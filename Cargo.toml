@@ -4,14 +4,15 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-tokio = { version = "1.0", features = ["full"] }
 async-trait = "0.1"
+tokio = { version = "1.0", features = ["full"] }
 
 [dev-dependencies]
-futures = "0.3"
-reqwest = { version = "0.12", features = ["json"] }
+cargo-audit = "0.21.2"
 criterion = { version = "0.6", features = ["html_reports", "async_tokio"] }
+futures = "0.3"
 rand = "0.9"
+reqwest = { version = "0.12", features = ["json"] }
 
 [[example]]
 name = "simple"

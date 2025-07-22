@@ -24,7 +24,6 @@ use async_trait::async_trait;
 use cano::prelude::*;
 use rand::Rng;
 use std::collections::HashMap;
-use tokio;
 
 /// Action enum for controlling negotiation flow
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -108,8 +107,8 @@ impl Node<NegotiationAction> for SellerNode {
                 let state = NegotiationState::new(initial_price, buyer_budget);
 
                 println!("🏪 Seller: Starting negotiation!");
-                println!("🏷️  Seller: Initial asking price: ${}", initial_price);
-                println!("💰 Buyer budget: ${}", buyer_budget);
+                println!("🏷️  Seller: Initial asking price: ${initial_price}");
+                println!("💰 Buyer budget: ${buyer_budget}");
                 println!("{}", "=".repeat(50));
 
                 Ok(state)
@@ -211,7 +210,7 @@ impl Node<NegotiationAction> for BuyerNode {
     /// Preparation phase: Load the current negotiation state
     async fn prep(&self, store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
         let state: NegotiationState = store.get("negotiation_state").map_err(|e| {
-            CanoError::preparation(&format!("Failed to load negotiation state: {}", e))
+            CanoError::preparation(format!("Failed to load negotiation state: {e}"))
         })?;
 
         println!(
@@ -264,15 +263,13 @@ impl Node<NegotiationAction> for BuyerNode {
     ) -> Result<NegotiationAction, CanoError> {
         let (mut state, acceptable) = exec_res;
 
-        if acceptable {
-            if state.current_offer <= state.buyer_budget {
-                // Store final deal details
-                store.put("final_deal", state.clone())?;
-                store.delete("negotiation_state")?;
+        if acceptable && state.current_offer <= state.buyer_budget {
+            // Store final deal details
+            store.put("final_deal", state.clone())?;
+            store.delete("negotiation_state")?;
 
-                println!("✅ Deal reached in round {}!", state.round);
-                return Ok(NegotiationAction::Deal);
-            }
+            println!("✅ Deal reached in round {}!", state.round);
+            return Ok(NegotiationAction::Deal);
         }
 
         // Check if we should give up
@@ -338,7 +335,7 @@ async fn run_negotiation_workflow() -> Result<(), CanoError> {
                             as f64
                             / deal.seller_initial_price as f64)
                             * 100.0;
-                        println!("  • Discount achieved: {:.1}%", savings_percent);
+                        println!("  • Discount achieved: {savings_percent:.1}%");
                     }
                 }
                 NegotiationAction::NoDeal => {
@@ -355,7 +352,7 @@ async fn run_negotiation_workflow() -> Result<(), CanoError> {
                         );
 
                         let gap_ratio = failed.current_offer as f64 / failed.buyer_budget as f64;
-                        println!("  • Offer was {:.1}x the buyer's budget", gap_ratio);
+                        println!("  • Offer was {gap_ratio:.1}x the buyer's budget");
                     }
 
                     println!("The buyer walked away - no deal was reached.");
@@ -365,16 +362,15 @@ async fn run_negotiation_workflow() -> Result<(), CanoError> {
                     return Err(CanoError::flow("Negotiation terminated with error state"));
                 }
                 other => {
-                    eprintln!("⚠️  Negotiation ended in unexpected state: {:?}", other);
+                    eprintln!("⚠️  Negotiation ended in unexpected state: {other:?}");
                     return Err(CanoError::flow(format!(
-                        "Negotiation ended in unexpected state: {:?}",
-                        other
+                        "Negotiation ended in unexpected state: {other:?}"
                     )));
                 }
             }
         }
         Err(e) => {
-            eprintln!("❌ Negotiation workflow failed: {}", e);
+            eprintln!("❌ Negotiation workflow failed: {e}");
             return Err(e);
         }
     }

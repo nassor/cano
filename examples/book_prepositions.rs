@@ -680,16 +680,15 @@ async fn run_workflow() -> Result<(), CanoError> {
                     return Err(CanoError::flow("Workflow terminated with error state"));
                 }
                 other => {
-                    eprintln!("⚠️  Workflow ended in unexpected state: {:?}", other);
+                    eprintln!("⚠️  Workflow ended in unexpected state: {other:?}");
                     return Err(CanoError::flow(format!(
-                        "Workflow ended in unexpected state: {:?}",
-                        other
+                        "Workflow ended in unexpected state: {other:?}"
                     )));
                 }
             }
         }
         Err(e) => {
-            eprintln!("❌ Flow-based workflow failed: {}", e);
+            eprintln!("❌ Flow-based workflow failed: {e}");
             return Err(e);
         }
     }

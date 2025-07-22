@@ -15,7 +15,6 @@ use async_trait::async_trait;
 use cano::prelude::*;
 use rand::Rng;
 use std::collections::HashMap;
-use tokio;
 
 /// Action enum for controlling workflow flow
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -130,9 +129,9 @@ impl Node<WorkflowAction> for CounterNode {
 
     /// Preparation phase: Load the filtered numbers from memory
     async fn prep(&self, store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
-        let numbers: Vec<u32> = store.get("filtered_numbers").map_err(|e| {
-            CanoError::preparation(&format!("Failed to load filtered numbers: {}", e))
-        })?;
+        let numbers: Vec<u32> = store
+            .get("filtered_numbers")
+            .map_err(|e| CanoError::preparation(format!("Failed to load filtered numbers: {e}")))?;
 
         println!("Loaded {} numbers from memory", numbers.len());
 
@@ -196,7 +195,7 @@ async fn run_simple_workflow_with_flow() -> Result<(), CanoError> {
                         Ok(final_count) => {
                             println!("\n📈 FINAL RESULTS");
                             println!("================");
-                            println!("Total even numbers found: {}", final_count);
+                            println!("Total even numbers found: {final_count}");
 
                             // Verify cleanup
                             match store.get::<Vec<u32>>("filtered_numbers") {
@@ -208,8 +207,7 @@ async fn run_simple_workflow_with_flow() -> Result<(), CanoError> {
                         }
                         Err(e) => {
                             return Err(CanoError::node_execution(format!(
-                                "Failed to get final count: {}",
-                                e
+                                "Failed to get final count: {e}"
                             )));
                         }
                     }
@@ -219,16 +217,15 @@ async fn run_simple_workflow_with_flow() -> Result<(), CanoError> {
                     return Err(CanoError::flow("Workflow terminated with error state"));
                 }
                 other => {
-                    eprintln!("⚠️  Workflow ended in unexpected state: {:?}", other);
+                    eprintln!("⚠️  Workflow ended in unexpected state: {other:?}");
                     return Err(CanoError::flow(format!(
-                        "Workflow ended in unexpected state: {:?}",
-                        other
+                        "Workflow ended in unexpected state: {other:?}"
                     )));
                 }
             }
         }
         Err(e) => {
-            eprintln!("❌ Workflow failed: {}", e);
+            eprintln!("❌ Workflow failed: {e}");
             return Err(e);
         }
     }

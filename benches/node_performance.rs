@@ -18,6 +18,7 @@ impl DoNothingNode {
 /// Test states for node benchmarking
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum TestState {
+    #[allow(dead_code)]
     Start,
     Node(usize),
     Complete,
@@ -480,8 +481,7 @@ fn bench_node_cloning(c: &mut Criterion) {
                     .collect();
 
                 b.iter(|| {
-                    let _cloned_nodes: Vec<DoNothingNode> =
-                        original_nodes.iter().map(|node| node.clone()).collect();
+                    let _cloned_nodes: Vec<DoNothingNode> = original_nodes.to_vec();
                 });
             },
         );
