@@ -1,5 +1,11 @@
 # Cano: Simple & Fast Async Workflows in Rust 🚀
 
+[![Crates.io](https://img.shields.io/crates/v/cano.svg)](https://crates.io/crates/cano)
+[![Documentation](https://docs.rs/cano/badge.svg)](https://docs.rs/cano)
+[![Downloads](https://img.shields.io/crates/d/cano.svg)](https://crates.io/crates/cano)
+[![License](https://img.shields.io/crates/l/cano.svg)](https://github.com/nassor/cano/blob/main/LICENSE)
+[![CI](https://github.com/nassor/cano/workflows/CI/badge.svg)](https://github.com/nassor/cano/actions)
+
 **Build powerful data processing pipelines with minimal code.**
 
 Cano is an async workflow engine that makes complex data processing simple. Whether you need to process one item or millions, Cano provides a clean API with minimal overhead for maximum performance.
