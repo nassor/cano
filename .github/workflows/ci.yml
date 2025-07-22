@@ -63,7 +63,7 @@ jobs:
       run: |
         cargo build --example simple
         cargo build --example book_prepositions
-        cargo build --example negotiaton
+        cargo build --example negotiation
     
     - name: Run doctests
       run: cargo test --doc
