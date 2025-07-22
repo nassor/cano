@@ -2,6 +2,13 @@
 name = "cano"
 version = "0.1.0"
 edition = "2024"
+description = "Simple & Fast Async Workflows in Rust - Build powerful data processing pipelines with minimal code"
+license = "MIT"
+repository = "https://github.com/nassor/cano"
+readme = "README.md"
+keywords = ["async", "workflow", "pipeline", "data-processing", "tokio"]
+categories = ["asynchronous", "data-structures", "concurrency"]
+authors = ["Nassor Frazier-Silva"]
 
 [dependencies]
 async-trait = "0.1"
