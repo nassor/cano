@@ -79,9 +79,7 @@ pub mod store;
 // Core public API - simplified imports
 pub use error::{CanoError, CanoResult};
 pub use flow::{Flow, FlowBuilder};
-pub use node::{
-    DefaultNodeResult, DefaultParams, DynNode, Node, NodeConfig, Params,
-};
+pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node, NodeConfig, Params};
 pub use store::{MemoryStore, StoreTrait};
 
 // Convenience re-exports for common patterns
@@ -91,8 +89,8 @@ pub mod prelude {
     //! Use `use cano::prelude::*;` to import the most commonly used types and traits.
 
     pub use crate::{
-        CanoError, CanoResult, DefaultNodeResult, DefaultParams, Flow, FlowBuilder,
-        MemoryStore, Node, NodeConfig, StoreTrait,
+        CanoError, CanoResult, DefaultNodeResult, DefaultParams, Flow, FlowBuilder, MemoryStore,
+        Node, NodeConfig, StoreTrait,
     };
 
     // Re-export async_trait for convenience

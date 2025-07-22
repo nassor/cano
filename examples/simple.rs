@@ -178,7 +178,7 @@ async fn run_simple_workflow_with_flow() -> Result<(), CanoError> {
 
     // Create a Flow that can handle different node types
     let mut flow = Flow::new(WorkflowAction::Generate);
-    
+
     // Register different node types - this now works!
     flow.register_node(WorkflowAction::Generate, GeneratorNode::new())
         .register_node(WorkflowAction::Count, CounterNode::new())
@@ -200,13 +200,16 @@ async fn run_simple_workflow_with_flow() -> Result<(), CanoError> {
 
                             // Verify cleanup
                             match store.get::<Vec<u32>>("filtered_numbers") {
-                                Ok(_) => println!("⚠️  Warning: Original data still exists in memory"),
+                                Ok(_) => {
+                                    println!("⚠️  Warning: Original data still exists in memory")
+                                }
                                 Err(_) => println!("✓ Original data successfully cleaned up"),
                             }
                         }
                         Err(e) => {
                             return Err(CanoError::node_execution(format!(
-                                "Failed to get final count: {}", e
+                                "Failed to get final count: {}",
+                                e
                             )));
                         }
                     }
@@ -217,7 +220,10 @@ async fn run_simple_workflow_with_flow() -> Result<(), CanoError> {
                 }
                 other => {
                     eprintln!("⚠️  Workflow ended in unexpected state: {:?}", other);
-                    return Err(CanoError::flow(format!("Workflow ended in unexpected state: {:?}", other)));
+                    return Err(CanoError::flow(format!(
+                        "Workflow ended in unexpected state: {:?}",
+                        other
+                    )));
                 }
             }
         }

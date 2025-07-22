@@ -1,6 +1,6 @@
-use cano::{Flow, MemoryStore, Node, CanoError, DefaultParams};
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use async_trait::async_trait;
+use cano::{CanoError, DefaultParams, Flow, MemoryStore, Node};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 /// Simple do-nothing node for benchmarking
 #[derive(Clone)]
@@ -26,11 +26,7 @@ enum TestState {
 impl TestState {
     /// Generate a state for a given node number
     fn node(n: usize) -> Self {
-        if n == 0 {
-            Self::Start
-        } else {
-            Self::Node(n)
-        }
+        if n == 0 { Self::Start } else { Self::Node(n) }
     }
 }
 
@@ -73,19 +69,19 @@ fn create_flow(node_count: usize) -> Flow<TestState, MemoryStore> {
         } else {
             TestState::node(i + 1)
         };
-        
+
         flow.register_node(current_state, DoNothingNode::new(next_state));
     }
 
     // Set the Complete state as exit state
     flow.add_exit_state(TestState::Complete);
-    
+
     flow
 }
 
 fn bench_flow_performance(c: &mut Criterion) {
     let mut group = c.benchmark_group("flow_performance");
-    
+
     // Test different workflow sizes
     let node_counts = vec![10, 100, 1000, 10000];
 
@@ -95,13 +91,14 @@ fn bench_flow_performance(c: &mut Criterion) {
             &node_count,
             |b, &node_count| {
                 let flow = create_flow(node_count);
-                
-                b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
-                    let storage = MemoryStore::new();
-                    let result = flow.orchestrate(&storage).await;
-                    assert!(result.is_ok());
-                    assert_eq!(result.unwrap(), TestState::Complete);
-                });
+
+                b.to_async(tokio::runtime::Runtime::new().unwrap())
+                    .iter(|| async {
+                        let storage = MemoryStore::new();
+                        let result = flow.orchestrate(&storage).await;
+                        assert!(result.is_ok());
+                        assert_eq!(result.unwrap(), TestState::Complete);
+                    });
             },
         );
 
@@ -129,26 +126,28 @@ fn bench_flow_vs_direct_execution(c: &mut Criterion) {
 
     group.bench_function("flow_execution_100_nodes", |b| {
         let flow = create_flow(node_count);
-        
-        b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
-            let storage = MemoryStore::new();
-            let result = flow.orchestrate(&storage).await;
-            assert!(result.is_ok());
-        });
+
+        b.to_async(tokio::runtime::Runtime::new().unwrap())
+            .iter(|| async {
+                let storage = MemoryStore::new();
+                let result = flow.orchestrate(&storage).await;
+                assert!(result.is_ok());
+            });
     });
 
     group.bench_function("direct_node_execution_100_nodes", |b| {
         let nodes: Vec<DoNothingNode> = (0..node_count)
             .map(|_i| DoNothingNode::new(TestState::Complete))
             .collect();
-        
-        b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
-            let storage = MemoryStore::new();
-            for node in &nodes {
-                let result = node.run(&storage).await;
-                assert!(result.is_ok());
-            }
-        });
+
+        b.to_async(tokio::runtime::Runtime::new().unwrap())
+            .iter(|| async {
+                let storage = MemoryStore::new();
+                for node in &nodes {
+                    let result = node.run(&storage).await;
+                    assert!(result.is_ok());
+                }
+            });
     });
 
     group.finish();
@@ -190,7 +189,7 @@ fn bench_memory_patterns(c: &mut Criterion) {
 }
 
 criterion_group!(
-    benches, 
+    benches,
     bench_flow_performance,
     bench_flow_vs_direct_execution,
     bench_memory_patterns

@@ -1,7 +1,7 @@
-use cano::{MemoryStore, Node, CanoError, DefaultParams};
-use cano::store::StoreTrait;
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use async_trait::async_trait;
+use cano::store::StoreTrait;
+use cano::{CanoError, DefaultParams, MemoryStore, Node};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 /// Simple do-nothing node for benchmarking
 #[derive(Clone)]
@@ -59,7 +59,10 @@ struct CpuIntensiveNode {
 
 impl CpuIntensiveNode {
     fn new(next_state: TestState, iterations: usize) -> Self {
-        Self { next_state, iterations }
+        Self {
+            next_state,
+            iterations,
+        }
     }
 }
 
@@ -102,7 +105,10 @@ struct IoSimulationNode {
 
 impl IoSimulationNode {
     fn new(next_state: TestState, delay_ms: u64) -> Self {
-        Self { next_state, delay_ms }
+        Self {
+            next_state,
+            delay_ms,
+        }
     }
 }
 
@@ -212,13 +218,14 @@ fn bench_node_execution(c: &mut Criterion) {
                 let nodes: Vec<DoNothingNode> = (0..node_count)
                     .map(|i| DoNothingNode::new(TestState::Node(i)))
                     .collect();
-                
-                b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
-                    let storage = MemoryStore::new();
-                    for node in &nodes {
-                        let _result = node.run(&storage).await;
-                    }
-                });
+
+                b.to_async(tokio::runtime::Runtime::new().unwrap())
+                    .iter(|| async {
+                        let storage = MemoryStore::new();
+                        for node in &nodes {
+                            let _result = node.run(&storage).await;
+                        }
+                    });
             },
         );
 
@@ -227,13 +234,14 @@ fn bench_node_execution(c: &mut Criterion) {
             &node_count,
             |b, &node_count| {
                 let node = DoNothingNode::new(TestState::Complete);
-                
-                b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
-                    let storage = MemoryStore::new();
-                    for _i in 0..node_count {
-                        let _result = node.run(&storage).await;
-                    }
-                });
+
+                b.to_async(tokio::runtime::Runtime::new().unwrap())
+                    .iter(|| async {
+                        let storage = MemoryStore::new();
+                        for _i in 0..node_count {
+                            let _result = node.run(&storage).await;
+                        }
+                    });
             },
         );
 
@@ -246,13 +254,14 @@ fn bench_node_execution(c: &mut Criterion) {
                     let nodes: Vec<CpuIntensiveNode> = (0..node_count)
                         .map(|i| CpuIntensiveNode::new(TestState::Node(i), 100))
                         .collect();
-                    
-                    b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
-                        let storage = MemoryStore::new();
-                        for node in &nodes {
-                            let _result = node.run(&storage).await;
-                        }
-                    });
+
+                    b.to_async(tokio::runtime::Runtime::new().unwrap())
+                        .iter(|| async {
+                            let storage = MemoryStore::new();
+                            for node in &nodes {
+                                let _result = node.run(&storage).await;
+                            }
+                        });
                 },
             );
         }
@@ -273,13 +282,14 @@ fn bench_node_phases(c: &mut Criterion) {
             &iterations,
             |b, &iterations| {
                 let node = DoNothingNode::new(TestState::Complete);
-                
-                b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
-                    let storage = MemoryStore::new();
-                    for _i in 0..iterations {
-                        let _result = node.prep(&storage).await;
-                    }
-                });
+
+                b.to_async(tokio::runtime::Runtime::new().unwrap())
+                    .iter(|| async {
+                        let storage = MemoryStore::new();
+                        for _i in 0..iterations {
+                            let _result = node.prep(&storage).await;
+                        }
+                    });
             },
         );
 
@@ -288,12 +298,13 @@ fn bench_node_phases(c: &mut Criterion) {
             &iterations,
             |b, &iterations| {
                 let node = DoNothingNode::new(TestState::Complete);
-                
-                b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
-                    for _i in 0..iterations {
-                        let _result = node.exec(()).await;
-                    }
-                });
+
+                b.to_async(tokio::runtime::Runtime::new().unwrap())
+                    .iter(|| async {
+                        for _i in 0..iterations {
+                            let _result = node.exec(()).await;
+                        }
+                    });
             },
         );
 
@@ -302,13 +313,14 @@ fn bench_node_phases(c: &mut Criterion) {
             &iterations,
             |b, &iterations| {
                 let node = DoNothingNode::new(TestState::Complete);
-                
-                b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
-                    let storage = MemoryStore::new();
-                    for _i in 0..iterations {
-                        let _result = node.post(&storage, ()).await;
-                    }
-                });
+
+                b.to_async(tokio::runtime::Runtime::new().unwrap())
+                    .iter(|| async {
+                        let storage = MemoryStore::new();
+                        for _i in 0..iterations {
+                            let _result = node.post(&storage, ()).await;
+                        }
+                    });
             },
         );
 
@@ -319,13 +331,14 @@ fn bench_node_phases(c: &mut Criterion) {
                 &iterations,
                 |b, &iterations| {
                     let node = CpuIntensiveNode::new(TestState::Complete, 50);
-                    
-                    b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
-                        let storage = MemoryStore::new();
-                        for _i in 0..iterations {
-                            let _result = node.prep(&storage).await;
-                        }
-                    });
+
+                    b.to_async(tokio::runtime::Runtime::new().unwrap())
+                        .iter(|| async {
+                            let storage = MemoryStore::new();
+                            for _i in 0..iterations {
+                                let _result = node.prep(&storage).await;
+                            }
+                        });
                 },
             );
 
@@ -335,12 +348,13 @@ fn bench_node_phases(c: &mut Criterion) {
                 |b, &iterations| {
                     let node = CpuIntensiveNode::new(TestState::Complete, 50);
                     let prep_data: Vec<u64> = (0..50).collect();
-                    
-                    b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
-                        for _i in 0..iterations {
-                            let _result = node.exec(prep_data.clone()).await;
-                        }
-                    });
+
+                    b.to_async(tokio::runtime::Runtime::new().unwrap())
+                        .iter(|| async {
+                            for _i in 0..iterations {
+                                let _result = node.exec(prep_data.clone()).await;
+                            }
+                        });
                 },
             );
         }
@@ -434,7 +448,7 @@ fn bench_node_cloning(c: &mut Criterion) {
             &size,
             |b, &size| {
                 let original_node = DoNothingNode::new(TestState::Complete);
-                
+
                 b.iter(|| {
                     for _i in 0..size {
                         let _cloned = original_node.clone();
@@ -450,7 +464,7 @@ fn bench_node_cloning(c: &mut Criterion) {
                 let original_nodes: Vec<DoNothingNode> = (0..size)
                     .map(|i| DoNothingNode::new(TestState::Node(i)))
                     .collect();
-                
+
                 b.iter(|| {
                     let _cloned_nodes = original_nodes.clone();
                 });
@@ -464,12 +478,10 @@ fn bench_node_cloning(c: &mut Criterion) {
                 let original_nodes: Vec<DoNothingNode> = (0..size)
                     .map(|i| DoNothingNode::new(TestState::Node(i)))
                     .collect();
-                
+
                 b.iter(|| {
-                    let _cloned_nodes: Vec<DoNothingNode> = original_nodes
-                        .iter()
-                        .map(|node| node.clone())
-                        .collect();
+                    let _cloned_nodes: Vec<DoNothingNode> =
+                        original_nodes.iter().map(|node| node.clone()).collect();
                 });
             },
         );
@@ -479,7 +491,7 @@ fn bench_node_cloning(c: &mut Criterion) {
             &size,
             |b, &size| {
                 let original_node = CpuIntensiveNode::new(TestState::Complete, 100);
-                
+
                 b.iter(|| {
                     for _i in 0..size {
                         let _cloned = original_node.clone();
@@ -507,28 +519,29 @@ fn bench_concurrent_node_execution(c: &mut Criterion) {
                 let nodes: Vec<std::sync::Arc<DoNothingNode>> = (0..node_count)
                     .map(|i| std::sync::Arc::new(DoNothingNode::new(TestState::Node(i))))
                     .collect();
-                
-                b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
-                    let storage = std::sync::Arc::new(MemoryStore::new());
-                    let chunk_size = std::cmp::max(1, node_count / concurrency);
-                    
-                    let tasks: Vec<_> = nodes
-                        .chunks(chunk_size)
-                        .map(|chunk| {
-                            let chunk = chunk.to_vec();
-                            let storage = storage.clone();
-                            tokio::spawn(async move {
-                                for node in chunk {
-                                    let _result = node.run(&*storage).await;
-                                }
+
+                b.to_async(tokio::runtime::Runtime::new().unwrap())
+                    .iter(|| async {
+                        let storage = std::sync::Arc::new(MemoryStore::new());
+                        let chunk_size = std::cmp::max(1, node_count / concurrency);
+
+                        let tasks: Vec<_> = nodes
+                            .chunks(chunk_size)
+                            .map(|chunk| {
+                                let chunk = chunk.to_vec();
+                                let storage = storage.clone();
+                                tokio::spawn(async move {
+                                    for node in chunk {
+                                        let _result = node.run(&*storage).await;
+                                    }
+                                })
                             })
-                        })
-                        .collect();
-                    
-                    for task in tasks {
-                        let _ = task.await;
-                    }
-                });
+                            .collect();
+
+                        for task in tasks {
+                            let _ = task.await;
+                        }
+                    });
             },
         );
 
@@ -542,28 +555,29 @@ fn bench_concurrent_node_execution(c: &mut Criterion) {
                     let nodes: Vec<std::sync::Arc<CpuIntensiveNode>> = (0..small_count)
                         .map(|i| std::sync::Arc::new(CpuIntensiveNode::new(TestState::Node(i), 50)))
                         .collect();
-                    
-                    b.to_async(tokio::runtime::Runtime::new().unwrap()).iter(|| async {
-                        let storage = std::sync::Arc::new(MemoryStore::new());
-                        let chunk_size = std::cmp::max(1, small_count / concurrency);
-                        
-                        let tasks: Vec<_> = nodes
-                            .chunks(chunk_size)
-                            .map(|chunk| {
-                                let chunk = chunk.to_vec();
-                                let storage = storage.clone();
-                                tokio::spawn(async move {
-                                    for node in chunk {
-                                        let _result = node.run(&*storage).await;
-                                    }
+
+                    b.to_async(tokio::runtime::Runtime::new().unwrap())
+                        .iter(|| async {
+                            let storage = std::sync::Arc::new(MemoryStore::new());
+                            let chunk_size = std::cmp::max(1, small_count / concurrency);
+
+                            let tasks: Vec<_> = nodes
+                                .chunks(chunk_size)
+                                .map(|chunk| {
+                                    let chunk = chunk.to_vec();
+                                    let storage = storage.clone();
+                                    tokio::spawn(async move {
+                                        for node in chunk {
+                                            let _result = node.run(&*storage).await;
+                                        }
+                                    })
                                 })
-                            })
-                            .collect();
-                        
-                        for task in tasks {
-                            let _ = task.await;
-                        }
-                    });
+                                .collect();
+
+                            for task in tasks {
+                                let _ = task.await;
+                            }
+                        });
                 },
             );
         }
@@ -586,9 +600,9 @@ fn bench_node_configuration(c: &mut Criterion) {
                 let mut nodes: Vec<DoNothingNode> = (0..size)
                     .map(|i| DoNothingNode::new(TestState::Node(i)))
                     .collect();
-                
+
                 let params = DefaultParams::new();
-                
+
                 b.iter(|| {
                     for node in &mut nodes {
                         node.set_params(params.clone());
@@ -604,7 +618,7 @@ fn bench_node_configuration(c: &mut Criterion) {
                 let nodes: Vec<DoNothingNode> = (0..size)
                     .map(|i| DoNothingNode::new(TestState::Node(i)))
                     .collect();
-                
+
                 b.iter(|| {
                     for node in &nodes {
                         let _config = node.config();

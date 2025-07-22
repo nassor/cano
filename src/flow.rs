@@ -63,7 +63,7 @@ use crate::error::CanoError;
 use crate::node::Node;
 
 /// Type alias for trait objects that can store different node types
-/// 
+///
 /// This allows the Flow to accept nodes of different concrete types as long as they
 /// implement the Node trait with compatible associated types. The trait object erases
 /// the specific Params, PrepResult, and ExecResult types but maintains the essential
@@ -71,7 +71,7 @@ use crate::node::Node;
 pub type DynNode<T, S> = Box<dyn DynNodeTrait<T, S> + Send + Sync>;
 
 /// Trait object-safe version of the Node trait for dynamic dispatch
-/// 
+///
 /// This trait provides the essential functionality needed for workflow execution
 /// while being object-safe (can be used as a trait object).
 #[async_trait::async_trait]
@@ -243,7 +243,7 @@ where
     }
 
     /// Register a node for a specific state (accepts any type implementing Node<T>)
-    pub fn register_node<N>(&mut self, state: T, node: N) -> &mut Self 
+    pub fn register_node<N>(&mut self, state: T, node: N) -> &mut Self
     where
         N: Node<T, Storage = S> + Send + Sync + 'static,
     {
@@ -348,7 +348,7 @@ where
     }
 
     /// Register a node for a state (accepts any type implementing Node<T>)
-    pub fn register_node<N>(mut self, state: T, node: N) -> Self 
+    pub fn register_node<N>(mut self, state: T, node: N) -> Self
     where
         N: Node<T, Storage = S> + Send + Sync + 'static,
     {
@@ -968,9 +968,9 @@ mod tests {
         let success_node = SuccessNode::new(TestState::Validate);
         let conditional_node = ConditionalNode::new(
             "workflow_data",
-            "test_value", 
+            "test_value",
             TestState::Complete,
-            TestState::Error
+            TestState::Error,
         );
 
         flow.register_node(TestState::Start, data_node)

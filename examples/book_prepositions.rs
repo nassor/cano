@@ -336,7 +336,7 @@ impl Node<BookPrepositionAction> for BookDownloaderNode {
         store.put("downloaded_books", exec_res.clone())?;
 
         println!("✅ Stored {} books in memory for analysis", exec_res.len());
-        Ok(BookPrepositionAction::Analyze)  // Move to analysis phase
+        Ok(BookPrepositionAction::Analyze) // Move to analysis phase
     }
 }
 
@@ -474,7 +474,7 @@ impl Node<BookPrepositionAction> for PrepositionNode {
             "✅ Stored {} book analyses and cleaned up raw content",
             exec_res.len()
         );
-        Ok(BookPrepositionAction::Rank)  // Move to ranking phase
+        Ok(BookPrepositionAction::Rank) // Move to ranking phase
     }
 }
 
@@ -630,12 +630,18 @@ async fn run_workflow() -> Result<(), CanoError> {
 
     // Create a Flow that handles all three different node types
     let mut flow = Flow::new(BookPrepositionAction::Download);
-    
+
     // Register different node types for each phase
     flow.register_node(BookPrepositionAction::Download, BookDownloaderNode::new())
         .register_node(BookPrepositionAction::Analyze, PrepositionNode::new())
-        .register_node(BookPrepositionAction::Rank, BookRankingByPrepositionNode::new())
-        .add_exit_states(vec![BookPrepositionAction::Complete, BookPrepositionAction::Error]);
+        .register_node(
+            BookPrepositionAction::Rank,
+            BookRankingByPrepositionNode::new(),
+        )
+        .add_exit_states(vec![
+            BookPrepositionAction::Complete,
+            BookPrepositionAction::Error,
+        ]);
 
     println!("📋 Flow configured with 3 different node types:");
     println!("  • BookDownloaderNode (Download phase)");
@@ -647,19 +653,25 @@ async fn run_workflow() -> Result<(), CanoError> {
         Ok(final_state) => {
             match final_state {
                 BookPrepositionAction::Complete => {
-                    println!("\n✅ Flow-based book preposition analysis workflow completed successfully!");
-                    
+                    println!(
+                        "\n✅ Flow-based book preposition analysis workflow completed successfully!"
+                    );
+
                     // Display summary from the final rankings
                     if let Ok(rankings) = store.get::<Vec<BookRanking>>("book_rankings") {
                         println!("\n🏆 WORKFLOW SUMMARY");
                         println!("==================");
                         println!("Total books analyzed: {}", rankings.len());
-                        
+
                         if let (Some(top), Some(bottom)) = (rankings.first(), rankings.last()) {
-                            println!("🥇 Most diverse: {} ({} prepositions)", 
-                                    top.analysis.title, top.analysis.preposition_count);
-                            println!("🥉 Least diverse: {} ({} prepositions)", 
-                                    bottom.analysis.title, bottom.analysis.preposition_count);
+                            println!(
+                                "🥇 Most diverse: {} ({} prepositions)",
+                                top.analysis.title, top.analysis.preposition_count
+                            );
+                            println!(
+                                "🥉 Least diverse: {} ({} prepositions)",
+                                bottom.analysis.title, bottom.analysis.preposition_count
+                            );
                         }
                     }
                 }
@@ -669,7 +681,10 @@ async fn run_workflow() -> Result<(), CanoError> {
                 }
                 other => {
                     eprintln!("⚠️  Workflow ended in unexpected state: {:?}", other);
-                    return Err(CanoError::flow(format!("Workflow ended in unexpected state: {:?}", other)));
+                    return Err(CanoError::flow(format!(
+                        "Workflow ended in unexpected state: {:?}",
+                        other
+                    )));
                 }
             }
         }
@@ -688,7 +703,7 @@ async fn main() {
     println!("=========================================");
 
     println!("🌐 Running with Flow orchestration");
-    
+
     match run_workflow().await {
         Ok(()) => {
             println!("\n🎉 Workflow completed successfully!");

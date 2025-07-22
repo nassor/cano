@@ -62,7 +62,7 @@
 ///
 /// ### NodeExecution
 /// Something went wrong in your node's business logic during the `exec` phase.
-/// 
+///
 /// **Common causes:**
 /// - Invalid input data
 /// - External API failures  
@@ -139,37 +139,37 @@ pub enum CanoError {
     /// Use this when your node's `exec` method encounters an error in its
     /// core processing logic. Include specific details about what went wrong.
     NodeExecution(String),
-    
+
     /// Error during node preparation phase (data loading/setup)
     ///
     /// Use this when your node's `prep` method fails to load or prepare data.
     /// Often indicates missing or invalid data in storage.
     Preparation(String),
-    
+
     /// Error in storage operations (get/put/remove)
     ///
     /// Use this for storage-related failures like missing keys, type mismatches,
     /// or storage backend issues.
     Storage(String),
-    
+
     /// Error in flow orchestration (routing/registration)
     ///
     /// Use this for workflow-level problems like unregistered nodes,
     /// invalid action routing, or flow configuration issues.
     Flow(String),
-    
+
     /// Error in node or flow configuration (invalid settings)
     ///
     /// Use this for configuration problems like invalid parameters,
     /// conflicting settings, or constraint violations.
     Configuration(String),
-    
+
     /// All retry attempts have been exhausted
     ///
     /// This error is automatically generated when a node fails and
     /// all configured retry attempts have been used up.
     RetryExhausted(String),
-    
+
     /// General-purpose error for other scenarios
     ///
     /// Use this for errors that don't fit the other categories.
@@ -214,7 +214,7 @@ impl CanoError {
     }
 
     /// Convert a StoreError to a CanoError
-    /// 
+    ///
     /// This is a convenience method that explicitly converts storage errors
     /// to workflow errors. The automatic `From` implementation also works.
     pub fn from_store_error(err: crate::store::error::StoreError) -> Self {
@@ -370,11 +370,11 @@ mod tests {
     #[test]
     fn test_store_error_conversion() {
         use crate::store::error::StoreError;
-        
+
         // Test conversion from StoreError to CanoError
         let store_error = StoreError::key_not_found("test_key");
         let cano_error: CanoError = store_error.into();
-        
+
         // Should be converted to Storage variant
         match cano_error {
             CanoError::Storage(msg) => {
@@ -383,12 +383,12 @@ mod tests {
             }
             _ => panic!("Expected Storage error variant"),
         }
-        
+
         // Test that the category is correct
         let store_error = StoreError::type_mismatch("type error");
         let cano_error: CanoError = store_error.into();
         assert_eq!(cano_error.category(), "storage");
-        
+
         // Test explicit conversion method
         let store_error = StoreError::lock_error("lock failed");
         let cano_error = CanoError::from_store_error(store_error);

@@ -14,10 +14,9 @@ fn bench_storage_operations(c: &mut Criterion) {
                 b.iter(|| {
                     let storage = MemoryStore::new();
                     for i in 0..count {
-                        storage.put(
-                            &format!("key_{i}"),
-                            format!("value_{i}"),
-                        ).unwrap();
+                        storage
+                            .put(&format!("key_{i}"), format!("value_{i}"))
+                            .unwrap();
                     }
                 });
             },
@@ -30,7 +29,9 @@ fn bench_storage_operations(c: &mut Criterion) {
                 let storage = MemoryStore::new();
                 // Pre-populate storage
                 for i in 0..count {
-                    storage.put(&format!("key_{i}"), format!("value_{i}")).unwrap();
+                    storage
+                        .put(&format!("key_{i}"), format!("value_{i}"))
+                        .unwrap();
                 }
 
                 b.iter(|| {
