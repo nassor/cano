@@ -51,11 +51,11 @@
 //! - Define error states in your enum for graceful error handling
 //! - Configure retries at the node level for transient failures
 //!
-//! ### Storage Usage
+//! ### store Usage
 //!
-//! - Use storage to pass data between nodes
-//! - Keep storage keys consistent across your workflow
-//! - Consider using strongly-typed storage wrappers for complex data
+//! - Use store to pass data between nodes
+//! - Keep store keys consistent across your workflow
+//! - Consider using strongly-typed store wrappers for complex data
 
 use std::collections::HashMap;
 
@@ -90,7 +90,7 @@ impl<T, S, N> DynNodeTrait<T, S> for N
 where
     T: Clone + std::fmt::Debug + Send + Sync + 'static,
     S: crate::store::StoreTrait,
-    N: Node<T, Storage = S> + Send + Sync,
+    N: Node<T, crate::node::DefaultParams, S> + Send + Sync,
 {
     async fn run(&self, store: &S) -> Result<T, CanoError> {
         // Call the existing run method from the Node trait
@@ -144,11 +144,10 @@ where
 ///
 /// #[async_trait]
 /// impl Node<WorkflowState> for StartNode {
-///     type Storage = MemoryStore;
 ///     type PrepResult = String;
 ///     type ExecResult = bool;
 ///
-///     async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+///     async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
 ///         Ok("prepared".to_string())
 ///     }
 ///
@@ -156,7 +155,7 @@ where
 ///         true
 ///     }
 ///
-///     async fn post(&self, _store: &Self::Storage, exec_res: Self::ExecResult)
+///     async fn post(&self, _store: &MemoryStore, exec_res: Self::ExecResult)
 ///         -> Result<WorkflowState, CanoError> {
 ///         if exec_res {
 ///             Ok(WorkflowState::Process)
@@ -168,11 +167,10 @@ where
 ///
 /// #[async_trait]
 /// impl Node<WorkflowState> for ProcessNode {
-///     type Storage = MemoryStore;
 ///     type PrepResult = i32;
 ///     type ExecResult = i32;
 ///
-///     async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+///     async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
 ///         Ok(42)
 ///     }
 ///
@@ -180,7 +178,7 @@ where
 ///         prep_res * 2
 ///     }
 ///
-///     async fn post(&self, _store: &Self::Storage, _exec_res: Self::ExecResult)
+///     async fn post(&self, _store: &MemoryStore, _exec_res: Self::ExecResult)
 ///         -> Result<WorkflowState, CanoError> {
 ///         Ok(WorkflowState::Complete)
 ///     }
@@ -195,8 +193,8 @@ where
 ///         .register_node(WorkflowState::Process, ProcessNode)
 ///         .add_exit_states(vec![WorkflowState::Complete, WorkflowState::Error]);
 ///     
-///     let mut storage = MemoryStore::new();
-///     let result = flow.orchestrate(&storage).await?;
+///     let mut store = MemoryStore::new();
+///     let result = flow.orchestrate(&store).await?;
 ///     println!("Workflow completed with state: {:?}", result);
 ///     Ok(())
 /// }
@@ -239,7 +237,7 @@ where
     /// Register a node for a specific state (accepts any type implementing Node<T>)
     pub fn register_node<N>(&mut self, state: T, node: N) -> &mut Self
     where
-        N: Node<T, Storage = S> + Send + Sync + 'static,
+        N: Node<T, crate::node::DefaultParams, S> + Send + Sync + 'static,
     {
         self.state_nodes.insert(state, Box::new(node));
         self
@@ -344,7 +342,7 @@ where
     /// Register a node for a state (accepts any type implementing Node<T>)
     pub fn register_node<N>(mut self, state: T, node: N) -> Self
     where
-        N: Node<T, Storage = S> + Send + Sync + 'static,
+        N: Node<T, crate::node::DefaultParams, S> + Send + Sync + 'static,
     {
         self.flow.register_node(state, node);
         self
@@ -411,11 +409,10 @@ mod tests {
 
     #[async_trait]
     impl Node<TestState> for SuccessNode {
-        type Storage = MemoryStore;
         type PrepResult = String;
         type ExecResult = bool;
 
-        async fn prep(&self, store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
             // Try to get previous data or create default
             let data = store
                 .get::<String>("test_data")
@@ -431,7 +428,7 @@ mod tests {
 
         async fn post(
             &self,
-            store: &Self::Storage,
+            store: &MemoryStore,
             exec_res: Self::ExecResult,
         ) -> Result<TestState, CanoError> {
             // Store the result for next node
@@ -461,11 +458,10 @@ mod tests {
 
     #[async_trait]
     impl Node<TestState> for FailureNode {
-        type Storage = MemoryStore;
         type PrepResult = String;
         type ExecResult = bool;
 
-        async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
             Err(CanoError::preparation(&self.error_message))
         }
 
@@ -475,7 +471,7 @@ mod tests {
 
         async fn post(
             &self,
-            _store: &Self::Storage,
+            _store: &MemoryStore,
             _exec_res: Self::ExecResult,
         ) -> Result<TestState, CanoError> {
             Ok(TestState::Error)
@@ -502,11 +498,10 @@ mod tests {
 
     #[async_trait]
     impl Node<TestState> for DataStoringNode {
-        type Storage = MemoryStore;
         type PrepResult = ();
         type ExecResult = String;
 
-        async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
             Ok(())
         }
 
@@ -516,7 +511,7 @@ mod tests {
 
         async fn post(
             &self,
-            store: &Self::Storage,
+            store: &MemoryStore,
             exec_res: Self::ExecResult,
         ) -> Result<TestState, CanoError> {
             store.put(&self.key, exec_res)?;
@@ -551,11 +546,10 @@ mod tests {
 
     #[async_trait]
     impl Node<TestState> for ConditionalNode {
-        type Storage = MemoryStore;
         type PrepResult = String;
         type ExecResult = bool;
 
-        async fn prep(&self, store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
             store.get::<String>(&self.key_to_check).map_err(|e| {
                 CanoError::preparation(format!("Failed to get key '{}': {}", self.key_to_check, e))
             })
@@ -567,7 +561,7 @@ mod tests {
 
         async fn post(
             &self,
-            _store: &Self::Storage,
+            _store: &MemoryStore,
             exec_res: Self::ExecResult,
         ) -> Result<TestState, CanoError> {
             if exec_res {
@@ -588,7 +582,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flow_register_node() {
-        let mut flow = Flow::new(TestState::Start);
+        let mut flow: Flow<TestState, MemoryStore> = Flow::new(TestState::Start);
         let node = SuccessNode::new(TestState::Complete);
 
         flow.register_node(TestState::Start, node);
@@ -635,8 +629,8 @@ mod tests {
         flow.register_node(TestState::Start, node)
             .add_exit_state(TestState::Complete);
 
-        let storage = MemoryStore::new();
-        let result = flow.orchestrate(&storage).await.unwrap();
+        let store = MemoryStore::new();
+        let result = flow.orchestrate(&store).await.unwrap();
 
         assert_eq!(result, TestState::Complete);
     }
@@ -655,13 +649,13 @@ mod tests {
             .register_node(TestState::Validate, validate_node)
             .add_exit_state(TestState::Complete);
 
-        let storage = MemoryStore::new();
-        let result = flow.orchestrate(&storage).await.unwrap();
+        let store = MemoryStore::new();
+        let result = flow.orchestrate(&store).await.unwrap();
 
         assert_eq!(result, TestState::Complete);
 
         // Verify that the last result was stored by the last node
-        let last_result: bool = storage.get("last_result").unwrap();
+        let last_result: bool = store.get("last_result").unwrap();
         assert!(last_result);
     }
 
@@ -674,12 +668,12 @@ mod tests {
             .register_node(TestState::Start, data_node)
             .add_exit_state(TestState::Process);
 
-        let storage = MemoryStore::new();
-        let result1 = flow1.orchestrate(&storage).await.unwrap();
+        let store = MemoryStore::new();
+        let result1 = flow1.orchestrate(&store).await.unwrap();
         assert_eq!(result1, TestState::Process);
 
         // Verify data was stored
-        let stored_data: String = storage.get("workflow_data").unwrap();
+        let stored_data: String = store.get("workflow_data").unwrap();
         assert_eq!(stored_data, "test_value");
 
         // Test with ConditionalNode
@@ -694,7 +688,7 @@ mod tests {
             .register_node(TestState::Validate, validation_node)
             .add_exit_states(vec![TestState::Complete, TestState::Error]);
 
-        let result2 = flow2.orchestrate(&storage).await.unwrap();
+        let result2 = flow2.orchestrate(&store).await.unwrap();
         assert_eq!(result2, TestState::Complete);
     }
 
@@ -708,8 +702,8 @@ mod tests {
         flow.register_node(TestState::Start, failing_node)
             .add_exit_state(TestState::Error);
 
-        let storage = MemoryStore::new();
-        let result = flow.orchestrate(&storage).await;
+        let store = MemoryStore::new();
+        let result = flow.orchestrate(&store).await;
 
         assert!(result.is_err());
         let error = result.unwrap_err();
@@ -724,8 +718,8 @@ mod tests {
         // Don't register any nodes
         flow.add_exit_state(TestState::Complete);
 
-        let storage = MemoryStore::new();
-        let result = flow.orchestrate(&storage).await;
+        let store = MemoryStore::new();
+        let result = flow.orchestrate(&store).await;
 
         assert!(result.is_err());
         let error = result.unwrap_err();
@@ -737,8 +731,8 @@ mod tests {
         let mut flow: Flow<TestState, MemoryStore> = Flow::new(TestState::Start);
         flow.start_state = None; // Manually clear start state
 
-        let storage = MemoryStore::new();
-        let result = flow.orchestrate(&storage).await;
+        let store = MemoryStore::new();
+        let result = flow.orchestrate(&store).await;
 
         assert!(result.is_err());
         let error = result.unwrap_err();
@@ -751,8 +745,8 @@ mod tests {
 
         flow.add_exit_state(TestState::Complete);
 
-        let storage = MemoryStore::new();
-        let result = flow.orchestrate(&storage).await.unwrap();
+        let store = MemoryStore::new();
+        let result = flow.orchestrate(&store).await.unwrap();
 
         assert_eq!(result, TestState::Complete);
     }
@@ -762,8 +756,8 @@ mod tests {
         let mut flow = Flow::new(TestState::Start);
 
         // Store different values and test both paths
-        let storage = MemoryStore::new();
-        storage
+        let store = MemoryStore::new();
+        store
             .put("branch_condition", "success".to_string())
             .unwrap();
 
@@ -777,14 +771,14 @@ mod tests {
         flow.register_node(TestState::Start, conditional_node)
             .add_exit_states(vec![TestState::Complete, TestState::Error]);
 
-        let result = flow.orchestrate(&storage).await.unwrap();
+        let result = flow.orchestrate(&store).await.unwrap();
         assert_eq!(result, TestState::Complete);
 
         // Test failure path
-        storage
+        store
             .put("branch_condition", "failure".to_string())
             .unwrap();
-        let result2 = flow.orchestrate(&storage).await.unwrap();
+        let result2 = flow.orchestrate(&store).await.unwrap();
         assert_eq!(result2, TestState::Error);
     }
 
@@ -792,15 +786,15 @@ mod tests {
     async fn test_complex_workflow_with_multiple_paths() {
         // Create separate flows for different paths since each flow can only have one node type
 
-        // Test the main data storage path
+        // Test the main data store path
         let mut flow1 = Flow::new(TestState::Start);
         let start_node = DataStoringNode::new("process_data", "valid", TestState::Process);
         flow1
             .register_node(TestState::Start, start_node)
             .add_exit_state(TestState::Process);
 
-        let storage = MemoryStore::new();
-        let result1 = flow1.orchestrate(&storage).await.unwrap();
+        let store = MemoryStore::new();
+        let result1 = flow1.orchestrate(&store).await.unwrap();
         assert_eq!(result1, TestState::Process);
 
         // Test the success node processing
@@ -810,7 +804,7 @@ mod tests {
             .register_node(TestState::Process, process_node)
             .add_exit_state(TestState::Validate);
 
-        let result2 = flow2.orchestrate(&storage).await.unwrap();
+        let result2 = flow2.orchestrate(&store).await.unwrap();
         assert_eq!(result2, TestState::Validate);
 
         // Test the conditional validation
@@ -825,11 +819,11 @@ mod tests {
             .register_node(TestState::Validate, validate_node)
             .add_exit_states(vec![TestState::Complete, TestState::Retry]);
 
-        let result3 = flow3.orchestrate(&storage).await.unwrap();
+        let result3 = flow3.orchestrate(&store).await.unwrap();
         assert_eq!(result3, TestState::Complete);
 
         // Verify data was processed through the workflow
-        let process_data: String = storage.get("process_data").unwrap();
+        let process_data: String = store.get("process_data").unwrap();
         assert_eq!(process_data, "valid");
     }
 
@@ -848,8 +842,8 @@ mod tests {
             .register_node(TestState::Process, process_node)
             .add_exit_state(TestState::Complete);
 
-        let storage = MemoryStore::new();
-        flow.orchestrate(&storage).await.unwrap();
+        let store = MemoryStore::new();
+        flow.orchestrate(&store).await.unwrap();
 
         // Verify each node was executed once
         assert_eq!(start_node_ref.execution_count(), 1);
@@ -871,14 +865,14 @@ mod tests {
         assert_eq!(flow.state_nodes.len(), 2);
         assert!(flow.exit_states.contains(&TestState::Complete));
 
-        let storage = MemoryStore::new();
-        let result = flow.orchestrate(&storage).await.unwrap();
+        let store = MemoryStore::new();
+        let result = flow.orchestrate(&store).await.unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
     #[tokio::test]
     async fn test_flow_builder_with_multiple_exit_states() {
-        let flow = FlowBuilder::new(TestState::Start)
+        let flow: Flow<TestState, MemoryStore> = FlowBuilder::new(TestState::Start)
             .register_node(TestState::Start, SuccessNode::new(TestState::Complete))
             .add_exit_states(vec![
                 TestState::Complete,
@@ -906,12 +900,12 @@ mod tests {
             .register_node(TestState::Process, data_node2)
             .add_exit_state(TestState::Complete);
 
-        let storage = MemoryStore::new();
-        flow.orchestrate(&storage).await.unwrap();
+        let store = MemoryStore::new();
+        flow.orchestrate(&store).await.unwrap();
 
         // Verify both pieces of data are stored
-        let data1: String = storage.get("step1").unwrap();
-        let data2: String = storage.get("step2").unwrap();
+        let data1: String = store.get("step1").unwrap();
+        let data2: String = store.get("step2").unwrap();
         assert_eq!(data1, "data1");
         assert_eq!(data2, "data2");
     }
@@ -931,8 +925,8 @@ mod tests {
         flow.register_node(TestState::Start, validation_node)
             .add_exit_states(vec![TestState::Complete, TestState::Error]);
 
-        let storage = MemoryStore::new();
-        let result = flow.orchestrate(&storage).await;
+        let store = MemoryStore::new();
+        let result = flow.orchestrate(&store).await;
 
         assert!(result.is_err());
         let error = result.unwrap_err();
@@ -959,12 +953,12 @@ mod tests {
             .register_node(TestState::Validate, conditional_node)
             .add_exit_states(vec![TestState::Complete, TestState::Error]);
 
-        let storage = MemoryStore::new();
-        let result = flow.orchestrate(&storage).await.unwrap();
+        let store = MemoryStore::new();
+        let result = flow.orchestrate(&store).await.unwrap();
         assert_eq!(result, TestState::Complete);
 
         // Verify data was stored and processed correctly
-        let stored_data: String = storage.get("workflow_data").unwrap();
+        let stored_data: String = store.get("workflow_data").unwrap();
         assert_eq!(stored_data, "test_value");
     }
 }

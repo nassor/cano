@@ -1,53 +1,53 @@
-//! # Storage API - Share Data Between Workflow Nodes
+//! # store API - Share Data Between Workflow Nodes
 //!
-//! This module provides simple, thread-safe storage for sharing data between nodes in workflows.
+//! This module provides simple, thread-safe store for sharing data between nodes in workflows.
 //! Think of it as a shared key-value store that any node can read from and write to.
 //!
-//! ## 🎯 Why Storage?
+//! ## 🎯 Why store?
 //!
 //! In workflows, nodes often need to pass data to each other:
 //! - A data loader puts results for a processor to use
 //! - A validator stores validation results for an auditor
 //! - A processor saves intermediate results for a reporter
 //!
-//! Storage makes this communication simple and type-safe.
+//! store makes this communication simple and type-safe.
 //!
 //! ## 🚀 Quick Start
 //!
 //! Use `MemoryStore` to store different types of data using key-value pairs.
-//! Store data with `put()` and retrieve it later with `get()` - the storage
+//! Store data with `put()` and retrieve it later with `get()` - the store
 //! handles type safety automatically through generic methods.
 //!
 //! ## 🔧 How It Works
 //!
 //! ### Stack and Heap Values
 //!
-//! The storage system can accept both stack-based and heap-based values.
+//! The store system can accept both stack-based and heap-based values.
 //! It's the user's responsibility to decide whether to use Copy-on-Write (Cow)
-//! or direct value storage based on their performance requirements.
+//! or direct value store based on their performance requirements.
 //!
 //! ### Type Safety with Any
 //!
-//! Storage uses `Box<dyn Any>` internally but provides type-safe access.
+//! store uses `Box<dyn Any>` internally but provides type-safe access.
 //! When you request data with the correct type, it returns `Some(value)`.
 //! When the type doesn't match, it safely returns `None`.
 //!
-//! ## 🏗️ Using Storage in Nodes
+//! ## 🏗️ Using store in Nodes
 //!
-//! In your custom nodes, use storage to read input data in the `prep()` phase,
+//! In your custom nodes, use store to read input data in the `prep()` phase,
 //! process it in `exec()`, and store results in the `post()` phase for the next node.
 //!
-//! ## 🔧 Available Storage Types
+//! ## 🔧 Available store Types
 //!
 //! ### MemoryStore (Default)
 //!
-//! A thread-safe, in-memory HashMap-based storage that's ready to use out of the box.
+//! A thread-safe, in-memory HashMap-based store that's ready to use out of the box.
 //! Perfect for most workflows where data fits in memory.
 //!
-//! ### Custom Storage
+//! ### Custom store
 //!
 //! Implement the [`StoreTrait`] trait for custom backends like databases,
-//! file systems, or network storage. The trait requires implementing
+//! file systems, or network store. The trait requires implementing
 //! `get`, `put`, `remove`, `append`, `delete`, `keys`, `len`, and `clear` methods.
 //!
 //! ## 💡 Best Practices
@@ -62,36 +62,36 @@
 //!
 //! - Choose between stack and heap allocation based on data size and lifetime
 //! - Use Copy-on-Write (Cow) when you need memory efficiency
-//! - Clear storage when workflows complete to free memory
+//! - Clear store when workflows complete to free memory
 //!
 //! ### Error Handling
 //!
 //! Always handle missing keys gracefully by providing sensible defaults.
 //! Use the `unwrap_or()` pattern to provide fallback values when data
-//! might not be present in storage.
+//! might not be present in store.
 
 pub mod error;
 pub mod memory;
 
-/// Type alias for storage operation results
+/// Type alias for store operation results
 pub type StoreResult<T> = Result<T, error::StoreError>;
 
-/// Core storage trait for workflow data sharing
+/// Core store trait for workflow data sharing
 ///
-/// This trait defines the interface for storage backends used in Cano workflows.
+/// This trait defines the interface for store backends used in Cano workflows.
 /// It provides a simple key-value store that any node can read from and write to.
 ///
 /// ## 🎯 Purpose
 ///
-/// The `StoreTrait` enables different storage backends while keeping the same API:
-/// - [`MemoryStore`]: Fast in-memory storage (default)
-/// - File-based storage: For persistent workflows
-/// - Database storage: For enterprise workflows
-/// - Network storage: For distributed workflows
+/// The `StoreTrait` enables different store backends while keeping the same API:
+/// - [`MemoryStore`]: Fast in-memory store (default)
+/// - File-based store: For persistent workflows
+/// - Database store: For enterprise workflows
+/// - Network store: For distributed workflows
 ///
 /// ## 🔧 Type Safety
 ///
-/// The storage system uses type erasure with `Box<dyn Any>` internally but provides
+/// The store system uses type erasure with `Box<dyn Any>` internally but provides
 /// type-safe access through generic methods. Store data with automatic type inference
 /// and retrieve with explicit type annotation for safety.
 ///
@@ -103,33 +103,33 @@ pub type StoreResult<T> = Result<T, error::StoreError>;
 ///
 /// ## 🚀 Implementation Example
 ///
-/// A simple thread-safe storage implementation using `Arc<RwLock<HashMap>>`.
-/// Custom storage backends can implement the StoreTrait to provide
+/// A simple thread-safe store implementation using `Arc<RwLock<HashMap>>`.
+/// Custom store backends can implement the StoreTrait to provide
 /// persistence, distribution, or other specialized functionality.
 ///
 /// ## 📋 Method Overview
 ///
 /// | Method | Purpose | Example |
 /// |--------|---------|---------|
-/// | `get` | Retrieve a value | `let val: Result<T, StoreError> = storage.get("key")` |
-/// | `put` | Store a value | `storage.put("key", value)?` |
-/// | `remove` | Delete a key | `storage.remove("key")?` |
-/// | `append` | Append to existing value | `storage.append("key", item)?` |
-/// | `delete` | Alias for remove | `storage.delete("key")?` |
-/// | `keys` | Get all keys | `for key in storage.keys()? { ... }` |
-/// | `len` | Get count of items | `let count = storage.len()?` |
-/// | `clear` | Remove all data | `storage.clear()?` |
+/// | `get` | Retrieve a value | `let val: Result<T, StoreError> = store.get("key")` |
+/// | `put` | Store a value | `store.put("key", value)?` |
+/// | `remove` | Delete a key | `store.remove("key")?` |
+/// | `append` | Append to existing value | `store.append("key", item)?` |
+/// | `delete` | Alias for remove | `store.delete("key")?` |
+/// | `keys` | Get all keys | `for key in store.keys()? { ... }` |
+/// | `len` | Get count of items | `let count = store.len()?` |
+/// | `clear` | Remove all data | `store.clear()?` |
 ///
 /// ## Type Safety
 ///
-/// The storage system uses type erasure with `Box<dyn Any + Send + Sync>` to allow
+/// The store system uses type erasure with `Box<dyn Any + Send + Sync>` to allow
 /// storing arbitrary types. Users must handle type safety through downcasting.
 ///
 /// ## Implementation Requirements
 ///
-/// All methods must be implemented to provide complete storage functionality.
+/// All methods must be implemented to provide complete store functionality.
 /// The trait provides no default implementations to ensure optimal performance
-/// for different storage backends.
+/// for different store backends.
 ///
 /// ## Thread Safety
 ///
@@ -142,13 +142,13 @@ pub trait StoreTrait: Send + Sync {
     /// Returns the value if the key exists and can be downcast to type T.
     /// Returns an error if the key doesn't exist or type mismatch occurs.
     /// The user is responsible for choosing whether to use
-    /// Copy-on-Write or direct value storage.
+    /// Copy-on-Write or direct value store.
     fn get<T: 'static + Clone>(&self, key: &str) -> StoreResult<T>;
 
     /// Store a typed value by key
     ///
     /// Stores the value under the given key. If the key already exists,
-    /// the previous value is replaced. The storage accepts both stack and
+    /// the previous value is replaced. The store accepts both stack and
     /// heap-based values - it's the user's responsibility to choose the
     /// appropriate allocation strategy.
     fn put<T: 'static + Send + Sync + Clone>(&self, key: &str, value: T) -> StoreResult<()>;
@@ -175,27 +175,27 @@ pub trait StoreTrait: Send + Sync {
         self.remove(key)
     }
 
-    /// Get all keys in the storage
+    /// Get all keys in the store
     ///
     /// Returns an iterator over all keys currently stored.
     fn keys(&self) -> StoreResult<Box<dyn Iterator<Item = String> + '_>>;
 
-    /// Get the number of key-value pairs in storage
+    /// Get the number of key-value pairs in store
     ///
     /// Returns the count of currently stored items.
     fn len(&self) -> StoreResult<usize>;
 
-    /// Check if the storage is empty
+    /// Check if the store is empty
     ///
-    /// Returns `true` if the storage contains no key-value pairs.
+    /// Returns `true` if the store contains no key-value pairs.
     /// This is a default implementation based on `len()`.
     fn is_empty(&self) -> StoreResult<bool> {
         self.len().map(|len| len == 0)
     }
 
-    /// Clear all data from storage
+    /// Clear all data from store
     ///
-    /// Removes all key-value pairs from the storage.
+    /// Removes all key-value pairs from the store.
     fn clear(&self) -> StoreResult<()>;
 }
 

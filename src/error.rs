@@ -23,8 +23,8 @@
 //! | Error Type | When It Occurs | How to Fix |
 //! |------------|----------------|------------|
 //! | `NodeExecution` | Node processing fails | Check your business logic |
-//! | `Preparation` | Node prep phase fails | Verify input data and storage |
-//! | `Storage` | Storage operations fail | Check storage state and keys |
+//! | `Preparation` | Node prep phase fails | Verify input data and store |
+//! | `store` | store operations fail | Check store state and keys |
 //! | `Flow` | Workflow orchestration fails | Verify node registration and routing |
 //! | `Configuration` | Invalid node/flow config | Check parameters and settings |
 //! | `RetryExhausted` | All retries failed | Increase retries or fix root cause |
@@ -36,18 +36,18 @@
 //! Use `CanoError::Preparation` for prep phase issues, `CanoError::NodeExecution`
 //! for exec phase problems, and handle errors appropriately in the post phase.
 //!
-//! ## 🔗 Storage Error Integration
+//! ## 🔗 store Error Integration
 //!
 //! `CanoError` automatically understands and converts `StoreError` instances.
-//! This means storage operations can seamlessly flow into the broader error system:
+//! This means store operations can seamlessly flow into the broader error system:
 //!
 //! ```rust
 //! use cano::{CanoResult, store::MemoryStore, store::StoreTrait};
 //!
 //! fn example_function() -> CanoResult<String> {
-//!     let storage = MemoryStore::new();
-//!     // StoreError is automatically converted to CanoError::Storage
-//!     let value: String = storage.get("key")?;
+//!     let store = MemoryStore::new();
+//!     // StoreError is automatically converted to CanoError::store
+//!     let value: String = store.get("key")?;
 //!     Ok(value)
 //! }
 //! ```
@@ -75,21 +75,21 @@
 /// Something went wrong while preparing data in the `prep` phase.
 ///
 /// **Common causes:**
-/// - Missing data in storage
+/// - Missing data in store
 /// - Invalid data format
 /// - Resource initialization failures
 ///
 /// **How to fix:** Verify that previous nodes stored the expected data.
 ///
-/// ### Storage
-/// Storage operations failed (get, put, remove, etc.).
+/// ### store
+/// store operations failed (get, put, remove, etc.).
 ///
 /// **Common causes:**
 /// - Type mismatches when retrieving data
-/// - Storage backend issues
+/// - store backend issues
 /// - Concurrent access problems
 ///
-/// **How to fix:** Check storage keys and ensure type consistency.
+/// **How to fix:** Check store keys and ensure type consistency.
 ///
 /// ### Flow
 /// Workflow orchestration problems.
@@ -124,7 +124,7 @@
 /// ## 💡 Usage Examples
 ///
 /// Create specific error types with helpful messages. Use the appropriate
-/// error variant (NodeExecution, Configuration, Storage, etc.) and provide
+/// error variant (NodeExecution, Configuration, store, etc.) and provide
 /// clear, actionable error messages that help users understand what went wrong.
 ///
 /// ## 🔄 Converting from Other Errors
@@ -143,14 +143,14 @@ pub enum CanoError {
     /// Error during node preparation phase (data loading/setup)
     ///
     /// Use this when your node's `prep` method fails to load or prepare data.
-    /// Often indicates missing or invalid data in storage.
+    /// Often indicates missing or invalid data in store.
     Preparation(String),
 
-    /// Error in storage operations (get/put/remove)
+    /// Error in store operations (get/put/remove)
     ///
-    /// Use this for storage-related failures like missing keys, type mismatches,
-    /// or storage backend issues.
-    Storage(String),
+    /// Use this for store-related failures like missing keys, type mismatches,
+    /// or store backend issues.
+    Store(String),
 
     /// Error in flow orchestration (routing/registration)
     ///
@@ -188,9 +188,9 @@ impl CanoError {
         CanoError::Preparation(msg.into())
     }
 
-    /// Create a new storage error
-    pub fn storage<S: Into<String>>(msg: S) -> Self {
-        CanoError::Storage(msg.into())
+    /// Create a new store error
+    pub fn store<S: Into<String>>(msg: S) -> Self {
+        CanoError::Store(msg.into())
     }
 
     /// Create a new flow error
@@ -215,10 +215,10 @@ impl CanoError {
 
     /// Convert a StoreError to a CanoError
     ///
-    /// This is a convenience method that explicitly converts storage errors
+    /// This is a convenience method that explicitly converts store errors
     /// to workflow errors. The automatic `From` implementation also works.
     pub fn from_store_error(err: crate::store::error::StoreError) -> Self {
-        CanoError::Storage(err.to_string())
+        CanoError::store(err.to_string())
     }
 
     /// Get the error message as a string slice
@@ -226,7 +226,7 @@ impl CanoError {
         match self {
             CanoError::NodeExecution(msg) => msg,
             CanoError::Preparation(msg) => msg,
-            CanoError::Storage(msg) => msg,
+            CanoError::Store(msg) => msg,
             CanoError::Flow(msg) => msg,
             CanoError::Configuration(msg) => msg,
             CanoError::RetryExhausted(msg) => msg,
@@ -239,7 +239,7 @@ impl CanoError {
         match self {
             CanoError::NodeExecution(_) => "node_execution",
             CanoError::Preparation(_) => "preparation",
-            CanoError::Storage(_) => "storage",
+            CanoError::Store(_) => "store",
             CanoError::Flow(_) => "flow",
             CanoError::Configuration(_) => "configuration",
             CanoError::RetryExhausted(_) => "retry_exhausted",
@@ -253,7 +253,7 @@ impl std::fmt::Display for CanoError {
         match self {
             CanoError::NodeExecution(msg) => write!(f, "Node execution error: {msg}"),
             CanoError::Preparation(msg) => write!(f, "Preparation error: {msg}"),
-            CanoError::Storage(msg) => write!(f, "Storage error: {msg}"),
+            CanoError::Store(msg) => write!(f, "Store error: {msg}"),
             CanoError::Flow(msg) => write!(f, "Flow error: {msg}"),
             CanoError::Configuration(msg) => write!(f, "Configuration error: {msg}"),
             CanoError::RetryExhausted(msg) => write!(f, "Retry exhausted: {msg}"),
@@ -286,13 +286,13 @@ impl From<String> for CanoError {
 
 impl From<std::io::Error> for CanoError {
     fn from(err: std::io::Error) -> Self {
-        CanoError::Storage(format!("IO error: {err}"))
+        CanoError::store(format!("IO error: {err}"))
     }
 }
 
 impl From<crate::store::error::StoreError> for CanoError {
     fn from(err: crate::store::error::StoreError) -> Self {
-        CanoError::Storage(err.to_string())
+        CanoError::store(err.to_string())
     }
 }
 
@@ -363,7 +363,7 @@ mod tests {
             CanoError::NodeExecution("".to_string()).category(),
             "node_execution"
         );
-        assert_eq!(CanoError::Storage("".to_string()).category(), "storage");
+        assert_eq!(CanoError::store("".to_string()).category(), "store");
         assert_eq!(CanoError::Flow("".to_string()).category(), "flow");
     }
 
@@ -375,24 +375,24 @@ mod tests {
         let store_error = StoreError::key_not_found("test_key");
         let cano_error: CanoError = store_error.into();
 
-        // Should be converted to Storage variant
+        // Should be converted to store variant
         match cano_error {
-            CanoError::Storage(msg) => {
+            CanoError::Store(msg) => {
                 assert!(msg.contains("test_key"));
                 assert!(msg.contains("not found"));
             }
-            _ => panic!("Expected Storage error variant"),
+            _ => panic!("Expected store error variant"),
         }
 
         // Test that the category is correct
         let store_error = StoreError::type_mismatch("type error");
         let cano_error: CanoError = store_error.into();
-        assert_eq!(cano_error.category(), "storage");
+        assert_eq!(cano_error.category(), "store");
 
         // Test explicit conversion method
         let store_error = StoreError::lock_error("lock failed");
         let cano_error = CanoError::from_store_error(store_error);
-        assert_eq!(cano_error.category(), "storage");
+        assert_eq!(cano_error.category(), "store");
         assert!(cano_error.message().contains("lock failed"));
     }
 }

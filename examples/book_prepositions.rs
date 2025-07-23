@@ -263,7 +263,6 @@ impl BookDownloaderNode {
 
 #[async_trait]
 impl Node<BookPrepositionAction> for BookDownloaderNode {
-    type Storage = MemoryStore;
     type PrepResult = Vec<(u32, String, String)>;
     type ExecResult = Vec<Book>;
 
@@ -276,7 +275,7 @@ impl Node<BookPrepositionAction> for BookDownloaderNode {
     }
 
     /// Preparation: Get the list of books to download
-    async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         let book_list = Self::get_book_list();
         println!("📋 Prepared {} books for download", book_list.len());
         Ok(book_list)
@@ -323,7 +322,7 @@ impl Node<BookPrepositionAction> for BookDownloaderNode {
     /// Post-processing: Store downloaded books in memory
     async fn post(
         &self,
-        store: &Self::Storage,
+        store: &MemoryStore,
         exec_res: Self::ExecResult,
     ) -> Result<BookPrepositionAction, CanoError> {
         if exec_res.is_empty() {
@@ -404,7 +403,6 @@ impl PrepositionNode {
 
 #[async_trait]
 impl Node<BookPrepositionAction> for PrepositionNode {
-    type Storage = MemoryStore;
     type PrepResult = Vec<Book>;
     type ExecResult = Vec<BookAnalysis>;
 
@@ -417,7 +415,7 @@ impl Node<BookPrepositionAction> for PrepositionNode {
     }
 
     /// Preparation: Load downloaded books from memory
-    async fn prep(&self, store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         let books: Vec<Book> = store
             .get("downloaded_books")
             .map_err(|e| CanoError::preparation(format!("Failed to load books: {e}")))?;
@@ -456,7 +454,7 @@ impl Node<BookPrepositionAction> for PrepositionNode {
     /// Post-processing: Store analysis results
     async fn post(
         &self,
-        store: &Self::Storage,
+        store: &MemoryStore,
         exec_res: Self::ExecResult,
     ) -> Result<BookPrepositionAction, CanoError> {
         if exec_res.is_empty() {
@@ -491,7 +489,6 @@ impl BookRankingByPrepositionNode {
 
 #[async_trait]
 impl Node<BookPrepositionAction> for BookRankingByPrepositionNode {
-    type Storage = MemoryStore;
     type PrepResult = Vec<BookAnalysis>;
     type ExecResult = Vec<BookRanking>;
 
@@ -504,7 +501,7 @@ impl Node<BookPrepositionAction> for BookRankingByPrepositionNode {
     }
 
     /// Preparation: Load book analyses from memory
-    async fn prep(&self, store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         let analyses: Vec<BookAnalysis> = store
             .get("book_analyses")
             .map_err(|e| CanoError::preparation(format!("Failed to load analyses: {e}")))?;
@@ -548,7 +545,7 @@ impl Node<BookPrepositionAction> for BookRankingByPrepositionNode {
     /// Post-processing: Store final rankings and display results
     async fn post(
         &self,
-        store: &Self::Storage,
+        store: &MemoryStore,
         exec_res: Self::ExecResult,
     ) -> Result<BookPrepositionAction, CanoError> {
         store.put("book_rankings", exec_res.clone())?;

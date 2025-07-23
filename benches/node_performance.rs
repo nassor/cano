@@ -26,11 +26,10 @@ enum TestState {
 
 #[async_trait]
 impl Node<TestState> for DoNothingNode {
-    type Storage = MemoryStore;
     type PrepResult = ();
     type ExecResult = ();
 
-    async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         Ok(())
     }
 
@@ -41,7 +40,7 @@ impl Node<TestState> for DoNothingNode {
 
     async fn post(
         &self,
-        _store: &Self::Storage,
+        _store: &MemoryStore,
         _exec_res: Self::ExecResult,
     ) -> Result<TestState, CanoError> {
         Ok(self.next_state.clone())
@@ -66,11 +65,10 @@ impl CpuIntensiveNode {
 
 #[async_trait]
 impl Node<TestState> for CpuIntensiveNode {
-    type Storage = MemoryStore;
     type PrepResult = Vec<u64>;
     type ExecResult = u64;
 
-    async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         // Generate some data to process
         Ok((0..self.iterations as u64).collect())
     }
@@ -82,7 +80,7 @@ impl Node<TestState> for CpuIntensiveNode {
 
     async fn post(
         &self,
-        store: &Self::Storage,
+        store: &MemoryStore,
         exec_res: Self::ExecResult,
     ) -> Result<TestState, CanoError> {
         // Store the result
@@ -109,11 +107,10 @@ impl IoSimulationNode {
 
 #[async_trait]
 impl Node<TestState> for IoSimulationNode {
-    type Storage = MemoryStore;
     type PrepResult = String;
     type ExecResult = String;
 
-    async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         // Simulate I/O delay
         tokio::time::sleep(tokio::time::Duration::from_millis(self.delay_ms)).await;
         Ok("prepared_data".to_string())
@@ -127,7 +124,7 @@ impl Node<TestState> for IoSimulationNode {
 
     async fn post(
         &self,
-        store: &Self::Storage,
+        store: &MemoryStore,
         exec_res: Self::ExecResult,
     ) -> Result<TestState, CanoError> {
         // Simulate I/O delay
@@ -213,9 +210,9 @@ fn bench_node_execution(c: &mut Criterion) {
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let storage = MemoryStore::new();
+                        let store = MemoryStore::new();
                         for node in &nodes {
-                            let _result = node.run(&storage).await;
+                            let _result = node.run(&store).await;
                         }
                     });
             },
@@ -229,9 +226,9 @@ fn bench_node_execution(c: &mut Criterion) {
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let storage = MemoryStore::new();
+                        let store = MemoryStore::new();
                         for _i in 0..node_count {
-                            let _result = node.run(&storage).await;
+                            let _result = node.run(&store).await;
                         }
                     });
             },
@@ -249,9 +246,9 @@ fn bench_node_execution(c: &mut Criterion) {
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
-                            let storage = MemoryStore::new();
+                            let store = MemoryStore::new();
                             for node in &nodes {
-                                let _result = node.run(&storage).await;
+                                let _result = node.run(&store).await;
                             }
                         });
                 },
@@ -277,9 +274,9 @@ fn bench_node_phases(c: &mut Criterion) {
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let storage = MemoryStore::new();
+                        let store = MemoryStore::new();
                         for _i in 0..iterations {
-                            let _result = node.prep(&storage).await;
+                            let _result = node.prep(&store).await;
                         }
                     });
             },
@@ -308,9 +305,9 @@ fn bench_node_phases(c: &mut Criterion) {
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let storage = MemoryStore::new();
+                        let store = MemoryStore::new();
                         for _i in 0..iterations {
-                            let _result = node.post(&storage, ()).await;
+                            let _result = node.post(&store, ()).await;
                         }
                     });
             },
@@ -326,9 +323,9 @@ fn bench_node_phases(c: &mut Criterion) {
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
-                            let storage = MemoryStore::new();
+                            let store = MemoryStore::new();
                             for _i in 0..iterations {
-                                let _result = node.prep(&storage).await;
+                                let _result = node.prep(&store).await;
                             }
                         });
                 },
@@ -513,17 +510,17 @@ fn bench_concurrent_node_execution(c: &mut Criterion) {
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let storage = std::sync::Arc::new(MemoryStore::new());
+                        let store = std::sync::Arc::new(MemoryStore::new());
                         let chunk_size = std::cmp::max(1, node_count / concurrency);
 
                         let tasks: Vec<_> = nodes
                             .chunks(chunk_size)
                             .map(|chunk| {
                                 let chunk = chunk.to_vec();
-                                let storage = storage.clone();
+                                let store = store.clone();
                                 tokio::spawn(async move {
                                     for node in chunk {
-                                        let _result = node.run(&*storage).await;
+                                        let _result = node.run(&*store).await;
                                     }
                                 })
                             })
@@ -549,17 +546,17 @@ fn bench_concurrent_node_execution(c: &mut Criterion) {
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
-                            let storage = std::sync::Arc::new(MemoryStore::new());
+                            let store = std::sync::Arc::new(MemoryStore::new());
                             let chunk_size = std::cmp::max(1, small_count / concurrency);
 
                             let tasks: Vec<_> = nodes
                                 .chunks(chunk_size)
                                 .map(|chunk| {
                                     let chunk = chunk.to_vec();
-                                    let storage = storage.clone();
+                                    let store = store.clone();
                                     tokio::spawn(async move {
                                         for node in chunk {
-                                            let _result = node.run(&*storage).await;
+                                            let _result = node.run(&*store).await;
                                         }
                                     })
                                 })

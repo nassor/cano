@@ -38,11 +38,10 @@ struct ProcessorNode;
 
 #[async_trait]
 impl Node<WorkflowState> for ProcessorNode {
-    type Storage = MemoryStore;
     type PrepResult = String;
     type ExecResult = bool;
 
-    async fn prep(&self, store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         let input: String = store.get("input").unwrap_or_default();
         Ok(input)
     }
@@ -52,7 +51,7 @@ impl Node<WorkflowState> for ProcessorNode {
         true // Success
     }
 
-    async fn post(&self, store: &Self::Storage, exec_res: Self::ExecResult) 
+    async fn post(&self, store: &MemoryStore, exec_res: Self::ExecResult) 
         -> Result<WorkflowState, CanoError> {
         if exec_res {
             store.put("result", "processed".to_string())?;
@@ -70,12 +69,12 @@ async fn main() -> Result<(), CanoError> {
     flow.register_node(WorkflowState::Start, ProcessorNode)
         .add_exit_state(WorkflowState::Complete);
     
-    // Create storage for sharing data between steps
-    let storage = MemoryStore::new();
-    storage.put("input", "Hello Cano!".to_string())?;
+    // Create store for sharing data between steps
+    let store = MemoryStore::new();
+    store.put("input", "Hello Cano!".to_string())?;
     
     // Run your workflow
-    let result = flow.orchestrate(&storage).await?;
+    let result = flow.orchestrate(&store).await?;
     println!("Workflow completed: {result:?}");
     
     Ok(())
@@ -89,7 +88,7 @@ That's it! You just ran your first Cano workflow.
 - **🏗️ Simple API**: A single `Node` trait handles everything - no complex type hierarchies
 - **🔗 Simple Configuration**: Fluent builder pattern makes setup intuitive  
 - **🔄 Built-in Retries**: Configurable retry logic for resilient workflows
-- **💾 Shared Storage**: Thread-safe key-value store for data passing between nodes
+- **💾 Shared store**: Thread-safe key-value store for data passing between nodes
 - **🌊 Complex Workflows**: Chain nodes together into sophisticated state machine pipelines
 - **⚡ Type Safety**: Enum-driven state transitions with compile-time safety
 - **🚀 High Performance**: Minimal overhead with direct execution for maximum throughput
@@ -108,13 +107,12 @@ struct EmailProcessor;
 
 #[async_trait]
 impl Node<String> for EmailProcessor {
-    type Storage = MemoryStore;
     type PrepResult = String;
     type ExecResult = bool;
 
-    async fn prep(&self, storage: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
-        // Load email data from storage
-        let email: String = storage.get("email").unwrap_or_default();
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        // Load email data from store
+        let email: String = store.get("email").unwrap_or_default();
         Ok(email)
     }
 
@@ -124,11 +122,11 @@ impl Node<String> for EmailProcessor {
         true // Success
     }
 
-    async fn post(&self, storage: &Self::Storage, success: Self::ExecResult) 
+    async fn post(&self, store: &MemoryStore, success: Self::ExecResult) 
         -> Result<String, CanoError> {
         // Store the result and return next action
         if success {
-            storage.put("result", "sent".to_string())?;
+            store.put("result", "sent".to_string())?;
             Ok("complete".to_string())
         } else {
             Ok("retry".to_string())
@@ -137,20 +135,20 @@ impl Node<String> for EmailProcessor {
 }
 ```
 
-### 2. Storage - Share Data Between Nodes
+### 2. Store - Share Data Between Nodes
 
-Use the built-in storage to pass data around your workflow:
+Use the built-in store to pass data around your workflow:
 
 ```rust
-let storage = MemoryStore::new();
+let store = MemoryStore::new();
 
 // Store some data
-storage.put("user_id", 123)?;
-storage.put("name", "Alice".to_string())?;
+store.put("user_id", 123)?;
+store.put("name", "Alice".to_string())?;
 
 // Retrieve it later
-let user_id: Result<i32, _> = storage.get("user_id");
-let name: Result<String, _> = storage.get("name");
+let user_id: Result<i32, _> = store.get("user_id");
+let name: Result<String, _> = store.get("name");
 ```
 
 ### 3. Flows - Chain Nodes Together
@@ -173,7 +171,7 @@ flow.register_node(WorkflowState::Validate, validator)
     .register_node(WorkflowState::SendEmail, email_sender)
     .add_exit_states(vec![WorkflowState::Complete, WorkflowState::Error]);
 
-let result = flow.orchestrate(&storage).await?;
+let result = flow.orchestrate(&store).await?;
 ```
 
 ## 🧩 Advanced Features
@@ -204,7 +202,7 @@ flow.register_node(State::Start, data_loader)
     .register_node(State::Process, processor)
     .add_exit_states(vec![State::Complete, State::Error]);
 
-let result = flow.orchestrate(&storage).await?;
+let result = flow.orchestrate(&store).await?;
 ```
 
 ## 🧪 Testing & Benchmarks
@@ -239,7 +237,7 @@ Benchmark results are saved in `target/criterion/` with detailed HTML reports.
 We welcome contributions! Areas where you can help:
 
 - **📝 Documentation** - Improve guides and examples
-- **🔧 Features** - Add new storage backends or workflow capabilities  
+- **🔧 Features** - Add new store backends or workflow capabilities  
 - **⚡ Performance** - Optimize hot paths and memory usage
 - **🧪 Testing** - Add test cases and edge case coverage
 - **🐛 Bug Fixes** - Report and fix issues

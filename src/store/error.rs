@@ -1,26 +1,26 @@
 //! # Store Error Types
 //!
-//! This module defines error types specific to storage operations in Cano workflows.
-//! It provides clear, actionable error messages for common storage failures.
+//! This module defines error types specific to store operations in Cano workflows.
+//! It provides clear, actionable error messages for common store failures.
 
 use std::fmt;
 
-/// Comprehensive error type for storage operations
+/// Comprehensive error type for store operations
 ///
-/// This enum covers all the different ways storage operations can fail.
+/// This enum covers all the different ways store operations can fail.
 /// Each variant provides specific information about what went wrong
 /// and helps users understand how to fix the issue.
 ///
 /// ## Error Categories
 ///
-/// - `KeyNotFound`: The requested key doesn't exist in storage
+/// - `KeyNotFound`: The requested key doesn't exist in store
 /// - `TypeMismatch`: The stored value can't be cast to the requested type
-/// - `LockError`: Failed to acquire read/write lock on storage
+/// - `LockError`: Failed to acquire read/write lock on store
 /// - `AppendTypeMismatch`: Tried to append to a value that isn't a Vec<T>
-/// - `Generic`: General storage errors with custom messages
+/// - `Generic`: General store errors with custom messages
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
-    /// The requested key was not found in storage
+    /// The requested key was not found in store
     ///
     /// This error occurs when trying to access a key that doesn't exist.
     /// Common causes: typos in key names, accessing data before it's stored,
@@ -34,9 +34,9 @@ pub enum StoreError {
     /// or inconsistent type usage across nodes.
     TypeMismatch(String),
 
-    /// Failed to acquire lock on storage
+    /// Failed to acquire lock on store
     ///
-    /// This error occurs when the storage lock is poisoned or unavailable.
+    /// This error occurs when the store lock is poisoned or unavailable.
     /// Common causes: panic in another thread while holding the lock,
     /// or deadlock situations.
     LockError(String),
@@ -47,9 +47,9 @@ pub enum StoreError {
     /// contains a value of a different type than Vec<T>.
     AppendTypeMismatch(String),
 
-    /// General storage error with custom message
+    /// General store error with custom message
     ///
-    /// Use this for storage errors that don't fit other categories.
+    /// Use this for store errors that don't fit other categories.
     /// Provide a descriptive message about what went wrong.
     Generic(String),
 }
@@ -57,7 +57,7 @@ pub enum StoreError {
 impl StoreError {
     /// Create a new key not found error
     pub fn key_not_found<S: Into<String>>(key: S) -> Self {
-        StoreError::KeyNotFound(format!("Key '{}' not found in storage", key.into()))
+        StoreError::KeyNotFound(format!("Key '{}' not found in store", key.into()))
     }
 
     /// Create a new type mismatch error
@@ -78,7 +78,7 @@ impl StoreError {
         ))
     }
 
-    /// Create a new generic storage error
+    /// Create a new generic store error
     pub fn generic<S: Into<String>>(msg: S) -> Self {
         StoreError::Generic(msg.into())
     }
@@ -91,7 +91,7 @@ impl fmt::Display for StoreError {
             StoreError::TypeMismatch(msg) => write!(f, "Type mismatch: {msg}"),
             StoreError::LockError(msg) => write!(f, "Lock error: {msg}"),
             StoreError::AppendTypeMismatch(msg) => write!(f, "Append type mismatch: {msg}"),
-            StoreError::Generic(msg) => write!(f, "Storage error: {msg}"),
+            StoreError::Generic(msg) => write!(f, "store error: {msg}"),
         }
     }
 }

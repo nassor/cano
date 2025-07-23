@@ -5,7 +5,7 @@
 //!
 //! ## 🚀 Quick Start
 //!
-//! Create a node that processes data, create storage for sharing data between nodes,
+//! Create a node that processes data, create store for sharing data between nodes,
 //! then run your workflow. The basic pattern involves creating a `Node`, setting up
 //! a `MemoryStore`, and calling the `run` method with error handling.
 //!
@@ -16,7 +16,7 @@
 //! A [`Node`] trait is where your logic lives. Implement it once, and Cano handles the execution.
 //! The design focuses on simplicity and directness for maximum performance.
 //!
-//! ### Storage - Share Data Between Nodes
+//! ### store - Share Data Between Nodes
 //!
 //! Use [`MemoryStore`] to pass data around your workflow. Store different types of data
 //! using key-value pairs, and retrieve them later with type safety. All values are
@@ -48,9 +48,9 @@
 //!   - Built-in retry logic and error handling
 //!   - Fluent configuration API via [`NodeConfig`]
 //!
-//! - **[`storage`]**: Thread-safe storage for inter-node communication
+//! - **[`store`]**: Thread-safe store for inter-node communication
 //!   - [`MemoryStore`] for in-memory data sharing
-//!   - [`StoreTrait`] trait for custom storage backends
+//!   - [`StoreTrait`] trait for custom store backends
 //!
 //! - **[`error`]**: Comprehensive error handling system
 //!   - [`CanoError`] for categorized error types

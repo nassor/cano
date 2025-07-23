@@ -48,7 +48,7 @@ pub type DefaultNodeResult = Result<Box<dyn std::any::Any + Send + Sync>, CanoEr
 ///
 /// - **`T`**: The return type from the post method (typically an enum for flow control)
 /// - **`Params`**: The parameter type for this node (e.g., `HashMap<String, String>`)
-/// - **`Storage`**: The storage backend type (e.g., `MemoryStore`)
+/// - **`Store`**: The store backend type (e.g., `MemoryStore`)
 /// - **`PrepResult`**: The result type from the `prep` phase, passed to `exec`.
 /// - **`ExecResult`**: The result type from the `exec` phase, passed to `post`.
 ///
@@ -78,7 +78,6 @@ pub type DefaultNodeResult = Result<Box<dyn std::any::Any + Send + Sync>, CanoEr
 ///
 /// #[async_trait]
 /// impl Node<String> for MyNode {
-///     type Storage = MemoryStore;
 ///     type PrepResult = String;
 ///     type ExecResult = bool;
 ///
@@ -86,7 +85,7 @@ pub type DefaultNodeResult = Result<Box<dyn std::any::Any + Send + Sync>, CanoEr
 ///         NodeConfig::minimal()  // Use minimal retries for fast execution
 ///     }
 ///
-///     async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+///     async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
 ///         Ok("prepared_data".to_string())
 ///     }
 ///
@@ -94,7 +93,7 @@ pub type DefaultNodeResult = Result<Box<dyn std::any::Any + Send + Sync>, CanoEr
 ///         true // Success
 ///     }
 ///
-///     async fn post(&self, _store: &Self::Storage, exec_res: Self::ExecResult)
+///     async fn post(&self, _store: &MemoryStore, exec_res: Self::ExecResult)
 ///         -> Result<String, CanoError> {
 ///         if exec_res {
 ///             Ok("next".to_string())
@@ -105,13 +104,12 @@ pub type DefaultNodeResult = Result<Box<dyn std::any::Any + Send + Sync>, CanoEr
 /// }
 /// ```
 #[async_trait]
-pub trait Node<T, Params = DefaultParams>: Send + Sync
+pub trait Node<T, Params = DefaultParams, Store = MemoryStore>: Send + Sync
 where
     T: Clone + std::fmt::Debug + Send + Sync + 'static,
     Params: Send + Sync + Clone,
+    Store: StoreTrait,
 {
-    /// Storage type for this node
-    type Storage: StoreTrait;
     /// Result type from the prep phase
     type PrepResult: Send + Sync;
     /// Result type from the exec phase
@@ -142,24 +140,24 @@ where
     /// Preparation phase - load data and setup resources
     ///
     /// This is the first phase of node execution. Use it to:
-    /// - Load data from storage that was left by previous nodes
+    /// - Load data from store that was left by previous nodes
     /// - Validate inputs and parameters
     /// - Setup resources needed for execution
     /// - Prepare any data structures
     ///
     /// The result of this phase is passed to the [`exec`] method.
-    async fn prep(&self, store: &Self::Storage) -> Result<Self::PrepResult, CanoError>;
+    async fn prep(&self, store: &Store) -> Result<Self::PrepResult, CanoError>;
 
     /// Execution phase - main processing logic
     ///
     /// This is the core processing phase where the main business logic runs.
-    /// This phase doesn't have access to storage - it only receives the result
+    /// This phase doesn't have access to store - it only receives the result
     /// from the [`prep`] phase and produces a result for the [`post`] phase.
     ///
     /// Benefits of this design:
     /// - Clear separation of concerns
     /// - Easier testing (pure function)
-    /// - Better performance (no storage access during processing)
+    /// - Better performance (no store access during processing)
     /// - Retry logic can wrap just this phase
     async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult;
 
@@ -172,8 +170,7 @@ where
     /// - Handle errors from the exec phase
     ///
     /// This method returns a typed value that determines what happens next in the workflow.
-    async fn post(&self, store: &Self::Storage, exec_res: Self::ExecResult)
-    -> Result<T, CanoError>;
+    async fn post(&self, store: &Store, exec_res: Self::ExecResult) -> Result<T, CanoError>;
 
     /// Run the complete node lifecycle with configuration-driven execution
     ///
@@ -182,7 +179,7 @@ where
     /// Nodes execute with minimal overhead for maximum throughput.
     ///
     /// You can override this method for completely custom orchestration.
-    async fn run(&self, store: &Self::Storage) -> Result<T, CanoError> {
+    async fn run(&self, store: &Store) -> Result<T, CanoError> {
         let config = self.config();
         self.run_with_retries(store, &config).await
     }
@@ -191,11 +188,7 @@ where
     ///
     /// This method handles the actual execution of the three phases (prep, exec, post)
     /// with retry logic based on the node configuration.
-    async fn run_with_retries(
-        &self,
-        store: &Self::Storage,
-        config: &NodeConfig,
-    ) -> Result<T, CanoError> {
+    async fn run_with_retries(&self, store: &Store, config: &NodeConfig) -> Result<T, CanoError> {
         let mut attempts = 0;
 
         loop {
@@ -232,7 +225,7 @@ pub trait DynNode<T>:
     Node<
         T,
         DefaultParams,
-        Storage = MemoryStore,
+        MemoryStore,
         PrepResult = Box<dyn std::any::Any + Send + Sync>,
         ExecResult = DefaultNodeResult,
     >
@@ -247,7 +240,7 @@ where
     N: Node<
             T,
             DefaultParams,
-            Storage = MemoryStore,
+            MemoryStore,
             PrepResult = Box<dyn std::any::Any + Send + Sync>,
             ExecResult = DefaultNodeResult,
         >,
@@ -349,11 +342,10 @@ mod tests {
 
     #[async_trait]
     impl Node<TestAction> for SimpleSuccessNode {
-        type Storage = MemoryStore;
         type PrepResult = String;
         type ExecResult = bool;
 
-        async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
             Ok("prepared".to_string())
         }
 
@@ -364,7 +356,7 @@ mod tests {
 
         async fn post(
             &self,
-            _store: &Self::Storage,
+            _store: &MemoryStore,
             exec_res: Self::ExecResult,
         ) -> Result<TestAction, CanoError> {
             if exec_res {
@@ -390,11 +382,10 @@ mod tests {
 
     #[async_trait]
     impl Node<TestAction> for PrepFailureNode {
-        type Storage = MemoryStore;
         type PrepResult = String;
         type ExecResult = bool;
 
-        async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
             Err(CanoError::preparation(&self.error_message))
         }
 
@@ -404,14 +395,14 @@ mod tests {
 
         async fn post(
             &self,
-            _store: &Self::Storage,
+            _store: &MemoryStore,
             _exec_res: Self::ExecResult,
         ) -> Result<TestAction, CanoError> {
             Ok(TestAction::Complete)
         }
     }
 
-    // Node that uses storage operations
+    // Node that uses store operations
     struct StorageNode {
         read_key: String,
         write_key: String,
@@ -430,11 +421,10 @@ mod tests {
 
     #[async_trait]
     impl Node<TestAction> for StorageNode {
-        type Storage = MemoryStore;
         type PrepResult = Option<String>;
         type ExecResult = String;
 
-        async fn prep(&self, store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
             match store.get::<String>(&self.read_key) {
                 Ok(value) => Ok(Some(value)),
                 Err(_) => Ok(None), // Key doesn't exist, which is fine
@@ -450,7 +440,7 @@ mod tests {
 
         async fn post(
             &self,
-            store: &Self::Storage,
+            store: &MemoryStore,
             exec_res: Self::ExecResult,
         ) -> Result<TestAction, CanoError> {
             store.put(&self.write_key, exec_res)?;
@@ -475,7 +465,6 @@ mod tests {
 
     #[async_trait]
     impl Node<TestAction> for ParameterizedNode {
-        type Storage = MemoryStore;
         type PrepResult = i32;
         type ExecResult = i32;
 
@@ -488,7 +477,7 @@ mod tests {
             }
         }
 
-        async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
             let base_value = self
                 .params
                 .get("base_value")
@@ -503,7 +492,7 @@ mod tests {
 
         async fn post(
             &self,
-            store: &Self::Storage,
+            store: &MemoryStore,
             exec_res: Self::ExecResult,
         ) -> Result<TestAction, CanoError> {
             store.put("result", exec_res)?;
@@ -516,11 +505,10 @@ mod tests {
 
     #[async_trait]
     impl Node<TestAction> for PostFailureNode {
-        type Storage = MemoryStore;
         type PrepResult = ();
         type ExecResult = ();
 
-        async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
             Ok(())
         }
 
@@ -530,7 +518,7 @@ mod tests {
 
         async fn post(
             &self,
-            _store: &Self::Storage,
+            _store: &MemoryStore,
             _exec_res: Self::ExecResult,
         ) -> Result<TestAction, CanoError> {
             Err(CanoError::node_execution("Post phase failure"))
@@ -550,11 +538,10 @@ mod tests {
 
     #[async_trait]
     impl Node<TestAction> for CustomRunNode {
-        type Storage = MemoryStore;
         type PrepResult = String;
         type ExecResult = String;
 
-        async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
             Ok("prep_completed".to_string())
         }
 
@@ -564,7 +551,7 @@ mod tests {
 
         async fn post(
             &self,
-            store: &Self::Storage,
+            store: &MemoryStore,
             exec_res: Self::ExecResult,
         ) -> Result<TestAction, CanoError> {
             store.put("custom_run_result", exec_res)?;
@@ -572,7 +559,7 @@ mod tests {
         }
 
         // Custom run implementation that can skip exec phase
-        async fn run(&self, store: &Self::Storage) -> Result<TestAction, CanoError> {
+        async fn run(&self, store: &MemoryStore) -> Result<TestAction, CanoError> {
             let prep_res = self.prep(store).await?;
 
             if self.should_skip_exec {
@@ -589,9 +576,9 @@ mod tests {
     #[tokio::test]
     async fn test_simple_node_execution() {
         let node = SimpleSuccessNode::new();
-        let storage = MemoryStore::new();
+        let store = MemoryStore::new();
 
-        let result = node.run(&storage).await.unwrap();
+        let result = node.run(&store).await.unwrap();
         assert_eq!(result, TestAction::Complete);
         assert_eq!(node.execution_count(), 1);
     }
@@ -599,10 +586,10 @@ mod tests {
     #[tokio::test]
     async fn test_node_lifecycle_phases() {
         let node = SimpleSuccessNode::new();
-        let storage = MemoryStore::new();
+        let store = MemoryStore::new();
 
         // Test prep phase
-        let prep_result = node.prep(&storage).await.unwrap();
+        let prep_result = node.prep(&store).await.unwrap();
         assert_eq!(prep_result, "prepared");
 
         // Test exec phase
@@ -610,16 +597,16 @@ mod tests {
         assert!(exec_result);
 
         // Test post phase
-        let post_result = node.post(&storage, exec_result).await.unwrap();
+        let post_result = node.post(&store, exec_result).await.unwrap();
         assert_eq!(post_result, TestAction::Complete);
     }
 
     #[tokio::test]
     async fn test_prep_phase_failure() {
         let node = PrepFailureNode::new("Test prep failure");
-        let storage = MemoryStore::new();
+        let store = MemoryStore::new();
 
-        let result = node.run(&storage).await;
+        let result = node.run(&store).await;
         assert!(result.is_err());
 
         let error = result.unwrap_err();
@@ -629,9 +616,9 @@ mod tests {
     #[tokio::test]
     async fn test_post_phase_failure() {
         let node = PostFailureNode;
-        let storage = MemoryStore::new();
+        let store = MemoryStore::new();
 
-        let result = node.run(&storage).await;
+        let result = node.run(&store).await;
         assert!(result.is_err());
 
         let error = result.unwrap_err();
@@ -641,37 +628,35 @@ mod tests {
     #[tokio::test]
     async fn test_storage_operations() {
         let node = StorageNode::new("input_key", "output_key", "test_value");
-        let storage = MemoryStore::new();
+        let store = MemoryStore::new();
 
         // First run - no existing data
-        let result = node.run(&storage).await.unwrap();
+        let result = node.run(&store).await.unwrap();
         assert_eq!(result, TestAction::Complete);
 
-        let stored_value: String = storage.get("output_key").unwrap();
+        let stored_value: String = store.get("output_key").unwrap();
         assert_eq!(stored_value, "created: test_value");
 
         // Second run - with existing data
-        storage
-            .put("input_key", "existing_data".to_string())
-            .unwrap();
+        store.put("input_key", "existing_data".to_string()).unwrap();
         let node2 = StorageNode::new("input_key", "output_key2", "test_value2");
-        let result2 = node2.run(&storage).await.unwrap();
+        let result2 = node2.run(&store).await.unwrap();
         assert_eq!(result2, TestAction::Complete);
 
-        let stored_value2: String = storage.get("output_key2").unwrap();
+        let stored_value2: String = store.get("output_key2").unwrap();
         assert_eq!(stored_value2, "processed: existing_data");
     }
 
     #[tokio::test]
     async fn test_parameterized_node() {
         let mut node = ParameterizedNode::new();
-        let storage = MemoryStore::new();
+        let store = MemoryStore::new();
 
         // Test with default parameters
-        let result = node.run(&storage).await.unwrap();
+        let result = node.run(&store).await.unwrap();
         assert_eq!(result, TestAction::Complete);
 
-        let stored_result: i32 = storage.get("result").unwrap();
+        let stored_result: i32 = store.get("result").unwrap();
         assert_eq!(stored_result, 10); // base_value (10) * multiplier (1)
 
         // Test with custom parameters
@@ -680,42 +665,42 @@ mod tests {
         params.insert("multiplier".to_string(), "3".to_string());
 
         node.set_params(params);
-        let result2 = node.run(&storage).await.unwrap();
+        let result2 = node.run(&store).await.unwrap();
         assert_eq!(result2, TestAction::Complete);
 
-        let stored_result2: i32 = storage.get("result").unwrap();
+        let stored_result2: i32 = store.get("result").unwrap();
         assert_eq!(stored_result2, 15); // base_value (5) * multiplier (3)
     }
 
     #[tokio::test]
     async fn test_custom_run_implementation() {
-        let storage = MemoryStore::new();
+        let store = MemoryStore::new();
 
         // Test normal execution
         let node1 = CustomRunNode::new(false);
-        let result1 = node1.run(&storage).await.unwrap();
+        let result1 = node1.run(&store).await.unwrap();
         assert_eq!(result1, TestAction::Complete);
 
-        let stored_value1: String = storage.get("custom_run_result").unwrap();
+        let stored_value1: String = store.get("custom_run_result").unwrap();
         assert_eq!(stored_value1, "exec: prep_completed");
 
         // Test skipped execution
         let node2 = CustomRunNode::new(true);
-        let result2 = node2.run(&storage).await.unwrap();
+        let result2 = node2.run(&store).await.unwrap();
         assert_eq!(result2, TestAction::Complete);
 
-        let stored_value2: String = storage.get("custom_run_result").unwrap();
+        let stored_value2: String = store.get("custom_run_result").unwrap();
         assert_eq!(stored_value2, "skipped_exec");
     }
 
     #[tokio::test]
     async fn test_multiple_node_executions() {
         let node = SimpleSuccessNode::new();
-        let storage = MemoryStore::new();
+        let store = MemoryStore::new();
 
         // Run the node multiple times
         for i in 1..=5 {
-            let result = node.run(&storage).await.unwrap();
+            let result = node.run(&store).await.unwrap();
             assert_eq!(result, TestAction::Complete);
             assert_eq!(node.execution_count(), i);
         }
@@ -767,27 +752,22 @@ mod tests {
         let node = SimpleSuccessNode::new();
 
         // Test that the node implements the required traits
-        let _: &dyn Node<
-            TestAction,
-            DefaultParams,
-            Storage = MemoryStore,
-            PrepResult = String,
-            ExecResult = bool,
-        > = &node;
+        let _: &dyn Node<TestAction, DefaultParams, MemoryStore, PrepResult = String, ExecResult = bool> =
+            &node;
     }
 
     #[tokio::test]
     async fn test_error_propagation() {
-        let storage = MemoryStore::new();
+        let store = MemoryStore::new();
 
         // Test prep phase error propagation
         let prep_fail_node = PrepFailureNode::new("Prep failed");
-        let result = prep_fail_node.run(&storage).await;
+        let result = prep_fail_node.run(&store).await;
         assert!(result.is_err());
 
         // Test post phase error propagation
         let post_fail_node = PostFailureNode;
-        let result = post_fail_node.run(&storage).await;
+        let result = post_fail_node.run(&store).await;
         assert!(result.is_err());
     }
 
@@ -796,14 +776,14 @@ mod tests {
         use tokio::task;
 
         let node = Arc::new(SimpleSuccessNode::new());
-        let storage = Arc::new(MemoryStore::new());
+        let store = Arc::new(MemoryStore::new());
 
         let mut handles = vec![];
 
         // Spawn multiple concurrent executions
         for _ in 0..10 {
             let node_clone = Arc::clone(&node);
-            let storage_clone = Arc::clone(&storage);
+            let storage_clone = Arc::clone(&store);
 
             let handle = task::spawn(async move { node_clone.run(&*storage_clone).await });
             handles.push(handle);
@@ -830,7 +810,7 @@ mod tests {
         let node1 = StorageNode::new("input", "output1", "value1");
         let node2 = StorageNode::new("input", "output2", "value2");
 
-        // Run nodes with different storage instances
+        // Run nodes with different store instances
         node1.run(&storage1).await.unwrap();
         node2.run(&storage2).await.unwrap();
 
@@ -871,7 +851,6 @@ mod tests {
 
         #[async_trait]
         impl Node<TestAction> for RetryNode {
-            type Storage = MemoryStore;
             type PrepResult = ();
             type ExecResult = ();
 
@@ -879,7 +858,7 @@ mod tests {
                 NodeConfig::new().with_retries(self.max_retries, Duration::from_millis(1))
             }
 
-            async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+            async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
                 let attempt = self.attempt_count.fetch_add(1, Ordering::SeqCst) + 1;
 
                 // Fail first 2 attempts, succeed on 3rd
@@ -896,38 +875,37 @@ mod tests {
 
             async fn post(
                 &self,
-                _store: &Self::Storage,
+                _store: &MemoryStore,
                 _exec_res: Self::ExecResult,
             ) -> Result<TestAction, CanoError> {
                 Ok(TestAction::Complete)
             }
         }
 
-        let storage = MemoryStore::new();
+        let store = MemoryStore::new();
 
         // Test with sufficient retries
         let node_success = RetryNode::new(5);
-        let result = node_success.run(&storage).await.unwrap();
+        let result = node_success.run(&store).await.unwrap();
         assert_eq!(result, TestAction::Complete);
         assert_eq!(node_success.attempt_count(), 3); // Failed twice, succeeded on third attempt
 
         // Test with insufficient retries
         let node_failure = RetryNode::new(1);
-        let result = node_failure.run(&storage).await;
+        let result = node_failure.run(&store).await;
         assert!(result.is_err());
         assert_eq!(node_failure.attempt_count(), 2); // Initial attempt + 1 retry
     }
 
     #[tokio::test]
     async fn test_node_config_variants() {
-        let storage = MemoryStore::new();
+        let store = MemoryStore::new();
 
         // Test minimal config
         struct MinimalNode;
 
         #[async_trait]
         impl Node<TestAction> for MinimalNode {
-            type Storage = MemoryStore;
             type PrepResult = ();
             type ExecResult = ();
 
@@ -935,7 +913,7 @@ mod tests {
                 NodeConfig::minimal()
             }
 
-            async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+            async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
                 Ok(())
             }
 
@@ -945,7 +923,7 @@ mod tests {
 
             async fn post(
                 &self,
-                _store: &Self::Storage,
+                _store: &MemoryStore,
                 _exec_res: Self::ExecResult,
             ) -> Result<TestAction, CanoError> {
                 Ok(TestAction::Complete)
@@ -953,7 +931,7 @@ mod tests {
         }
 
         let minimal_node = MinimalNode;
-        let result = minimal_node.run(&storage).await.unwrap();
+        let result = minimal_node.run(&store).await.unwrap();
         assert_eq!(result, TestAction::Complete);
 
         let config = minimal_node.config();

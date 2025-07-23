@@ -32,11 +32,10 @@ impl TestState {
 
 #[async_trait]
 impl Node<TestState> for DoNothingNode {
-    type Storage = MemoryStore;
     type PrepResult = ();
     type ExecResult = ();
 
-    async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         Ok(())
     }
 
@@ -47,7 +46,7 @@ impl Node<TestState> for DoNothingNode {
 
     async fn post(
         &self,
-        _store: &Self::Storage,
+        _store: &MemoryStore,
         _exec_res: Self::ExecResult,
     ) -> Result<TestState, CanoError> {
         Ok(self.next_state.clone())
@@ -91,8 +90,8 @@ fn bench_flow_performance(c: &mut Criterion) {
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let storage = MemoryStore::new();
-                        let result = flow.orchestrate(&storage).await;
+                        let store = MemoryStore::new();
+                        let result = flow.orchestrate(&store).await;
                         assert!(result.is_ok());
                         assert_eq!(result.unwrap(), TestState::Complete);
                     });
@@ -126,8 +125,8 @@ fn bench_flow_vs_direct_execution(c: &mut Criterion) {
 
         b.to_async(tokio::runtime::Runtime::new().unwrap())
             .iter(|| async {
-                let storage = MemoryStore::new();
-                let result = flow.orchestrate(&storage).await;
+                let store = MemoryStore::new();
+                let result = flow.orchestrate(&store).await;
                 assert!(result.is_ok());
             });
     });
@@ -139,9 +138,9 @@ fn bench_flow_vs_direct_execution(c: &mut Criterion) {
 
         b.to_async(tokio::runtime::Runtime::new().unwrap())
             .iter(|| async {
-                let storage = MemoryStore::new();
+                let store = MemoryStore::new();
                 for node in &nodes {
-                    let result = node.run(&storage).await;
+                    let result = node.run(&store).await;
                     assert!(result.is_ok());
                 }
             });

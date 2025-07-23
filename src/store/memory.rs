@@ -2,16 +2,16 @@ use super::{StoreResult, StoreTrait, error::StoreError};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
-/// Thread-safe in-memory HashMap-based storage
+/// Thread-safe in-memory HashMap-based store
 ///
-/// `MemoryStore` provides a thread-safe storage solution using
+/// `MemoryStore` provides a thread-safe store solution using
 /// a `HashMap` wrapped in `Arc<RwLock<_>>` as the backing store.
-/// This is the default storage implementation used throughout Cano workflows.
+/// This is the default store implementation used throughout Cano workflows.
 ///
 /// ## Thread Safety
 ///
-/// The storage is fully thread-safe using `Arc<RwLock<_>>` for interior mutability.
-/// Multiple readers can access the storage concurrently, while writers get exclusive access.
+/// The store is fully thread-safe using `Arc<RwLock<_>>` for interior mutability.
+/// Multiple readers can access the store concurrently, while writers get exclusive access.
 ///
 /// ## Performance Characteristics
 ///
@@ -28,8 +28,8 @@ pub struct MemoryStore {
 impl MemoryStore {
     /// Create a new empty MemoryStore instance
     ///
-    /// Creates a new thread-safe storage instance with an empty HashMap.
-    /// This is the most common way to initialize storage for workflows.
+    /// Creates a new thread-safe store instance with an empty HashMap.
+    /// This is the most common way to initialize store for workflows.
     ///
     /// # Returns
     /// A new, empty `MemoryStore` instance
@@ -45,7 +45,7 @@ impl StoreTrait for MemoryStore {
         let data = self
             .data
             .read()
-            .map_err(|_| StoreError::lock_error("Failed to acquire read lock on storage"))?;
+            .map_err(|_| StoreError::lock_error("Failed to acquire read lock on store"))?;
 
         match data.get(key) {
             Some(value) => value.downcast_ref::<T>().cloned().ok_or_else(|| {
@@ -61,7 +61,7 @@ impl StoreTrait for MemoryStore {
         let mut data = self
             .data
             .write()
-            .map_err(|_| StoreError::lock_error("Failed to acquire write lock on storage"))?;
+            .map_err(|_| StoreError::lock_error("Failed to acquire write lock on store"))?;
 
         data.insert(key.to_string(), Box::new(value));
         Ok(())
@@ -71,7 +71,7 @@ impl StoreTrait for MemoryStore {
         let mut data = self
             .data
             .write()
-            .map_err(|_| StoreError::lock_error("Failed to acquire write lock on storage"))?;
+            .map_err(|_| StoreError::lock_error("Failed to acquire write lock on store"))?;
 
         data.remove(key)
             .map(|_| ())
@@ -82,7 +82,7 @@ impl StoreTrait for MemoryStore {
         let mut data = self
             .data
             .write()
-            .map_err(|_| StoreError::lock_error("Failed to acquire write lock on storage"))?;
+            .map_err(|_| StoreError::lock_error("Failed to acquire write lock on store"))?;
 
         if let Some(existing) = data.get_mut(key) {
             // Try to downcast to Vec<T> and append
@@ -104,7 +104,7 @@ impl StoreTrait for MemoryStore {
         let data = self
             .data
             .read()
-            .map_err(|_| StoreError::lock_error("Failed to acquire read lock on storage"))?;
+            .map_err(|_| StoreError::lock_error("Failed to acquire read lock on store"))?;
 
         let keys: Vec<String> = data.keys().cloned().collect();
         Ok(Box::new(keys.into_iter()))
@@ -114,7 +114,7 @@ impl StoreTrait for MemoryStore {
         let data = self
             .data
             .read()
-            .map_err(|_| StoreError::lock_error("Failed to acquire read lock on storage"))?;
+            .map_err(|_| StoreError::lock_error("Failed to acquire read lock on store"))?;
 
         Ok(data.len())
     }
@@ -123,7 +123,7 @@ impl StoreTrait for MemoryStore {
         let mut data = self
             .data
             .write()
-            .map_err(|_| StoreError::lock_error("Failed to acquire write lock on storage"))?;
+            .map_err(|_| StoreError::lock_error("Failed to acquire write lock on store"))?;
 
         data.clear();
         Ok(())
@@ -215,7 +215,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             StoreError::KeyNotFound(msg) => {
-                assert_eq!(msg, "Key 'nonexistent' not found in storage")
+                assert_eq!(msg, "Key 'nonexistent' not found in store")
             }
             _ => panic!("Expected KeyNotFound error"),
         }
@@ -261,7 +261,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             StoreError::KeyNotFound(msg) => {
-                assert_eq!(msg, "Key 'nonexistent' not found in storage")
+                assert_eq!(msg, "Key 'nonexistent' not found in store")
             }
             _ => panic!("Expected KeyNotFound error"),
         }

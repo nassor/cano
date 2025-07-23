@@ -12,9 +12,9 @@ fn bench_storage_operations(c: &mut Criterion) {
             &count,
             |b, &count| {
                 b.iter(|| {
-                    let storage = MemoryStore::new();
+                    let store = MemoryStore::new();
                     for i in 0..count {
-                        storage
+                        store
                             .put(&format!("key_{i}"), format!("value_{i}"))
                             .unwrap();
                     }
@@ -26,17 +26,17 @@ fn bench_storage_operations(c: &mut Criterion) {
             BenchmarkId::new("get_operations", count),
             &count,
             |b, &count| {
-                let storage = MemoryStore::new();
-                // Pre-populate storage
+                let store = MemoryStore::new();
+                // Pre-populate store
                 for i in 0..count {
-                    storage
+                    store
                         .put(&format!("key_{i}"), format!("value_{i}"))
                         .unwrap();
                 }
 
                 b.iter(|| {
                     for i in 0..count {
-                        let _: Result<String, _> = storage.get(&format!("key_{i}"));
+                        let _: Result<String, _> = store.get(&format!("key_{i}"));
                     }
                 });
             },
@@ -47,12 +47,12 @@ fn bench_storage_operations(c: &mut Criterion) {
             &count,
             |b, &count| {
                 b.iter(|| {
-                    let storage = MemoryStore::new();
+                    let store = MemoryStore::new();
                     let mut list_items = Vec::new();
                     for i in 0..count {
                         list_items.push(format!("value_{i}"));
                     }
-                    storage.put("list_key", list_items).unwrap();
+                    store.put("list_key", list_items).unwrap();
                 });
             },
         );
