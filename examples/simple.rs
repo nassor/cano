@@ -41,12 +41,11 @@ impl GeneratorNode {
 
 #[async_trait]
 impl Node<WorkflowAction> for GeneratorNode {
-    type Params = HashMap<String, String>;
     type Storage = MemoryStore;
     type PrepResult = Vec<u32>;
     type ExecResult = Vec<u32>;
 
-    fn set_params(&mut self, params: Self::Params) {
+    fn set_params(&mut self, params: HashMap<String, String>) {
         self.params = params;
     }
 
@@ -114,12 +113,11 @@ impl CounterNode {
 
 #[async_trait]
 impl Node<WorkflowAction> for CounterNode {
-    type Params = HashMap<String, String>;
     type Storage = MemoryStore;
     type PrepResult = Vec<u32>;
     type ExecResult = usize;
 
-    fn set_params(&mut self, params: Self::Params) {
+    fn set_params(&mut self, params: HashMap<String, String>) {
         self.params = params;
     }
 

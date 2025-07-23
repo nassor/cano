@@ -79,7 +79,7 @@ pub mod store;
 // Core public API - simplified imports
 pub use error::{CanoError, CanoResult};
 pub use flow::{Flow, FlowBuilder};
-pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node, NodeConfig, Params};
+pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node, NodeConfig};
 pub use store::{MemoryStore, StoreTrait};
 
 // Convenience re-exports for common patterns

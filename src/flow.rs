@@ -144,7 +144,6 @@ where
 ///
 /// #[async_trait]
 /// impl Node<WorkflowState> for StartNode {
-///     type Params = DefaultParams;
 ///     type Storage = MemoryStore;
 ///     type PrepResult = String;
 ///     type ExecResult = bool;
@@ -169,7 +168,6 @@ where
 ///
 /// #[async_trait]
 /// impl Node<WorkflowState> for ProcessNode {
-///     type Params = DefaultParams;
 ///     type Storage = MemoryStore;
 ///     type PrepResult = i32;
 ///     type ExecResult = i32;
@@ -375,7 +373,6 @@ mod tests {
     use super::*;
     use crate::store::{MemoryStore, StoreTrait};
     use async_trait::async_trait;
-    use std::collections::HashMap;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
     use tokio;
@@ -414,7 +411,6 @@ mod tests {
 
     #[async_trait]
     impl Node<TestState> for SuccessNode {
-        type Params = HashMap<String, String>;
         type Storage = MemoryStore;
         type PrepResult = String;
         type ExecResult = bool;
@@ -465,7 +461,6 @@ mod tests {
 
     #[async_trait]
     impl Node<TestState> for FailureNode {
-        type Params = HashMap<String, String>;
         type Storage = MemoryStore;
         type PrepResult = String;
         type ExecResult = bool;
@@ -507,7 +502,6 @@ mod tests {
 
     #[async_trait]
     impl Node<TestState> for DataStoringNode {
-        type Params = HashMap<String, String>;
         type Storage = MemoryStore;
         type PrepResult = ();
         type ExecResult = String;
@@ -557,7 +551,6 @@ mod tests {
 
     #[async_trait]
     impl Node<TestState> for ConditionalNode {
-        type Params = HashMap<String, String>;
         type Storage = MemoryStore;
         type PrepResult = String;
         type ExecResult = bool;

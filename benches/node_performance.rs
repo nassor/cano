@@ -26,7 +26,6 @@ enum TestState {
 
 #[async_trait]
 impl Node<TestState> for DoNothingNode {
-    type Params = DefaultParams;
     type Storage = MemoryStore;
     type PrepResult = ();
     type ExecResult = ();
@@ -67,7 +66,6 @@ impl CpuIntensiveNode {
 
 #[async_trait]
 impl Node<TestState> for CpuIntensiveNode {
-    type Params = DefaultParams;
     type Storage = MemoryStore;
     type PrepResult = Vec<u64>;
     type ExecResult = u64;
@@ -111,7 +109,6 @@ impl IoSimulationNode {
 
 #[async_trait]
 impl Node<TestState> for IoSimulationNode {
-    type Params = DefaultParams;
     type Storage = MemoryStore;
     type PrepResult = String;
     type ExecResult = String;

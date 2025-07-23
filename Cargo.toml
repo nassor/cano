@@ -1,6 +1,6 @@
 [package]
 name = "cano"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "Simple & Fast Async Workflows in Rust - Build powerful data processing pipelines with minimal code"
 license = "MIT"

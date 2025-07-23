@@ -77,12 +77,11 @@ impl SellerNode {
 
 #[async_trait]
 impl Node<NegotiationAction> for SellerNode {
-    type Params = HashMap<String, String>;
     type Storage = MemoryStore;
     type PrepResult = NegotiationState;
     type ExecResult = NegotiationState;
 
-    fn set_params(&mut self, params: Self::Params) {
+    fn set_params(&mut self, params: HashMap<String, String>) {
         self.params = params;
     }
 
@@ -194,12 +193,11 @@ impl BuyerNode {
 
 #[async_trait]
 impl Node<NegotiationAction> for BuyerNode {
-    type Params = HashMap<String, String>;
     type Storage = MemoryStore;
     type PrepResult = NegotiationState;
     type ExecResult = (NegotiationState, bool);
 
-    fn set_params(&mut self, params: Self::Params) {
+    fn set_params(&mut self, params: HashMap<String, String>) {
         self.params = params;
     }
 

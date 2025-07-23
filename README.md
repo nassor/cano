@@ -38,7 +38,6 @@ struct ProcessorNode;
 
 #[async_trait]
 impl Node<WorkflowState> for ProcessorNode {
-    type Params = DefaultParams;
     type Storage = MemoryStore;
     type PrepResult = String;
     type ExecResult = bool;
@@ -109,7 +108,6 @@ struct EmailProcessor;
 
 #[async_trait]
 impl Node<String> for EmailProcessor {
-    type Params = DefaultParams;
     type Storage = MemoryStore;
     type PrepResult = String;
     type ExecResult = bool;

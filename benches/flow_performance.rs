@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use cano::{CanoError, DefaultParams, Flow, MemoryStore, Node};
+use cano::{CanoError, Flow, MemoryStore, Node};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 /// Simple do-nothing node for benchmarking
@@ -32,7 +32,6 @@ impl TestState {
 
 #[async_trait]
 impl Node<TestState> for DoNothingNode {
-    type Params = DefaultParams;
     type Storage = MemoryStore;
     type PrepResult = ();
     type ExecResult = ();

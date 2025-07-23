@@ -161,9 +161,9 @@ pub trait StoreTrait: Send + Sync {
 
     /// Append an item to an existing collection value
     ///
-    /// If the key exists and contains a Vec<T>, appends the item to it.
-    /// If the key doesn't exist, creates a new Vec<T> with the single item.
-    /// Returns an error if the key exists but doesn't contain a Vec<T>.
+    /// If the key exists and contains a `Vec<T>`, appends the item to it.
+    /// If the key doesn't exist, creates a new `Vec<T>` with the single item.
+    /// Returns an error if the key exists but doesn't contain a `Vec<T>`.
     fn append<T: 'static + Send + Sync + Clone>(&self, key: &str, item: T) -> StoreResult<()>;
 
     /// Delete a value by key (alias for remove)

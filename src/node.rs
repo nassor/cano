@@ -39,10 +39,6 @@ pub type DefaultParams = HashMap<String, String>;
 /// to allow nodes to return any type while maintaining type erasure for dynamic workflows.
 pub type DefaultNodeResult = Result<Box<dyn std::any::Any + Send + Sync>, CanoError>;
 
-/// Backward compatibility type aliases
-pub type Params = DefaultParams;
-pub type NodeResult = DefaultNodeResult;
-
 /// Node trait for workflow processing
 ///
 /// This trait defines the core interface that all workflow nodes must implement.
@@ -82,7 +78,6 @@ pub type NodeResult = DefaultNodeResult;
 ///
 /// #[async_trait]
 /// impl Node<String> for MyNode {
-///     type Params = DefaultParams;
 ///     type Storage = MemoryStore;
 ///     type PrepResult = String;
 ///     type ExecResult = bool;
@@ -110,12 +105,11 @@ pub type NodeResult = DefaultNodeResult;
 /// }
 /// ```
 #[async_trait]
-pub trait Node<T>: Send + Sync
+pub trait Node<T, Params = DefaultParams>: Send + Sync
 where
     T: Clone + std::fmt::Debug + Send + Sync + 'static,
+    Params: Send + Sync + Clone,
 {
-    /// Parameter type for this node
-    type Params: Send + Sync + Clone;
     /// Storage type for this node
     type Storage: StoreTrait;
     /// Result type from the prep phase
@@ -127,7 +121,7 @@ where
     ///
     /// Default implementation that does nothing. Override this method if your node
     /// needs to store or process parameters when they are set.
-    fn set_params(&mut self, _params: Self::Params) {
+    fn set_params(&mut self, _params: Params) {
         // Default implementation does nothing
     }
 
@@ -237,7 +231,7 @@ where
 pub trait DynNode<T>:
     Node<
         T,
-        Params = DefaultParams,
+        DefaultParams,
         Storage = MemoryStore,
         PrepResult = Box<dyn std::any::Any + Send + Sync>,
         ExecResult = DefaultNodeResult,
@@ -252,7 +246,7 @@ where
     T: Clone + std::fmt::Debug + Send + Sync + 'static,
     N: Node<
             T,
-            Params = DefaultParams,
+            DefaultParams,
             Storage = MemoryStore,
             PrepResult = Box<dyn std::any::Any + Send + Sync>,
             ExecResult = DefaultNodeResult,
@@ -281,8 +275,6 @@ pub struct NodeConfig {
     pub max_retries: usize,
     /// Duration to wait between retry attempts  
     pub wait: Duration,
-    /// Key-value parameters for node configuration
-    pub params: Params,
 }
 
 impl Default for NodeConfig {
@@ -290,7 +282,6 @@ impl Default for NodeConfig {
         Self {
             max_retries: 3,
             wait: Duration::from_micros(50),
-            params: HashMap::new(),
         }
     }
 }
@@ -308,7 +299,6 @@ impl NodeConfig {
         Self {
             max_retries: 1,
             wait: Duration::from_millis(0),
-            params: HashMap::new(),
         }
     }
 
@@ -316,12 +306,6 @@ impl NodeConfig {
     pub fn with_retries(mut self, retries: usize, wait: Duration) -> Self {
         self.max_retries = retries;
         self.wait = wait;
-        self
-    }
-
-    /// Set parameters for the node
-    pub fn with_params(mut self, params: Params) -> Self {
-        self.params = params;
         self
     }
 }
@@ -365,7 +349,6 @@ mod tests {
 
     #[async_trait]
     impl Node<TestAction> for SimpleSuccessNode {
-        type Params = DefaultParams;
         type Storage = MemoryStore;
         type PrepResult = String;
         type ExecResult = bool;
@@ -407,7 +390,6 @@ mod tests {
 
     #[async_trait]
     impl Node<TestAction> for PrepFailureNode {
-        type Params = DefaultParams;
         type Storage = MemoryStore;
         type PrepResult = String;
         type ExecResult = bool;
@@ -448,7 +430,6 @@ mod tests {
 
     #[async_trait]
     impl Node<TestAction> for StorageNode {
-        type Params = DefaultParams;
         type Storage = MemoryStore;
         type PrepResult = Option<String>;
         type ExecResult = String;
@@ -494,12 +475,11 @@ mod tests {
 
     #[async_trait]
     impl Node<TestAction> for ParameterizedNode {
-        type Params = DefaultParams;
         type Storage = MemoryStore;
         type PrepResult = i32;
         type ExecResult = i32;
 
-        fn set_params(&mut self, params: Self::Params) {
+        fn set_params(&mut self, params: DefaultParams) {
             self.params = params;
             if let Some(multiplier_str) = self.params.get("multiplier") {
                 if let Ok(multiplier) = multiplier_str.parse::<i32>() {
@@ -536,7 +516,6 @@ mod tests {
 
     #[async_trait]
     impl Node<TestAction> for PostFailureNode {
-        type Params = DefaultParams;
         type Storage = MemoryStore;
         type PrepResult = ();
         type ExecResult = ();
@@ -571,7 +550,6 @@ mod tests {
 
     #[async_trait]
     impl Node<TestAction> for CustomRunNode {
-        type Params = DefaultParams;
         type Storage = MemoryStore;
         type PrepResult = String;
         type ExecResult = String;
@@ -748,7 +726,6 @@ mod tests {
         let config = NodeConfig::new();
         assert_eq!(config.max_retries, 3);
         assert_eq!(config.wait, Duration::from_micros(50));
-        assert!(config.params.is_empty());
     }
 
     #[test]
@@ -756,7 +733,6 @@ mod tests {
         let config = NodeConfig::default();
         assert_eq!(config.max_retries, 3);
         assert_eq!(config.wait, Duration::from_micros(50));
-        assert!(config.params.is_empty());
     }
 
     #[test]
@@ -764,7 +740,6 @@ mod tests {
         let config = NodeConfig::minimal();
         assert_eq!(config.max_retries, 1);
         assert_eq!(config.wait, Duration::from_millis(0));
-        assert!(config.params.is_empty());
     }
 
     #[test]
@@ -776,40 +751,11 @@ mod tests {
     }
 
     #[test]
-    fn test_node_config_with_params() {
-        let mut params = HashMap::new();
-        params.insert("key1".to_string(), "value1".to_string());
-        params.insert("key2".to_string(), "value2".to_string());
-
-        let config = NodeConfig::new().with_params(params.clone());
-        assert_eq!(config.params, params);
-    }
-
-    #[test]
     fn test_node_config_builder_pattern() {
-        let mut params = HashMap::new();
-        params.insert("timeout".to_string(), "30".to_string());
-        params.insert("retries".to_string(), "5".to_string());
-
-        let config = NodeConfig::new()
-            .with_retries(10, Duration::from_secs(1))
-            .with_params(params.clone());
+        let config = NodeConfig::new().with_retries(10, Duration::from_secs(1));
 
         assert_eq!(config.max_retries, 10);
         assert_eq!(config.wait, Duration::from_secs(1));
-        assert_eq!(config.params, params);
-    }
-
-    #[test]
-    fn test_type_aliases() {
-        // Test that type aliases compile and work correctly
-        let _params: DefaultParams = HashMap::new();
-        let _legacy_params: Params = HashMap::new();
-
-        // These should be the same type
-        let default_params: DefaultParams = HashMap::new();
-        let legacy_params: Params = default_params;
-        assert!(legacy_params.is_empty());
     }
 
     #[tokio::test]
@@ -823,7 +769,7 @@ mod tests {
         // Test that the node implements the required traits
         let _: &dyn Node<
             TestAction,
-            Params = DefaultParams,
+            DefaultParams,
             Storage = MemoryStore,
             PrepResult = String,
             ExecResult = bool,
@@ -925,7 +871,6 @@ mod tests {
 
         #[async_trait]
         impl Node<TestAction> for RetryNode {
-            type Params = DefaultParams;
             type Storage = MemoryStore;
             type PrepResult = ();
             type ExecResult = ();
@@ -982,7 +927,6 @@ mod tests {
 
         #[async_trait]
         impl Node<TestAction> for MinimalNode {
-            type Params = DefaultParams;
             type Storage = MemoryStore;
             type PrepResult = ();
             type ExecResult = ();

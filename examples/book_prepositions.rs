@@ -263,12 +263,11 @@ impl BookDownloaderNode {
 
 #[async_trait]
 impl Node<BookPrepositionAction> for BookDownloaderNode {
-    type Params = HashMap<String, String>;
     type Storage = MemoryStore;
     type PrepResult = Vec<(u32, String, String)>;
     type ExecResult = Vec<Book>;
 
-    fn set_params(&mut self, params: Self::Params) {
+    fn set_params(&mut self, params: HashMap<String, String>) {
         self.params = params;
     }
 
@@ -405,12 +404,11 @@ impl PrepositionNode {
 
 #[async_trait]
 impl Node<BookPrepositionAction> for PrepositionNode {
-    type Params = HashMap<String, String>;
     type Storage = MemoryStore;
     type PrepResult = Vec<Book>;
     type ExecResult = Vec<BookAnalysis>;
 
-    fn set_params(&mut self, params: Self::Params) {
+    fn set_params(&mut self, params: HashMap<String, String>) {
         self.params = params;
     }
 
@@ -493,12 +491,11 @@ impl BookRankingByPrepositionNode {
 
 #[async_trait]
 impl Node<BookPrepositionAction> for BookRankingByPrepositionNode {
-    type Params = HashMap<String, String>;
     type Storage = MemoryStore;
     type PrepResult = Vec<BookAnalysis>;
     type ExecResult = Vec<BookRanking>;
 
-    fn set_params(&mut self, params: Self::Params) {
+    fn set_params(&mut self, params: HashMap<String, String>) {
         self.params = params;
     }
 
