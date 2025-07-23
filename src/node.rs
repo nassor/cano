@@ -280,9 +280,9 @@ impl NodeConfig {
 /// }
 /// ```
 #[async_trait]
-pub trait Node<T, Params = DefaultParams, S = MemoryStore>: Send + Sync
+pub trait Node<Enum, Params = DefaultParams, S = MemoryStore>: Send + Sync
 where
-    T: Clone + std::fmt::Debug + Send + Sync + 'static,
+    Enum: Clone + std::fmt::Debug + Send + Sync + 'static,
     Params: Send + Sync + Clone,
     S: Store,
 {
@@ -346,7 +346,8 @@ where
     /// - Handle errors from the exec phase
     ///
     /// This method returns a typed value that determines what happens next in the workflow.
-    async fn post(&self, store: &impl Store, exec_res: Self::ExecResult) -> Result<T, CanoError>;
+    async fn post(&self, store: &impl Store, exec_res: Self::ExecResult)
+    -> Result<Enum, CanoError>;
 
     /// Run the complete node lifecycle with configuration-driven execution
     ///
@@ -355,7 +356,7 @@ where
     /// Nodes execute with minimal overhead for maximum throughput.
     ///
     /// You can override this method for completely custom orchestration.
-    async fn run(&self, store: &impl Store) -> Result<T, CanoError> {
+    async fn run(&self, store: &impl Store) -> Result<Enum, CanoError> {
         let config = self.config();
         self.run_with_retries(store, &config).await
     }
@@ -368,7 +369,7 @@ where
         &self,
         store: &impl Store,
         config: &NodeConfig,
-    ) -> Result<T, CanoError> {
+    ) -> Result<Enum, CanoError> {
         let max_attempts = config.retry_mode.max_attempts();
         let mut attempt = 0;
 
@@ -410,24 +411,24 @@ where
 ///
 /// This trait provides a concrete implementation of Node using the default types,
 /// enabling dynamic dispatch and trait object usage.
-pub trait DynNode<T>:
+pub trait DynNode<Enum>:
     Node<
-        T,
+        Enum,
         DefaultParams,
         MemoryStore,
         PrepResult = Box<dyn std::any::Any + Send + Sync>,
         ExecResult = DefaultNodeResult,
     >
 where
-    T: Clone + std::fmt::Debug + Send + Sync + 'static,
+    Enum: Clone + std::fmt::Debug + Send + Sync + 'static,
 {
 }
 
-impl<T, N> DynNode<T> for N
+impl<Enum, N> DynNode<Enum> for N
 where
-    T: Clone + std::fmt::Debug + Send + Sync + 'static,
+    Enum: Clone + std::fmt::Debug + Send + Sync + 'static,
     N: Node<
-            T,
+            Enum,
             DefaultParams,
             MemoryStore,
             PrepResult = Box<dyn std::any::Any + Send + Sync>,
