@@ -16,7 +16,8 @@ Add Cano to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-cano = "0.1.0"
+cano = "0.1"
+async-trait = "0.1"
 tokio = { version = "1.0", features = ["full"] }
 ```
 
@@ -50,7 +51,7 @@ impl Node<WorkflowState> for ProcessorNode {
     }
 
     async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
-        println!("Processing: {}", prep_res);
+        println!("Processing: {prep_res}");
         true // Success
     }
 
@@ -78,7 +79,7 @@ async fn main() -> Result<(), CanoError> {
     
     // Run your workflow
     let result = flow.orchestrate(&storage).await?;
-    println!("Workflow completed: {:?}", result);
+    println!("Workflow completed: {result:?}");
     
     Ok(())
 }
@@ -125,7 +126,7 @@ impl Node<String> for EmailProcessor {
 
     async fn exec(&self, email: Self::PrepResult) -> Self::ExecResult {
         // Process the email (your business logic here)
-        println!("Sending email to: {}", email);
+        println!("Sending email to: {email}");
         true // Success
     }
 
