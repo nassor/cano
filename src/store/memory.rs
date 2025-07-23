@@ -1,4 +1,4 @@
-use super::{StoreResult, StoreTrait, error::StoreError};
+use super::{Store, StoreResult, error::StoreError};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -40,7 +40,7 @@ impl MemoryStore {
     }
 }
 
-impl StoreTrait for MemoryStore {
+impl Store for MemoryStore {
     fn get<T: 'static + Clone>(&self, key: &str) -> StoreResult<T> {
         let data = self
             .data

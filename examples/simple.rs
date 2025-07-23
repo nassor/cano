@@ -54,7 +54,7 @@ impl Node<WorkflowAction> for GeneratorNode {
     }
 
     /// Preparation phase: Generate a random vector of u32 numbers (25 to 150 elements)
-    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
         let mut rng = rand::rng();
 
         // Generate random size between 25 and 150
@@ -85,7 +85,7 @@ impl Node<WorkflowAction> for GeneratorNode {
     /// Post-processing phase: Store the filtered vector in memory
     async fn post(
         &self,
-        store: &MemoryStore,
+        store: &impl Store,
         exec_res: Self::ExecResult,
     ) -> Result<WorkflowAction, CanoError> {
         // Store the filtered vector in memory
@@ -125,7 +125,7 @@ impl Node<WorkflowAction> for CounterNode {
     }
 
     /// Preparation phase: Load the filtered numbers from memory
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
         let numbers: Vec<u32> = store
             .get("filtered_numbers")
             .map_err(|e| CanoError::preparation(format!("Failed to load filtered numbers: {e}")))?;
@@ -147,7 +147,7 @@ impl Node<WorkflowAction> for CounterNode {
     /// Post-processing phase: Store count and clean up the original vector
     async fn post(
         &self,
-        store: &MemoryStore,
+        store: &impl Store,
         exec_res: Self::ExecResult,
     ) -> Result<WorkflowAction, CanoError> {
         // Store the count

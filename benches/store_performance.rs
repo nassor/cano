@@ -1,4 +1,4 @@
-use cano::{MemoryStore, store::StoreTrait};
+use cano::{MemoryStore, store::Store};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 fn bench_storage_operations(c: &mut Criterion) {

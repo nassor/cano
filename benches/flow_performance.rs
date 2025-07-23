@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use cano::{CanoError, Flow, MemoryStore, Node};
+use cano::{CanoError, Flow, MemoryStore, Node, Store};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 /// Simple do-nothing node for benchmarking
@@ -35,7 +35,7 @@ impl Node<TestState> for DoNothingNode {
     type PrepResult = ();
     type ExecResult = ();
 
-    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
         Ok(())
     }
 
@@ -46,7 +46,7 @@ impl Node<TestState> for DoNothingNode {
 
     async fn post(
         &self,
-        _store: &MemoryStore,
+        _store: &impl Store,
         _exec_res: Self::ExecResult,
     ) -> Result<TestState, CanoError> {
         Ok(self.next_state.clone())

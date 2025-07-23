@@ -46,7 +46,7 @@
 //!
 //! ### Custom store
 //!
-//! Implement the [`StoreTrait`] trait for custom backends like databases,
+//! Implement the [`Store`] trait for custom backends like databases,
 //! file systems, or network store. The trait requires implementing
 //! `get`, `put`, `remove`, `append`, `delete`, `keys`, `len`, and `clear` methods.
 //!
@@ -83,7 +83,7 @@ pub type StoreResult<T> = Result<T, error::StoreError>;
 ///
 /// ## 🎯 Purpose
 ///
-/// The `StoreTrait` enables different store backends while keeping the same API:
+/// The `Store` enables different store backends while keeping the same API:
 /// - [`MemoryStore`]: Fast in-memory store (default)
 /// - File-based store: For persistent workflows
 /// - Database store: For enterprise workflows
@@ -97,14 +97,14 @@ pub type StoreResult<T> = Result<T, error::StoreError>;
 ///
 /// ## 🔒 Thread Safety Requirements
 ///
-/// All `StoreTrait` implementations are always thread-safe (`Send + Sync`) to support
+/// All `Store` implementations are always thread-safe (`Send + Sync`) to support
 /// concurrent access from async tasks. This typically means using interior mutability
 /// patterns like `Arc<Mutex<_>>` or `Arc<RwLock<_>>`.
 ///
 /// ## 🚀 Implementation Example
 ///
 /// A simple thread-safe store implementation using `Arc<RwLock<HashMap>>`.
-/// Custom store backends can implement the StoreTrait to provide
+/// Custom store backends can implement the Store to provide
 /// persistence, distribution, or other specialized functionality.
 ///
 /// ## 📋 Method Overview
@@ -136,7 +136,7 @@ pub type StoreResult<T> = Result<T, error::StoreError>;
 /// All implementations are guaranteed to be thread-safe (`Send + Sync`).
 /// For mutable operations, this typically means using interior mutability patterns
 /// or external synchronization.
-pub trait StoreTrait: Send + Sync {
+pub trait Store: Send + Sync {
     /// Get a typed value by key
     ///
     /// Returns the value if the key exists and can be downcast to type T.

@@ -78,7 +78,7 @@ pub type DynNode<T, S> = Box<dyn DynNodeTrait<T, S> + Send + Sync>;
 pub trait DynNodeTrait<T, S>: Send + Sync
 where
     T: Clone + std::fmt::Debug + Send + Sync + 'static,
-    S: crate::store::StoreTrait,
+    S: crate::store::Store,
 {
     /// Execute the node and return the next state
     async fn run(&self, store: &S) -> Result<T, CanoError>;
@@ -89,7 +89,7 @@ where
 impl<T, S, N> DynNodeTrait<T, S> for N
 where
     T: Clone + std::fmt::Debug + Send + Sync + 'static,
-    S: crate::store::StoreTrait,
+    S: crate::store::Store,
     N: Node<T, crate::node::DefaultParams, S> + Send + Sync,
 {
     async fn run(&self, store: &S) -> Result<T, CanoError> {
@@ -147,7 +147,7 @@ where
 ///     type PrepResult = String;
 ///     type ExecResult = bool;
 ///
-///     async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+///     async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
 ///         Ok("prepared".to_string())
 ///     }
 ///
@@ -155,7 +155,7 @@ where
 ///         true
 ///     }
 ///
-///     async fn post(&self, _store: &MemoryStore, exec_res: Self::ExecResult)
+///     async fn post(&self, _store: &impl Store, exec_res: Self::ExecResult)
 ///         -> Result<WorkflowState, CanoError> {
 ///         if exec_res {
 ///             Ok(WorkflowState::Process)
@@ -170,7 +170,7 @@ where
 ///     type PrepResult = i32;
 ///     type ExecResult = i32;
 ///
-///     async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+///     async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
 ///         Ok(42)
 ///     }
 ///
@@ -178,7 +178,7 @@ where
 ///         prep_res * 2
 ///     }
 ///
-///     async fn post(&self, _store: &MemoryStore, _exec_res: Self::ExecResult)
+///     async fn post(&self, _store: &impl Store, _exec_res: Self::ExecResult)
 ///         -> Result<WorkflowState, CanoError> {
 ///         Ok(WorkflowState::Complete)
 ///     }
@@ -210,7 +210,7 @@ where
 pub struct Flow<T, S>
 where
     T: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    S: crate::store::StoreTrait,
+    S: crate::store::Store,
 {
     /// The starting state of the workflow
     pub start_state: Option<T>,
@@ -223,7 +223,7 @@ where
 impl<T, S> Flow<T, S>
 where
     T: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    S: crate::store::StoreTrait,
+    S: crate::store::Store,
 {
     /// Create a new Flow with a starting state
     pub fn new(start_state: T) -> Self {
@@ -322,7 +322,7 @@ where
 pub struct FlowBuilder<T, S>
 where
     T: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    S: crate::store::StoreTrait,
+    S: crate::store::Store,
 {
     flow: Flow<T, S>,
 }
@@ -330,7 +330,7 @@ where
 impl<T, S> FlowBuilder<T, S>
 where
     T: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    S: crate::store::StoreTrait,
+    S: crate::store::Store,
 {
     /// Create a new FlowBuilder with a starting state
     pub fn new(start_state: T) -> Self {
@@ -369,7 +369,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{MemoryStore, StoreTrait};
+    use crate::store::{MemoryStore, Store};
     use async_trait::async_trait;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -412,7 +412,7 @@ mod tests {
         type PrepResult = String;
         type ExecResult = bool;
 
-        async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
             // Try to get previous data or create default
             let data = store
                 .get::<String>("test_data")
@@ -428,7 +428,7 @@ mod tests {
 
         async fn post(
             &self,
-            store: &MemoryStore,
+            store: &impl Store,
             exec_res: Self::ExecResult,
         ) -> Result<TestState, CanoError> {
             // Store the result for next node
@@ -461,7 +461,7 @@ mod tests {
         type PrepResult = String;
         type ExecResult = bool;
 
-        async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
             Err(CanoError::preparation(&self.error_message))
         }
 
@@ -471,7 +471,7 @@ mod tests {
 
         async fn post(
             &self,
-            _store: &MemoryStore,
+            _store: &impl Store,
             _exec_res: Self::ExecResult,
         ) -> Result<TestState, CanoError> {
             Ok(TestState::Error)
@@ -501,7 +501,7 @@ mod tests {
         type PrepResult = ();
         type ExecResult = String;
 
-        async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
             Ok(())
         }
 
@@ -511,7 +511,7 @@ mod tests {
 
         async fn post(
             &self,
-            store: &MemoryStore,
+            store: &impl Store,
             exec_res: Self::ExecResult,
         ) -> Result<TestState, CanoError> {
             store.put(&self.key, exec_res)?;
@@ -549,7 +549,7 @@ mod tests {
         type PrepResult = String;
         type ExecResult = bool;
 
-        async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
             store.get::<String>(&self.key_to_check).map_err(|e| {
                 CanoError::preparation(format!("Failed to get key '{}': {}", self.key_to_check, e))
             })
@@ -561,7 +561,7 @@ mod tests {
 
         async fn post(
             &self,
-            _store: &MemoryStore,
+            _store: &impl Store,
             exec_res: Self::ExecResult,
         ) -> Result<TestState, CanoError> {
             if exec_res {

@@ -41,7 +41,7 @@ impl Node<WorkflowState> for ProcessorNode {
     type PrepResult = String;
     type ExecResult = bool;
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
         let input: String = store.get("input").unwrap_or_default();
         Ok(input)
     }
@@ -51,7 +51,7 @@ impl Node<WorkflowState> for ProcessorNode {
         true // Success
     }
 
-    async fn post(&self, store: &MemoryStore, exec_res: Self::ExecResult) 
+    async fn post(&self, store: &impl Store, exec_res: Self::ExecResult) 
         -> Result<WorkflowState, CanoError> {
         if exec_res {
             store.put("result", "processed".to_string())?;
@@ -110,7 +110,7 @@ impl Node<String> for EmailProcessor {
     type PrepResult = String;
     type ExecResult = bool;
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
         // Load email data from store
         let email: String = store.get("email").unwrap_or_default();
         Ok(email)
@@ -122,7 +122,7 @@ impl Node<String> for EmailProcessor {
         true // Success
     }
 
-    async fn post(&self, store: &MemoryStore, success: Self::ExecResult) 
+    async fn post(&self, store: &impl Store, success: Self::ExecResult) 
         -> Result<String, CanoError> {
         // Store the result and return next action
         if success {

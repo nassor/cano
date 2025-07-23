@@ -50,7 +50,7 @@
 //!
 //! - **[`store`]**: Thread-safe store for inter-node communication
 //!   - [`MemoryStore`] for in-memory data sharing
-//!   - [`StoreTrait`] trait for custom store backends
+//!   - [`Store`] trait for custom store backends
 //!
 //! - **[`error`]**: Comprehensive error handling system
 //!   - [`CanoError`] for categorized error types
@@ -80,7 +80,7 @@ pub mod store;
 pub use error::{CanoError, CanoResult};
 pub use flow::{Flow, FlowBuilder};
 pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node, NodeConfig};
-pub use store::{MemoryStore, StoreTrait};
+pub use store::{MemoryStore, Store};
 
 // Convenience re-exports for common patterns
 pub mod prelude {
@@ -90,7 +90,7 @@ pub mod prelude {
 
     pub use crate::{
         CanoError, CanoResult, DefaultNodeResult, DefaultParams, Flow, FlowBuilder, MemoryStore,
-        Node, NodeConfig, StoreTrait,
+        Node, NodeConfig, Store,
     };
 
     // Re-export async_trait for convenience
