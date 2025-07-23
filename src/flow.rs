@@ -149,8 +149,6 @@ where
 ///     type PrepResult = String;
 ///     type ExecResult = bool;
 ///
-///     fn set_params(&mut self, _params: Self::Params) {}
-///
 ///     async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
 ///         Ok("prepared".to_string())
 ///     }
@@ -175,8 +173,6 @@ where
 ///     type Storage = MemoryStore;
 ///     type PrepResult = i32;
 ///     type ExecResult = i32;
-///
-///     fn set_params(&mut self, _params: Self::Params) {}
 ///
 ///     async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
 ///         Ok(42)
@@ -423,8 +419,6 @@ mod tests {
         type PrepResult = String;
         type ExecResult = bool;
 
-        fn set_params(&mut self, _params: Self::Params) {}
-
         async fn prep(&self, store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
             // Try to get previous data or create default
             let data = store
@@ -476,8 +470,6 @@ mod tests {
         type PrepResult = String;
         type ExecResult = bool;
 
-        fn set_params(&mut self, _params: Self::Params) {}
-
         async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
             Err(CanoError::preparation(&self.error_message))
         }
@@ -519,8 +511,6 @@ mod tests {
         type Storage = MemoryStore;
         type PrepResult = ();
         type ExecResult = String;
-
-        fn set_params(&mut self, _params: Self::Params) {}
 
         async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
             Ok(())
@@ -571,8 +561,6 @@ mod tests {
         type Storage = MemoryStore;
         type PrepResult = String;
         type ExecResult = bool;
-
-        fn set_params(&mut self, _params: Self::Params) {}
 
         async fn prep(&self, store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
             store.get::<String>(&self.key_to_check).map_err(|e| {

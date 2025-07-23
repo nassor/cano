@@ -37,8 +37,6 @@ impl Node<TestState> for DoNothingNode {
     type PrepResult = ();
     type ExecResult = ();
 
-    fn set_params(&mut self, _params: Self::Params) {}
-
     async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
         Ok(())
     }

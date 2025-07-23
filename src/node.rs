@@ -87,8 +87,6 @@ pub type NodeResult = DefaultNodeResult;
 ///     type PrepResult = String;
 ///     type ExecResult = bool;
 ///
-///     fn set_params(&mut self, _params: Self::Params) {}
-///
 ///     fn config(&self) -> NodeConfig {
 ///         NodeConfig::minimal()  // Use minimal retries for fast execution
 ///     }
@@ -126,7 +124,12 @@ where
     type ExecResult: Send + Sync;
 
     /// Set parameters for the node
-    fn set_params(&mut self, params: Self::Params);
+    ///
+    /// Default implementation that does nothing. Override this method if your node
+    /// needs to store or process parameters when they are set.
+    fn set_params(&mut self, _params: Self::Params) {
+        // Default implementation does nothing
+    }
 
     /// Get the node configuration that controls execution behavior
     ///
@@ -367,8 +370,6 @@ mod tests {
         type PrepResult = String;
         type ExecResult = bool;
 
-        fn set_params(&mut self, _params: Self::Params) {}
-
         async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
             Ok("prepared".to_string())
         }
@@ -411,8 +412,6 @@ mod tests {
         type PrepResult = String;
         type ExecResult = bool;
 
-        fn set_params(&mut self, _params: Self::Params) {}
-
         async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
             Err(CanoError::preparation(&self.error_message))
         }
@@ -453,8 +452,6 @@ mod tests {
         type Storage = MemoryStore;
         type PrepResult = Option<String>;
         type ExecResult = String;
-
-        fn set_params(&mut self, _params: Self::Params) {}
 
         async fn prep(&self, store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
             match store.get::<String>(&self.read_key) {
@@ -544,8 +541,6 @@ mod tests {
         type PrepResult = ();
         type ExecResult = ();
 
-        fn set_params(&mut self, _params: Self::Params) {}
-
         async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
             Ok(())
         }
@@ -580,8 +575,6 @@ mod tests {
         type Storage = MemoryStore;
         type PrepResult = String;
         type ExecResult = String;
-
-        fn set_params(&mut self, _params: Self::Params) {}
 
         async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
             Ok("prep_completed".to_string())
@@ -937,8 +930,6 @@ mod tests {
             type PrepResult = ();
             type ExecResult = ();
 
-            fn set_params(&mut self, _params: Self::Params) {}
-
             fn config(&self) -> NodeConfig {
                 NodeConfig::new().with_retries(self.max_retries, Duration::from_millis(1))
             }
@@ -995,8 +986,6 @@ mod tests {
             type Storage = MemoryStore;
             type PrepResult = ();
             type ExecResult = ();
-
-            fn set_params(&mut self, _params: Self::Params) {}
 
             fn config(&self) -> NodeConfig {
                 NodeConfig::minimal()

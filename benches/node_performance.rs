@@ -31,8 +31,6 @@ impl Node<TestState> for DoNothingNode {
     type PrepResult = ();
     type ExecResult = ();
 
-    fn set_params(&mut self, _params: Self::Params) {}
-
     async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
         Ok(())
     }
@@ -73,8 +71,6 @@ impl Node<TestState> for CpuIntensiveNode {
     type Storage = MemoryStore;
     type PrepResult = Vec<u64>;
     type ExecResult = u64;
-
-    fn set_params(&mut self, _params: Self::Params) {}
 
     async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
         // Generate some data to process
@@ -119,8 +115,6 @@ impl Node<TestState> for IoSimulationNode {
     type Storage = MemoryStore;
     type PrepResult = String;
     type ExecResult = String;
-
-    fn set_params(&mut self, _params: Self::Params) {}
 
     async fn prep(&self, _store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
         // Simulate I/O delay

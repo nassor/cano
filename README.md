@@ -43,8 +43,6 @@ impl Node<WorkflowState> for ProcessorNode {
     type PrepResult = String;
     type ExecResult = bool;
 
-    fn set_params(&mut self, _params: Self::Params) {}
-
     async fn prep(&self, store: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
         let input: String = store.get("input").unwrap_or_default();
         Ok(input)
@@ -115,8 +113,6 @@ impl Node<String> for EmailProcessor {
     type Storage = MemoryStore;
     type PrepResult = String;
     type ExecResult = bool;
-
-    fn set_params(&mut self, _params: Self::Params) {}
 
     async fn prep(&self, storage: &Self::Storage) -> Result<Self::PrepResult, CanoError> {
         // Load email data from storage
