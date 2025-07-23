@@ -79,7 +79,7 @@ pub mod store;
 // Core public API - simplified imports
 pub use error::{CanoError, CanoResult};
 pub use flow::{Flow, FlowBuilder};
-pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node, NodeConfig};
+pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node, NodeConfig, RetryMode};
 pub use store::{MemoryStore, Store};
 
 // Convenience re-exports for common patterns
@@ -90,7 +90,7 @@ pub mod prelude {
 
     pub use crate::{
         CanoError, CanoResult, DefaultNodeResult, DefaultParams, Flow, FlowBuilder, MemoryStore,
-        Node, NodeConfig, Store,
+        Node, NodeConfig, RetryMode, Store,
     };
 
     // Re-export async_trait for convenience

@@ -87,8 +87,8 @@ That's it! You just ran your first Cano workflow.
 
 - **🏗️ Simple API**: A single `Node` trait handles everything - no complex type hierarchies
 - **🔗 Simple Configuration**: Fluent builder pattern makes setup intuitive  
-- **🔄 Built-in Retries**: Configurable retry logic for resilient workflows
-- **💾 Shared store**: Thread-safe key-value store for data passing between nodes
+- **🔄 Smart Retries**: Multiple retry strategies (none, fixed, exponential backoff) with jitter support
+- **💾 Shared Store**: Thread-safe key-value store for data passing between nodes
 - **🌊 Complex Workflows**: Chain nodes together into sophisticated state machine pipelines
 - **⚡ Type Safety**: Enum-driven state transitions with compile-time safety
 - **🚀 High Performance**: Minimal overhead with direct execution for maximum throughput
@@ -178,15 +178,70 @@ let result = flow.orchestrate(&store).await?;
 
 ### Built-in Retry Logic
 
-Every node includes configurable retry logic:
+Every node includes configurable retry logic with multiple strategies:
+
+#### Retry Modes
+
+**No Retries** - Fail fast for critical operations:
 
 ```rust
-let config = NodeConfig::new()
-    .with_retries(5, Duration::from_secs(1));  // 5 retries, 1s wait between attempts
-
-// Or use minimal retries for fast-failing nodes
-let config = NodeConfig::minimal();  // 1 retry, no wait
+impl Node<WorkflowState> for CriticalNode {
+    fn config(&self) -> NodeConfig {
+        NodeConfig::minimal()  // No retries, fail immediately
+    }
+    // ... rest of implementation
+}
 ```
+
+**Fixed Retries** - Consistent delays between attempts:
+
+```rust
+impl Node<WorkflowState> for ReliableNode {
+    fn config(&self) -> NodeConfig {
+        NodeConfig::new().with_fixed_retry(3, Duration::from_secs(2))
+        // 3 retries with 2 second delays
+    }
+    // ... rest of implementation
+}
+```
+
+**Exponential Backoff** - Smart retry with increasing delays:
+
+```rust
+impl Node<WorkflowState> for ResilientNode {
+    fn config(&self) -> NodeConfig {
+        NodeConfig::new().with_exponential_retry(5)
+        // 5 retries with exponential backoff (100ms, 200ms, 400ms, 800ms, 1.6s)
+    }
+    // ... rest of implementation
+}
+```
+
+**Custom Exponential Backoff** - Full control over retry behavior:
+
+```rust
+impl Node<WorkflowState> for CustomNode {
+    fn config(&self) -> NodeConfig {
+        NodeConfig::new().with_retry(
+            RetryMode::exponential_custom(
+                3,                              // max retries
+                Duration::from_millis(50),      // base delay
+                3.0,                            // multiplier  
+                Duration::from_secs(10),        // max delay cap
+                0.2,                            // 20% jitter
+            )
+        )
+    }
+    // ... rest of implementation
+}
+```
+
+#### Why Use Different Retry Modes?
+
+- **None**: Database transactions, critical validations where failure should be immediate
+- **Fixed**: Network calls, file operations where consistent timing is preferred  
+- **Exponential**: API calls, external services where you want to back off gracefully
+- **Custom Exponential**: High-load scenarios where you need precise control over timing and jitter
 
 ### Complex Workflows
 

@@ -16,7 +16,7 @@ use std::fmt;
 /// - `KeyNotFound`: The requested key doesn't exist in store
 /// - `TypeMismatch`: The stored value can't be cast to the requested type
 /// - `LockError`: Failed to acquire read/write lock on store
-/// - `AppendTypeMismatch`: Tried to append to a value that isn't a Vec<T>
+/// - `AppendTypeMismatch`: Tried to append to a value that isn't a `Vec<T>`
 /// - `Generic`: General store errors with custom messages
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
@@ -41,10 +41,10 @@ pub enum StoreError {
     /// or deadlock situations.
     LockError(String),
 
-    /// Attempted to append to a value that isn't a Vec<T>
+    /// Attempted to append to a value that isn't a `Vec<T>`
     ///
     /// This error occurs when trying to append to an existing key that
-    /// contains a value of a different type than Vec<T>.
+    /// contains a value of a different type than `Vec<T>`.
     AppendTypeMismatch(String),
 
     /// General store error with custom message

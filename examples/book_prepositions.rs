@@ -271,7 +271,7 @@ impl Node<BookPrepositionAction> for BookDownloaderNode {
     }
 
     fn config(&self) -> NodeConfig {
-        NodeConfig::new().with_retries(2, Duration::from_secs(1))
+        NodeConfig::new().with_fixed_retry(2, Duration::from_secs(1))
     }
 
     /// Preparation: Get the list of books to download

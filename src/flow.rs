@@ -234,7 +234,7 @@ where
         }
     }
 
-    /// Register a node for a specific state (accepts any type implementing Node<T>)
+    /// Register a node for a specific state (accepts any type implementing `Node<T>`)
     pub fn register_node<N>(&mut self, state: T, node: N) -> &mut Self
     where
         N: Node<T, crate::node::DefaultParams, S> + Send + Sync + 'static,
@@ -339,7 +339,7 @@ where
         }
     }
 
-    /// Register a node for a state (accepts any type implementing Node<T>)
+    /// Register a node for a state (accepts any type implementing `Node<T>`)
     pub fn register_node<N>(mut self, state: T, node: N) -> Self
     where
         N: Node<T, crate::node::DefaultParams, S> + Send + Sync + 'static,
