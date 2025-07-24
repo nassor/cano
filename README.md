@@ -1,4 +1,4 @@
-# Cano: Async Workflows in Rust
+# Cano: Simple & Fast Async Workflows in Rust
 
 [![Crates.io](https://img.shields.io/crates/v/cano.svg)](https://crates.io/crates/cano)
 [![Documentation](https://docs.rs/cano/badge.svg)](https://docs.rs/cano)
@@ -6,13 +6,13 @@
 [![License](https://img.shields.io/crates/l/cano.svg)](https://github.com/nassor/cano/blob/main/LICENSE)
 [![CI](https://github.com/nassor/cano/workflows/CI/badge.svg)](https://github.com/nassor/cano/actions)
 
-An async workflow engine with built-in scheduling, retry logic, and state machine semantics.
+**Async workflow engine with built-in scheduling, retry logic, and state machine semantics.**
 
 Cano is an async workflow engine for Rust that manages complex processing through composable workflows.
 
-The engine is built on three core concepts: **Nodes** to encapsulate business logic, **Workflows** to manage state transitions, and **Schedulers** to run workflows on a schedule.
+The engine is built on three core concepts: **Nodes** to encapsulate business logic, **Workflows** to manage state transitions, and **Schedulers** to run workflows on a schedule. Only **Nodes** are required to implement your processing logic, while workflows and schedulers are optional and can be used as needed.
 
-The Node API is inspired by the [PocketFlow](https://github.com/The-Pocket/PocketFlow) project, adapted for Rust's async ecosystem.
+*The Node API is inspired by the [PocketFlow](https://github.com/The-Pocket/PocketFlow) project, adapted for Rust's async ecosystem.*
 
 ## Getting Started
 
@@ -28,6 +28,7 @@ tokio = { version = "1.0", features = ["full"] }
 ### Basic Example
 
 ```rust
+use async_trait::async_trait;
 use cano::prelude::*;
 
 // Define your workflow states
