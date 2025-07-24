@@ -7,7 +7,6 @@
 //!
 //! ```rust
 //! use cano::prelude::*;
-//! use cano::stream_simple::Stream;
 //! use tokio::time::Duration;
 //!
 //! #[tokio::main]

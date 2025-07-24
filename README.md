@@ -89,6 +89,7 @@ That's it! You just ran your first Cano workflow.
 - **🔗 Simple Configuration**: Fluent builder pattern makes setup intuitive  
 - **🔄 Smart Retries**: Multiple retry strategies (none, fixed, exponential backoff) with jitter support
 - **💾 Shared Store**: Thread-safe key-value store for data passing between nodes
+- **🌊 Stream Scheduling**: Built-in scheduler for running flows on intervals, cron schedules, or manual triggers
 - **🌊 Complex Workflows**: Chain nodes together into sophisticated state machine pipelines
 - **⚡ Type Safety**: Enum-driven state transitions with compile-time safety
 - **🚀 High Performance**: Minimal overhead with direct execution for maximum throughput
@@ -172,6 +173,99 @@ flow.register_node(WorkflowState::Validate, validator)
     .add_exit_states(vec![WorkflowState::Complete, WorkflowState::Error]);
 
 let result = flow.orchestrate(&store).await?;
+```
+
+## 🌊 Stream - Simplified Scheduling
+
+The Stream module provides an easy-to-use scheduler for running flows on various schedules. Perfect for building background job systems, periodic data processing, and automated workflows.
+
+### Quick Start with Streams
+
+```rust
+use cano::prelude::*;
+use tokio::time::Duration;
+
+#[tokio::main]
+async fn main() -> CanoResult<()> {
+    let mut stream: Stream<MyState, MemoryStore> = Stream::new();
+    
+    let flow = Flow::new(MyState::Start);
+    
+    // Multiple ways to schedule flows:
+    stream.every_seconds("task1", flow.clone(), 30)?;                    // Every 30 seconds
+    stream.every_minutes("task2", flow.clone(), 5)?;                     // Every 5 minutes  
+    stream.every_hours("task3", flow.clone(), 2)?;                       // Every 2 hours
+    stream.every("task4", flow.clone(), Duration::from_millis(500))?;    // Every 500ms
+    stream.cron("task5", flow.clone(), "0 */10 * * * *")?;              // Every 10 minutes (cron)
+    stream.manual("task6", flow)?;                                       // Manual trigger only
+    
+    // Start the scheduler
+    stream.start().await?;
+    
+    // Trigger a manual flow
+    stream.trigger("task6").await?;
+    
+    // Check flow status
+    if let Some(status) = stream.status("task1").await {
+        println!("Task1 status: {:?}", status);
+    }
+    
+    // Graceful shutdown with timeout
+    stream.stop().await?;
+    
+    Ok(())
+}
+```
+
+### Stream Features
+
+- **🕐 Flexible Scheduling**: Support for intervals, cron expressions, and manual triggers
+- **⏰ Convenience Methods**: Easy `every_seconds()`, `every_minutes()`, `every_hours()` helpers
+- **📊 Status Monitoring**: Check flow status, run counts, and last execution times
+- **🔧 Manual Control**: Trigger flows manually and monitor execution
+- **🛑 Graceful Shutdown**: Stop with timeout to wait for running flows to complete
+- **🔄 Concurrent Execution**: Multiple flows can run simultaneously
+
+### Advanced Stream Usage
+
+```rust
+// Create a more complex scheduled workflow
+let mut stream = Stream::new();
+
+// Data processing every hour
+stream.every_hours("data_sync", data_processing_flow, 1)?;
+
+// Health checks every 30 seconds  
+stream.every_seconds("health_check", monitoring_flow, 30)?;
+
+// Daily reports at 9 AM using cron
+stream.cron("daily_report", reporting_flow, "0 0 9 * * *")?;
+
+// Manual cleanup task
+stream.manual("cleanup", cleanup_flow)?;
+
+// Start the scheduler
+stream.start().await?;
+
+// Monitor running flows
+tokio::spawn(async move {
+    loop {
+        let running_count = stream.running_count().await;
+        println!("Currently running flows: {}", running_count);
+        
+        // List all flow statuses
+        let flows = stream.list().await;
+        for flow_info in flows {
+            println!("Flow {}: {:?} (runs: {})", 
+                flow_info.id, flow_info.status, flow_info.run_count);
+        }
+        
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+});
+
+// Graceful shutdown with 30 second timeout
+stream.stop_with_timeout(Duration::from_secs(30)).await?;
 ```
 
 ## 🧩 Advanced Features
@@ -273,10 +367,16 @@ cargo bench --bench store_performance
 cargo bench --bench flow_performance
 cargo bench --bench node_performance
 
-# Run all examples
-cargo run --examples examples/simple.rs
-cargo run --examples examples/book_prepositions.rs
-cargo run --examples examples/negotiation.rs
+# Run workflow examples
+cargo run --example flow_simple
+cargo run --example flow_book_prepositions
+cargo run --example flow_negotiation
+
+# Run stream scheduling examples
+cargo run --example stream_scheduling
+cargo run --example stream_duration_scheduling
+cargo run --example stream_concurrent_flows
+cargo run --example stream_graceful_shutdown
 ```
 
 Benchmark results are saved in `target/criterion/` with detailed HTML reports.
