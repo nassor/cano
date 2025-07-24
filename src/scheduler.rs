@@ -83,7 +83,7 @@ pub struct FlowInfo {
 /// Type alias for the complex workflow data stored in the scheduler
 type FlowData<T, S> = (Arc<Workflow<T, S>>, Schedule, Arc<RwLock<FlowInfo>>);
 
-/// Simplified scheduler scheduler
+/// Simplified scheduler system
 pub struct Scheduler<T, S>
 where
     T: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
