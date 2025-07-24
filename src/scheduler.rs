@@ -9,19 +9,31 @@
 //! use cano::prelude::*;
 //! use tokio::time::Duration;
 //!
+//! #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+//! enum MyState {
+//!     Start,
+//!     Complete,
+//! }
+//!
 //! #[tokio::main]
 //! async fn main() -> CanoResult<()> {
 //!     let mut scheduler: Scheduler<MyState, MemoryStore> = Scheduler::new();
 //!     
-//!     let workflow = Workflow::new(MyState::Start);
+//!     // Create separate workflows for each scheduled task
+//!     let workflow1 = Workflow::new(MyState::Start);
+//!     let workflow2 = Workflow::new(MyState::Start);
+//!     let workflow3 = Workflow::new(MyState::Start);
+//!     let workflow4 = Workflow::new(MyState::Start);
+//!     let workflow5 = Workflow::new(MyState::Start);
+//!     let workflow6 = Workflow::new(MyState::Start);
 //!     
-//!     // Multiple ways to schedule flows:
-//!     scheduler.every_seconds("task1", workflow, 30)?;                    // Every 30 seconds
-//!     scheduler.every_minutes("task2", workflow, 5)?;                     // Every 5 minutes  
-//!     scheduler.every_hours("task3", workflow, 2)?;                       // Every 2 hours
-//!     scheduler.every("task4", workflow, Duration::from_millis(500))?;    // Every 500ms
-//!     scheduler.cron("task5", workflow, "0 */10 * * * *")?;              // Every 10 minutes (cron)
-//!     scheduler.manual("task6", workflow)?;                               // Manual trigger only
+//!     // Multiple ways to schedule workflows:
+//!     scheduler.every_seconds("task1", workflow1, 30)?;                    // Every 30 seconds
+//!     scheduler.every_minutes("task2", workflow2, 5)?;                     // Every 5 minutes  
+//!     scheduler.every_hours("task3", workflow3, 2)?;                       // Every 2 hours
+//!     scheduler.every("task4", workflow4, Duration::from_millis(500))?;    // Every 500ms
+//!     scheduler.cron("task5", workflow5, "0 */10 * * * *")?;              // Every 10 minutes (cron)
+//!     scheduler.manual("task6", workflow6)?;                               // Manual trigger only
 //!     
 //!     scheduler.start().await?;
 //!     Ok(())
@@ -29,8 +41,8 @@
 //! ```
 
 use crate::error::{CanoError, CanoResult};
-use crate::workflow::Workflow;
 use crate::store::Store;
+use crate::workflow::Workflow;
 use chrono::{DateTime, Utc};
 use cron::Schedule as CronSchedule;
 use std::collections::HashMap;
@@ -97,22 +109,42 @@ where
     }
 
     /// Add a workflow that runs every Duration interval
-    pub fn every(&mut self, id: &str, workflow: Workflow<T, S>, interval: Duration) -> CanoResult<()> {
+    pub fn every(
+        &mut self,
+        id: &str,
+        workflow: Workflow<T, S>,
+        interval: Duration,
+    ) -> CanoResult<()> {
         self.add_flow(id, workflow, Schedule::Every(interval))
     }
 
     /// Add a workflow that runs every N seconds (convenience method)
-    pub fn every_seconds(&mut self, id: &str, workflow: Workflow<T, S>, seconds: u64) -> CanoResult<()> {
+    pub fn every_seconds(
+        &mut self,
+        id: &str,
+        workflow: Workflow<T, S>,
+        seconds: u64,
+    ) -> CanoResult<()> {
         self.every(id, workflow, Duration::from_secs(seconds))
     }
 
     /// Add a workflow that runs every N minutes (convenience method)
-    pub fn every_minutes(&mut self, id: &str, workflow: Workflow<T, S>, minutes: u64) -> CanoResult<()> {
+    pub fn every_minutes(
+        &mut self,
+        id: &str,
+        workflow: Workflow<T, S>,
+        minutes: u64,
+    ) -> CanoResult<()> {
         self.every(id, workflow, Duration::from_secs(minutes * 60))
     }
 
     /// Add a workflow that runs every N hours (convenience method)
-    pub fn every_hours(&mut self, id: &str, workflow: Workflow<T, S>, hours: u64) -> CanoResult<()> {
+    pub fn every_hours(
+        &mut self,
+        id: &str,
+        workflow: Workflow<T, S>,
+        hours: u64,
+    ) -> CanoResult<()> {
         self.every(id, workflow, Duration::from_secs(hours * 3600))
     }
 
@@ -130,7 +162,12 @@ where
     }
 
     /// Internal method to add flows
-    fn add_flow(&mut self, id: &str, workflow: Workflow<T, S>, schedule: Schedule) -> CanoResult<()> {
+    fn add_flow(
+        &mut self,
+        id: &str,
+        workflow: Workflow<T, S>,
+        schedule: Schedule,
+    ) -> CanoResult<()> {
         if self.flows.contains_key(id) {
             return Err(CanoError::Configuration(format!(
                 "Workflow '{id}' already exists"
@@ -220,7 +257,9 @@ where
                 .map_err(|_| CanoError::workflow("Failed to trigger workflow"))?;
             Ok(())
         } else {
-            Err(CanoError::Configuration("Scheduler not running".to_string()))
+            Err(CanoError::Configuration(
+                "Scheduler not running".to_string(),
+            ))
         }
     }
 

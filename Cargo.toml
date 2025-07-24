@@ -24,35 +24,35 @@ futures = "0.3"
 reqwest = { version = "0.12", features = ["json"] }
 
 [[example]]
-name = "simple"
-path = "examples/flow_simple.rs"
+name = "workflow_simple"
+path = "examples/workflow_simple.rs"
 
 [[example]]
-name = "book_prepositions"
-path = "examples/flow_book_prepositions.rs"
+name = "workflow_book_prepositions"
+path = "examples/workflow_book_prepositions.rs"
 
 [[example]]
-name = "negotiation"
-path = "examples/flow_negotiation.rs"
+name = "workflow_negotiation"
+path = "examples/workflow_negotiation.rs"
 
 [[example]]
-name = "stream_scheduling"
-path = "examples/stream_scheduling.rs"
+name = "scheduler_scheduling"
+path = "examples/scheduler_scheduling.rs"
 
 [[example]]
-name = "stream_concurrent_flows"
-path = "examples/stream_concurrent_flows.rs"
+name = "scheduler_concurrent_workflows"
+path = "examples/scheduler_concurrent_workflows.rs"
 
 [[example]]
-name = "stream_duration_scheduling"
-path = "examples/stream_duration_scheduling.rs"
+name = "scheduler_duration_scheduling"
+path = "examples/scheduler_duration_scheduling.rs"
 
 [[example]]
-name = "stream_graceful_shutdown"
-path = "examples/stream_graceful_shutdown.rs"
+name = "scheduler_graceful_shutdown"
+path = "examples/scheduler_graceful_shutdown.rs"
 
 [[bench]]
-name = "flow_performance"
+name = "workflow_performance"
 harness = false
 
 [[bench]]
