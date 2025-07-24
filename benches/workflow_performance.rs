@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use cano::{CanoError, Workflow, MemoryStore, Node, Store};
+use cano::{CanoError, MemoryStore, Node, Store, Workflow};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 /// Simple do-nothing node for benchmarking

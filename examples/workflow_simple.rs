@@ -176,7 +176,8 @@ async fn run_simple_workflow_with_flow() -> Result<(), CanoError> {
     let mut workflow = Workflow::new(WorkflowAction::Generate);
 
     // Register different node types - this now works!
-    workflow.register_node(WorkflowAction::Generate, GeneratorNode::new())
+    workflow
+        .register_node(WorkflowAction::Generate, GeneratorNode::new())
         .register_node(WorkflowAction::Count, CounterNode::new())
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 

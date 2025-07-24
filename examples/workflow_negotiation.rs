@@ -300,7 +300,8 @@ async fn run_negotiation_workflow() -> Result<(), CanoError> {
     // Create a Workflow that handles the negotiation process
     let mut workflow = Workflow::new(NegotiationAction::StartSelling);
 
-    workflow.register_node(NegotiationAction::StartSelling, SellerNode::new())
+    workflow
+        .register_node(NegotiationAction::StartSelling, SellerNode::new())
         .register_node(NegotiationAction::BuyerEvaluate, BuyerNode::new())
         .add_exit_states(vec![
             NegotiationAction::Deal,
@@ -355,7 +356,9 @@ async fn run_negotiation_workflow() -> Result<(), CanoError> {
                 }
                 NegotiationAction::Error => {
                     eprintln!("❌ Negotiation terminated due to an error");
-                    return Err(CanoError::workflow("Negotiation terminated with error state"));
+                    return Err(CanoError::workflow(
+                        "Negotiation terminated with error state",
+                    ));
                 }
                 other => {
                     eprintln!("⚠️  Negotiation ended in unexpected state: {other:?}");

@@ -626,7 +626,8 @@ async fn run_workflow() -> Result<(), CanoError> {
     let mut workflow = Workflow::new(BookPrepositionAction::Download);
 
     // Register different node types for each phase
-    workflow.register_node(BookPrepositionAction::Download, BookDownloaderNode::new())
+    workflow
+        .register_node(BookPrepositionAction::Download, BookDownloaderNode::new())
         .register_node(BookPrepositionAction::Analyze, PrepositionNode::new())
         .register_node(
             BookPrepositionAction::Rank,

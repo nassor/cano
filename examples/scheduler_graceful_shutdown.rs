@@ -129,7 +129,9 @@ async fn main() -> CanoResult<()> {
 
 // Pattern 1: Graceful with fallback
 #[allow(dead_code)]
-async fn graceful_shutdown_pattern(scheduler: &mut Scheduler<MyState, MemoryStore>) -> CanoResult<()> {
+async fn graceful_shutdown_pattern(
+    scheduler: &mut Scheduler<MyState, MemoryStore>,
+) -> CanoResult<()> {
     // Try graceful shutdown first
     match scheduler.stop_with_timeout(Duration::from_secs(30)).await {
         Ok(()) => {

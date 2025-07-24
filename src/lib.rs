@@ -76,17 +76,17 @@
 //! - **Async I/O**: Efficient async operations with tokio runtime
 
 pub mod error;
-pub mod workflow;
 pub mod node;
-pub mod store;
 pub mod scheduler;
+pub mod store;
+pub mod workflow;
 
 // Core public API - simplified imports
 pub use error::{CanoError, CanoResult};
-pub use workflow::{Workflow, WorkflowBuilder};
 pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node, NodeConfig, RetryMode};
-pub use store::{MemoryStore, Store};
 pub use scheduler::{FlowInfo, Scheduler};
+pub use store::{MemoryStore, Store};
+pub use workflow::{Workflow, WorkflowBuilder};
 
 // Convenience re-exports for common patterns
 pub mod prelude {
@@ -95,8 +95,8 @@ pub mod prelude {
     //! Use `use cano::prelude::*;` to import the most commonly used types and traits.
 
     pub use crate::{
-        CanoError, CanoResult, DefaultNodeResult, DefaultParams, Workflow, WorkflowBuilder, FlowInfo,
-        MemoryStore, Node, NodeConfig, RetryMode, Store, Scheduler,
+        CanoError, CanoResult, DefaultNodeResult, DefaultParams, FlowInfo, MemoryStore, Node,
+        NodeConfig, RetryMode, Scheduler, Store, Workflow, WorkflowBuilder,
     };
 
     // Re-export async_trait for convenience

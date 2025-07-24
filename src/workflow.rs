@@ -626,7 +626,8 @@ mod tests {
         let mut workflow = Workflow::new(TestState::Start);
         let node = SuccessNode::new(TestState::Complete);
 
-        workflow.register_node(TestState::Start, node)
+        workflow
+            .register_node(TestState::Start, node)
             .add_exit_state(TestState::Complete);
 
         let store = MemoryStore::new();
@@ -644,7 +645,8 @@ mod tests {
         let process_node = SuccessNode::new(TestState::Validate);
         let validate_node = SuccessNode::new(TestState::Complete);
 
-        workflow.register_node(TestState::Start, start_node)
+        workflow
+            .register_node(TestState::Start, start_node)
             .register_node(TestState::Process, process_node)
             .register_node(TestState::Validate, validate_node)
             .add_exit_state(TestState::Complete);
@@ -699,7 +701,8 @@ mod tests {
         // Node that will fail
         let failing_node = FailureNode::new("Test failure");
 
-        workflow.register_node(TestState::Start, failing_node)
+        workflow
+            .register_node(TestState::Start, failing_node)
             .add_exit_state(TestState::Error);
 
         let store = MemoryStore::new();
@@ -768,7 +771,8 @@ mod tests {
             TestState::Error,
         );
 
-        workflow.register_node(TestState::Start, conditional_node)
+        workflow
+            .register_node(TestState::Start, conditional_node)
             .add_exit_states(vec![TestState::Complete, TestState::Error]);
 
         let result = workflow.orchestrate(&store).await.unwrap();
@@ -838,7 +842,8 @@ mod tests {
         let start_node_ref = start_node.clone();
         let process_node_ref = process_node.clone();
 
-        workflow.register_node(TestState::Start, start_node)
+        workflow
+            .register_node(TestState::Start, start_node)
             .register_node(TestState::Process, process_node)
             .add_exit_state(TestState::Complete);
 
@@ -896,7 +901,8 @@ mod tests {
         // Second node stores more data
         let data_node2 = DataStoringNode::new("step2", "data2", TestState::Complete);
 
-        workflow.register_node(TestState::Start, data_node1)
+        workflow
+            .register_node(TestState::Start, data_node1)
             .register_node(TestState::Process, data_node2)
             .add_exit_state(TestState::Complete);
 
@@ -922,7 +928,8 @@ mod tests {
             TestState::Error,
         );
 
-        workflow.register_node(TestState::Start, validation_node)
+        workflow
+            .register_node(TestState::Start, validation_node)
             .add_exit_states(vec![TestState::Complete, TestState::Error]);
 
         let store = MemoryStore::new();
@@ -948,7 +955,8 @@ mod tests {
             TestState::Error,
         );
 
-        workflow.register_node(TestState::Start, data_node)
+        workflow
+            .register_node(TestState::Start, data_node)
             .register_node(TestState::Process, success_node)
             .register_node(TestState::Validate, conditional_node)
             .add_exit_states(vec![TestState::Complete, TestState::Error]);
