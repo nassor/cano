@@ -12,7 +12,7 @@
 //!
 //! Run with:
 //! ```bash
-//! cargo run --example concurrent_flows
+//! cargo run --example scheduler_concurrent_workflows
 //! ```
 
 use async_trait::async_trait;
