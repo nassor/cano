@@ -6,9 +6,13 @@
 [![License](https://img.shields.io/crates/l/cano.svg)](https://github.com/nassor/cano/blob/main/LICENSE)
 [![CI](https://github.com/nassor/cano/workflows/CI/badge.svg)](https://github.com/nassor/cano/actions)
 
-**Build powerful data processing pipelines with minimal code.**
+**Async workflow engine with built-in scheduling, retry logic, and state machine semantics.**
 
-Cano is an async workflow engine that makes complex data processing simple. Whether you need to process one item or millions, Cano provides a clean API with minimal overhead for maximum performance.
+Cano is a lightweight, async workflow engine for Rust that turns complex processing into simple, composable workflows.
+
+The engine is built on three core concepts: **Nodes** to encapsulate your business logic, **Workflows** to manage state transitions, and **Schedulers** to run your workflows on a schedule. This library-driven approach allows you to define complex processes with ease.
+
+The Node API is inspired by the [PocketFlow](https://github.com/The-Pocket/PocketFlow) project, but has been re-imagined for Rust's async ecosystem with a strong focus on simplicity and performance.
 
 ## ⚡ Quick Start
 
@@ -152,7 +156,7 @@ let user_id: Result<i32, _> = store.get("user_id");
 let name: Result<String, _> = store.get("name");
 ```
 
-### 3. Flows - Chain Nodes Together
+### 3. Workflows - Chain Nodes Together
 
 Build complex workflows with state machine semantics:
 
@@ -175,11 +179,11 @@ workflow.register_node(WorkflowState::Validate, validator)
 let result = workflow.orchestrate(&store).await?;
 ```
 
-## 🌊 Scheduler - Simplified Scheduling
+## Scheduler - Simplified Scheduling
 
-The Scheduler module provides an easy-to-use scheduler for running flows on various schedules. Perfect for building background job systems, periodic data processing, and automated workflows.
+The Scheduler module provides an easy-to-use scheduler for running workflows on various schedules. Perfect for building background job systems, periodic data processing, and automated workflows.
 
-### Quick Start with Streams
+### Quick Start with Scheduler
 
 ```rust
 use cano::prelude::*;
