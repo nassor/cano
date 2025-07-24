@@ -92,11 +92,11 @@ impl Node<TaskState> for LongRunningTask {
 async fn print_flow_status(stream: &Stream<TaskState, MemoryStore>, title: &str) {
     println!("\n{title}");
     println!("{}", "=".repeat(title.len()));
-    let flows_info = stream.get_all_flows_info().await;
+    let flows_info = stream.list().await;
     for info in &flows_info {
         println!(
-            "📊 {}: {:?} | Runs: {} | Errors: {} | Active Instances: {}",
-            info.id, info.status, info.run_count, info.error_count, info.active_instances
+            "📊 {}: {:?} | Runs: {}",
+            info.id, info.status, info.run_count
         );
     }
     println!();
@@ -161,19 +161,19 @@ async fn main() -> CanoResult<()> {
         .add_exit_states(vec![TaskState::Complete]);
 
     // Setup stream with aggressive scheduling to force overlaps
-    let mut stream = StreamBuilder::new()
-        // Long task every 2 seconds (7s execution, 2s interval = lots of overlap)
-        .with_interval_flow("long_task", long_task_flow, 2)?
-        // Medium task every 1 second (3s execution, 1s interval = massive overlap)
-        .with_interval_flow("medium_task", medium_task_flow, 1)?
-        // Fast task every 100ms (500ms execution, 100ms interval = extreme overlap)
-        .with_interval_flow("fast_task", fast_task_flow, 0)?
-        .build();
+    let mut stream: Stream<TaskState, MemoryStore> = Stream::new();
+
+    // Long task every 2 seconds (7s execution, 2s interval = lots of overlap)
+    stream.every_seconds("long_task", long_task_flow, 2)?;
+    // Medium task every 1 second (3s execution, 1s interval = massive overlap)
+    stream.every_seconds("medium_task", medium_task_flow, 1)?;
+    // Fast task every 100ms (500ms execution, 100ms interval = extreme overlap)
+    stream.every("fast_task", fast_task_flow, Duration::from_millis(100))?;
 
     println!("📅 Scheduled flows:");
     println!("  • Long Task: Every 2 seconds (7 second execution time)");
     println!("  • Medium Task: Every 1 second (3 second execution time)");
-    println!("  • Fast Task: Every 0 seconds (500ms execution time)");
+    println!("  • Fast Task: Every 100ms (500ms execution time)");
     println!("  → This creates intentional overlapping executions!\n");
 
     // Start the stream

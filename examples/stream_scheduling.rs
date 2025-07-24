@@ -262,25 +262,23 @@ async fn main() -> CanoResult<()> {
         .register_node(WorkflowAction::Start, SetupNode::new("System"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
-    // Create stream with multiple flows using builder pattern
-    let one_time_run = Utc::now() + chrono::Duration::seconds(5);
+    // Create stream with multiple flows
+    let mut stream: Stream<WorkflowAction, MemoryStore> = Stream::new();
 
-    let mut stream = StreamBuilder::new()
-        // Run hourly report every 5 seconds for demo to see concurrent executions
-        .with_interval_flow("hourly_report", hourly_report_flow, 5)?
-        // Run cleanup every 3 seconds for concurrent demo
-        .with_interval_flow("data_cleanup", cleanup_flow, 3)?
-        // Manual trigger only
-        .with_manual_flow("manual_migration", manual_flow)?
-        // One-time setup in 5 seconds
-        .with_once_flow("system_setup", setup_flow, one_time_run)?
-        .build();
+    // Run hourly report every 5 seconds for demo to see concurrent executions
+    stream.every_seconds("hourly_report", hourly_report_flow, 5)?;
+    // Run cleanup every 3 seconds for concurrent demo
+    stream.every_seconds("data_cleanup", cleanup_flow, 3)?;
+    // Manual trigger only
+    stream.manual("manual_migration", manual_flow)?;
+    // System setup
+    stream.manual("system_setup", setup_flow)?;
 
     println!("📅 Configured flows:");
-    println!("  • Hourly Report: Every 5 seconds (3s execution time - allows overlap)");
-    println!("  • Data Cleanup: Every 3 seconds (2s execution time - allows overlap)");
+    println!("  • Hourly Report: Every 5 seconds");
+    println!("  • Data Cleanup: Every 3 seconds");
     println!("  • Manual Migration: Manual trigger only");
-    println!("  • System Setup: One-time in 5 seconds");
+    println!("  • System Setup: Manual trigger only");
     println!();
 
     // Start the stream
@@ -291,25 +289,26 @@ async fn main() -> CanoResult<()> {
     sleep(Duration::from_secs(2)).await;
 
     println!("📊 Current flow status:");
-    let flows_info = stream.get_all_flows_info().await;
+    let flows_info = stream.list().await;
     for info in &flows_info {
         println!(
-            "  • {}: {:?} (runs: {}, errors: {}, active: {})",
-            info.id, info.status, info.run_count, info.error_count, info.active_instances
+            "  • {}: {:?} (runs: {})",
+            info.id, info.status, info.run_count
         );
-        if let Some(next_run) = info.next_run {
-            println!("    Next run: {}", next_run.format("%H:%M:%S"));
-        }
     }
     println!();
 
-    // Wait for the one-time setup to run
-    println!("⏳ Waiting for one-time setup to execute...");
+    // Wait for the system setup and then trigger it manually
+    println!("⏳ Waiting a bit then triggering system setup...");
     sleep(Duration::from_secs(4)).await;
+
+    // Manually trigger the setup task
+    println!("🔧 Manually triggering system setup...");
+    stream.trigger("system_setup").await?;
 
     // Manually trigger the migration task
     println!("🔧 Manually triggering data migration...");
-    stream.trigger_flow("manual_migration").await?;
+    stream.trigger("manual_migration").await?;
 
     // Let the stream run for a while to see scheduled executions
     println!("⏳ Running stream for 20 seconds to see concurrent executions...");
@@ -317,11 +316,11 @@ async fn main() -> CanoResult<()> {
 
     // Show final status
     println!("\n📊 Final flow status:");
-    let final_flows_info = stream.get_all_flows_info().await;
+    let final_flows_info = stream.list().await;
     for info in &final_flows_info {
         println!(
-            "  • {}: {:?} (runs: {}, errors: {}, active: {})",
-            info.id, info.status, info.run_count, info.error_count, info.active_instances
+            "  • {}: {:?} (runs: {})",
+            info.id, info.status, info.run_count
         );
     }
 

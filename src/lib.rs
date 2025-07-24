@@ -86,7 +86,7 @@ pub use error::{CanoError, CanoResult};
 pub use flow::{Flow, FlowBuilder};
 pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node, NodeConfig, RetryMode};
 pub use store::{MemoryStore, Store};
-pub use stream::{Stream, StreamBuilder, FlowSchedule, FlowStatus, FlowInfo};
+pub use stream::{FlowInfo, Stream};
 
 // Convenience re-exports for common patterns
 pub mod prelude {
@@ -96,8 +96,7 @@ pub mod prelude {
 
     pub use crate::{
         CanoError, CanoResult, DefaultNodeResult, DefaultParams, Flow, FlowBuilder, FlowInfo,
-        FlowSchedule, FlowStatus, MemoryStore, Node, NodeConfig, RetryMode, Store, Stream,
-        StreamBuilder,
+        MemoryStore, Node, NodeConfig, RetryMode, Store, Stream,
     };
 
     // Re-export async_trait for convenience
