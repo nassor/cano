@@ -4,7 +4,7 @@
 //! The unified approach offers several advantages:
 //!
 //! - **Simpler API**: One trait to learn, not a hierarchy of traits
-//! - **Type Safety**: Return enum values instead of strings for flow control
+//! - **Type Safety**: Return enum values instead of strings for workflow control
 //! - **Performance**: No string conversion overhead
 //! - **IDE Support**: Autocomplete for enum variants
 //! - **Compile-Time Safety**: Impossible to have invalid state transitions
@@ -222,7 +222,7 @@ impl NodeConfig {
 ///
 /// # Generic Types
 ///
-/// - **`T`**: The return type from the post method (typically an enum for flow control)
+/// - **`T`**: The return type from the post method (typically an enum for workflow control)
 /// - **`Params`**: The parameter type for this node (e.g., `HashMap<String, String>`)
 /// - **`Store`**: The store backend type (e.g., `MemoryStore`)
 /// - **`PrepResult`**: The result type from the `prep` phase, passed to `exec`.
@@ -706,7 +706,7 @@ mod tests {
                 // Skip exec and go directly to post with a default value
                 self.post(store, "skipped_exec".to_string()).await
             } else {
-                // Normal flow
+                // Normal workflow
                 let exec_res = self.exec(prep_res).await;
                 self.post(store, exec_res).await
             }

@@ -6,9 +6,13 @@
 [![License](https://img.shields.io/crates/l/cano.svg)](https://github.com/nassor/cano/blob/main/LICENSE)
 [![CI](https://github.com/nassor/cano/workflows/CI/badge.svg)](https://github.com/nassor/cano/actions)
 
-**Build powerful data processing pipelines with minimal code.**
+**Async workflow engine with built-in scheduling, retry logic, and state machine semantics.**
 
-Cano is an async workflow engine that makes complex data processing simple. Whether you need to process one item or millions, Cano provides a clean API with minimal overhead for maximum performance.
+Cano is a lightweight, async workflow engine for Rust that turns complex processing into simple, composable workflows.
+
+The engine is built on three core concepts: **Nodes** to encapsulate your business logic, **Workflows** to manage state transitions, and **Schedulers** to run your workflows on a schedule. This library-driven approach allows you to define complex processes with ease.
+
+The Node API is inspired by the [PocketFlow](https://github.com/The-Pocket/PocketFlow) project, but has been re-imagined for Rust's async ecosystem with a strong focus on simplicity and performance.
 
 ## ⚡ Quick Start
 
@@ -65,8 +69,8 @@ impl Node<WorkflowState> for ProcessorNode {
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     // Create a 2-step workflow
-    let mut flow = Flow::new(WorkflowState::Start);
-    flow.register_node(WorkflowState::Start, ProcessorNode)
+    let mut workflow = Workflow::new(WorkflowState::Start);
+    workflow.register_node(WorkflowState::Start, ProcessorNode)
         .add_exit_state(WorkflowState::Complete);
     
     // Create store for sharing data between steps
@@ -74,7 +78,7 @@ async fn main() -> Result<(), CanoError> {
     store.put("input", "Hello Cano!".to_string())?;
     
     // Run your workflow
-    let result = flow.orchestrate(&store).await?;
+    let result = workflow.orchestrate(&store).await?;
     println!("Workflow completed: {result:?}");
     
     Ok(())
@@ -89,6 +93,7 @@ That's it! You just ran your first Cano workflow.
 - **🔗 Simple Configuration**: Fluent builder pattern makes setup intuitive  
 - **🔄 Smart Retries**: Multiple retry strategies (none, fixed, exponential backoff) with jitter support
 - **💾 Shared Store**: Thread-safe key-value store for data passing between nodes
+- **🌊 Scheduler Scheduling**: Built-in scheduler for running flows on intervals, cron schedules, or manual triggers
 - **🌊 Complex Workflows**: Chain nodes together into sophisticated state machine pipelines
 - **⚡ Type Safety**: Enum-driven state transitions with compile-time safety
 - **🚀 High Performance**: Minimal overhead with direct execution for maximum throughput
@@ -135,52 +140,9 @@ impl Node<String> for EmailProcessor {
 }
 ```
 
-### 2. Store - Share Data Between Nodes
-
-Use the built-in store to pass data around your workflow:
-
-```rust
-let store = MemoryStore::new();
-
-// Store some data
-store.put("user_id", 123)?;
-store.put("name", "Alice".to_string())?;
-
-// Retrieve it later
-let user_id: Result<i32, _> = store.get("user_id");
-let name: Result<String, _> = store.get("name");
-```
-
-### 3. Flows - Chain Nodes Together
-
-Build complex workflows with state machine semantics:
-
-```rust
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum WorkflowState {
-    Validate,
-    Process,
-    SendEmail,
-    Complete,
-    Error,
-}
-
-let mut flow = Flow::new(WorkflowState::Validate);
-flow.register_node(WorkflowState::Validate, validator)
-    .register_node(WorkflowState::Process, processor)
-    .register_node(WorkflowState::SendEmail, email_sender)
-    .add_exit_states(vec![WorkflowState::Complete, WorkflowState::Error]);
-
-let result = flow.orchestrate(&store).await?;
-```
-
-## 🧩 Advanced Features
-
-### Built-in Retry Logic
+#### Built-in Retry Logic
 
 Every node includes configurable retry logic with multiple strategies:
-
-#### Retry Modes
 
 **No Retries** - Fail fast for critical operations:
 
@@ -236,28 +198,285 @@ impl Node<WorkflowState> for CustomNode {
 }
 ```
 
-#### Why Use Different Retry Modes?
+**Why Use Different Retry Modes?**
 
 - **None**: Database transactions, critical validations where failure should be immediate
 - **Fixed**: Network calls, file operations where consistent timing is preferred  
 - **Exponential**: API calls, external services where you want to back off gracefully
 - **Custom Exponential**: High-load scenarios where you need precise control over timing and jitter
 
-### Complex Workflows
+### 2. Store - Share Data Between Nodes
 
-Chain multiple nodes together to build sophisticated state machine pipelines:
+Use the built-in store to pass data around your workflow:
+
+```rust
+let store = MemoryStore::new();
+
+// Store some data
+store.put("user_id", 123)?;
+store.put("name", "Alice".to_string())?;
+
+// Retrieve it later
+let user_id: Result<i32, _> = store.get("user_id");
+let name: Result<String, _> = store.get("name");
+```
+
+### 3. Workflows - Chain Nodes Together
+
+Build complex workflows with state machine semantics:
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum State { Start, Validate, Process, Complete, Error }
+enum WorkflowState {
+    Validate,
+    Process,
+    SendEmail,
+    Complete,
+    Error,
+}
 
-let mut flow = Flow::new(State::Start);
-flow.register_node(State::Start, data_loader)
-    .register_node(State::Validate, validator)
-    .register_node(State::Process, processor)
-    .add_exit_states(vec![State::Complete, State::Error]);
+let mut workflow = Workflow::new(WorkflowState::Validate);
+workflow.register_node(WorkflowState::Validate, validator)
+    .register_node(WorkflowState::Process, processor)
+    .register_node(WorkflowState::SendEmail, email_sender)
+    .add_exit_states(vec![WorkflowState::Complete, WorkflowState::Error]);
 
-let result = flow.orchestrate(&store).await?;
+let result = workflow.orchestrate(&store).await?;
+```
+
+#### Complex Workflows
+
+Build sophisticated state machine pipelines with conditional branching, error handling, and retry logic:
+
+```mermaid
+graph TD
+    A[Start] --> B[LoadData]
+    B --> C{Validate}
+    C -->|Valid| D[Process]
+    C -->|Invalid| E[Sanitize]  
+    C -->|Critical Error| F[Error]
+    E --> D
+    D --> G{QualityCheck}
+    G -->|High Quality| H[Enrich]
+    G -->|Low Quality| I[BasicProcess]
+    G -->|Failed & Retries Left| J[Retry]
+    G -->|Failed & No Retries| K[Failed]
+    H --> L[Complete]
+    I --> L
+    J --> D
+    F --> M[Cleanup]
+    M --> K
+```
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum OrderState {
+    Start,
+    LoadData,
+    Validate,
+    Sanitize,
+    Process,
+    QualityCheck,
+    Enrich,
+    BasicProcess,
+    Retry,
+    Cleanup,
+    Complete,
+    Failed,
+    Error,
+}
+
+// Validation node with multiple possible outcomes
+struct ValidationNode;
+
+#[async_trait]
+impl Node<OrderState> for ValidationNode {
+    type PrepResult = String;
+    type ExecResult = ValidationResult;
+
+    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+        let data: String = store.get("raw_data")?;
+        Ok(data)
+    }
+
+    async fn exec(&self, data: Self::PrepResult) -> Self::ExecResult {
+        if data.contains("critical_error") {
+            ValidationResult::CriticalError
+        } else if data.len() < 10 {
+            ValidationResult::Invalid
+        } else {
+            ValidationResult::Valid
+        }
+    }
+
+    async fn post(&self, store: &impl Store, result: Self::ExecResult) 
+        -> Result<OrderState, CanoError> {
+        match result {
+            ValidationResult::Valid => {
+                store.put("validation_status", "passed")?;
+                Ok(OrderState::Process)
+            }
+            ValidationResult::Invalid => {
+                store.put("validation_status", "needs_sanitization")?;
+                Ok(OrderState::Sanitize)
+            }
+            ValidationResult::CriticalError => {
+                store.put("error_reason", "critical_validation_failure")?;
+                Ok(OrderState::Error)
+            }
+        }
+    }
+}
+
+// Quality check node with conditional processing paths
+struct QualityCheckNode;
+
+#[async_trait]
+impl Node<OrderState> for QualityCheckNode {
+    type PrepResult = (String, i32);
+    type ExecResult = QualityScore;
+
+    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+        let data: String = store.get("processed_data")?;
+        let attempt: i32 = store.get("retry_count").unwrap_or(0);
+        Ok((data, attempt))
+    }
+
+    async fn exec(&self, (data, attempt): Self::PrepResult) -> Self::ExecResult {
+        let score = calculate_quality_score(&data);
+        QualityScore { score, attempt }
+    }
+
+    async fn post(&self, store: &impl Store, result: Self::ExecResult) 
+        -> Result<OrderState, CanoError> {
+        store.put("quality_score", result.score)?;
+        
+        match result.score {
+            90..=100 => Ok(OrderState::Enrich),
+            60..=89 => Ok(OrderState::BasicProcess),
+            _ if result.attempt < 3 => {
+                store.put("retry_count", result.attempt + 1)?;
+                Ok(OrderState::Retry)
+            }
+            _ => Ok(OrderState::Failed),
+        }
+    }
+}
+
+// # ALL OTHER NODES...
+
+// Build the complex workflow
+let mut workflow = Workflow::new(OrderState::Start);
+workflow
+    .register_node(OrderState::Start, DataLoaderNode)
+    .register_node(OrderState::LoadData, ValidationNode)
+    .register_node(OrderState::Validate, SanitizeNode)
+    .register_node(OrderState::Sanitize, ProcessNode)  
+    .register_node(OrderState::Process, QualityCheckNode)
+    .register_node(OrderState::QualityCheck, EnrichNode)
+    .register_node(OrderState::Enrich, CompleteNode)     // -> Complete
+    .register_node(OrderState::BasicProcess, CompleteNode) // -> Complete
+    .register_node(OrderState::Retry, ProcessNode)        // -> Process
+    .register_node(OrderState::Error, CleanupNode)        // -> Failed
+    .add_exit_states(vec![
+        OrderState::Complete, 
+        OrderState::Failed
+    ]);
+
+let result = workflow.orchestrate(&store).await?;
+```
+
+## Scheduler - Simplified Scheduling
+
+The Scheduler module provides an easy-to-use scheduler for running workflows on various schedules. Perfect for building background job systems, periodic data processing, and automated workflows.
+
+### Quick Start with Scheduler
+
+```rust
+use cano::prelude::*;
+use tokio::time::Duration;
+
+#[tokio::main]
+async fn main() -> CanoResult<()> {
+    let mut scheduler: Scheduler<MyState, MemoryStore> = Scheduler::new();
+    
+    let workflow = Workflow::new(MyState::Start);
+    
+    // Multiple ways to schedule flows:
+    scheduler.every_seconds("task1", workflow.clone(), 30)?;                    // Every 30 seconds
+    scheduler.every_minutes("task2", workflow.clone(), 5)?;                     // Every 5 minutes  
+    scheduler.every_hours("task3", workflow.clone(), 2)?;                       // Every 2 hours
+    scheduler.every("task4", workflow.clone(), Duration::from_millis(500))?;    // Every 500ms
+    scheduler.cron("task5", workflow.clone(), "0 */10 * * * *")?;              // Every 10 minutes (cron)
+    scheduler.manual("task6", workflow)?;                                       // Manual trigger only
+    
+    // Start the scheduler
+    scheduler.start().await?;
+    
+    // Trigger a manual workflow
+    scheduler.trigger("task6").await?;
+    
+    // Check workflow status
+    if let Some(status) = scheduler.status("task1").await {
+        println!("Task1 status: {:?}", status);
+    }
+    
+    // Graceful shutdown with timeout
+    scheduler.stop().await?;
+    
+    Ok(())
+}
+```
+
+### Scheduler Features
+
+- **🕐 Flexible Scheduling**: Support for intervals, cron expressions, and manual triggers
+- **⏰ Convenience Methods**: Easy `every_seconds()`, `every_minutes()`, `every_hours()` helpers
+- **📊 Status Monitoring**: Check workflow status, run counts, and last execution times
+- **🔧 Manual Control**: Trigger flows manually and monitor execution
+- **🛑 Graceful Shutdown**: Stop with timeout to wait for running flows to complete
+- **🔄 Concurrent Execution**: Multiple flows can run simultaneously
+
+### Advanced Scheduler Usage
+
+```rust
+// Create a more complex scheduled workflow
+let mut scheduler = Scheduler::new();
+
+// Data processing every hour
+scheduler.every_hours("data_sync", data_processing_flow, 1)?;
+
+// Health checks every 30 seconds  
+scheduler.every_seconds("health_check", monitoring_flow, 30)?;
+
+// Daily reports at 9 AM using cron
+scheduler.cron("daily_report", reporting_flow, "0 0 9 * * *")?;
+
+// Manual cleanup task
+scheduler.manual("cleanup", cleanup_flow)?;
+
+// Start the scheduler
+scheduler.start().await?;
+
+// Monitor running flows
+tokio::spawn(async move {
+    loop {
+        let running_count = scheduler.running_count().await;
+        println!("Currently running flows: {}", running_count);
+        
+        // List all workflow statuses
+        let flows = scheduler.list().await;
+        for flow_info in flows {
+            println!("Workflow {}: {:?} (runs: {})", 
+                flow_info.id, flow_info.status, flow_info.run_count);
+        }
+        
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+});
+
+// Graceful shutdown with 30 second timeout
+scheduler.stop_with_timeout(Duration::from_secs(30)).await?;
 ```
 
 ## 🧪 Testing & Benchmarks
@@ -273,13 +492,19 @@ cargo bench --bench store_performance
 cargo bench --bench flow_performance
 cargo bench --bench node_performance
 
-# Run all examples
-cargo run --examples examples/simple.rs
-cargo run --examples examples/book_prepositions.rs
-cargo run --examples examples/negotiation.rs
-```
+# Run workflow examples
+cargo run --example workflow_simple
+cargo run --example workflow_book_prepositions
+cargo run --example workflow_negotiation
+
+# Run scheduler scheduling examples
+cargo run --example scheduler_scheduling
+cargo run --example scheduler_duration_scheduling
+cargo run --example scheduler_concurrent_workflows
+cargo run --example scheduler_graceful_shutdown
 
 Benchmark results are saved in `target/criterion/` with detailed HTML reports.
+```
 
 ## 📚 Documentation
 

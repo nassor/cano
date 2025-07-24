@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use cano::{CanoError, Flow, MemoryStore, Node, Store};
+use cano::{CanoError, MemoryStore, Node, Store, Workflow};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 /// Simple do-nothing node for benchmarking
@@ -53,9 +53,9 @@ impl Node<TestState> for DoNothingNode {
     }
 }
 
-/// Create a flow with a specified number of nodes
-fn create_flow(node_count: usize) -> Flow<TestState, MemoryStore> {
-    let mut flow = Flow::new(TestState::Start);
+/// Create a workflow with a specified number of nodes
+fn create_flow(node_count: usize) -> Workflow<TestState, MemoryStore> {
+    let mut workflow = Workflow::new(TestState::Start);
 
     // Add the sequential chain of nodes
     for i in 0..node_count {
@@ -66,13 +66,13 @@ fn create_flow(node_count: usize) -> Flow<TestState, MemoryStore> {
             TestState::node(i + 1)
         };
 
-        flow.register_node(current_state, DoNothingNode::new(next_state));
+        workflow.register_node(current_state, DoNothingNode::new(next_state));
     }
 
     // Set the Complete state as exit state
-    flow.add_exit_state(TestState::Complete);
+    workflow.add_exit_state(TestState::Complete);
 
-    flow
+    workflow
 }
 
 fn bench_flow_performance(c: &mut Criterion) {
@@ -86,12 +86,12 @@ fn bench_flow_performance(c: &mut Criterion) {
             BenchmarkId::new("sequential_execution", node_count),
             &node_count,
             |b, &node_count| {
-                let flow = create_flow(node_count);
+                let workflow = create_flow(node_count);
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
                         let store = MemoryStore::new();
-                        let result = flow.orchestrate(&store).await;
+                        let result = workflow.orchestrate(&store).await;
                         assert!(result.is_ok());
                         assert_eq!(result.unwrap(), TestState::Complete);
                     });
@@ -103,9 +103,9 @@ fn bench_flow_performance(c: &mut Criterion) {
             &node_count,
             |b, &node_count| {
                 b.iter(|| {
-                    let flow = create_flow(node_count);
-                    // Just to ensure the flow is created properly
-                    assert_eq!(flow.state_nodes.len(), node_count);
+                    let workflow = create_flow(node_count);
+                    // Just to ensure the workflow is created properly
+                    assert_eq!(workflow.state_nodes.len(), node_count);
                 });
             },
         );
@@ -114,19 +114,19 @@ fn bench_flow_performance(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark flow execution overhead vs direct node execution
+/// Benchmark workflow execution overhead vs direct node execution
 fn bench_flow_vs_direct_execution(c: &mut Criterion) {
     let mut group = c.benchmark_group("flow_vs_direct");
 
     let node_count = 100;
 
     group.bench_function("flow_execution_100_nodes", |b| {
-        let flow = create_flow(node_count);
+        let workflow = create_flow(node_count);
 
         b.to_async(tokio::runtime::Runtime::new().unwrap())
             .iter(|| async {
                 let store = MemoryStore::new();
-                let result = flow.orchestrate(&store).await;
+                let result = workflow.orchestrate(&store).await;
                 assert!(result.is_ok());
             });
     });
@@ -159,9 +159,9 @@ fn bench_memory_patterns(c: &mut Criterion) {
             &node_count,
             |b, &node_count| {
                 b.iter(|| {
-                    // Create flow on heap
-                    let flow = Box::new(create_flow(node_count));
-                    assert_eq!(flow.state_nodes.len(), node_count);
+                    // Create workflow on heap
+                    let workflow = Box::new(create_flow(node_count));
+                    assert_eq!(workflow.state_nodes.len(), node_count);
                 });
             },
         );
@@ -171,10 +171,10 @@ fn bench_memory_patterns(c: &mut Criterion) {
             &node_count,
             |b, &node_count| {
                 b.iter(|| {
-                    // Create flow on stack (smaller sizes only)
+                    // Create workflow on stack (smaller sizes only)
                     if node_count <= 100 {
-                        let flow = create_flow(node_count);
-                        assert_eq!(flow.state_nodes.len(), node_count);
+                        let workflow = create_flow(node_count);
+                        assert_eq!(workflow.state_nodes.len(), node_count);
                     }
                 });
             },

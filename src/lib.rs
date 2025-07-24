@@ -41,8 +41,12 @@
 //!
 //! ## 📚 Module Overview
 //!
-//! - **[`flow`]**: Core workflow orchestration
-//!   - [`Flow`] for state machine-based workflows
+//! - **[`workflow`]**: Core workflow orchestration
+//!   - [`Workflow`] for state machine-based workflows
+//!
+//! - **[`scheduler`]**: Advanced workflow scheduling
+//!   - [`Scheduler`] for managing multiple flows with cron support
+//!   - Time-based and event-driven scheduling
 //!
 //! - **[`node`]**: The [`Node`] trait for custom processing logic
 //!   - Built-in retry logic and error handling
@@ -72,15 +76,17 @@
 //! - **Async I/O**: Efficient async operations with tokio runtime
 
 pub mod error;
-pub mod flow;
 pub mod node;
+pub mod scheduler;
 pub mod store;
+pub mod workflow;
 
 // Core public API - simplified imports
 pub use error::{CanoError, CanoResult};
-pub use flow::{Flow, FlowBuilder};
 pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node, NodeConfig, RetryMode};
+pub use scheduler::{FlowInfo, Scheduler};
 pub use store::{MemoryStore, Store};
+pub use workflow::{Workflow, WorkflowBuilder};
 
 // Convenience re-exports for common patterns
 pub mod prelude {
@@ -89,8 +95,8 @@ pub mod prelude {
     //! Use `use cano::prelude::*;` to import the most commonly used types and traits.
 
     pub use crate::{
-        CanoError, CanoResult, DefaultNodeResult, DefaultParams, Flow, FlowBuilder, MemoryStore,
-        Node, NodeConfig, RetryMode, Store,
+        CanoError, CanoResult, DefaultNodeResult, DefaultParams, FlowInfo, MemoryStore, Node,
+        NodeConfig, RetryMode, Scheduler, Store, Workflow, WorkflowBuilder,
     };
 
     // Re-export async_trait for convenience

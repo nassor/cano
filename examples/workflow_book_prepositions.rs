@@ -6,11 +6,11 @@
 //! 3. **BookRankingByPrepositionNode**: Ranks books by their preposition diversity
 //!
 //! The workflow showcases parallel processing, text analysis, and book analysis patterns
-//! using the Cano framework with Flow orchestration supporting different node types.
+//! using the Cano framework with Workflow orchestration supporting different node types.
 //!
 //! ## Execution Modes
 //!
-//! - **Default**: Flow orchestration with real downloads
+//! - **Default**: Workflow orchestration with real downloads
 //!   ```bash
 //!   cargo run --example book_prepositions
 //!   ```
@@ -28,7 +28,7 @@ use futures::future::join_all;
 use std::collections::{HashMap, HashSet};
 use tokio::time::{Duration, timeout};
 
-/// Result type for workflow flow control
+/// Result type for workflow workflow control
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum BookPrepositionAction {
     Complete,
@@ -615,18 +615,19 @@ impl Node<BookPrepositionAction> for BookRankingByPrepositionNode {
     }
 }
 
-/// Book preposition analysis workflow using Flow orchestration with different node types
+/// Book preposition analysis workflow using Workflow orchestration with different node types
 async fn run_workflow() -> Result<(), CanoError> {
-    println!("🚀 Starting Book Preposition Analysis Workflow with Flow");
+    println!("🚀 Starting Book Preposition Analysis Workflow with Workflow");
     println!("========================================================");
 
     let store = MemoryStore::new();
 
-    // Create a Flow that handles all three different node types
-    let mut flow = Flow::new(BookPrepositionAction::Download);
+    // Create a Workflow that handles all three different node types
+    let mut workflow = Workflow::new(BookPrepositionAction::Download);
 
     // Register different node types for each phase
-    flow.register_node(BookPrepositionAction::Download, BookDownloaderNode::new())
+    workflow
+        .register_node(BookPrepositionAction::Download, BookDownloaderNode::new())
         .register_node(BookPrepositionAction::Analyze, PrepositionNode::new())
         .register_node(
             BookPrepositionAction::Rank,
@@ -637,18 +638,18 @@ async fn run_workflow() -> Result<(), CanoError> {
             BookPrepositionAction::Error,
         ]);
 
-    println!("📋 Flow configured with 3 different node types:");
+    println!("📋 Workflow configured with 3 different node types:");
     println!("  • BookDownloaderNode (Download phase)");
     println!("  • PrepositionNode (Analysis phase)");
     println!("  • BookRankingByPrepositionNode (Ranking phase)");
 
-    // Execute the entire workflow using Flow orchestration
-    match flow.orchestrate(&store).await {
+    // Execute the entire workflow using Workflow orchestration
+    match workflow.orchestrate(&store).await {
         Ok(final_state) => {
             match final_state {
                 BookPrepositionAction::Complete => {
                     println!(
-                        "\n✅ Flow-based book preposition analysis workflow completed successfully!"
+                        "\n✅ Workflow-based book preposition analysis workflow completed successfully!"
                     );
 
                     // Display summary from the final rankings
@@ -671,18 +672,18 @@ async fn run_workflow() -> Result<(), CanoError> {
                 }
                 BookPrepositionAction::Error => {
                     eprintln!("❌ Workflow terminated with error state");
-                    return Err(CanoError::flow("Workflow terminated with error state"));
+                    return Err(CanoError::workflow("Workflow terminated with error state"));
                 }
                 other => {
                     eprintln!("⚠️  Workflow ended in unexpected state: {other:?}");
-                    return Err(CanoError::flow(format!(
+                    return Err(CanoError::workflow(format!(
                         "Workflow ended in unexpected state: {other:?}"
                     )));
                 }
             }
         }
         Err(e) => {
-            eprintln!("❌ Flow-based workflow failed: {e}");
+            eprintln!("❌ Workflow-based workflow failed: {e}");
             return Err(e);
         }
     }
@@ -695,7 +696,7 @@ async fn main() {
     println!("📚 Project Gutenberg Book Preposition Analysis");
     println!("=========================================");
 
-    println!("🌐 Running with Flow orchestration");
+    println!("🌐 Running with Workflow orchestration");
 
     match run_workflow().await {
         Ok(()) => {
