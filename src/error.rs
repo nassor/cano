@@ -25,8 +25,8 @@
 //! | `NodeExecution` | Node processing fails | Check your business logic |
 //! | `Preparation` | Node prep phase fails | Verify input data and store |
 //! | `store` | store operations fail | Check store state and keys |
-//! | `Flow` | Workflow orchestration fails | Verify node registration and routing |
-//! | `Configuration` | Invalid node/flow config | Check parameters and settings |
+//! | `Workflow` | Workflow orchestration fails | Verify node registration and routing |
+//! | `Configuration` | Invalid node/workflow config | Check parameters and settings |
 //! | `RetryExhausted` | All retries failed | Increase retries or fix root cause |
 //! | `Generic` | General errors | Check the specific error message |
 //!
@@ -39,7 +39,7 @@
 //! ## 🔗 store Error Integration
 //!
 //! `CanoError` automatically understands and converts `StoreError` instances.
-//! This means store operations can seamlessly flow into the broader error system:
+//! This means store operations can seamlessly workflow into the broader error system:
 //!
 //! ```rust
 //! use cano::{CanoResult, store::MemoryStore, store::Store};
@@ -91,7 +91,7 @@
 ///
 /// **How to fix:** Check store keys and ensure type consistency.
 ///
-/// ### Flow
+/// ### Workflow
 /// Workflow orchestration problems.
 ///
 /// **Common causes:**
@@ -102,14 +102,14 @@
 /// **How to fix:** Verify node registration and action string routing.
 ///
 /// ### Configuration
-/// Invalid node or flow configuration.
+/// Invalid node or workflow configuration.
 ///
 /// **Common causes:**
 /// - Invalid concurrency settings
 /// - Negative retry counts
 /// - Conflicting settings
 ///
-/// **How to fix:** Review node builder parameters and flow setup.
+/// **How to fix:** Review node builder parameters and workflow setup.
 ///
 /// ### RetryExhausted
 /// All retry attempts have been exhausted.
@@ -152,13 +152,13 @@ pub enum CanoError {
     /// or store backend issues.
     Store(String),
 
-    /// Error in flow orchestration (routing/registration)
+    /// Error in workflow orchestration (routing/registration)
     ///
     /// Use this for workflow-level problems like unregistered nodes,
-    /// invalid action routing, or flow configuration issues.
-    Flow(String),
+    /// invalid action routing, or workflow configuration issues.
+    Workflow(String),
 
-    /// Error in node or flow configuration (invalid settings)
+    /// Error in node or workflow configuration (invalid settings)
     ///
     /// Use this for configuration problems like invalid parameters,
     /// conflicting settings, or constraint violations.
@@ -193,9 +193,9 @@ impl CanoError {
         CanoError::Store(msg.into())
     }
 
-    /// Create a new flow error
-    pub fn flow<S: Into<String>>(msg: S) -> Self {
-        CanoError::Flow(msg.into())
+    /// Create a new workflow error
+    pub fn workflow<S: Into<String>>(msg: S) -> Self {
+        CanoError::Workflow(msg.into())
     }
 
     /// Create a new configuration error
@@ -227,7 +227,7 @@ impl CanoError {
             CanoError::NodeExecution(msg) => msg,
             CanoError::Preparation(msg) => msg,
             CanoError::Store(msg) => msg,
-            CanoError::Flow(msg) => msg,
+            CanoError::Workflow(msg) => msg,
             CanoError::Configuration(msg) => msg,
             CanoError::RetryExhausted(msg) => msg,
             CanoError::Generic(msg) => msg,
@@ -240,7 +240,7 @@ impl CanoError {
             CanoError::NodeExecution(_) => "node_execution",
             CanoError::Preparation(_) => "preparation",
             CanoError::Store(_) => "store",
-            CanoError::Flow(_) => "flow",
+            CanoError::Workflow(_) => "workflow",
             CanoError::Configuration(_) => "configuration",
             CanoError::RetryExhausted(_) => "retry_exhausted",
             CanoError::Generic(_) => "generic",
@@ -254,7 +254,7 @@ impl std::fmt::Display for CanoError {
             CanoError::NodeExecution(msg) => write!(f, "Node execution error: {msg}"),
             CanoError::Preparation(msg) => write!(f, "Preparation error: {msg}"),
             CanoError::Store(msg) => write!(f, "Store error: {msg}"),
-            CanoError::Flow(msg) => write!(f, "Flow error: {msg}"),
+            CanoError::Workflow(msg) => write!(f, "Workflow error: {msg}"),
             CanoError::Configuration(msg) => write!(f, "Configuration error: {msg}"),
             CanoError::RetryExhausted(msg) => write!(f, "Retry exhausted: {msg}"),
             CanoError::Generic(msg) => write!(f, "Error: {msg}"),
@@ -364,7 +364,7 @@ mod tests {
             "node_execution"
         );
         assert_eq!(CanoError::store("".to_string()).category(), "store");
-        assert_eq!(CanoError::Flow("".to_string()).category(), "flow");
+        assert_eq!(CanoError::Workflow("".to_string()).category(), "workflow");
     }
 
     #[test]

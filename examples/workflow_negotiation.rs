@@ -1,13 +1,13 @@
 //! # Negotiation Workflow Example
 //!
-//! This example demonstrates a negotiation workflow between a seller and buyer using the Flow structure:
+//! This example demonstrates a negotiation workflow between a seller and buyer using the Workflow structure:
 //! 1. **SellerNode**: Starts with an initial price and decrements it on each round
 //! 2. **BuyerNode**: Evaluates the offer against their budget and decides to accept or continue
 //!
 //! The workflow showcases:
 //! - Inter-node communication through shared store
 //! - Iterative negotiation logic with random price decrements
-//! - Flow control based on negotiation outcomes
+//! - Workflow control based on negotiation outcomes
 //!
 //! ## Testing Different Scenarios
 //!
@@ -25,7 +25,7 @@ use cano::prelude::*;
 use rand::Rng;
 use std::collections::HashMap;
 
-/// Action enum for controlling negotiation flow
+/// Action enum for controlling negotiation workflow
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum NegotiationAction {
     StartSelling,
@@ -286,7 +286,7 @@ impl Node<NegotiationAction> for BuyerNode {
     }
 }
 
-/// Negotiation orchestrator using Flow
+/// Negotiation orchestrator using Workflow
 async fn run_negotiation_workflow() -> Result<(), CanoError> {
     println!("🤝 Starting Negotiation Workflow");
     println!("================================");
@@ -297,10 +297,10 @@ async fn run_negotiation_workflow() -> Result<(), CanoError> {
 
     let store = MemoryStore::new();
 
-    // Create a Flow that handles the negotiation process
-    let mut flow = Flow::new(NegotiationAction::StartSelling);
+    // Create a Workflow that handles the negotiation process
+    let mut workflow = Workflow::new(NegotiationAction::StartSelling);
 
-    flow.register_node(NegotiationAction::StartSelling, SellerNode::new())
+    workflow.register_node(NegotiationAction::StartSelling, SellerNode::new())
         .register_node(NegotiationAction::BuyerEvaluate, BuyerNode::new())
         .add_exit_states(vec![
             NegotiationAction::Deal,
@@ -309,7 +309,7 @@ async fn run_negotiation_workflow() -> Result<(), CanoError> {
         ]);
 
     // Execute the negotiation workflow
-    match flow.orchestrate(&store).await {
+    match workflow.orchestrate(&store).await {
         Ok(final_state) => {
             println!("{}", "=".repeat(50));
 
@@ -355,11 +355,11 @@ async fn run_negotiation_workflow() -> Result<(), CanoError> {
                 }
                 NegotiationAction::Error => {
                     eprintln!("❌ Negotiation terminated due to an error");
-                    return Err(CanoError::flow("Negotiation terminated with error state"));
+                    return Err(CanoError::workflow("Negotiation terminated with error state"));
                 }
                 other => {
                     eprintln!("⚠️  Negotiation ended in unexpected state: {other:?}");
-                    return Err(CanoError::flow(format!(
+                    return Err(CanoError::workflow(format!(
                         "Negotiation ended in unexpected state: {other:?}"
                     )));
                 }

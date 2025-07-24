@@ -39,22 +39,22 @@ impl Node<TaskState> for DemoNode {
 
 #[tokio::main]
 async fn main() -> CanoResult<()> {
-    let mut stream: Stream<TaskState, MemoryStore> = Stream::new();
+    let mut scheduler: Scheduler<TaskState, MemoryStore> = Scheduler::new();
 
     // Create different flows
-    let mut daily_flow = Flow::new(TaskState::Start);
+    let mut daily_flow = Workflow::new(TaskState::Start);
     daily_flow.register_node(TaskState::Start, DemoNode("Daily Report".to_string()));
     daily_flow.add_exit_state(TaskState::End);
 
-    let mut hourly_flow = Flow::new(TaskState::Start);
+    let mut hourly_flow = Workflow::new(TaskState::Start);
     hourly_flow.register_node(TaskState::Start, DemoNode("Hourly Check".to_string()));
     hourly_flow.add_exit_state(TaskState::End);
 
-    let mut frequent_flow = Flow::new(TaskState::Start);
+    let mut frequent_flow = Workflow::new(TaskState::Start);
     frequent_flow.register_node(TaskState::Start, DemoNode("Frequent Task".to_string()));
     frequent_flow.add_exit_state(TaskState::End);
 
-    let mut manual_flow = Flow::new(TaskState::Start);
+    let mut manual_flow = Workflow::new(TaskState::Start);
     manual_flow.register_node(TaskState::Start, DemoNode("Manual Task".to_string()));
     manual_flow.add_exit_state(TaskState::End);
 
@@ -63,27 +63,27 @@ async fn main() -> CanoResult<()> {
     // ===============================
 
     // Convenience methods for common intervals
-    stream.every_hours("daily_report", daily_flow, 24)?; // Every 24 hours
-    stream.every_minutes("hourly_check", hourly_flow, 60)?; // Every hour (60 minutes)
-    stream.every_seconds("frequent_task", frequent_flow, 30)?; // Every 30 seconds
+    scheduler.every_hours("daily_report", daily_flow, 24)?; // Every 24 hours
+    scheduler.every_minutes("hourly_check", hourly_flow, 60)?; // Every hour (60 minutes)
+    scheduler.every_seconds("frequent_task", frequent_flow, 30)?; // Every 30 seconds
 
     // Precise Duration control for sub-second timing
-    stream.every("high_freq", manual_flow, Duration::from_millis(500))?; // Every 500ms
+    scheduler.every("high_freq", manual_flow, Duration::from_millis(500))?; // Every 500ms
 
     // Cron for complex schedules
-    // stream.cron("business_hours", flow, "0 9-17 * * 1-5")?;  // Weekdays 9-5
+    // scheduler.cron("business_hours", workflow, "0 9-17 * * 1-5")?;  // Weekdays 9-5
 
     // Manual triggers
-    // stream.manual("on_demand", flow)?;
+    // scheduler.manual("on_demand", workflow)?;
 
     println!("🚀 Starting scheduler with multiple interval types...");
-    stream.start().await?;
+    scheduler.start().await?;
 
     // Let it run for demonstration
     tokio::time::sleep(Duration::from_secs(5)).await;
 
     println!("📊 Current status:");
-    for flow_info in stream.list().await {
+    for flow_info in scheduler.list().await {
         println!(
             "  {} - {:?} (runs: {})",
             flow_info.id, flow_info.status, flow_info.run_count
@@ -92,7 +92,7 @@ async fn main() -> CanoResult<()> {
 
     // Graceful shutdown
     println!("🛑 Stopping scheduler...");
-    stream.stop().await?;
+    scheduler.stop().await?;
     println!("✅ Done!");
 
     Ok(())

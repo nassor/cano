@@ -61,9 +61,10 @@ jobs:
     
     - name: Build examples
       run: |
-        cargo build --example simple
-        cargo build --example book_prepositions
-        cargo build --example negotiation
+        for file in examples/*.rs; do
+          example=$(basename "$file" .rs)
+          cargo build --example "$example"
+        done
     
     - name: Run doctests
       run: cargo test --doc

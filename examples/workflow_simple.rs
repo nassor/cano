@@ -1,11 +1,11 @@
 //! # Simple Two-Node Workflow Example
 //!
-//! This example demonstrates a basic workflow with two nodes using the Flow structure:
+//! This example demonstrates a basic workflow with two nodes using the Workflow structure:
 //! 1. **GeneratorNode**: Creates a random vector of u32 numbers, filters out odd numbers
 //! 2. **CounterNode**: Counts the filtered numbers and cleans up store
 //!
 //! The workflow showcases the three-phase lifecycle (prep, exec, post) and
-//! inter-node communication through shared store using the Flow state machine.
+//! inter-node communication through shared store using the Workflow state machine.
 //!
 //! Run with:
 //! ```bash
@@ -17,7 +17,7 @@ use cano::prelude::*;
 use rand::Rng;
 use std::collections::HashMap;
 
-/// Action enum for controlling workflow flow
+/// Action enum for controlling workflow workflow
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum WorkflowAction {
     Generate,
@@ -165,23 +165,23 @@ impl Node<WorkflowAction> for CounterNode {
     }
 }
 
-/// Workflow orchestrator using Flow with different node types
+/// Workflow orchestrator using Workflow with different node types
 async fn run_simple_workflow_with_flow() -> Result<(), CanoError> {
-    println!("🚀 Starting Simple Two-Node Workflow with Flow");
+    println!("🚀 Starting Simple Two-Node Workflow with Workflow");
     println!("===============================================");
 
     let store = MemoryStore::new();
 
-    // Create a Flow that can handle different node types
-    let mut flow = Flow::new(WorkflowAction::Generate);
+    // Create a Workflow that can handle different node types
+    let mut workflow = Workflow::new(WorkflowAction::Generate);
 
     // Register different node types - this now works!
-    flow.register_node(WorkflowAction::Generate, GeneratorNode::new())
+    workflow.register_node(WorkflowAction::Generate, GeneratorNode::new())
         .register_node(WorkflowAction::Count, CounterNode::new())
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
-    // Execute the workflow using the Flow orchestrator
-    match flow.orchestrate(&store).await {
+    // Execute the workflow using the Workflow orchestrator
+    match workflow.orchestrate(&store).await {
         Ok(final_state) => {
             match final_state {
                 WorkflowAction::Complete => {
@@ -211,11 +211,11 @@ async fn run_simple_workflow_with_flow() -> Result<(), CanoError> {
                 }
                 WorkflowAction::Error => {
                     eprintln!("❌ Workflow terminated with error state");
-                    return Err(CanoError::flow("Workflow terminated with error state"));
+                    return Err(CanoError::workflow("Workflow terminated with error state"));
                 }
                 other => {
                     eprintln!("⚠️  Workflow ended in unexpected state: {other:?}");
-                    return Err(CanoError::flow(format!(
+                    return Err(CanoError::workflow(format!(
                         "Workflow ended in unexpected state: {other:?}"
                     )));
                 }
@@ -230,14 +230,14 @@ async fn run_simple_workflow_with_flow() -> Result<(), CanoError> {
     Ok(())
 }
 
-/// Demonstrate the workflow with Flow accepting different node types
+/// Demonstrate the workflow with Workflow accepting different node types
 #[tokio::main]
 async fn main() {
     println!("🚀 Simple Two-Node Workflow Example");
     println!("===================================");
 
-    // Run the Flow-based workflow with different node types
-    println!("\n� Running Flow-Based Workflow (Different Node Types):");
+    // Run the Workflow-based workflow with different node types
+    println!("\n� Running Workflow-Based Workflow (Different Node Types):");
     match run_simple_workflow_with_flow().await {
         Ok(()) => {
             println!("✅ Manual workflow completed successfully!");
@@ -248,20 +248,20 @@ async fn main() {
         }
     }
 
-    // Then, run the Flow-based workflow with different node types
-    println!("\n� Running Flow-Based Workflow (Different Node Types):");
+    // Then, run the Workflow-based workflow with different node types
+    println!("\n� Running Workflow-Based Workflow (Different Node Types):");
     match run_simple_workflow_with_flow().await {
         Ok(()) => {
-            println!("✅ Flow-based workflow completed successfully!");
+            println!("✅ Workflow-based workflow completed successfully!");
         }
         Err(e) => {
-            eprintln!("❌ Flow-based workflow failed: {e}");
+            eprintln!("❌ Workflow-based workflow failed: {e}");
             std::process::exit(1);
         }
     }
 
     println!("\n🎉 Workflow executed successfully!");
-    println!("✨ The Flow supports different node types in the same workflow!");
+    println!("✨ The Workflow supports different node types in the same workflow!");
 }
 
 #[cfg(test)]
@@ -318,7 +318,7 @@ mod tests {
         let result = run_simple_workflow_with_flow().await;
         assert!(result.is_ok());
 
-        println!("Full Flow workflow test with different node types passed");
+        println!("Full Workflow workflow test with different node types passed");
     }
 
     #[tokio::test]

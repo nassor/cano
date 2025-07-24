@@ -1,6 +1,6 @@
-//! # Simplified Stream API
+//! # Simplified Scheduler API
 //!
-//! A simplified stream scheduler that focuses on ease of use while maintaining
+//! A simplified scheduler scheduler that focuses on ease of use while maintaining
 //! the core scheduling functionality.
 //!
 //! ## 🚀 Quick Start
@@ -11,25 +11,25 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> CanoResult<()> {
-//!     let mut stream: Stream<MyState, MemoryStore> = Stream::new();
+//!     let mut scheduler: Scheduler<MyState, MemoryStore> = Scheduler::new();
 //!     
-//!     let flow = Flow::new(MyState::Start);
+//!     let workflow = Workflow::new(MyState::Start);
 //!     
 //!     // Multiple ways to schedule flows:
-//!     stream.every_seconds("task1", flow, 30)?;                    // Every 30 seconds
-//!     stream.every_minutes("task2", flow, 5)?;                     // Every 5 minutes  
-//!     stream.every_hours("task3", flow, 2)?;                       // Every 2 hours
-//!     stream.every("task4", flow, Duration::from_millis(500))?;    // Every 500ms
-//!     stream.cron("task5", flow, "0 */10 * * * *")?;              // Every 10 minutes (cron)
-//!     stream.manual("task6", flow)?;                               // Manual trigger only
+//!     scheduler.every_seconds("task1", workflow, 30)?;                    // Every 30 seconds
+//!     scheduler.every_minutes("task2", workflow, 5)?;                     // Every 5 minutes  
+//!     scheduler.every_hours("task3", workflow, 2)?;                       // Every 2 hours
+//!     scheduler.every("task4", workflow, Duration::from_millis(500))?;    // Every 500ms
+//!     scheduler.cron("task5", workflow, "0 */10 * * * *")?;              // Every 10 minutes (cron)
+//!     scheduler.manual("task6", workflow)?;                               // Manual trigger only
 //!     
-//!     stream.start().await?;
+//!     scheduler.start().await?;
 //!     Ok(())
 //! }
 //! ```
 
 use crate::error::{CanoError, CanoResult};
-use crate::flow::Flow;
+use crate::workflow::Workflow;
 use crate::store::Store;
 use chrono::{DateTime, Utc};
 use cron::Schedule as CronSchedule;
@@ -51,7 +51,7 @@ pub enum Schedule {
     Manual,
 }
 
-/// Simple flow status
+/// Simple workflow status
 #[derive(Debug, Clone, PartialEq)]
 pub enum Status {
     Idle,
@@ -59,7 +59,7 @@ pub enum Status {
     Failed(String),
 }
 
-/// Minimal flow information
+/// Minimal workflow information
 #[derive(Debug, Clone)]
 pub struct FlowInfo {
     pub id: String,
@@ -68,11 +68,11 @@ pub struct FlowInfo {
     pub last_run: Option<DateTime<Utc>>,
 }
 
-/// Type alias for the complex flow data stored in the stream
-type FlowData<T, S> = (Arc<Flow<T, S>>, Schedule, Arc<RwLock<FlowInfo>>);
+/// Type alias for the complex workflow data stored in the scheduler
+type FlowData<T, S> = (Arc<Workflow<T, S>>, Schedule, Arc<RwLock<FlowInfo>>);
 
-/// Simplified stream scheduler
-pub struct Stream<T, S>
+/// Simplified scheduler scheduler
+pub struct Scheduler<T, S>
 where
     T: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
     S: Store + Clone + Default + 'static,
@@ -82,12 +82,12 @@ where
     running: Arc<RwLock<bool>>,
 }
 
-impl<T, S> Stream<T, S>
+impl<T, S> Scheduler<T, S>
 where
     T: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
     S: Store + Clone + Default + 'static,
 {
-    /// Create a new stream
+    /// Create a new scheduler
     pub fn new() -> Self {
         Self {
             flows: HashMap::new(),
@@ -96,44 +96,44 @@ where
         }
     }
 
-    /// Add a flow that runs every Duration interval
-    pub fn every(&mut self, id: &str, flow: Flow<T, S>, interval: Duration) -> CanoResult<()> {
-        self.add_flow(id, flow, Schedule::Every(interval))
+    /// Add a workflow that runs every Duration interval
+    pub fn every(&mut self, id: &str, workflow: Workflow<T, S>, interval: Duration) -> CanoResult<()> {
+        self.add_flow(id, workflow, Schedule::Every(interval))
     }
 
-    /// Add a flow that runs every N seconds (convenience method)
-    pub fn every_seconds(&mut self, id: &str, flow: Flow<T, S>, seconds: u64) -> CanoResult<()> {
-        self.every(id, flow, Duration::from_secs(seconds))
+    /// Add a workflow that runs every N seconds (convenience method)
+    pub fn every_seconds(&mut self, id: &str, workflow: Workflow<T, S>, seconds: u64) -> CanoResult<()> {
+        self.every(id, workflow, Duration::from_secs(seconds))
     }
 
-    /// Add a flow that runs every N minutes (convenience method)
-    pub fn every_minutes(&mut self, id: &str, flow: Flow<T, S>, minutes: u64) -> CanoResult<()> {
-        self.every(id, flow, Duration::from_secs(minutes * 60))
+    /// Add a workflow that runs every N minutes (convenience method)
+    pub fn every_minutes(&mut self, id: &str, workflow: Workflow<T, S>, minutes: u64) -> CanoResult<()> {
+        self.every(id, workflow, Duration::from_secs(minutes * 60))
     }
 
-    /// Add a flow that runs every N hours (convenience method)
-    pub fn every_hours(&mut self, id: &str, flow: Flow<T, S>, hours: u64) -> CanoResult<()> {
-        self.every(id, flow, Duration::from_secs(hours * 3600))
+    /// Add a workflow that runs every N hours (convenience method)
+    pub fn every_hours(&mut self, id: &str, workflow: Workflow<T, S>, hours: u64) -> CanoResult<()> {
+        self.every(id, workflow, Duration::from_secs(hours * 3600))
     }
 
-    /// Add a flow with cron schedule
-    pub fn cron(&mut self, id: &str, flow: Flow<T, S>, expr: &str) -> CanoResult<()> {
+    /// Add a workflow with cron schedule
+    pub fn cron(&mut self, id: &str, workflow: Workflow<T, S>, expr: &str) -> CanoResult<()> {
         // Validate cron expression
         CronSchedule::from_str(expr)
             .map_err(|e| CanoError::Configuration(format!("Invalid cron expression: {e}")))?;
-        self.add_flow(id, flow, Schedule::Cron(expr.to_string()))
+        self.add_flow(id, workflow, Schedule::Cron(expr.to_string()))
     }
 
-    /// Add a manually triggered flow
-    pub fn manual(&mut self, id: &str, flow: Flow<T, S>) -> CanoResult<()> {
-        self.add_flow(id, flow, Schedule::Manual)
+    /// Add a manually triggered workflow
+    pub fn manual(&mut self, id: &str, workflow: Workflow<T, S>) -> CanoResult<()> {
+        self.add_flow(id, workflow, Schedule::Manual)
     }
 
     /// Internal method to add flows
-    fn add_flow(&mut self, id: &str, flow: Flow<T, S>, schedule: Schedule) -> CanoResult<()> {
+    fn add_flow(&mut self, id: &str, workflow: Workflow<T, S>, schedule: Schedule) -> CanoResult<()> {
         if self.flows.contains_key(id) {
             return Err(CanoError::Configuration(format!(
-                "Flow '{id}' already exists"
+                "Workflow '{id}' already exists"
             )));
         }
 
@@ -146,7 +146,7 @@ where
 
         self.flows.insert(
             id.to_string(),
-            (Arc::new(flow), schedule, Arc::new(RwLock::new(info))),
+            (Arc::new(workflow), schedule, Arc::new(RwLock::new(info))),
         );
         Ok(())
     }
@@ -177,14 +177,14 @@ where
                         }
 
                         let now = Utc::now();
-                        for (id, (flow, schedule, info)) in &flows {
+                        for (id, (workflow, schedule, info)) in &flows {
                             if should_run(schedule, &mut last_check, id, now) {
-                                let flow = Arc::clone(flow);
+                                let workflow = Arc::clone(workflow);
                                 let info = Arc::clone(info);
                                 let store = S::default();
 
                                 tokio::spawn(async move {
-                                    execute_flow(flow, info, store).await;
+                                    execute_flow(workflow, info, store).await;
                                 });
                             }
                         }
@@ -193,13 +193,13 @@ where
                     command = rx.recv() => {
                         match command {
                             Some(flow_id) => {
-                                if let Some((flow, _, info)) = flows.get(&flow_id) {
-                                    let flow = Arc::clone(flow);
+                                if let Some((workflow, _, info)) = flows.get(&flow_id) {
+                                    let workflow = Arc::clone(workflow);
                                     let info = Arc::clone(info);
                                     let store = S::default();
 
                                     tokio::spawn(async move {
-                                        execute_flow(flow, info, store).await;
+                                        execute_flow(workflow, info, store).await;
                                     });
                                 }
                             }
@@ -213,14 +213,14 @@ where
         Ok(())
     }
 
-    /// Trigger a flow manually
+    /// Trigger a workflow manually
     pub async fn trigger(&self, id: &str) -> CanoResult<()> {
         if let Some(tx) = &self.command_tx {
             tx.send(id.to_string())
-                .map_err(|_| CanoError::flow("Failed to trigger flow"))?;
+                .map_err(|_| CanoError::workflow("Failed to trigger workflow"))?;
             Ok(())
         } else {
-            Err(CanoError::Configuration("Stream not running".to_string()))
+            Err(CanoError::Configuration("Scheduler not running".to_string()))
         }
     }
 
@@ -296,7 +296,7 @@ where
         count
     }
 
-    /// Get flow status
+    /// Get workflow status
     pub async fn status(&self, id: &str) -> Option<FlowInfo> {
         if let Some((_, _, info)) = self.flows.get(id) {
             Some(info.read().await.clone())
@@ -315,7 +315,7 @@ where
     }
 }
 
-impl<T, S> Default for Stream<T, S>
+impl<T, S> Default for Scheduler<T, S>
 where
     T: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
     S: Store + Clone + Default + 'static,
@@ -325,7 +325,7 @@ where
     }
 }
 
-/// Check if a flow should run
+/// Check if a workflow should run
 fn should_run(
     schedule: &Schedule,
     last_check: &mut HashMap<String, DateTime<Utc>>,
@@ -369,8 +369,8 @@ fn should_run(
     }
 }
 
-/// Execute a flow
-async fn execute_flow<T, S>(flow: Arc<Flow<T, S>>, info: Arc<RwLock<FlowInfo>>, store: S)
+/// Execute a workflow
+async fn execute_flow<T, S>(workflow: Arc<Workflow<T, S>>, info: Arc<RwLock<FlowInfo>>, store: S)
 where
     T: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
     S: Store + Clone + Default + 'static,
@@ -382,8 +382,8 @@ where
         info_guard.last_run = Some(Utc::now());
     }
 
-    // Execute flow
-    let result = flow.orchestrate(&store).await;
+    // Execute workflow
+    let result = workflow.orchestrate(&store).await;
 
     // Update final status
     {

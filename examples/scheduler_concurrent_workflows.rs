@@ -1,11 +1,11 @@
-//! # Concurrent Flow Execution Demo
+//! # Concurrent Workflow Execution Demo
 //!
-//! This example specifically demonstrates how the Stream scheduler can run
-//! the same flow multiple times concurrently. Each execution instance runs
+//! This example specifically demonstrates how the Scheduler scheduler can run
+//! the same workflow multiple times concurrently. Each execution instance runs
 //! independently and simultaneously.
 //!
 //! Key features demonstrated:
-//! - Same flow executing multiple overlapping instances
+//! - Same workflow executing multiple overlapping instances
 //! - Active instance tracking
 //! - Independent execution contexts
 //! - No blocking between instances
@@ -89,10 +89,10 @@ impl Node<TaskState> for LongRunningTask {
     }
 }
 
-async fn print_flow_status(stream: &Stream<TaskState, MemoryStore>, title: &str) {
+async fn print_flow_status(scheduler: &Scheduler<TaskState, MemoryStore>, title: &str) {
     println!("\n{title}");
     println!("{}", "=".repeat(title.len()));
-    let flows_info = stream.list().await;
+    let flows_info = scheduler.list().await;
     for info in &flows_info {
         println!(
             "📊 {}: {:?} | Runs: {}",
@@ -137,38 +137,38 @@ async fn print_manual_task_summary() {
 
 #[tokio::main]
 async fn main() -> CanoResult<()> {
-    println!("🎯 Concurrent Flow Execution Demo");
+    println!("🎯 Concurrent Workflow Execution Demo");
     println!("=================================");
-    println!("This demo shows multiple instances of the same flow running concurrently.");
+    println!("This demo shows multiple instances of the same workflow running concurrently.");
     println!("Watch for overlapping execution messages and active instance counts!\n");
 
-    // Create a long-running flow (5 seconds execution time)
-    let mut long_task_flow = Flow::new(TaskState::Execute);
+    // Create a long-running workflow (5 seconds execution time)
+    let mut long_task_flow = Workflow::new(TaskState::Execute);
     long_task_flow
         .register_node(TaskState::Execute, LongRunningTask::new("LongTask", 7000))
         .add_exit_states(vec![TaskState::Complete]);
 
-    // Create a medium-running flow (3 seconds execution time)
-    let mut medium_task_flow = Flow::new(TaskState::Execute);
+    // Create a medium-running workflow (3 seconds execution time)
+    let mut medium_task_flow = Workflow::new(TaskState::Execute);
     medium_task_flow
         .register_node(TaskState::Execute, LongRunningTask::new("MediumTask", 3000))
         .add_exit_states(vec![TaskState::Complete]);
 
-    // Create a fast-running flow (500ms execution time)
-    let mut fast_task_flow = Flow::new(TaskState::Execute);
+    // Create a fast-running workflow (500ms execution time)
+    let mut fast_task_flow = Workflow::new(TaskState::Execute);
     fast_task_flow
         .register_node(TaskState::Execute, LongRunningTask::new("FastTask", 500))
         .add_exit_states(vec![TaskState::Complete]);
 
-    // Setup stream with aggressive scheduling to force overlaps
-    let mut stream: Stream<TaskState, MemoryStore> = Stream::new();
+    // Setup scheduler with aggressive scheduling to force overlaps
+    let mut scheduler: Scheduler<TaskState, MemoryStore> = Scheduler::new();
 
     // Long task every 2 seconds (7s execution, 2s interval = lots of overlap)
-    stream.every_seconds("long_task", long_task_flow, 2)?;
+    scheduler.every_seconds("long_task", long_task_flow, 2)?;
     // Medium task every 1 second (3s execution, 1s interval = massive overlap)
-    stream.every_seconds("medium_task", medium_task_flow, 1)?;
+    scheduler.every_seconds("medium_task", medium_task_flow, 1)?;
     // Fast task every 100ms (500ms execution, 100ms interval = extreme overlap)
-    stream.every("fast_task", fast_task_flow, Duration::from_millis(100))?;
+    scheduler.every("fast_task", fast_task_flow, Duration::from_millis(100))?;
 
     println!("📅 Scheduled flows:");
     println!("  • Long Task: Every 2 seconds (7 second execution time)");
@@ -176,8 +176,8 @@ async fn main() -> CanoResult<()> {
     println!("  • Fast Task: Every 100ms (500ms execution time)");
     println!("  → This creates intentional overlapping executions!\n");
 
-    // Start the stream
-    stream.start().await?;
+    // Start the scheduler
+    scheduler.start().await?;
 
     // Run for 10 seconds to let tasks start, then stop scheduling new tasks
     println!("🏃 Running for 10 seconds to start tasks...\n");
@@ -185,15 +185,15 @@ async fn main() -> CanoResult<()> {
         sleep(Duration::from_secs(1)).await;
         if i % 3 == 0 {
             // Print status every 3 seconds to reduce noise
-            print_flow_status(&stream, &format!("Status at {i}s")).await;
+            print_flow_status(&scheduler, &format!("Status at {i}s")).await;
         }
     }
 
-    // Stop the stream to prevent new tasks from starting
+    // Stop the scheduler to prevent new tasks from starting
     println!("🛑 Stopping new task scheduling...");
-    stream.stop().await?;
+    scheduler.stop().await?;
 
-    // Since the stream moves flows internally, we need to track completion differently
+    // Since the scheduler moves flows internally, we need to track completion differently
     // For this demo, we'll wait a reasonable time for tasks to complete
     println!("⏳ Waiting for tasks to complete...\n");
 
@@ -218,7 +218,7 @@ async fn main() -> CanoResult<()> {
     print_manual_task_summary().await;
 
     println!("🎉 Demo completed! Notice how:");
-    println!("   • Multiple instances of the same flow ran simultaneously");
+    println!("   • Multiple instances of the same workflow ran simultaneously");
     println!("   • Active instance counts tracked concurrent executions");
     println!("   • No blocking occurred between instances");
     println!("   • Each instance had independent execution context");

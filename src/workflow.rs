@@ -1,13 +1,13 @@
-//! # Flow API - Build Simple Workflows
+//! # Workflow API - Build Simple Workflows
 //!
-//! This module provides the core [`Flow`] type for building async workflow systems.
+//! This module provides the core [`Workflow`] type for building async workflow systems.
 //! It includes state machine-driven workflow execution with type-safe routing.
 //!
 //! ## 🎯 Core Concepts
 //!
 //! ### State Machine-Based Workflows
 //!
-//! The [`Flow`] API provides a state machine-driven approach to workflow orchestration:
+//! The [`Workflow`] API provides a state machine-driven approach to workflow orchestration:
 //! - Define your workflow states using custom enums
 //! - Register nodes for each state
 //! - Set up state transitions based on node outcomes
@@ -64,7 +64,7 @@ use crate::node::Node;
 
 /// Type alias for trait objects that can store different node types
 ///
-/// This allows the Flow to accept nodes of different concrete types as long as they
+/// This allows the Workflow to accept nodes of different concrete types as long as they
 /// implement the Node trait with compatible associated types. The trait object erases
 /// the specific Params, PrepResult, and ExecResult types but maintains the essential
 /// functionality needed for workflow execution.
@@ -100,11 +100,11 @@ where
 
 /// State machine workflow orchestration
 ///
-/// [`Flow`] provides type-safe, enum-driven workflow orchestration with state machine semantics.
-/// Define your workflow states as an enum, register nodes for each state, and let the flow
+/// [`Workflow`] provides type-safe, enum-driven workflow orchestration with state machine semantics.
+/// Define your workflow states as an enum, register nodes for each state, and let the workflow
 /// automatically route between states based on node outcomes.
 ///
-/// This version of Flow accepts different node types through trait objects, allowing you to
+/// This version of Workflow accepts different node types through trait objects, allowing you to
 /// register nodes of different concrete types as long as they implement the Node trait.
 ///
 /// ## 🎯 Core Features
@@ -186,15 +186,15 @@ where
 ///
 /// #[tokio::main]
 /// async fn main() -> Result<(), CanoError> {
-///     let mut flow = Flow::new(WorkflowState::Start);
+///     let mut workflow = Workflow::new(WorkflowState::Start);
 ///     
 ///     // Register different node types
-///     flow.register_node(WorkflowState::Start, StartNode)
+///     workflow.register_node(WorkflowState::Start, StartNode)
 ///         .register_node(WorkflowState::Process, ProcessNode)
 ///         .add_exit_states(vec![WorkflowState::Complete, WorkflowState::Error]);
 ///     
 ///     let mut store = MemoryStore::new();
-///     let result = flow.orchestrate(&store).await?;
+///     let result = workflow.orchestrate(&store).await?;
 ///     println!("Workflow completed with state: {:?}", result);
 ///     Ok(())
 /// }
@@ -203,11 +203,11 @@ where
 /// ## Benefits
 ///
 /// - **Compile-Time Safety**: Impossible to transition to undefined states
-/// - **Clear Flow Logic**: Enum variants make workflow logic explicit
+/// - **Clear Workflow Logic**: Enum variants make workflow logic explicit
 /// - **Flexible Node Types**: Accept different node implementations per state
 /// - **Easy Testing**: Test individual states and transitions independently
 /// - **Maintainable**: Changes to workflow structure are type-checked
-pub struct Flow<T, S>
+pub struct Workflow<T, S>
 where
     T: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
     S: crate::store::Store,
@@ -220,12 +220,12 @@ where
     pub exit_states: std::collections::HashSet<T>,
 }
 
-impl<T, S> Flow<T, S>
+impl<T, S> Workflow<T, S>
 where
     T: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
     S: crate::store::Store,
 {
-    /// Create a new Flow with a starting state
+    /// Create a new Workflow with a starting state
     pub fn new(start_state: T) -> Self {
         Self {
             start_state: Some(start_state),
@@ -261,12 +261,12 @@ where
         self
     }
 
-    /// Execute the typed flow with state machine orchestration
+    /// Execute the typed workflow with state machine orchestration
     ///
     /// This method runs the workflow by starting from the initial state and transitioning
     /// between states based on node outcomes until an exit state is reached or an error occurs.
     ///
-    /// ## Flow Execution
+    /// ## Workflow Execution
     ///
     /// 1. Start with the configured initial state
     /// 2. Look up the node registered for the current state
@@ -287,7 +287,7 @@ where
         let mut current_state = self
             .start_state
             .as_ref()
-            .ok_or_else(|| CanoError::flow("No start state defined"))?
+            .ok_or_else(|| CanoError::workflow("No start state defined"))?
             .clone();
 
         loop {
@@ -298,7 +298,7 @@ where
 
             // Look up the node for the current state
             let node = self.state_nodes.get(&current_state).ok_or_else(|| {
-                CanoError::flow(format!("No node registered for state: {current_state:?}"))
+                CanoError::workflow(format!("No node registered for state: {current_state:?}"))
             })?;
 
             // Execute the node and get the next state
@@ -307,7 +307,7 @@ where
                     current_state = next_state;
                 }
                 Err(e) => {
-                    return Err(CanoError::flow(format!(
+                    return Err(CanoError::workflow(format!(
                         "Node execution failed in state {current_state:?}: {e}"
                     )));
                 }
@@ -316,26 +316,26 @@ where
     }
 }
 
-/// Builder for creating Flow instances with a fluent API
+/// Builder for creating Workflow instances with a fluent API
 ///
 /// Provides a convenient way to construct flows with method chaining.
-pub struct FlowBuilder<T, S>
+pub struct WorkflowBuilder<T, S>
 where
     T: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
     S: crate::store::Store,
 {
-    flow: Flow<T, S>,
+    workflow: Workflow<T, S>,
 }
 
-impl<T, S> FlowBuilder<T, S>
+impl<T, S> WorkflowBuilder<T, S>
 where
     T: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
     S: crate::store::Store,
 {
-    /// Create a new FlowBuilder with a starting state
+    /// Create a new WorkflowBuilder with a starting state
     pub fn new(start_state: T) -> Self {
         Self {
-            flow: Flow::new(start_state),
+            workflow: Workflow::new(start_state),
         }
     }
 
@@ -344,25 +344,25 @@ where
     where
         N: Node<T, crate::node::DefaultParams, S> + Send + Sync + 'static,
     {
-        self.flow.register_node(state, node);
+        self.workflow.register_node(state, node);
         self
     }
 
     /// Add an exit state
     pub fn add_exit_state(mut self, state: T) -> Self {
-        self.flow.add_exit_state(state);
+        self.workflow.add_exit_state(state);
         self
     }
 
     /// Add multiple exit states
     pub fn add_exit_states(mut self, states: Vec<T>) -> Self {
-        self.flow.add_exit_states(states);
+        self.workflow.add_exit_states(states);
         self
     }
 
-    /// Build the final Flow instance
-    pub fn build(self) -> Flow<T, S> {
-        self.flow
+    /// Build the final Workflow instance
+    pub fn build(self) -> Workflow<T, S> {
+        self.workflow
     }
 }
 
@@ -574,83 +574,83 @@ mod tests {
 
     #[tokio::test]
     async fn test_flow_creation() {
-        let flow: Flow<TestState, MemoryStore> = Flow::new(TestState::Start);
-        assert_eq!(flow.start_state, Some(TestState::Start));
-        assert!(flow.state_nodes.is_empty());
-        assert!(flow.exit_states.is_empty());
+        let workflow: Workflow<TestState, MemoryStore> = Workflow::new(TestState::Start);
+        assert_eq!(workflow.start_state, Some(TestState::Start));
+        assert!(workflow.state_nodes.is_empty());
+        assert!(workflow.exit_states.is_empty());
     }
 
     #[tokio::test]
     async fn test_flow_register_node() {
-        let mut flow: Flow<TestState, MemoryStore> = Flow::new(TestState::Start);
+        let mut workflow: Workflow<TestState, MemoryStore> = Workflow::new(TestState::Start);
         let node = SuccessNode::new(TestState::Complete);
 
-        flow.register_node(TestState::Start, node);
+        workflow.register_node(TestState::Start, node);
 
-        assert_eq!(flow.state_nodes.len(), 1);
-        assert!(flow.state_nodes.contains_key(&TestState::Start));
+        assert_eq!(workflow.state_nodes.len(), 1);
+        assert!(workflow.state_nodes.contains_key(&TestState::Start));
     }
 
     #[tokio::test]
     async fn test_flow_add_exit_states() {
-        let mut flow: Flow<TestState, MemoryStore> = Flow::new(TestState::Start);
+        let mut workflow: Workflow<TestState, MemoryStore> = Workflow::new(TestState::Start);
 
-        flow.add_exit_states(vec![TestState::Complete, TestState::Error]);
+        workflow.add_exit_states(vec![TestState::Complete, TestState::Error]);
 
-        assert_eq!(flow.exit_states.len(), 2);
-        assert!(flow.exit_states.contains(&TestState::Complete));
-        assert!(flow.exit_states.contains(&TestState::Error));
+        assert_eq!(workflow.exit_states.len(), 2);
+        assert!(workflow.exit_states.contains(&TestState::Complete));
+        assert!(workflow.exit_states.contains(&TestState::Error));
     }
 
     #[tokio::test]
     async fn test_flow_add_single_exit_state() {
-        let mut flow: Flow<TestState, MemoryStore> = Flow::new(TestState::Start);
+        let mut workflow: Workflow<TestState, MemoryStore> = Workflow::new(TestState::Start);
 
-        flow.add_exit_state(TestState::Complete);
+        workflow.add_exit_state(TestState::Complete);
 
-        assert_eq!(flow.exit_states.len(), 1);
-        assert!(flow.exit_states.contains(&TestState::Complete));
+        assert_eq!(workflow.exit_states.len(), 1);
+        assert!(workflow.exit_states.contains(&TestState::Complete));
     }
 
     #[tokio::test]
     async fn test_flow_start_state_change() {
-        let mut flow: Flow<TestState, MemoryStore> = Flow::new(TestState::Start);
+        let mut workflow: Workflow<TestState, MemoryStore> = Workflow::new(TestState::Start);
 
-        flow.start(TestState::Process);
+        workflow.start(TestState::Process);
 
-        assert_eq!(flow.start_state, Some(TestState::Process));
+        assert_eq!(workflow.start_state, Some(TestState::Process));
     }
 
     #[tokio::test]
     async fn test_simple_workflow_execution() {
-        let mut flow = Flow::new(TestState::Start);
+        let mut workflow = Workflow::new(TestState::Start);
         let node = SuccessNode::new(TestState::Complete);
 
-        flow.register_node(TestState::Start, node)
+        workflow.register_node(TestState::Start, node)
             .add_exit_state(TestState::Complete);
 
         let store = MemoryStore::new();
-        let result = flow.orchestrate(&store).await.unwrap();
+        let result = workflow.orchestrate(&store).await.unwrap();
 
         assert_eq!(result, TestState::Complete);
     }
 
     #[tokio::test]
     async fn test_multi_step_workflow() {
-        let mut flow = Flow::new(TestState::Start);
+        let mut workflow = Workflow::new(TestState::Start);
 
         // Create nodes for each step
         let start_node = SuccessNode::new(TestState::Process);
         let process_node = SuccessNode::new(TestState::Validate);
         let validate_node = SuccessNode::new(TestState::Complete);
 
-        flow.register_node(TestState::Start, start_node)
+        workflow.register_node(TestState::Start, start_node)
             .register_node(TestState::Process, process_node)
             .register_node(TestState::Validate, validate_node)
             .add_exit_state(TestState::Complete);
 
         let store = MemoryStore::new();
-        let result = flow.orchestrate(&store).await.unwrap();
+        let result = workflow.orchestrate(&store).await.unwrap();
 
         assert_eq!(result, TestState::Complete);
 
@@ -662,7 +662,7 @@ mod tests {
     #[tokio::test]
     async fn test_workflow_with_data_passing() {
         // Test with DataStoringNode first
-        let mut flow1 = Flow::new(TestState::Start);
+        let mut flow1 = Workflow::new(TestState::Start);
         let data_node = DataStoringNode::new("workflow_data", "test_value", TestState::Process);
         flow1
             .register_node(TestState::Start, data_node)
@@ -677,7 +677,7 @@ mod tests {
         assert_eq!(stored_data, "test_value");
 
         // Test with ConditionalNode
-        let mut flow2 = Flow::new(TestState::Validate);
+        let mut flow2 = Workflow::new(TestState::Validate);
         let validation_node = ConditionalNode::new(
             "workflow_data",
             "test_value",
@@ -694,16 +694,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_workflow_error_handling() {
-        let mut flow: Flow<TestState, MemoryStore> = Flow::new(TestState::Start);
+        let mut workflow: Workflow<TestState, MemoryStore> = Workflow::new(TestState::Start);
 
         // Node that will fail
         let failing_node = FailureNode::new("Test failure");
 
-        flow.register_node(TestState::Start, failing_node)
+        workflow.register_node(TestState::Start, failing_node)
             .add_exit_state(TestState::Error);
 
         let store = MemoryStore::new();
-        let result = flow.orchestrate(&store).await;
+        let result = workflow.orchestrate(&store).await;
 
         assert!(result.is_err());
         let error = result.unwrap_err();
@@ -713,13 +713,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_unregistered_node_error() {
-        let mut flow: Flow<TestState, MemoryStore> = Flow::new(TestState::Start);
+        let mut workflow: Workflow<TestState, MemoryStore> = Workflow::new(TestState::Start);
 
         // Don't register any nodes
-        flow.add_exit_state(TestState::Complete);
+        workflow.add_exit_state(TestState::Complete);
 
         let store = MemoryStore::new();
-        let result = flow.orchestrate(&store).await;
+        let result = workflow.orchestrate(&store).await;
 
         assert!(result.is_err());
         let error = result.unwrap_err();
@@ -728,11 +728,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_start_state_error() {
-        let mut flow: Flow<TestState, MemoryStore> = Flow::new(TestState::Start);
-        flow.start_state = None; // Manually clear start state
+        let mut workflow: Workflow<TestState, MemoryStore> = Workflow::new(TestState::Start);
+        workflow.start_state = None; // Manually clear start state
 
         let store = MemoryStore::new();
-        let result = flow.orchestrate(&store).await;
+        let result = workflow.orchestrate(&store).await;
 
         assert!(result.is_err());
         let error = result.unwrap_err();
@@ -741,19 +741,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_immediate_exit_state() {
-        let mut flow: Flow<TestState, MemoryStore> = Flow::new(TestState::Complete);
+        let mut workflow: Workflow<TestState, MemoryStore> = Workflow::new(TestState::Complete);
 
-        flow.add_exit_state(TestState::Complete);
+        workflow.add_exit_state(TestState::Complete);
 
         let store = MemoryStore::new();
-        let result = flow.orchestrate(&store).await.unwrap();
+        let result = workflow.orchestrate(&store).await.unwrap();
 
         assert_eq!(result, TestState::Complete);
     }
 
     #[tokio::test]
     async fn test_conditional_branching() {
-        let mut flow = Flow::new(TestState::Start);
+        let mut workflow = Workflow::new(TestState::Start);
 
         // Store different values and test both paths
         let store = MemoryStore::new();
@@ -768,26 +768,26 @@ mod tests {
             TestState::Error,
         );
 
-        flow.register_node(TestState::Start, conditional_node)
+        workflow.register_node(TestState::Start, conditional_node)
             .add_exit_states(vec![TestState::Complete, TestState::Error]);
 
-        let result = flow.orchestrate(&store).await.unwrap();
+        let result = workflow.orchestrate(&store).await.unwrap();
         assert_eq!(result, TestState::Complete);
 
         // Test failure path
         store
             .put("branch_condition", "failure".to_string())
             .unwrap();
-        let result2 = flow.orchestrate(&store).await.unwrap();
+        let result2 = workflow.orchestrate(&store).await.unwrap();
         assert_eq!(result2, TestState::Error);
     }
 
     #[tokio::test]
     async fn test_complex_workflow_with_multiple_paths() {
-        // Create separate flows for different paths since each flow can only have one node type
+        // Create separate flows for different paths since each workflow can only have one node type
 
         // Test the main data store path
-        let mut flow1 = Flow::new(TestState::Start);
+        let mut flow1 = Workflow::new(TestState::Start);
         let start_node = DataStoringNode::new("process_data", "valid", TestState::Process);
         flow1
             .register_node(TestState::Start, start_node)
@@ -798,7 +798,7 @@ mod tests {
         assert_eq!(result1, TestState::Process);
 
         // Test the success node processing
-        let mut flow2 = Flow::new(TestState::Process);
+        let mut flow2 = Workflow::new(TestState::Process);
         let process_node = SuccessNode::new(TestState::Validate);
         flow2
             .register_node(TestState::Process, process_node)
@@ -808,7 +808,7 @@ mod tests {
         assert_eq!(result2, TestState::Validate);
 
         // Test the conditional validation
-        let mut flow3 = Flow::new(TestState::Validate);
+        let mut flow3 = Workflow::new(TestState::Validate);
         let validate_node = ConditionalNode::new(
             "process_data",
             "valid",
@@ -829,7 +829,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_node_execution_counting() {
-        let mut flow = Flow::new(TestState::Start);
+        let mut workflow = Workflow::new(TestState::Start);
 
         let start_node = SuccessNode::new(TestState::Process);
         let process_node = SuccessNode::new(TestState::Complete);
@@ -838,12 +838,12 @@ mod tests {
         let start_node_ref = start_node.clone();
         let process_node_ref = process_node.clone();
 
-        flow.register_node(TestState::Start, start_node)
+        workflow.register_node(TestState::Start, start_node)
             .register_node(TestState::Process, process_node)
             .add_exit_state(TestState::Complete);
 
         let store = MemoryStore::new();
-        flow.orchestrate(&store).await.unwrap();
+        workflow.orchestrate(&store).await.unwrap();
 
         // Verify each node was executed once
         assert_eq!(start_node_ref.execution_count(), 1);
@@ -855,24 +855,24 @@ mod tests {
         let start_node = SuccessNode::new(TestState::Process);
         let process_node = SuccessNode::new(TestState::Complete);
 
-        let flow = FlowBuilder::new(TestState::Start)
+        let workflow = WorkflowBuilder::new(TestState::Start)
             .register_node(TestState::Start, start_node)
             .register_node(TestState::Process, process_node)
             .add_exit_state(TestState::Complete)
             .build();
 
-        assert_eq!(flow.start_state, Some(TestState::Start));
-        assert_eq!(flow.state_nodes.len(), 2);
-        assert!(flow.exit_states.contains(&TestState::Complete));
+        assert_eq!(workflow.start_state, Some(TestState::Start));
+        assert_eq!(workflow.state_nodes.len(), 2);
+        assert!(workflow.exit_states.contains(&TestState::Complete));
 
         let store = MemoryStore::new();
-        let result = flow.orchestrate(&store).await.unwrap();
+        let result = workflow.orchestrate(&store).await.unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
     #[tokio::test]
     async fn test_flow_builder_with_multiple_exit_states() {
-        let flow: Flow<TestState, MemoryStore> = FlowBuilder::new(TestState::Start)
+        let workflow: Workflow<TestState, MemoryStore> = WorkflowBuilder::new(TestState::Start)
             .register_node(TestState::Start, SuccessNode::new(TestState::Complete))
             .add_exit_states(vec![
                 TestState::Complete,
@@ -881,27 +881,27 @@ mod tests {
             ])
             .build();
 
-        assert_eq!(flow.exit_states.len(), 3);
-        assert!(flow.exit_states.contains(&TestState::Complete));
-        assert!(flow.exit_states.contains(&TestState::Error));
-        assert!(flow.exit_states.contains(&TestState::Cleanup));
+        assert_eq!(workflow.exit_states.len(), 3);
+        assert!(workflow.exit_states.contains(&TestState::Complete));
+        assert!(workflow.exit_states.contains(&TestState::Error));
+        assert!(workflow.exit_states.contains(&TestState::Cleanup));
     }
 
     #[tokio::test]
     async fn test_workflow_data_persistence() {
-        let mut flow = Flow::new(TestState::Start);
+        let mut workflow = Workflow::new(TestState::Start);
 
         // First node stores data
         let data_node1 = DataStoringNode::new("step1", "data1", TestState::Process);
         // Second node stores more data
         let data_node2 = DataStoringNode::new("step2", "data2", TestState::Complete);
 
-        flow.register_node(TestState::Start, data_node1)
+        workflow.register_node(TestState::Start, data_node1)
             .register_node(TestState::Process, data_node2)
             .add_exit_state(TestState::Complete);
 
         let store = MemoryStore::new();
-        flow.orchestrate(&store).await.unwrap();
+        workflow.orchestrate(&store).await.unwrap();
 
         // Verify both pieces of data are stored
         let data1: String = store.get("step1").unwrap();
@@ -912,7 +912,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_workflow_with_missing_data() {
-        let mut flow = Flow::new(TestState::Start);
+        let mut workflow = Workflow::new(TestState::Start);
 
         // Node that tries to read non-existent data
         let validation_node = ConditionalNode::new(
@@ -922,11 +922,11 @@ mod tests {
             TestState::Error,
         );
 
-        flow.register_node(TestState::Start, validation_node)
+        workflow.register_node(TestState::Start, validation_node)
             .add_exit_states(vec![TestState::Complete, TestState::Error]);
 
         let store = MemoryStore::new();
-        let result = flow.orchestrate(&store).await;
+        let result = workflow.orchestrate(&store).await;
 
         assert!(result.is_err());
         let error = result.unwrap_err();
@@ -935,8 +935,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_mixed_node_types_workflow() {
-        // Test with different node types in the same flow
-        let mut flow: Flow<TestState, MemoryStore> = Flow::new(TestState::Start);
+        // Test with different node types in the same workflow
+        let mut workflow: Workflow<TestState, MemoryStore> = Workflow::new(TestState::Start);
 
         // Register different node types
         let data_node = DataStoringNode::new("workflow_data", "test_value", TestState::Process);
@@ -948,13 +948,13 @@ mod tests {
             TestState::Error,
         );
 
-        flow.register_node(TestState::Start, data_node)
+        workflow.register_node(TestState::Start, data_node)
             .register_node(TestState::Process, success_node)
             .register_node(TestState::Validate, conditional_node)
             .add_exit_states(vec![TestState::Complete, TestState::Error]);
 
         let store = MemoryStore::new();
-        let result = flow.orchestrate(&store).await.unwrap();
+        let result = workflow.orchestrate(&store).await.unwrap();
         assert_eq!(result, TestState::Complete);
 
         // Verify data was stored and processed correctly

@@ -65,8 +65,8 @@ impl Node<WorkflowState> for ProcessorNode {
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     // Create a 2-step workflow
-    let mut flow = Flow::new(WorkflowState::Start);
-    flow.register_node(WorkflowState::Start, ProcessorNode)
+    let mut workflow = Workflow::new(WorkflowState::Start);
+    workflow.register_node(WorkflowState::Start, ProcessorNode)
         .add_exit_state(WorkflowState::Complete);
     
     // Create store for sharing data between steps
@@ -74,7 +74,7 @@ async fn main() -> Result<(), CanoError> {
     store.put("input", "Hello Cano!".to_string())?;
     
     // Run your workflow
-    let result = flow.orchestrate(&store).await?;
+    let result = workflow.orchestrate(&store).await?;
     println!("Workflow completed: {result:?}");
     
     Ok(())
@@ -89,7 +89,7 @@ That's it! You just ran your first Cano workflow.
 - **🔗 Simple Configuration**: Fluent builder pattern makes setup intuitive  
 - **🔄 Smart Retries**: Multiple retry strategies (none, fixed, exponential backoff) with jitter support
 - **💾 Shared Store**: Thread-safe key-value store for data passing between nodes
-- **🌊 Stream Scheduling**: Built-in scheduler for running flows on intervals, cron schedules, or manual triggers
+- **🌊 Scheduler Scheduling**: Built-in scheduler for running flows on intervals, cron schedules, or manual triggers
 - **🌊 Complex Workflows**: Chain nodes together into sophisticated state machine pipelines
 - **⚡ Type Safety**: Enum-driven state transitions with compile-time safety
 - **🚀 High Performance**: Minimal overhead with direct execution for maximum throughput
@@ -166,18 +166,18 @@ enum WorkflowState {
     Error,
 }
 
-let mut flow = Flow::new(WorkflowState::Validate);
-flow.register_node(WorkflowState::Validate, validator)
+let mut workflow = Workflow::new(WorkflowState::Validate);
+workflow.register_node(WorkflowState::Validate, validator)
     .register_node(WorkflowState::Process, processor)
     .register_node(WorkflowState::SendEmail, email_sender)
     .add_exit_states(vec![WorkflowState::Complete, WorkflowState::Error]);
 
-let result = flow.orchestrate(&store).await?;
+let result = workflow.orchestrate(&store).await?;
 ```
 
-## 🌊 Stream - Simplified Scheduling
+## 🌊 Scheduler - Simplified Scheduling
 
-The Stream module provides an easy-to-use scheduler for running flows on various schedules. Perfect for building background job systems, periodic data processing, and automated workflows.
+The Scheduler module provides an easy-to-use scheduler for running flows on various schedules. Perfect for building background job systems, periodic data processing, and automated workflows.
 
 ### Quick Start with Streams
 
@@ -187,76 +187,76 @@ use tokio::time::Duration;
 
 #[tokio::main]
 async fn main() -> CanoResult<()> {
-    let mut stream: Stream<MyState, MemoryStore> = Stream::new();
+    let mut scheduler: Scheduler<MyState, MemoryStore> = Scheduler::new();
     
-    let flow = Flow::new(MyState::Start);
+    let workflow = Workflow::new(MyState::Start);
     
     // Multiple ways to schedule flows:
-    stream.every_seconds("task1", flow.clone(), 30)?;                    // Every 30 seconds
-    stream.every_minutes("task2", flow.clone(), 5)?;                     // Every 5 minutes  
-    stream.every_hours("task3", flow.clone(), 2)?;                       // Every 2 hours
-    stream.every("task4", flow.clone(), Duration::from_millis(500))?;    // Every 500ms
-    stream.cron("task5", flow.clone(), "0 */10 * * * *")?;              // Every 10 minutes (cron)
-    stream.manual("task6", flow)?;                                       // Manual trigger only
+    scheduler.every_seconds("task1", workflow.clone(), 30)?;                    // Every 30 seconds
+    scheduler.every_minutes("task2", workflow.clone(), 5)?;                     // Every 5 minutes  
+    scheduler.every_hours("task3", workflow.clone(), 2)?;                       // Every 2 hours
+    scheduler.every("task4", workflow.clone(), Duration::from_millis(500))?;    // Every 500ms
+    scheduler.cron("task5", workflow.clone(), "0 */10 * * * *")?;              // Every 10 minutes (cron)
+    scheduler.manual("task6", workflow)?;                                       // Manual trigger only
     
     // Start the scheduler
-    stream.start().await?;
+    scheduler.start().await?;
     
-    // Trigger a manual flow
-    stream.trigger("task6").await?;
+    // Trigger a manual workflow
+    scheduler.trigger("task6").await?;
     
-    // Check flow status
-    if let Some(status) = stream.status("task1").await {
+    // Check workflow status
+    if let Some(status) = scheduler.status("task1").await {
         println!("Task1 status: {:?}", status);
     }
     
     // Graceful shutdown with timeout
-    stream.stop().await?;
+    scheduler.stop().await?;
     
     Ok(())
 }
 ```
 
-### Stream Features
+### Scheduler Features
 
 - **🕐 Flexible Scheduling**: Support for intervals, cron expressions, and manual triggers
 - **⏰ Convenience Methods**: Easy `every_seconds()`, `every_minutes()`, `every_hours()` helpers
-- **📊 Status Monitoring**: Check flow status, run counts, and last execution times
+- **📊 Status Monitoring**: Check workflow status, run counts, and last execution times
 - **🔧 Manual Control**: Trigger flows manually and monitor execution
 - **🛑 Graceful Shutdown**: Stop with timeout to wait for running flows to complete
 - **🔄 Concurrent Execution**: Multiple flows can run simultaneously
 
-### Advanced Stream Usage
+### Advanced Scheduler Usage
 
 ```rust
 // Create a more complex scheduled workflow
-let mut stream = Stream::new();
+let mut scheduler = Scheduler::new();
 
 // Data processing every hour
-stream.every_hours("data_sync", data_processing_flow, 1)?;
+scheduler.every_hours("data_sync", data_processing_flow, 1)?;
 
 // Health checks every 30 seconds  
-stream.every_seconds("health_check", monitoring_flow, 30)?;
+scheduler.every_seconds("health_check", monitoring_flow, 30)?;
 
 // Daily reports at 9 AM using cron
-stream.cron("daily_report", reporting_flow, "0 0 9 * * *")?;
+scheduler.cron("daily_report", reporting_flow, "0 0 9 * * *")?;
 
 // Manual cleanup task
-stream.manual("cleanup", cleanup_flow)?;
+scheduler.manual("cleanup", cleanup_flow)?;
 
 // Start the scheduler
-stream.start().await?;
+scheduler.start().await?;
 
 // Monitor running flows
 tokio::spawn(async move {
     loop {
-        let running_count = stream.running_count().await;
+        let running_count = scheduler.running_count().await;
         println!("Currently running flows: {}", running_count);
         
-        // List all flow statuses
-        let flows = stream.list().await;
+        // List all workflow statuses
+        let flows = scheduler.list().await;
         for flow_info in flows {
-            println!("Flow {}: {:?} (runs: {})", 
+            println!("Workflow {}: {:?} (runs: {})", 
                 flow_info.id, flow_info.status, flow_info.run_count);
         }
         
@@ -265,7 +265,7 @@ tokio::spawn(async move {
 });
 
 // Graceful shutdown with 30 second timeout
-stream.stop_with_timeout(Duration::from_secs(30)).await?;
+scheduler.stop_with_timeout(Duration::from_secs(30)).await?;
 ```
 
 ## 🧩 Advanced Features
@@ -345,13 +345,13 @@ Chain multiple nodes together to build sophisticated state machine pipelines:
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum State { Start, Validate, Process, Complete, Error }
 
-let mut flow = Flow::new(State::Start);
-flow.register_node(State::Start, data_loader)
+let mut workflow = Workflow::new(State::Start);
+workflow.register_node(State::Start, data_loader)
     .register_node(State::Validate, validator)
     .register_node(State::Process, processor)
     .add_exit_states(vec![State::Complete, State::Error]);
 
-let result = flow.orchestrate(&store).await?;
+let result = workflow.orchestrate(&store).await?;
 ```
 
 ## 🧪 Testing & Benchmarks
@@ -368,18 +368,18 @@ cargo bench --bench flow_performance
 cargo bench --bench node_performance
 
 # Run workflow examples
-cargo run --example flow_simple
-cargo run --example flow_book_prepositions
-cargo run --example flow_negotiation
+cargo run --example workflow_simple
+cargo run --example workflow_book_prepositions
+cargo run --example workflow_negotiation
 
-# Run stream scheduling examples
-cargo run --example stream_scheduling
-cargo run --example stream_duration_scheduling
-cargo run --example stream_concurrent_flows
-cargo run --example stream_graceful_shutdown
-```
+# Run scheduler scheduling examples
+cargo run --example scheduler_scheduling
+cargo run --example scheduler_duration_scheduling
+cargo run --example scheduler_concurrent_workflows
+cargo run --example scheduler_graceful_shutdown
 
 Benchmark results are saved in `target/criterion/` with detailed HTML reports.
+```
 
 ## 📚 Documentation
 
