@@ -438,3 +438,570 @@ where
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::node::Node;
+    use crate::store::MemoryStore;
+    use async_trait::async_trait;
+    use chrono::Timelike;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use tokio::time::sleep;
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    enum TestState {
+        Start,
+        Complete,
+        Error,
+    }
+
+    #[derive(Clone)]
+    struct TestNode {
+        execution_count: Arc<AtomicU32>,
+        should_fail: bool,
+    }
+
+    impl TestNode {
+        fn new() -> Self {
+            Self {
+                execution_count: Arc::new(AtomicU32::new(0)),
+                should_fail: false,
+            }
+        }
+
+        fn new_failing() -> Self {
+            Self {
+                execution_count: Arc::new(AtomicU32::new(0)),
+                should_fail: true,
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Node<TestState, crate::node::DefaultParams, MemoryStore> for TestNode {
+        type PrepResult = ();
+        type ExecResult = ();
+
+        async fn prep(&self, _store: &impl crate::store::Store) -> CanoResult<()> {
+            Ok(())
+        }
+
+        async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
+            self.execution_count.fetch_add(1, Ordering::Relaxed);
+        }
+
+        async fn post(
+            &self,
+            _store: &impl crate::store::Store,
+            _exec_res: Self::ExecResult,
+        ) -> CanoResult<TestState> {
+            if self.should_fail {
+                Err(CanoError::NodeExecution("Test failure".to_string()))
+            } else {
+                Ok(TestState::Complete)
+            }
+        }
+    }
+
+    fn create_test_workflow() -> Workflow<TestState, MemoryStore> {
+        let mut workflow = Workflow::new(TestState::Start);
+        workflow.register_node(TestState::Start, TestNode::new());
+        workflow.add_exit_state(TestState::Complete);
+        workflow.add_exit_state(TestState::Error);
+        workflow
+    }
+
+    fn create_failing_workflow() -> Workflow<TestState, MemoryStore> {
+        let mut workflow = Workflow::new(TestState::Start);
+        workflow.register_node(TestState::Start, TestNode::new_failing());
+        workflow.add_exit_state(TestState::Complete);
+        workflow.add_exit_state(TestState::Error);
+        workflow
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_creation() {
+        let scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        assert!(!scheduler.has_running_flows().await);
+        assert_eq!(scheduler.running_count().await, 0);
+        assert!(scheduler.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_add_workflow_every_seconds() {
+        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let workflow = create_test_workflow();
+
+        let result = scheduler.every_seconds("test_task", workflow, 5);
+        assert!(result.is_ok());
+
+        let flows = scheduler.list().await;
+        assert_eq!(flows.len(), 1);
+        assert_eq!(flows[0].id, "test_task");
+        assert_eq!(flows[0].status, Status::Idle);
+        assert_eq!(flows[0].run_count, 0);
+    }
+
+    #[tokio::test]
+    async fn test_add_workflow_every_minutes() {
+        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let workflow = create_test_workflow();
+
+        let result = scheduler.every_minutes("test_task", workflow, 2);
+        assert!(result.is_ok());
+
+        let status = scheduler.status("test_task").await;
+        assert!(status.is_some());
+        assert_eq!(status.unwrap().id, "test_task");
+    }
+
+    #[tokio::test]
+    async fn test_add_workflow_every_hours() {
+        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let workflow = create_test_workflow();
+
+        let result = scheduler.every_hours("test_task", workflow, 1);
+        assert!(result.is_ok());
+
+        let status = scheduler.status("test_task").await;
+        assert!(status.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_add_workflow_every_duration() {
+        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let workflow = create_test_workflow();
+
+        let result = scheduler.every("test_task", workflow, Duration::from_millis(100));
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_add_workflow_cron() {
+        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let workflow = create_test_workflow();
+
+        // Valid cron expression
+        let result = scheduler.cron("test_task", workflow, "0 */5 * * * *");
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_add_workflow_cron_invalid() {
+        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let workflow = create_test_workflow();
+
+        // Invalid cron expression
+        let result = scheduler.cron("test_task", workflow, "invalid cron");
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), CanoError::Configuration(_)));
+    }
+
+    #[tokio::test]
+    async fn test_add_workflow_manual() {
+        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let workflow = create_test_workflow();
+
+        let result = scheduler.manual("test_task", workflow);
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_duplicate_workflow_id() {
+        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let workflow1 = create_test_workflow();
+        let workflow2 = create_test_workflow();
+
+        scheduler.every_seconds("test_task", workflow1, 5).unwrap();
+
+        let result = scheduler.every_seconds("test_task", workflow2, 10);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), CanoError::Configuration(_)));
+    }
+
+    #[tokio::test]
+    async fn test_manual_trigger_without_start() {
+        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let workflow = create_test_workflow();
+        scheduler.manual("test_task", workflow).unwrap();
+
+        let result = scheduler.trigger("test_task").await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), CanoError::Configuration(_)));
+    }
+
+    #[tokio::test]
+    async fn test_start_and_stop() {
+        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let workflow = create_test_workflow();
+        scheduler.manual("test_task", workflow).unwrap();
+
+        // Start scheduler
+        scheduler.start().await.unwrap();
+
+        // Try to start again (should fail)
+        let result = scheduler.start().await;
+        assert!(result.is_err());
+
+        // Stop scheduler
+        scheduler.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_stop_immediately() {
+        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let workflow = create_test_workflow();
+        scheduler.manual("test_task", workflow).unwrap();
+
+        scheduler.start().await.unwrap();
+        scheduler.stop_immediately().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_manual_trigger_success() {
+        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let workflow = create_test_workflow();
+        scheduler.manual("test_task", workflow).unwrap();
+
+        scheduler.start().await.unwrap();
+
+        // Trigger manually
+        scheduler.trigger("test_task").await.unwrap();
+
+        // Give some time for execution
+        sleep(Duration::from_millis(100)).await;
+
+        let status = scheduler.status("test_task").await.unwrap();
+        assert_eq!(status.run_count, 1);
+        assert_eq!(status.status, Status::Idle);
+        assert!(status.last_run.is_some());
+
+        scheduler.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_manual_trigger_nonexistent() {
+        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        scheduler.start().await.unwrap();
+
+        scheduler.trigger("nonexistent").await.unwrap(); // Should not fail, just do nothing
+
+        scheduler.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_workflow_execution_failure() {
+        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let workflow = create_failing_workflow();
+        scheduler.manual("test_task", workflow).unwrap();
+
+        scheduler.start().await.unwrap();
+        scheduler.trigger("test_task").await.unwrap();
+
+        // Give more time for execution and poll status
+        for _ in 0..10 {
+            sleep(Duration::from_millis(100)).await;
+            let status = scheduler.status("test_task").await.unwrap();
+            if !matches!(status.status, Status::Running) {
+                break;
+            }
+        }
+
+        let status = scheduler.status("test_task").await.unwrap();
+        assert!(matches!(status.status, Status::Failed(_)));
+        assert_eq!(status.run_count, 0); // Should not increment on failure
+
+        scheduler.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_status_nonexistent_workflow() {
+        let scheduler = Scheduler::<TestState, MemoryStore>::new();
+        let status = scheduler.status("nonexistent").await;
+        assert!(status.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_multiple_workflows() {
+        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+
+        scheduler.manual("task1", create_test_workflow()).unwrap();
+        scheduler.manual("task2", create_test_workflow()).unwrap();
+        scheduler.manual("task3", create_test_workflow()).unwrap();
+
+        let flows = scheduler.list().await;
+        assert_eq!(flows.len(), 3);
+
+        let ids: Vec<&str> = flows.iter().map(|f| f.id.as_str()).collect();
+        assert!(ids.contains(&"task1"));
+        assert!(ids.contains(&"task2"));
+        assert!(ids.contains(&"task3"));
+    }
+
+    #[tokio::test]
+    async fn test_running_flows_tracking() {
+        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        scheduler
+            .manual("test_task", create_test_workflow())
+            .unwrap();
+
+        // Initially no running flows
+        assert!(!scheduler.has_running_flows().await);
+        assert_eq!(scheduler.running_count().await, 0);
+
+        scheduler.start().await.unwrap();
+        scheduler.trigger("test_task").await.unwrap();
+
+        // Give some time for execution to complete
+        sleep(Duration::from_millis(100)).await;
+
+        // Should be back to no running flows
+        assert!(!scheduler.has_running_flows().await);
+        assert_eq!(scheduler.running_count().await, 0);
+
+        scheduler.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_should_run_manual() {
+        let mut last_check = HashMap::new();
+        let schedule = Schedule::Manual;
+        let now = Utc::now();
+
+        assert!(!should_run(&schedule, &mut last_check, "test", now));
+    }
+
+    #[tokio::test]
+    async fn test_should_run_every() {
+        let mut last_check = HashMap::new();
+        let schedule = Schedule::Every(Duration::from_millis(100));
+        let now = Utc::now();
+
+        // First run should trigger
+        assert!(should_run(&schedule, &mut last_check, "test", now));
+
+        // Immediate second run should not trigger
+        assert!(!should_run(&schedule, &mut last_check, "test", now));
+
+        // After interval, should trigger again
+        let later = now + chrono::Duration::milliseconds(200);
+        assert!(should_run(&schedule, &mut last_check, "test", later));
+    }
+
+    #[tokio::test]
+    async fn test_should_run_cron() {
+        let mut last_check = HashMap::new();
+        // Every minute cron expression
+        let schedule = Schedule::Cron("0 * * * * *".to_string());
+
+        // Set a time just before the minute boundary
+        let base_time = Utc::now()
+            .with_second(59)
+            .unwrap()
+            .with_nanosecond(0)
+            .unwrap();
+
+        // Should not run before the minute
+        assert!(!should_run(&schedule, &mut last_check, "test", base_time));
+
+        // Should run at the minute boundary
+        let minute_boundary = base_time + chrono::Duration::seconds(1);
+        assert!(should_run(
+            &schedule,
+            &mut last_check,
+            "test",
+            minute_boundary
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_should_run_invalid_cron() {
+        let mut last_check = HashMap::new();
+        let schedule = Schedule::Cron("invalid cron".to_string());
+        let now = Utc::now();
+
+        // Invalid cron should never trigger
+        assert!(!should_run(&schedule, &mut last_check, "test", now));
+    }
+
+    #[tokio::test]
+    async fn test_stop_with_timeout() {
+        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        scheduler
+            .manual("test_task", create_test_workflow())
+            .unwrap();
+
+        scheduler.start().await.unwrap();
+
+        // Stop with a very short timeout should work since we have no running flows
+        let result = scheduler.stop_with_timeout(Duration::from_millis(1)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_default() {
+        let scheduler: Scheduler<TestState, MemoryStore> = Scheduler::default();
+        assert!(scheduler.list().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_flow_info_creation() {
+        let info = FlowInfo {
+            id: "test".to_string(),
+            status: Status::Idle,
+            run_count: 5,
+            last_run: Some(Utc::now()),
+        };
+
+        assert_eq!(info.id, "test");
+        assert_eq!(info.status, Status::Idle);
+        assert_eq!(info.run_count, 5);
+        assert!(info.last_run.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_status_variants() {
+        let idle = Status::Idle;
+        let running = Status::Running;
+        let failed = Status::Failed("error".to_string());
+
+        assert_ne!(idle, running);
+        assert_ne!(running, failed);
+        assert_ne!(idle, failed);
+
+        // Test clone
+        let failed_clone = failed.clone();
+        assert_eq!(failed, failed_clone);
+    }
+
+    #[tokio::test]
+    async fn test_schedule_variants() {
+        let every = Schedule::Every(Duration::from_secs(60));
+        let cron = Schedule::Cron("0 * * * * *".to_string());
+        let manual = Schedule::Manual;
+
+        // Test that all variants can be created and cloned
+        let _every_clone = every.clone();
+        let _cron_clone = cron.clone();
+        let _manual_clone = manual.clone();
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_manual_triggers() {
+        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        scheduler
+            .manual("test_task", create_test_workflow())
+            .unwrap();
+        scheduler.start().await.unwrap();
+
+        // Trigger multiple times concurrently
+        let triggers = vec![
+            scheduler.trigger("test_task"),
+            scheduler.trigger("test_task"),
+            scheduler.trigger("test_task"),
+        ];
+
+        for trigger in triggers {
+            trigger.await.unwrap();
+        }
+
+        // Give time for execution
+        sleep(Duration::from_millis(200)).await;
+
+        let status = scheduler.status("test_task").await.unwrap();
+        assert!(status.run_count >= 1); // At least one should have run
+
+        scheduler.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_cleanup_on_drop() {
+        // This test ensures that the scheduler can be dropped without issues
+        {
+            let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+            scheduler
+                .manual("test_task", create_test_workflow())
+                .unwrap();
+            scheduler.start().await.unwrap();
+            // scheduler will be dropped here
+        }
+
+        // If we reach here without hanging, the test passes
+        assert_eq!(true, true, "Scheduler dropped without issues");
+    }
+
+    #[tokio::test]
+    async fn test_execute_flow_function() {
+        // Test the execute_flow function directly
+        let workflow = Arc::new(create_test_workflow());
+        let info = Arc::new(RwLock::new(FlowInfo {
+            id: "test".to_string(),
+            status: Status::Idle,
+            run_count: 0,
+            last_run: None,
+        }));
+        let store = MemoryStore::default();
+
+        // Before execution
+        assert_eq!(info.read().await.status, Status::Idle);
+        assert_eq!(info.read().await.run_count, 0);
+
+        // Execute
+        execute_flow(workflow, Arc::clone(&info), store).await;
+
+        // After execution
+        let final_info = info.read().await;
+        assert_eq!(final_info.status, Status::Idle);
+        assert_eq!(final_info.run_count, 1);
+        assert!(final_info.last_run.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_execute_flow_function_failure() {
+        // Test the execute_flow function with a failing workflow
+        let workflow = Arc::new(create_failing_workflow());
+        let info = Arc::new(RwLock::new(FlowInfo {
+            id: "test".to_string(),
+            status: Status::Idle,
+            run_count: 0,
+            last_run: None,
+        }));
+        let store = MemoryStore::default();
+
+        // Execute
+        execute_flow(workflow, Arc::clone(&info), store).await;
+
+        // After execution
+        let final_info = info.read().await;
+        assert!(matches!(final_info.status, Status::Failed(_)));
+        assert_eq!(final_info.run_count, 0); // Should not increment on failure
+        assert!(final_info.last_run.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_time_based_scheduling_logic() {
+        // Test the actual scheduling logic more thoroughly
+        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+
+        // Create a workflow that runs every 100ms
+        scheduler
+            .every(
+                "fast_task",
+                create_test_workflow(),
+                Duration::from_millis(100),
+            )
+            .unwrap();
+
+        scheduler.start().await.unwrap();
+
+        // Wait for multiple execution cycles
+        sleep(Duration::from_millis(250)).await;
+
+        let status = scheduler.status("fast_task").await.unwrap();
+        // Should have run at least once (being less strict since timing can be tricky in tests)
+        assert!(status.run_count >= 1);
+
+        scheduler.stop().await.unwrap();
+    }
+}
