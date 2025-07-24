@@ -20,7 +20,6 @@
 use async_trait::async_trait;
 use cano::prelude::*;
 use chrono::Utc;
-use std::collections::HashMap;
 use tokio::time::{Duration, sleep};
 
 /// Workflow states for our example flows
@@ -49,8 +48,6 @@ impl ReportNode {
 impl Node<WorkflowAction, DefaultParams, MemoryStore> for ReportNode {
     type PrepResult = String;
     type ExecResult = String;
-
-    fn set_params(&mut self, _params: HashMap<String, String>) {}
 
     fn config(&self) -> NodeConfig {
         NodeConfig::minimal()
@@ -98,8 +95,6 @@ impl CleanupNode {
 impl Node<WorkflowAction, DefaultParams, MemoryStore> for CleanupNode {
     type PrepResult = Vec<String>;
     type ExecResult = usize;
-
-    fn set_params(&mut self, _params: HashMap<String, String>) {}
 
     fn config(&self) -> NodeConfig {
         NodeConfig::minimal()
@@ -153,8 +148,6 @@ impl Node<WorkflowAction, DefaultParams, MemoryStore> for ManualTaskNode {
     type PrepResult = String;
     type ExecResult = String;
 
-    fn set_params(&mut self, _params: HashMap<String, String>) {}
-
     fn config(&self) -> NodeConfig {
         NodeConfig::minimal()
     }
@@ -201,8 +194,6 @@ impl SetupNode {
 impl Node<WorkflowAction, DefaultParams, MemoryStore> for SetupNode {
     type PrepResult = Vec<String>;
     type ExecResult = bool;
-
-    fn set_params(&mut self, _params: HashMap<String, String>) {}
 
     fn config(&self) -> NodeConfig {
         NodeConfig::minimal()

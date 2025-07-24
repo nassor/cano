@@ -2,7 +2,6 @@
 
 use async_trait::async_trait;
 use cano::prelude::*;
-use std::collections::HashMap;
 use tokio::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -20,8 +19,6 @@ struct DemoNode(String);
 impl Node<TaskState> for DemoNode {
     type PrepResult = ();
     type ExecResult = ();
-
-    fn set_params(&mut self, _params: HashMap<String, String>) {}
 
     async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
         Ok(())

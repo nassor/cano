@@ -1,9 +1,8 @@
 // Example: Graceful Shutdown with Timeout
 
+use async_trait::async_trait;
 use cano::prelude::*;
 use tokio::time::Duration;
-use async_trait::async_trait;
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum MyState {
@@ -21,8 +20,6 @@ struct LongProcessingNode;
 impl Node<MyState> for LongProcessingNode {
     type PrepResult = ();
     type ExecResult = ();
-
-    fn set_params(&mut self, _params: HashMap<String, String>) {}
 
     async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
         Ok(())
@@ -51,8 +48,6 @@ struct QuickNode;
 impl Node<MyState> for QuickNode {
     type PrepResult = ();
     type ExecResult = ();
-
-    fn set_params(&mut self, _params: HashMap<String, String>) {}
 
     async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
         Ok(())
