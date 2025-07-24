@@ -1,4 +1,4 @@
-# Cano: Simple & Fast Async Workflows in Rust 🚀
+# Cano: Async Workflows in Rust
 
 [![Crates.io](https://img.shields.io/crates/v/cano.svg)](https://crates.io/crates/cano)
 [![Documentation](https://docs.rs/cano/badge.svg)](https://docs.rs/cano)
@@ -6,15 +6,15 @@
 [![License](https://img.shields.io/crates/l/cano.svg)](https://github.com/nassor/cano/blob/main/LICENSE)
 [![CI](https://github.com/nassor/cano/workflows/CI/badge.svg)](https://github.com/nassor/cano/actions)
 
-**Async workflow engine with built-in scheduling, retry logic, and state machine semantics.**
+An async workflow engine with built-in scheduling, retry logic, and state machine semantics.
 
-Cano is a lightweight, async workflow engine for Rust that turns complex processing into simple, composable workflows.
+Cano is an async workflow engine for Rust that manages complex processing through composable workflows.
 
-The engine is built on three core concepts: **Nodes** to encapsulate your business logic, **Workflows** to manage state transitions, and **Schedulers** to run your workflows on a schedule. This library-driven approach allows you to define complex processes with ease.
+The engine is built on three core concepts: **Nodes** to encapsulate business logic, **Workflows** to manage state transitions, and **Schedulers** to run workflows on a schedule.
 
-The Node API is inspired by the [PocketFlow](https://github.com/The-Pocket/PocketFlow) project, but has been re-imagined for Rust's async ecosystem with a strong focus on simplicity and performance.
+The Node API is inspired by the [PocketFlow](https://github.com/The-Pocket/PocketFlow) project, adapted for Rust's async ecosystem.
 
-## ⚡ Quick Start
+## Getting Started
 
 Add Cano to your `Cargo.toml`:
 
@@ -25,7 +25,7 @@ async-trait = "0.1"
 tokio = { version = "1.0", features = ["full"] }
 ```
 
-### The Simplest Example
+### Basic Example
 
 ```rust
 use cano::prelude::*;
@@ -85,29 +85,29 @@ async fn main() -> Result<(), CanoError> {
 }
 ```
 
-That's it! You just ran your first Cano workflow.
+This example demonstrates a basic workflow with a single processing node.
 
-## 🎯 Why Choose Cano?
+## Features
 
-- **🏗️ Simple API**: A single `Node` trait handles everything - no complex type hierarchies
-- **🔗 Simple Configuration**: Fluent builder pattern makes setup intuitive  
-- **🔄 Smart Retries**: Multiple retry strategies (none, fixed, exponential backoff) with jitter support
-- **💾 Shared Store**: Thread-safe key-value store for data passing between nodes
-- **🌊 Scheduler Scheduling**: Built-in scheduler for running flows on intervals, cron schedules, or manual triggers
-- **🌊 Complex Workflows**: Chain nodes together into sophisticated state machine pipelines
-- **⚡ Type Safety**: Enum-driven state transitions with compile-time safety
-- **🚀 High Performance**: Minimal overhead with direct execution for maximum throughput
+- **Node-based API**: Single `Node` trait for implementing processing logic
+- **Fluent configuration**: Builder pattern for setup  
+- **Retry strategies**: None, fixed delays, and exponential backoff with jitter
+- **Shared state**: Thread-safe key-value store for data passing between nodes
+- **Scheduling**: Built-in scheduler for intervals, cron schedules, and manual triggers
+- **State machines**: Chain nodes together into complex workflows
+- **Type safety**: Enum-driven state transitions with compile-time checking
+- **Performance**: Minimal overhead with direct execution
 
-## 📖 How It Works
+## How It Works
 
-Cano is built around three simple concepts:
+Cano is built around three concepts:
 
-### 1. Nodes - Your Processing Units
+### 1. Nodes - Processing Units
 
-A `Node` trait is where your logic lives. Configure it once, and Cano handles the execution:
+A `Node` implements the processing logic for your workflow:
 
 ```rust
-// Custom node with specific logic
+// Node with specific processing logic
 struct EmailProcessor;
 
 #[async_trait]
@@ -122,7 +122,7 @@ impl Node<String> for EmailProcessor {
     }
 
     async fn exec(&self, email: Self::PrepResult) -> Self::ExecResult {
-        // Process the email (your business logic here)
+        // Process the email
         println!("Sending email to: {email}");
         true // Success
     }
@@ -140,11 +140,11 @@ impl Node<String> for EmailProcessor {
 }
 ```
 
-#### Built-in Retry Logic
+#### Retry Logic
 
-Every node includes configurable retry logic with multiple strategies:
+Each node can be configured with retry logic using different strategies:
 
-**No Retries** - Fail fast for critical operations:
+**No Retries** - Fail immediately:
 
 ```rust
 impl Node<WorkflowState> for CriticalNode {
@@ -155,7 +155,7 @@ impl Node<WorkflowState> for CriticalNode {
 }
 ```
 
-**Fixed Retries** - Consistent delays between attempts:
+**Fixed Retries** - Consistent delays:
 
 ```rust
 impl Node<WorkflowState> for ReliableNode {
@@ -167,7 +167,7 @@ impl Node<WorkflowState> for ReliableNode {
 }
 ```
 
-**Exponential Backoff** - Smart retry with increasing delays:
+**Exponential Backoff** - Increasing delays:
 
 ```rust
 impl Node<WorkflowState> for ResilientNode {
@@ -179,7 +179,7 @@ impl Node<WorkflowState> for ResilientNode {
 }
 ```
 
-**Custom Exponential Backoff** - Full control over retry behavior:
+**Custom Exponential Backoff** - Fine-tuned retry behavior:
 
 ```rust
 impl Node<WorkflowState> for CustomNode {
@@ -198,16 +198,16 @@ impl Node<WorkflowState> for CustomNode {
 }
 ```
 
-**Why Use Different Retry Modes?**
+**When to Use Different Retry Modes:**
 
-- **None**: Database transactions, critical validations where failure should be immediate
-- **Fixed**: Network calls, file operations where consistent timing is preferred  
-- **Exponential**: API calls, external services where you want to back off gracefully
-- **Custom Exponential**: High-load scenarios where you need precise control over timing and jitter
+- **None**: Database transactions, critical validations
+- **Fixed**: Network calls, file operations  
+- **Exponential**: API calls, external services
+- **Custom Exponential**: High-load scenarios requiring precise timing control
 
-### 2. Store - Share Data Between Nodes
+### 2. Store - Data Sharing
 
-Use the built-in store to pass data around your workflow:
+Use the built-in store to pass data between workflow nodes:
 
 ```rust
 let store = MemoryStore::new();
@@ -221,9 +221,9 @@ let user_id: Result<i32, _> = store.get("user_id");
 let name: Result<String, _> = store.get("name");
 ```
 
-### 3. Workflows - Chain Nodes Together
+### 3. Workflows - State Management
 
-Build complex workflows with state machine semantics:
+Build workflows with state machine semantics:
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -246,7 +246,7 @@ let result = workflow.orchestrate(&store).await?;
 
 #### Complex Workflows
 
-Build sophisticated state machine pipelines with conditional branching, error handling, and retry logic:
+Build state machine pipelines with conditional branching, error handling, and retry logic:
 
 ```mermaid
 graph TD
@@ -386,11 +386,11 @@ workflow
 let result = workflow.orchestrate(&store).await?;
 ```
 
-## Scheduler - Simplified Scheduling
+## Scheduler - Workflow Scheduling
 
-The Scheduler module provides an easy-to-use scheduler for running workflows on various schedules. Perfect for building background job systems, periodic data processing, and automated workflows.
+The Scheduler provides workflow scheduling capabilities for background jobs, periodic processing, and automated workflows.
 
-### Quick Start with Scheduler
+### Scheduler Usage
 
 ```rust
 use cano::prelude::*;
@@ -402,7 +402,7 @@ async fn main() -> CanoResult<()> {
     
     let workflow = Workflow::new(MyState::Start);
     
-    // Multiple ways to schedule flows:
+    // Multiple scheduling options:
     scheduler.every_seconds("task1", workflow.clone(), 30)?;                    // Every 30 seconds
     scheduler.every_minutes("task2", workflow.clone(), 5)?;                     // Every 5 minutes  
     scheduler.every_hours("task3", workflow.clone(), 2)?;                       // Every 2 hours
@@ -430,17 +430,17 @@ async fn main() -> CanoResult<()> {
 
 ### Scheduler Features
 
-- **🕐 Flexible Scheduling**: Support for intervals, cron expressions, and manual triggers
-- **⏰ Convenience Methods**: Easy `every_seconds()`, `every_minutes()`, `every_hours()` helpers
-- **📊 Status Monitoring**: Check workflow status, run counts, and last execution times
-- **🔧 Manual Control**: Trigger flows manually and monitor execution
-- **🛑 Graceful Shutdown**: Stop with timeout to wait for running flows to complete
-- **🔄 Concurrent Execution**: Multiple flows can run simultaneously
+- **Flexible Scheduling**: Support for intervals, cron expressions, and manual triggers
+- **Convenience Methods**: `every_seconds()`, `every_minutes()`, `every_hours()` helpers
+- **Status Monitoring**: Check workflow status, run counts, and execution times
+- **Manual Control**: Trigger flows manually and monitor execution
+- **Graceful Shutdown**: Stop with timeout for running flows to complete
+- **Concurrent Execution**: Multiple flows can run simultaneously
 
 ### Advanced Scheduler Usage
 
 ```rust
-// Create a more complex scheduled workflow
+// Scheduled workflow examples
 let mut scheduler = Scheduler::new();
 
 // Data processing every hour
@@ -479,9 +479,9 @@ tokio::spawn(async move {
 scheduler.stop_with_timeout(Duration::from_secs(30)).await?;
 ```
 
-## 🧪 Testing & Benchmarks
+## Testing & Benchmarks
 
-Verify everything works and see performance metrics:
+Run tests and view performance metrics:
 
 ```bash
 # Run all tests
@@ -503,29 +503,25 @@ cargo run --example scheduler_duration_scheduling
 cargo run --example scheduler_concurrent_workflows
 cargo run --example scheduler_graceful_shutdown
 
-Benchmark results are saved in `target/criterion/` with detailed HTML reports.
+Benchmark results are saved in `target/criterion/`.
 ```
 
-## 📚 Documentation
+## Documentation
 
 - **[API Documentation](https://docs.rs/cano)** - Complete API reference
 - **[Examples Directory](./examples/)** - Hands-on code examples
 - **[Benchmarks](./benches/)** - Performance testing and optimization
 
-## 🤝 Contributing
+## Contributing
 
-We welcome contributions! Areas where you can help:
+Contributions are welcome in the following areas:
 
-- **📝 Documentation** - Improve guides and examples
-- **🔧 Features** - Add new store backends or workflow capabilities  
-- **⚡ Performance** - Optimize hot paths and memory usage
-- **🧪 Testing** - Add test cases and edge case coverage
-- **🐛 Bug Fixes** - Report and fix issues
+- **Documentation** - Improve guides and examples
+- **Features** - Add new store backends or workflow capabilities  
+- **Performance** - Optimize performance and memory usage
+- **Testing** - Add test cases and edge case coverage
+- **Bug Fixes** - Report and fix issues
 
-## 📄 License
+## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-**Ready to build fast, reliable workflows?** Start with the examples and let Cano handle the complexity while you focus on your business logic.
