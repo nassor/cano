@@ -30,12 +30,22 @@
 //! use cano::prelude::*;
 //! use cano::stream::{Stream, FlowSchedule};
 //!
+//! #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+//! enum MyState {
+//!     Start,
+//!     End,
+//! }
+//!
 //! #[tokio::main]
 //! async fn main() -> CanoResult<()> {
-//!     let mut stream = Stream::new();
+//!     let mut stream: Stream<MyState, MemoryStore> = Stream::new();
+//!     
+//!     // Create some flows
+//!     let flow1 = Flow::new(MyState::Start);
+//!     let flow2 = Flow::new(MyState::Start);
 //!     
 //!     // Add a flow with cron schedule (every hour)
-//!     stream.add_flow("hourly_report", flow, FlowSchedule::Cron("0 0 * * * *".to_string()))?;
+//!     stream.add_flow("hourly_report", flow1, FlowSchedule::Cron("0 0 * * * *".to_string()))?;
 //!     
 //!     // Add a manually triggered flow
 //!     stream.add_flow("manual_task", flow2, FlowSchedule::Manual)?;
@@ -72,8 +82,8 @@ use cron::Schedule;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
-use tokio::time::{sleep, Duration};
+use tokio::sync::{RwLock, mpsc};
+use tokio::time::{Duration, sleep};
 
 /// Represents different scheduling modes for flows
 #[derive(Debug, Clone)]
@@ -113,10 +123,11 @@ pub struct FlowInfo {
     pub next_run: Option<DateTime<Utc>>,
     pub run_count: u64,
     pub error_count: u64,
+    pub active_instances: u64, // Track how many instances are currently running
 }
 
 /// A scheduled flow with its execution context
-struct ScheduledFlow<T, S> 
+struct ScheduledFlow<T, S>
 where
     T: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
     S: Store + Clone + Default + 'static,
@@ -129,7 +140,7 @@ where
 }
 
 /// Stream scheduler for managing multiple flows
-pub struct Stream<T, S> 
+pub struct Stream<T, S>
 where
     T: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
     S: Store + Clone + Default + 'static,
@@ -170,16 +181,16 @@ where
     ) -> CanoResult<()> {
         if self.flows.contains_key(id) {
             return Err(CanoError::Configuration(format!(
-                "Flow with id '{}' already exists",
-                id
+                "Flow with id '{id}' already exists",
             )));
         }
 
         let next_run = match &schedule {
             FlowSchedule::Manual => None,
             FlowSchedule::Cron(expr) => {
-                let schedule = Schedule::from_str(expr)
-                    .map_err(|e| CanoError::Configuration(format!("Invalid cron expression: {}", e)))?;
+                let schedule = Schedule::from_str(expr).map_err(|e| {
+                    CanoError::Configuration(format!("Invalid cron expression: {e}"))
+                })?;
                 schedule.upcoming(Utc).next()
             }
             FlowSchedule::Interval(seconds) => {
@@ -196,6 +207,7 @@ where
             next_run,
             run_count: 0,
             error_count: 0,
+            active_instances: 0,
         };
 
         let scheduled_flow = ScheduledFlow {
@@ -216,8 +228,7 @@ where
             Ok(())
         } else {
             Err(CanoError::Configuration(format!(
-                "Flow with id '{}' not found",
-                id
+                "Flow with id '{id}' not found",
             )))
         }
     }
@@ -228,8 +239,7 @@ where
             Ok(scheduled_flow.info.read().await.clone())
         } else {
             Err(CanoError::Configuration(format!(
-                "Flow with id '{}' not found",
-                id
+                "Flow with id '{id}' not found",
             )))
         }
     }
@@ -300,7 +310,7 @@ where
 
                         let now = Utc::now();
                         for (_, scheduled_flow) in flows.iter_mut() {
-                            if should_run_flow::<T, S>(&scheduled_flow.schedule, &scheduled_flow.info, now).await {
+                            if should_run_flow(&scheduled_flow.schedule, &scheduled_flow.info, now).await {
                                 let flow_id = scheduled_flow.id.clone();
                                 let flow = Arc::clone(&scheduled_flow.flow);
                                 let store = scheduled_flow.store.clone();
@@ -375,9 +385,10 @@ where
         store: S,
         info: Arc<RwLock<FlowInfo>>,
     ) {
-        // Update status to running
+        // Increment active instance count and update status
         {
             let mut info_guard = info.write().await;
+            info_guard.active_instances += 1;
             info_guard.status = FlowStatus::Running;
             info_guard.last_run = Some(Utc::now());
         }
@@ -385,22 +396,33 @@ where
         // Execute the flow
         let result = flow.orchestrate(&store).await;
 
-        // Update status based on result
+        // Update status based on result and decrement active instances
         {
             let mut info_guard = info.write().await;
+            info_guard.active_instances -= 1;
+
             match result {
                 Ok(_) => {
-                    info_guard.status = FlowStatus::Completed;
                     info_guard.run_count += 1;
+                    // Only update status to Completed if no other instances are running
+                    if info_guard.active_instances == 0 {
+                        info_guard.status = FlowStatus::Completed;
+                    }
                 }
                 Err(e) => {
-                    info_guard.status = FlowStatus::Failed(e.to_string());
                     info_guard.error_count += 1;
+                    // Only update status to Failed if no other instances are running
+                    if info_guard.active_instances == 0 {
+                        info_guard.status = FlowStatus::Failed(e.to_string());
+                    }
                 }
             }
 
-            // Calculate next run time
-            info_guard.next_run = calculate_next_run(&info_guard.schedule);
+            // Calculate next run time only if no instances are running
+            // This prevents race conditions when multiple instances complete simultaneously
+            if info_guard.active_instances == 0 {
+                info_guard.next_run = calculate_next_run(&info_guard.schedule);
+            }
         }
     }
 }
@@ -416,21 +438,15 @@ where
 }
 
 /// Check if a flow should run based on its schedule
-async fn should_run_flow<T, S>(
+async fn should_run_flow(
     schedule: &FlowSchedule,
     info: &Arc<RwLock<FlowInfo>>,
     now: DateTime<Utc>,
-) -> bool 
-where
-    T: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    S: Store + Clone + Default + 'static,
-{
+) -> bool {
     let info_guard = info.read().await;
 
-    // Don't run if already running
-    if matches!(info_guard.status, FlowStatus::Running) {
-        return false;
-    }
+    // Allow concurrent executions - remove the "already running" check
+    // This enables the same flow to run multiple times simultaneously
 
     match schedule {
         FlowSchedule::Manual => false, // Only run when manually triggered
@@ -463,7 +479,7 @@ fn calculate_next_run(schedule: &FlowSchedule) -> Option<DateTime<Utc>> {
 }
 
 /// Builder for creating streams with fluent API
-pub struct StreamBuilder<T, S> 
+pub struct StreamBuilder<T, S>
 where
     T: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
     S: Store + Clone + Default + 'static,

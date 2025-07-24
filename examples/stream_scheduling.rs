@@ -21,7 +21,7 @@ use async_trait::async_trait;
 use cano::prelude::*;
 use chrono::Utc;
 use std::collections::HashMap;
-use tokio::time::{sleep, Duration};
+use tokio::time::{Duration, sleep};
 
 /// Workflow states for our example flows
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -64,8 +64,8 @@ impl Node<WorkflowAction, DefaultParams, MemoryStore> for ReportNode {
 
     async fn exec(&self, _prep_result: Self::PrepResult) -> Self::ExecResult {
         println!("📊 Generating {} report...", self.report_type);
-        // Simulate report generation
-        sleep(Duration::from_millis(100)).await;
+        // Simulate longer report generation to see concurrent executions
+        sleep(Duration::from_millis(3000)).await;
         format!("{} report generated successfully", self.report_type)
     }
 
@@ -118,8 +118,8 @@ impl Node<WorkflowAction, DefaultParams, MemoryStore> for CleanupNode {
 
     async fn exec(&self, prep_result: Self::PrepResult) -> Self::ExecResult {
         println!("🧹 Cleaning up {} items...", prep_result.len());
-        // Simulate cleanup work
-        sleep(Duration::from_millis(50)).await;
+        // Simulate longer cleanup work to see concurrent executions
+        sleep(Duration::from_millis(2000)).await;
         prep_result.len()
     }
 
@@ -264,12 +264,12 @@ async fn main() -> CanoResult<()> {
 
     // Create stream with multiple flows using builder pattern
     let one_time_run = Utc::now() + chrono::Duration::seconds(5);
-    
+
     let mut stream = StreamBuilder::new()
-        // Run hourly report every minute for demo (normally would be "0 0 * * * *" for hourly)
-        .with_cron_flow("hourly_report", hourly_report_flow, "0 * * * * *")?
-        // Run cleanup every 10 seconds
-        .with_interval_flow("data_cleanup", cleanup_flow, 10)?
+        // Run hourly report every 5 seconds for demo to see concurrent executions
+        .with_interval_flow("hourly_report", hourly_report_flow, 5)?
+        // Run cleanup every 3 seconds for concurrent demo
+        .with_interval_flow("data_cleanup", cleanup_flow, 3)?
         // Manual trigger only
         .with_manual_flow("manual_migration", manual_flow)?
         // One-time setup in 5 seconds
@@ -277,8 +277,8 @@ async fn main() -> CanoResult<()> {
         .build();
 
     println!("📅 Configured flows:");
-    println!("  • Hourly Report: Every minute (cron)");
-    println!("  • Data Cleanup: Every 10 seconds (interval)");
+    println!("  • Hourly Report: Every 5 seconds (3s execution time - allows overlap)");
+    println!("  • Data Cleanup: Every 3 seconds (2s execution time - allows overlap)");
     println!("  • Manual Migration: Manual trigger only");
     println!("  • System Setup: One-time in 5 seconds");
     println!();
@@ -289,12 +289,14 @@ async fn main() -> CanoResult<()> {
 
     // Wait a bit and check flow status
     sleep(Duration::from_secs(2)).await;
-    
+
     println!("📊 Current flow status:");
     let flows_info = stream.get_all_flows_info().await;
     for info in &flows_info {
-        println!("  • {}: {:?} (runs: {}, errors: {})", 
-                info.id, info.status, info.run_count, info.error_count);
+        println!(
+            "  • {}: {:?} (runs: {}, errors: {}, active: {})",
+            info.id, info.status, info.run_count, info.error_count, info.active_instances
+        );
         if let Some(next_run) = info.next_run {
             println!("    Next run: {}", next_run.format("%H:%M:%S"));
         }
@@ -310,15 +312,17 @@ async fn main() -> CanoResult<()> {
     stream.trigger_flow("manual_migration").await?;
 
     // Let the stream run for a while to see scheduled executions
-    println!("⏳ Running stream for 25 seconds to see scheduled executions...");
-    sleep(Duration::from_secs(25)).await;
+    println!("⏳ Running stream for 20 seconds to see concurrent executions...");
+    sleep(Duration::from_secs(20)).await;
 
     // Show final status
     println!("\n📊 Final flow status:");
     let final_flows_info = stream.get_all_flows_info().await;
     for info in &final_flows_info {
-        println!("  • {}: {:?} (runs: {}, errors: {})", 
-                info.id, info.status, info.run_count, info.error_count);
+        println!(
+            "  • {}: {:?} (runs: {}, errors: {}, active: {})",
+            info.id, info.status, info.run_count, info.error_count, info.active_instances
+        );
     }
 
     // Stop the stream

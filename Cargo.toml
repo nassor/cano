@@ -39,6 +39,10 @@ path = "examples/negotiation.rs"
 name = "stream_scheduling"
 path = "examples/stream_scheduling.rs"
 
+[[example]]
+name = "concurrent_flows"
+path = "examples/concurrent_flows.rs"
+
 [[bench]]
 name = "flow_performance"
 harness = false
