@@ -14,7 +14,7 @@
 //!
 //! Run with:
 //! ```bash
-//! cargo run --example stream_scheduling
+//! cargo run --example scheduler_scheduling
 //! ```
 
 use async_trait::async_trait;
