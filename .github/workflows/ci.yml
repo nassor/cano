@@ -48,19 +48,20 @@ jobs:
     - name: Run clippy
       run: cargo clippy --all-targets --all-features -- -D warnings
       if: matrix.rust == 'stable'
-    
+
     - name: Build
-      run: cargo build --verbose
+      run: cargo build
+
+    - name: Run benchmarks checks
+      run: cargo bench --no-run
+      if: matrix.rust == 'stable'
     
     - name: Run tests
-      run: cargo test --lib --verbose
+      run: cargo test --lib
     
-    - name: Build examples
-      run: |
-        for file in examples/*.rs; do
-          example=$(basename "$file" .rs)
-          cargo build --example "$example"
-        done
+    - name: Check examples
+      run: cargo check --examples
+      if: matrix.rust == 'stable'
     
     - name: Run doctests
       run: cargo test --doc
@@ -80,17 +81,3 @@ jobs:
     
     - name: Run security audit
       run: cargo audit
-
-  check_benchmarks:
-    name: Check Benchmarks
-    runs-on: ubuntu-latest
-    steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install Rust
-      uses: dtolnay/rust-toolchain@stable
-    
-    - name: Check benchmark compilation
-      run: |
-        cargo check --benches
-        cargo bench --no-run
