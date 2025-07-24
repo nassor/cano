@@ -273,7 +273,7 @@ async fn main() -> CanoResult<()> {
     println!();
 
     // Start the scheduler
-    println!("▶️  Starting scheduler scheduler...");
+    println!("▶️  Starting scheduler system...");
     scheduler.start().await?;
 
     // Wait a bit and check workflow status
