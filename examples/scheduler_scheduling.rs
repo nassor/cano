@@ -316,7 +316,7 @@ async fn main() -> CanoResult<()> {
     }
 
     // Stop the scheduler
-    println!("\n⏹️  Stopping scheduler scheduler...");
+    println!("\n⏹️  Stopping scheduler...");
     scheduler.stop().await?;
 
     println!("✅ Scheduler scheduling example completed!");
