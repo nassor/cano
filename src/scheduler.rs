@@ -1,6 +1,6 @@
 //! # Simplified Scheduler API
 //!
-//! A simplified scheduler scheduler that focuses on ease of use while maintaining
+//! A simplified scheduler that focuses on ease of use while maintaining
 //! the core scheduling functionality.
 //!
 //! ## 🚀 Quick Start
