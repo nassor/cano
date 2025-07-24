@@ -140,6 +140,71 @@ impl Node<String> for EmailProcessor {
 }
 ```
 
+#### Built-in Retry Logic
+
+Every node includes configurable retry logic with multiple strategies:
+
+**No Retries** - Fail fast for critical operations:
+
+```rust
+impl Node<WorkflowState> for CriticalNode {
+    fn config(&self) -> NodeConfig {
+        NodeConfig::minimal()  // No retries, fail immediately
+    }
+    // ... rest of implementation
+}
+```
+
+**Fixed Retries** - Consistent delays between attempts:
+
+```rust
+impl Node<WorkflowState> for ReliableNode {
+    fn config(&self) -> NodeConfig {
+        NodeConfig::new().with_fixed_retry(3, Duration::from_secs(2))
+        // 3 retries with 2 second delays
+    }
+    // ... rest of implementation
+}
+```
+
+**Exponential Backoff** - Smart retry with increasing delays:
+
+```rust
+impl Node<WorkflowState> for ResilientNode {
+    fn config(&self) -> NodeConfig {
+        NodeConfig::new().with_exponential_retry(5)
+        // 5 retries with exponential backoff (100ms, 200ms, 400ms, 800ms, 1.6s)
+    }
+    // ... rest of implementation
+}
+```
+
+**Custom Exponential Backoff** - Full control over retry behavior:
+
+```rust
+impl Node<WorkflowState> for CustomNode {
+    fn config(&self) -> NodeConfig {
+        NodeConfig::new().with_retry(
+            RetryMode::exponential_custom(
+                3,                              // max retries
+                Duration::from_millis(50),      // base delay
+                3.0,                            // multiplier  
+                Duration::from_secs(10),        // max delay cap
+                0.2,                            // 20% jitter
+            )
+        )
+    }
+    // ... rest of implementation
+}
+```
+
+**Why Use Different Retry Modes?**
+
+- **None**: Database transactions, critical validations where failure should be immediate
+- **Fixed**: Network calls, file operations where consistent timing is preferred  
+- **Exponential**: API calls, external services where you want to back off gracefully
+- **Custom Exponential**: High-load scenarios where you need precise control over timing and jitter
+
 ### 2. Store - Share Data Between Nodes
 
 Use the built-in store to pass data around your workflow:
@@ -175,6 +240,148 @@ workflow.register_node(WorkflowState::Validate, validator)
     .register_node(WorkflowState::Process, processor)
     .register_node(WorkflowState::SendEmail, email_sender)
     .add_exit_states(vec![WorkflowState::Complete, WorkflowState::Error]);
+
+let result = workflow.orchestrate(&store).await?;
+```
+
+#### Complex Workflows
+
+Build sophisticated state machine pipelines with conditional branching, error handling, and retry logic:
+
+```mermaid
+graph TD
+    A[Start] --> B[LoadData]
+    B --> C{Validate}
+    C -->|Valid| D[Process]
+    C -->|Invalid| E[Sanitize]  
+    C -->|Critical Error| F[Error]
+    E --> D
+    D --> G{QualityCheck}
+    G -->|High Quality| H[Enrich]
+    G -->|Low Quality| I[BasicProcess]
+    G -->|Failed & Retries Left| J[Retry]
+    G -->|Failed & No Retries| K[Failed]
+    H --> L[Complete]
+    I --> L
+    J --> D
+    F --> M[Cleanup]
+    M --> K
+```
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum OrderState {
+    Start,
+    LoadData,
+    Validate,
+    Sanitize,
+    Process,
+    QualityCheck,
+    Enrich,
+    BasicProcess,
+    Retry,
+    Cleanup,
+    Complete,
+    Failed,
+    Error,
+}
+
+// Validation node with multiple possible outcomes
+struct ValidationNode;
+
+#[async_trait]
+impl Node<OrderState> for ValidationNode {
+    type PrepResult = String;
+    type ExecResult = ValidationResult;
+
+    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+        let data: String = store.get("raw_data")?;
+        Ok(data)
+    }
+
+    async fn exec(&self, data: Self::PrepResult) -> Self::ExecResult {
+        if data.contains("critical_error") {
+            ValidationResult::CriticalError
+        } else if data.len() < 10 {
+            ValidationResult::Invalid
+        } else {
+            ValidationResult::Valid
+        }
+    }
+
+    async fn post(&self, store: &impl Store, result: Self::ExecResult) 
+        -> Result<OrderState, CanoError> {
+        match result {
+            ValidationResult::Valid => {
+                store.put("validation_status", "passed")?;
+                Ok(OrderState::Process)
+            }
+            ValidationResult::Invalid => {
+                store.put("validation_status", "needs_sanitization")?;
+                Ok(OrderState::Sanitize)
+            }
+            ValidationResult::CriticalError => {
+                store.put("error_reason", "critical_validation_failure")?;
+                Ok(OrderState::Error)
+            }
+        }
+    }
+}
+
+// Quality check node with conditional processing paths
+struct QualityCheckNode;
+
+#[async_trait]
+impl Node<OrderState> for QualityCheckNode {
+    type PrepResult = (String, i32);
+    type ExecResult = QualityScore;
+
+    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+        let data: String = store.get("processed_data")?;
+        let attempt: i32 = store.get("retry_count").unwrap_or(0);
+        Ok((data, attempt))
+    }
+
+    async fn exec(&self, (data, attempt): Self::PrepResult) -> Self::ExecResult {
+        let score = calculate_quality_score(&data);
+        QualityScore { score, attempt }
+    }
+
+    async fn post(&self, store: &impl Store, result: Self::ExecResult) 
+        -> Result<OrderState, CanoError> {
+        store.put("quality_score", result.score)?;
+        
+        match result.score {
+            90..=100 => Ok(OrderState::Enrich),
+            60..=89 => Ok(OrderState::BasicProcess),
+            _ if result.attempt < 3 => {
+                store.put("retry_count", result.attempt + 1)?;
+                Ok(OrderState::Retry)
+            }
+            _ => Ok(OrderState::Failed),
+        }
+    }
+}
+
+// # ALL OTHER NODES...
+
+// Build the complex workflow
+let mut workflow = Workflow::new(OrderState::Start);
+workflow
+    .register_node(OrderState::Start, DataLoaderNode)
+    .register_node(OrderState::LoadData, ValidationNode)
+    .register_node(OrderState::Validate, SanitizeNode)
+    .register_node(OrderState::Sanitize, ProcessNode)  
+    .register_node(OrderState::Process, QualityCheckNode)
+    .register_node(OrderState::QualityCheck, EnrichNode)
+    .register_node(OrderState::Enrich, CompleteNode)     // -> Complete
+    .register_node(OrderState::BasicProcess, CompleteNode) // -> Complete
+    .register_node(OrderState::Retry, ProcessNode)        // -> Process
+    .register_node(OrderState::Error, CleanupNode)        // -> Failed
+    .add_exit_states(vec![
+        OrderState::Complete, 
+        OrderState::Failed
+    ]);
 
 let result = workflow.orchestrate(&store).await?;
 ```
@@ -270,92 +477,6 @@ tokio::spawn(async move {
 
 // Graceful shutdown with 30 second timeout
 scheduler.stop_with_timeout(Duration::from_secs(30)).await?;
-```
-
-## 🧩 Advanced Features
-
-### Built-in Retry Logic
-
-Every node includes configurable retry logic with multiple strategies:
-
-#### Retry Modes
-
-**No Retries** - Fail fast for critical operations:
-
-```rust
-impl Node<WorkflowState> for CriticalNode {
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()  // No retries, fail immediately
-    }
-    // ... rest of implementation
-}
-```
-
-**Fixed Retries** - Consistent delays between attempts:
-
-```rust
-impl Node<WorkflowState> for ReliableNode {
-    fn config(&self) -> NodeConfig {
-        NodeConfig::new().with_fixed_retry(3, Duration::from_secs(2))
-        // 3 retries with 2 second delays
-    }
-    // ... rest of implementation
-}
-```
-
-**Exponential Backoff** - Smart retry with increasing delays:
-
-```rust
-impl Node<WorkflowState> for ResilientNode {
-    fn config(&self) -> NodeConfig {
-        NodeConfig::new().with_exponential_retry(5)
-        // 5 retries with exponential backoff (100ms, 200ms, 400ms, 800ms, 1.6s)
-    }
-    // ... rest of implementation
-}
-```
-
-**Custom Exponential Backoff** - Full control over retry behavior:
-
-```rust
-impl Node<WorkflowState> for CustomNode {
-    fn config(&self) -> NodeConfig {
-        NodeConfig::new().with_retry(
-            RetryMode::exponential_custom(
-                3,                              // max retries
-                Duration::from_millis(50),      // base delay
-                3.0,                            // multiplier  
-                Duration::from_secs(10),        // max delay cap
-                0.2,                            // 20% jitter
-            )
-        )
-    }
-    // ... rest of implementation
-}
-```
-
-#### Why Use Different Retry Modes?
-
-- **None**: Database transactions, critical validations where failure should be immediate
-- **Fixed**: Network calls, file operations where consistent timing is preferred  
-- **Exponential**: API calls, external services where you want to back off gracefully
-- **Custom Exponential**: High-load scenarios where you need precise control over timing and jitter
-
-### Complex Workflows
-
-Chain multiple nodes together to build sophisticated state machine pipelines:
-
-```rust
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum State { Start, Validate, Process, Complete, Error }
-
-let mut workflow = Workflow::new(State::Start);
-workflow.register_node(State::Start, data_loader)
-    .register_node(State::Validate, validator)
-    .register_node(State::Process, processor)
-    .add_exit_states(vec![State::Complete, State::Error]);
-
-let result = workflow.orchestrate(&store).await?;
 ```
 
 ## 🧪 Testing & Benchmarks
