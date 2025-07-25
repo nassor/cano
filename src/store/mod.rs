@@ -120,7 +120,6 @@ pub type StoreResult<TState> = Result<TState, error::StoreError>;
 /// | `put` | Store typed value | `store.put("key", value)?` |
 /// | `remove` | Delete by key | `store.remove("key")?` |
 /// | `append` | Add to collection | `store.append("list", item)?` |
-/// | `delete` | Alias for remove | `store.delete("key")?` |
 /// | `keys` | List all keys | `for key in store.keys()? { ... }` |
 /// | `len` | Count stored items | `let count = store.len()?` |
 /// | `clear` | Remove all data | `store.clear()?` |
