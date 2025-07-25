@@ -153,7 +153,7 @@ impl Node<WorkflowAction> for CounterNode {
         // Store the count
         store.put("number_count", exec_res)?;
 
-        // Delete the original vector from memory (cleanup)
+        // Remove the original vector from memory (cleanup)
         store.remove("filtered_numbers")?;
 
         println!(
