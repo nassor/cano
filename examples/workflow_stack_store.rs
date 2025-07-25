@@ -122,7 +122,7 @@ enum ProcessingState {
 struct MetricsNode;
 
 #[async_trait]
-impl Node<ProcessingState, DefaultParams, RequestCtx> for MetricsNode {
+impl Node<ProcessingState, RequestCtx> for MetricsNode {
     type PrepResult = String;
     type ExecResult = (f64, String, u32);
 
@@ -180,7 +180,7 @@ impl Node<ProcessingState, DefaultParams, RequestCtx> for MetricsNode {
 struct ResponseNode;
 
 #[async_trait]
-impl Node<ProcessingState, DefaultParams, RequestCtx> for ResponseNode {
+impl Node<ProcessingState, RequestCtx> for ResponseNode {
     type PrepResult = (f64, String, u32);
     type ExecResult = (String, u16);
 
@@ -280,7 +280,7 @@ async fn main() -> CanoResult<()> {
     println!("Demonstrating custom store types for node communication\n");
 
     // Create the processing workflow
-    let mut workflow: Workflow<ProcessingState, DefaultParams, RequestCtx> =
+    let mut workflow: Workflow<ProcessingState, RequestCtx> =
         Workflow::new(ProcessingState::IncomingRequest);
 
     workflow

@@ -280,7 +280,7 @@ impl NodeConfig {
 /// }
 /// ```
 #[async_trait]
-pub trait Node<TState, TParams = DefaultParams, TStore = MemoryStore>: Send + Sync
+pub trait Node<TState, TStore = MemoryStore, TParams = DefaultParams>: Send + Sync
 where
     TState: Clone + std::fmt::Debug + Send + Sync + 'static,
     TParams: Send + Sync + Clone,
@@ -888,7 +888,7 @@ mod tests {
         // Test specific trait bounds instead of full trait object
         fn assert_node_traits<N>(_: &N)
         where
-            N: Node<TestAction, DefaultParams, MemoryStore, PrepResult = String, ExecResult = bool>,
+            N: Node<TestAction, MemoryStore, DefaultParams, PrepResult = String, ExecResult = bool>,
         {
         }
 

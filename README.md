@@ -271,7 +271,7 @@ struct RequestCtx {
 
 // Nodes can access and modify the custom store directly
 #[async_trait]
-impl Node<ProcessingState, (), RequestCtx> for MetricsNode {
+impl Node<ProcessingState, RequestCtx> for MetricsNode {
     async fn prep(&self, store: &RequestCtx) -> Result<String, CanoError> {
         // Direct field access - no hash map lookups
         Ok(store.request_body.clone())

@@ -69,15 +69,15 @@ use crate::node::{DefaultParams, Node};
 /// implement the Node trait with compatible associated types. The trait object erases
 /// the specific TParams, PrepResult, and ExecResult types but maintains the essential
 /// functionality needed for workflow execution.
-pub type DynNode<TState, TParams = DefaultParams, TStore = MemoryStore> =
-    Box<dyn DynNodeTrait<TState, TParams, TStore> + Send + Sync>;
+pub type DynNode<TState, TStore = MemoryStore, TParams = DefaultParams> =
+    Box<dyn DynNodeTrait<TState, TStore, TParams> + Send + Sync>;
 
 /// Trait object-safe version of the Node trait for dynamic dispatch
 ///
 /// This trait provides the essential functionality needed for workflow execution
 /// while being object-safe (can be used as a trait object).
 #[async_trait::async_trait]
-pub trait DynNodeTrait<TState, TParams = DefaultParams, TStore = MemoryStore>: Send + Sync
+pub trait DynNodeTrait<TState, TStore = MemoryStore, TParams = DefaultParams>: Send + Sync
 where
     TState: Clone + std::fmt::Debug + Send + Sync + 'static,
 {
@@ -87,12 +87,12 @@ where
 
 /// Blanket implementation of `DynNodeTrait<TState, TStore>` for any `N: Node<TState, P, TStore>`
 #[async_trait::async_trait]
-impl<TState, TParams, TStore, N> DynNodeTrait<TState, TParams, TStore> for N
+impl<TState, TStore, TParams, N> DynNodeTrait<TState, TStore, TParams> for N
 where
     TState: Clone + std::fmt::Debug + Send + Sync + 'static,
     TParams: Clone + Send + Sync + 'static,
     TStore: Send + Sync + 'static,
-    N: Node<TState, TParams, TStore> + Send + Sync + 'static,
+    N: Node<TState, TStore, TParams> + Send + Sync + 'static,
 {
     async fn run(&self, store: &TStore) -> Result<TState, CanoError> {
         // just forward to the inherent `Node::run`
@@ -101,7 +101,7 @@ where
 }
 
 /// State machine workflow orchestration
-pub struct Workflow<TState, TParams = DefaultParams, TStore = MemoryStore>
+pub struct Workflow<TState, TStore = MemoryStore, TParams = DefaultParams>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
     TParams: Clone + Send + Sync + 'static,
@@ -110,12 +110,12 @@ where
     /// The starting state of the workflow
     pub start_state: Option<TState>,
     /// Map of states to their corresponding node trait objects
-    pub state_nodes: HashMap<TState, DynNode<TState, TParams, TStore>>,
+    pub state_nodes: HashMap<TState, DynNode<TState, TStore, TParams>>,
     /// Set of states that will terminate the workflow when reached
     pub exit_states: std::collections::HashSet<TState>,
 }
 
-impl<TState, TParams, TStore> Workflow<TState, TParams, TStore>
+impl<TState, TStore, TParams> Workflow<TState, TStore, TParams>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
     TParams: Clone + Send + Sync + 'static,
@@ -133,7 +133,7 @@ where
     /// Register a node for a specific state (accepts any type implementing `Node<TState>`)
     pub fn register_node<N>(&mut self, state: TState, node: N) -> &mut Self
     where
-        N: Node<TState, TParams, TStore> + Send + Sync + 'static,
+        N: Node<TState, TStore, TParams> + Send + Sync + 'static,
     {
         self.state_nodes.insert(state, Box::new(node));
         self
@@ -203,16 +203,16 @@ where
 /// Builder for creating Workflow instances with a fluent API
 ///
 /// Provides a convenient way to construct flows with method chaining.
-pub struct WorkflowBuilder<TState, TParams = crate::node::DefaultParams, TStore = MemoryStore>
+pub struct WorkflowBuilder<TState, TStore = MemoryStore, TParams = DefaultParams>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
     TParams: Clone + Send + Sync + 'static,
     TStore: Send + Sync + 'static,
 {
-    workflow: Workflow<TState, TParams, TStore>,
+    workflow: Workflow<TState, TStore, TParams>,
 }
 
-impl<TState, TParams, TStore> WorkflowBuilder<TState, TParams, TStore>
+impl<TState, TStore, TParams> WorkflowBuilder<TState, TStore, TParams>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
     TParams: Clone + Send + Sync + 'static,
@@ -228,7 +228,7 @@ where
     /// Register a node for a state (accepts any type implementing `Node<TState>`)
     pub fn register_node<N>(mut self, state: TState, node: N) -> Self
     where
-        N: Node<TState, TParams, TStore> + Send + Sync + 'static,
+        N: Node<TState, TStore, TParams> + Send + Sync + 'static,
     {
         self.workflow.register_node(state, node);
         self
@@ -247,7 +247,7 @@ where
     }
 
     /// Build the final Workflow instance
-    pub fn build(self) -> Workflow<TState, TParams, TStore> {
+    pub fn build(self) -> Workflow<TState, TStore, TParams> {
         self.workflow
     }
 }
@@ -460,8 +460,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flow_creation() {
-        let workflow: Workflow<TestState, crate::node::DefaultParams, MemoryStore> =
-            Workflow::new(TestState::Start);
+        let workflow: Workflow<TestState> = Workflow::new(TestState::Start);
         assert_eq!(workflow.start_state, Some(TestState::Start));
         assert!(workflow.state_nodes.is_empty());
         assert!(workflow.exit_states.is_empty());
@@ -469,8 +468,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flow_register_node() {
-        let mut workflow: Workflow<TestState, crate::node::DefaultParams, MemoryStore> =
-            Workflow::new(TestState::Start);
+        let mut workflow: Workflow<TestState> = Workflow::new(TestState::Start);
         let node = SuccessNode::new(TestState::Complete);
 
         workflow.register_node(TestState::Start, node);
@@ -481,8 +479,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flow_add_exit_states() {
-        let mut workflow: Workflow<TestState, crate::node::DefaultParams, MemoryStore> =
-            Workflow::new(TestState::Start);
+        let mut workflow: Workflow<TestState> = Workflow::new(TestState::Start);
 
         workflow.add_exit_states(vec![TestState::Complete, TestState::Error]);
 
@@ -493,8 +490,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flow_add_single_exit_state() {
-        let mut workflow: Workflow<TestState, crate::node::DefaultParams, MemoryStore> =
-            Workflow::new(TestState::Start);
+        let mut workflow: Workflow<TestState> = Workflow::new(TestState::Start);
 
         workflow.add_exit_state(TestState::Complete);
 
@@ -504,8 +500,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flow_start_state_change() {
-        let mut workflow: Workflow<TestState, crate::node::DefaultParams, MemoryStore> =
-            Workflow::new(TestState::Start);
+        let mut workflow: Workflow<TestState> = Workflow::new(TestState::Start);
 
         workflow.start(TestState::Process);
 
@@ -587,8 +582,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_workflow_error_handling() {
-        let mut workflow: Workflow<TestState, crate::node::DefaultParams, MemoryStore> =
-            Workflow::new(TestState::Start);
+        let mut workflow: Workflow<TestState> = Workflow::new(TestState::Start);
 
         // Node that will fail
         let failing_node = FailureNode::new("Test failure");
@@ -608,8 +602,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unregistered_node_error() {
-        let mut workflow: Workflow<TestState, crate::node::DefaultParams, MemoryStore> =
-            Workflow::new(TestState::Start);
+        let mut workflow: Workflow<TestState> = Workflow::new(TestState::Start);
 
         // Don't register any nodes
         workflow.add_exit_state(TestState::Complete);
@@ -624,8 +617,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_no_start_state_error() {
-        let mut workflow: Workflow<TestState, crate::node::DefaultParams, MemoryStore> =
-            Workflow::new(TestState::Start);
+        let mut workflow: Workflow<TestState> = Workflow::new(TestState::Start);
         workflow.start_state = None; // Manually clear start state
 
         let store = MemoryStore::new();
@@ -638,8 +630,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_immediate_exit_state() {
-        let mut workflow: Workflow<TestState, crate::node::DefaultParams, MemoryStore> =
-            Workflow::new(TestState::Complete);
+        let mut workflow: Workflow<TestState> = Workflow::new(TestState::Complete);
 
         workflow.add_exit_state(TestState::Complete);
 
@@ -755,13 +746,11 @@ mod tests {
         let start_node = SuccessNode::new(TestState::Process);
         let process_node = SuccessNode::new(TestState::Complete);
 
-        let workflow = WorkflowBuilder::<TestState, crate::node::DefaultParams, MemoryStore>::new(
-            TestState::Start,
-        )
-        .register_node(TestState::Start, start_node)
-        .register_node(TestState::Process, process_node)
-        .add_exit_state(TestState::Complete)
-        .build();
+        let workflow = WorkflowBuilder::<TestState>::new(TestState::Start)
+            .register_node(TestState::Start, start_node)
+            .register_node(TestState::Process, process_node)
+            .add_exit_state(TestState::Complete)
+            .build();
 
         assert_eq!(workflow.start_state, Some(TestState::Start));
         assert_eq!(workflow.state_nodes.len(), 2);
@@ -774,10 +763,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_flow_builder_with_multiple_exit_states() {
-        let workflow: Workflow<TestState, crate::node::DefaultParams, MemoryStore> =
-            WorkflowBuilder::<TestState, crate::node::DefaultParams, MemoryStore>::new(
-                TestState::Start,
-            )
+        let workflow: Workflow<TestState> = WorkflowBuilder::<TestState>::new(TestState::Start)
             .register_node(TestState::Start, SuccessNode::new(TestState::Complete))
             .add_exit_states(vec![
                 TestState::Complete,
@@ -843,8 +829,7 @@ mod tests {
     #[tokio::test]
     async fn test_mixed_node_types_workflow() {
         // Test with different node types in the same workflow
-        let mut workflow: Workflow<TestState, crate::node::DefaultParams, MemoryStore> =
-            Workflow::new(TestState::Start);
+        let mut workflow: Workflow<TestState> = Workflow::new(TestState::Start);
 
         // Register different node types
         let data_node = DataStoringNode::new("workflow_data", "test_value", TestState::Process);
