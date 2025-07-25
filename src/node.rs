@@ -22,7 +22,7 @@
 //! - Implement retry logic in NodeConfig for resilience
 
 use crate::error::CanoError;
-use crate::store::{MemoryStore, Store};
+use crate::store::MemoryStore;
 use async_trait::async_trait;
 use rand::Rng;
 use std::collections::HashMap;
@@ -261,7 +261,7 @@ impl NodeConfig {
 ///         NodeConfig::minimal()  // Use minimal retries for fast execution
 ///     }
 ///
-///     async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+///     async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
 ///         Ok("prepared_data".to_string())
 ///     }
 ///
@@ -269,7 +269,7 @@ impl NodeConfig {
 ///         true // Success
 ///     }
 ///
-///     async fn post(&self, _store: &impl Store, exec_res: Self::ExecResult)
+///     async fn post(&self, _store: &MemoryStore, exec_res: Self::ExecResult)
 ///         -> Result<String, CanoError> {
 ///         if exec_res {
 ///             Ok("next".to_string())
@@ -280,11 +280,11 @@ impl NodeConfig {
 /// }
 /// ```
 #[async_trait]
-pub trait Node<Enum, Params = DefaultParams, S = MemoryStore>: Send + Sync
+pub trait Node<Enum, Params = DefaultParams, ST = MemoryStore>: Send + Sync
 where
     Enum: Clone + std::fmt::Debug + Send + Sync + 'static,
     Params: Send + Sync + Clone,
-    S: Store,
+    ST: Send + Sync + 'static,
 {
     /// Result type from the prep phase
     type PrepResult: Send + Sync;
@@ -322,7 +322,7 @@ where
     /// - Prepare any data structures
     ///
     /// The result of this phase is passed to the [`exec`](Node::exec) method.
-    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError>;
+    async fn prep(&self, store: &ST) -> Result<Self::PrepResult, CanoError>;
 
     /// Execution phase - main processing logic
     ///
@@ -346,8 +346,7 @@ where
     /// - Handle errors from the exec phase
     ///
     /// This method returns a typed value that determines what happens next in the workflow.
-    async fn post(&self, store: &impl Store, exec_res: Self::ExecResult)
-    -> Result<Enum, CanoError>;
+    async fn post(&self, store: &ST, exec_res: Self::ExecResult) -> Result<Enum, CanoError>;
 
     /// Run the complete node lifecycle with configuration-driven execution
     ///
@@ -356,7 +355,7 @@ where
     /// Nodes execute with minimal overhead for maximum throughput.
     ///
     /// You can override this method for completely custom orchestration.
-    async fn run(&self, store: &impl Store) -> Result<Enum, CanoError> {
+    async fn run(&self, store: &ST) -> Result<Enum, CanoError> {
         let config = self.config();
         self.run_with_retries(store, &config).await
     }
@@ -365,11 +364,7 @@ where
     ///
     /// This method handles the actual execution of the three phases (prep, exec, post)
     /// with retry logic based on the node configuration.
-    async fn run_with_retries(
-        &self,
-        store: &impl Store,
-        config: &NodeConfig,
-    ) -> Result<Enum, CanoError> {
+    async fn run_with_retries(&self, store: &ST, config: &NodeConfig) -> Result<Enum, CanoError> {
         let max_attempts = config.retry_mode.max_attempts();
         let mut attempt = 0;
 
@@ -485,7 +480,7 @@ mod tests {
         type PrepResult = String;
         type ExecResult = bool;
 
-        async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
             Ok("prepared".to_string())
         }
 
@@ -496,7 +491,7 @@ mod tests {
 
         async fn post(
             &self,
-            _store: &impl Store,
+            _store: &MemoryStore,
             exec_res: Self::ExecResult,
         ) -> Result<TestAction, CanoError> {
             if exec_res {
@@ -525,7 +520,7 @@ mod tests {
         type PrepResult = String;
         type ExecResult = bool;
 
-        async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
             Err(CanoError::preparation(&self.error_message))
         }
 
@@ -535,7 +530,7 @@ mod tests {
 
         async fn post(
             &self,
-            _store: &impl Store,
+            _store: &MemoryStore,
             _exec_res: Self::ExecResult,
         ) -> Result<TestAction, CanoError> {
             Ok(TestAction::Complete)
@@ -564,7 +559,7 @@ mod tests {
         type PrepResult = Option<String>;
         type ExecResult = String;
 
-        async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
             match store.get::<String>(&self.read_key) {
                 Ok(value) => Ok(Some(value)),
                 Err(_) => Ok(None), // Key doesn't exist, which is fine
@@ -580,7 +575,7 @@ mod tests {
 
         async fn post(
             &self,
-            store: &impl Store,
+            store: &MemoryStore,
             exec_res: Self::ExecResult,
         ) -> Result<TestAction, CanoError> {
             store.put(&self.write_key, exec_res)?;
@@ -617,7 +612,7 @@ mod tests {
             }
         }
 
-        async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
             let base_value = self
                 .params
                 .get("base_value")
@@ -632,7 +627,7 @@ mod tests {
 
         async fn post(
             &self,
-            store: &impl Store,
+            store: &MemoryStore,
             exec_res: Self::ExecResult,
         ) -> Result<TestAction, CanoError> {
             store.put("result", exec_res)?;
@@ -648,7 +643,7 @@ mod tests {
         type PrepResult = ();
         type ExecResult = ();
 
-        async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
             Ok(())
         }
 
@@ -658,7 +653,7 @@ mod tests {
 
         async fn post(
             &self,
-            _store: &impl Store,
+            _store: &MemoryStore,
             _exec_res: Self::ExecResult,
         ) -> Result<TestAction, CanoError> {
             Err(CanoError::node_execution("Post phase failure"))
@@ -681,7 +676,7 @@ mod tests {
         type PrepResult = String;
         type ExecResult = String;
 
-        async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
             Ok("prep_completed".to_string())
         }
 
@@ -691,7 +686,7 @@ mod tests {
 
         async fn post(
             &self,
-            store: &impl Store,
+            store: &MemoryStore,
             exec_res: Self::ExecResult,
         ) -> Result<TestAction, CanoError> {
             store.put("custom_run_result", exec_res)?;
@@ -699,7 +694,7 @@ mod tests {
         }
 
         // Custom run implementation that can skip exec phase
-        async fn run(&self, store: &impl Store) -> Result<TestAction, CanoError> {
+        async fn run(&self, store: &MemoryStore) -> Result<TestAction, CanoError> {
             let prep_res = self.prep(store).await?;
 
             if self.should_skip_exec {
@@ -998,7 +993,7 @@ mod tests {
                 NodeConfig::new().with_fixed_retry(self.max_retries, Duration::from_millis(1))
             }
 
-            async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+            async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
                 let attempt = self.attempt_count.fetch_add(1, Ordering::SeqCst) + 1;
 
                 // Fail first 2 attempts, succeed on 3rd
@@ -1015,7 +1010,7 @@ mod tests {
 
             async fn post(
                 &self,
-                _store: &impl Store,
+                _store: &MemoryStore,
                 _exec_res: Self::ExecResult,
             ) -> Result<TestAction, CanoError> {
                 Ok(TestAction::Complete)
@@ -1053,7 +1048,7 @@ mod tests {
                 NodeConfig::minimal()
             }
 
-            async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+            async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
                 Ok(())
             }
 
@@ -1063,7 +1058,7 @@ mod tests {
 
             async fn post(
                 &self,
-                _store: &impl Store,
+                _store: &MemoryStore,
                 _exec_res: Self::ExecResult,
             ) -> Result<TestAction, CanoError> {
                 Ok(TestAction::Complete)
@@ -1303,7 +1298,7 @@ mod tests {
                 NodeConfig::new().with_fixed_retry(5, Duration::from_millis(1))
             }
 
-            async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+            async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
                 let attempt = self.attempt_counter.fetch_add(1, Ordering::SeqCst);
 
                 if attempt < self.fail_count {
@@ -1319,7 +1314,7 @@ mod tests {
 
             async fn post(
                 &self,
-                _store: &impl Store,
+                _store: &MemoryStore,
                 _exec_res: Self::ExecResult,
             ) -> Result<TestAction, CanoError> {
                 Ok(TestAction::Complete)
@@ -1356,7 +1351,7 @@ mod tests {
                 NodeConfig::new().with_fixed_retry(2, Duration::from_millis(50))
             }
 
-            async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+            async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
                 Err(CanoError::preparation("Always fails"))
             }
 
@@ -1366,7 +1361,7 @@ mod tests {
 
             async fn post(
                 &self,
-                _store: &impl Store,
+                _store: &MemoryStore,
                 _exec_res: Self::ExecResult,
             ) -> Result<TestAction, CanoError> {
                 Ok(TestAction::Complete)

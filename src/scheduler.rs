@@ -17,15 +17,15 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> CanoResult<()> {
-//!     let mut scheduler: Scheduler<MyState, MemoryStore> = Scheduler::new();
+//!     let mut scheduler: Scheduler<MyState, DefaultParams, MemoryStore> = Scheduler::new();
 //!     
 //!     // Create separate workflows for each scheduled task
-//!     let workflow1 = Workflow::new(MyState::Start);
-//!     let workflow2 = Workflow::new(MyState::Start);
-//!     let workflow3 = Workflow::new(MyState::Start);
-//!     let workflow4 = Workflow::new(MyState::Start);
-//!     let workflow5 = Workflow::new(MyState::Start);
-//!     let workflow6 = Workflow::new(MyState::Start);
+//!     let workflow1: Workflow<MyState, DefaultParams, MemoryStore> = Workflow::new(MyState::Start);
+//!     let workflow2: Workflow<MyState, DefaultParams, MemoryStore> = Workflow::new(MyState::Start);
+//!     let workflow3: Workflow<MyState, DefaultParams, MemoryStore> = Workflow::new(MyState::Start);
+//!     let workflow4: Workflow<MyState, DefaultParams, MemoryStore> = Workflow::new(MyState::Start);
+//!     let workflow5: Workflow<MyState, DefaultParams, MemoryStore> = Workflow::new(MyState::Start);
+//!     let workflow6: Workflow<MyState, DefaultParams, MemoryStore> = Workflow::new(MyState::Start);
 //!     
 //!     // Multiple ways to schedule workflows:
 //!     scheduler.every_seconds("task1", workflow1, 30)?;                    // Every 30 seconds
@@ -41,7 +41,6 @@
 //! ```
 
 use crate::error::{CanoError, CanoResult};
-use crate::store::Store;
 use crate::workflow::Workflow;
 use chrono::{DateTime, Utc};
 use cron::Schedule as CronSchedule;
@@ -81,23 +80,25 @@ pub struct FlowInfo {
 }
 
 /// Type alias for the complex workflow data stored in the scheduler
-type FlowData<T, S> = (Arc<Workflow<T, S>>, Schedule, Arc<RwLock<FlowInfo>>);
+type FlowData<T, Params, S> = (Arc<Workflow<T, Params, S>>, Schedule, Arc<RwLock<FlowInfo>>);
 
 /// Simplified scheduler system
-pub struct Scheduler<T, S>
+pub struct Scheduler<T, Params = crate::node::DefaultParams, S = crate::MemoryStore>
 where
     T: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    S: Store + Clone + Default + 'static,
+    Params: Clone + Send + Sync + 'static,
+    S: Clone + Default + Send + Sync + 'static,
 {
-    flows: HashMap<String, FlowData<T, S>>,
+    flows: HashMap<String, FlowData<T, Params, S>>,
     command_tx: Option<mpsc::UnboundedSender<String>>,
     running: Arc<RwLock<bool>>,
 }
 
-impl<T, S> Scheduler<T, S>
+impl<T, Params, S> Scheduler<T, Params, S>
 where
     T: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    S: Store + Clone + Default + 'static,
+    Params: Clone + Send + Sync + 'static,
+    S: Clone + Default + Send + Sync + 'static,
 {
     /// Create a new scheduler
     pub fn new() -> Self {
@@ -112,7 +113,7 @@ where
     pub fn every(
         &mut self,
         id: &str,
-        workflow: Workflow<T, S>,
+        workflow: Workflow<T, Params, S>,
         interval: Duration,
     ) -> CanoResult<()> {
         self.add_flow(id, workflow, Schedule::Every(interval))
@@ -122,7 +123,7 @@ where
     pub fn every_seconds(
         &mut self,
         id: &str,
-        workflow: Workflow<T, S>,
+        workflow: Workflow<T, Params, S>,
         seconds: u64,
     ) -> CanoResult<()> {
         self.every(id, workflow, Duration::from_secs(seconds))
@@ -132,7 +133,7 @@ where
     pub fn every_minutes(
         &mut self,
         id: &str,
-        workflow: Workflow<T, S>,
+        workflow: Workflow<T, Params, S>,
         minutes: u64,
     ) -> CanoResult<()> {
         self.every(id, workflow, Duration::from_secs(minutes * 60))
@@ -142,14 +143,19 @@ where
     pub fn every_hours(
         &mut self,
         id: &str,
-        workflow: Workflow<T, S>,
+        workflow: Workflow<T, Params, S>,
         hours: u64,
     ) -> CanoResult<()> {
         self.every(id, workflow, Duration::from_secs(hours * 3600))
     }
 
     /// Add a workflow with cron schedule
-    pub fn cron(&mut self, id: &str, workflow: Workflow<T, S>, expr: &str) -> CanoResult<()> {
+    pub fn cron(
+        &mut self,
+        id: &str,
+        workflow: Workflow<T, Params, S>,
+        expr: &str,
+    ) -> CanoResult<()> {
         // Validate cron expression
         CronSchedule::from_str(expr)
             .map_err(|e| CanoError::Configuration(format!("Invalid cron expression: {e}")))?;
@@ -157,7 +163,7 @@ where
     }
 
     /// Add a manually triggered workflow
-    pub fn manual(&mut self, id: &str, workflow: Workflow<T, S>) -> CanoResult<()> {
+    pub fn manual(&mut self, id: &str, workflow: Workflow<T, Params, S>) -> CanoResult<()> {
         self.add_flow(id, workflow, Schedule::Manual)
     }
 
@@ -165,7 +171,7 @@ where
     fn add_flow(
         &mut self,
         id: &str,
-        workflow: Workflow<T, S>,
+        workflow: Workflow<T, Params, S>,
         schedule: Schedule,
     ) -> CanoResult<()> {
         if self.flows.contains_key(id) {
@@ -354,10 +360,11 @@ where
     }
 }
 
-impl<T, S> Default for Scheduler<T, S>
+impl<T, Params, S> Default for Scheduler<T, Params, S>
 where
     T: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    S: Store + Clone + Default + 'static,
+    Params: Clone + Send + Sync + 'static,
+    S: Clone + Default + Send + Sync + 'static,
 {
     fn default() -> Self {
         Self::new()
@@ -409,10 +416,14 @@ fn should_run(
 }
 
 /// Execute a workflow
-async fn execute_flow<T, S>(workflow: Arc<Workflow<T, S>>, info: Arc<RwLock<FlowInfo>>, store: S)
-where
+async fn execute_flow<T, Params, S>(
+    workflow: Arc<Workflow<T, Params, S>>,
+    info: Arc<RwLock<FlowInfo>>,
+    store: S,
+) where
     T: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    S: Store + Clone + Default + 'static,
+    Params: Clone + Send + Sync + 'static,
+    S: Clone + Default + Send + Sync + 'static,
 {
     // Update status to running
     {
@@ -479,11 +490,11 @@ mod tests {
     }
 
     #[async_trait]
-    impl Node<TestState, crate::node::DefaultParams, MemoryStore> for TestNode {
+    impl Node<TestState, crate::node::DefaultParams> for TestNode {
         type PrepResult = ();
         type ExecResult = ();
 
-        async fn prep(&self, _store: &impl crate::store::Store) -> CanoResult<()> {
+        async fn prep(&self, _store: &MemoryStore) -> CanoResult<()> {
             Ok(())
         }
 
@@ -493,7 +504,7 @@ mod tests {
 
         async fn post(
             &self,
-            _store: &impl crate::store::Store,
+            _store: &MemoryStore,
             _exec_res: Self::ExecResult,
         ) -> CanoResult<TestState> {
             if self.should_fail {
@@ -504,7 +515,7 @@ mod tests {
         }
     }
 
-    fn create_test_workflow() -> Workflow<TestState, MemoryStore> {
+    fn create_test_workflow() -> Workflow<TestState, crate::node::DefaultParams, MemoryStore> {
         let mut workflow = Workflow::new(TestState::Start);
         workflow.register_node(TestState::Start, TestNode::new());
         workflow.add_exit_state(TestState::Complete);
@@ -512,7 +523,7 @@ mod tests {
         workflow
     }
 
-    fn create_failing_workflow() -> Workflow<TestState, MemoryStore> {
+    fn create_failing_workflow() -> Workflow<TestState, crate::node::DefaultParams, MemoryStore> {
         let mut workflow = Workflow::new(TestState::Start);
         workflow.register_node(TestState::Start, TestNode::new_failing());
         workflow.add_exit_state(TestState::Complete);
@@ -522,7 +533,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_scheduler_creation() {
-        let scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let scheduler: Scheduler<TestState, crate::node::DefaultParams, MemoryStore> =
+            Scheduler::<TestState, crate::node::DefaultParams, MemoryStore>::new();
         assert!(!scheduler.has_running_flows().await);
         assert_eq!(scheduler.running_count().await, 0);
         assert!(scheduler.list().await.is_empty());
@@ -530,7 +542,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_workflow_every_seconds() {
-        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let mut scheduler = Scheduler::<TestState, crate::node::DefaultParams, MemoryStore>::new();
         let workflow = create_test_workflow();
 
         let result = scheduler.every_seconds("test_task", workflow, 5);
@@ -545,7 +557,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_workflow_every_minutes() {
-        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let mut scheduler: Scheduler<TestState, crate::node::DefaultParams, MemoryStore> =
+            Scheduler::<TestState, crate::node::DefaultParams, MemoryStore>::new();
         let workflow = create_test_workflow();
 
         let result = scheduler.every_minutes("test_task", workflow, 2);
@@ -558,7 +571,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_workflow_every_hours() {
-        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let mut scheduler: Scheduler<TestState, crate::node::DefaultParams, MemoryStore> =
+            Scheduler::<TestState, crate::node::DefaultParams, MemoryStore>::new();
         let workflow = create_test_workflow();
 
         let result = scheduler.every_hours("test_task", workflow, 1);
@@ -570,7 +584,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_workflow_every_duration() {
-        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let mut scheduler: Scheduler<TestState, crate::node::DefaultParams, MemoryStore> =
+            Scheduler::<TestState, crate::node::DefaultParams, MemoryStore>::new();
         let workflow = create_test_workflow();
 
         let result = scheduler.every("test_task", workflow, Duration::from_millis(100));
@@ -579,7 +594,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_workflow_cron() {
-        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let mut scheduler: Scheduler<TestState, crate::node::DefaultParams, MemoryStore> =
+            Scheduler::<TestState, crate::node::DefaultParams, MemoryStore>::new();
         let workflow = create_test_workflow();
 
         // Valid cron expression
@@ -589,7 +605,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_workflow_cron_invalid() {
-        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let mut scheduler: Scheduler<TestState, crate::node::DefaultParams, MemoryStore> =
+            Scheduler::<TestState, crate::node::DefaultParams, MemoryStore>::new();
         let workflow = create_test_workflow();
 
         // Invalid cron expression
@@ -600,7 +617,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_add_workflow_manual() {
-        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let mut scheduler: Scheduler<TestState, crate::node::DefaultParams, MemoryStore> =
+            Scheduler::<TestState, crate::node::DefaultParams, MemoryStore>::new();
         let workflow = create_test_workflow();
 
         let result = scheduler.manual("test_task", workflow);
@@ -609,7 +627,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_duplicate_workflow_id() {
-        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let mut scheduler: Scheduler<TestState, crate::node::DefaultParams, MemoryStore> =
+            Scheduler::<TestState, crate::node::DefaultParams, MemoryStore>::new();
         let workflow1 = create_test_workflow();
         let workflow2 = create_test_workflow();
 
@@ -622,7 +641,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_manual_trigger_without_start() {
-        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let mut scheduler: Scheduler<TestState, crate::node::DefaultParams, MemoryStore> =
+            Scheduler::<TestState, crate::node::DefaultParams, MemoryStore>::new();
         let workflow = create_test_workflow();
         scheduler.manual("test_task", workflow).unwrap();
 
@@ -633,7 +653,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_start_and_stop() {
-        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let mut scheduler: Scheduler<TestState, crate::node::DefaultParams, MemoryStore> =
+            Scheduler::<TestState, crate::node::DefaultParams, MemoryStore>::new();
         let workflow = create_test_workflow();
         scheduler.manual("test_task", workflow).unwrap();
 
@@ -650,7 +671,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_stop_immediately() {
-        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let mut scheduler: Scheduler<TestState, crate::node::DefaultParams, MemoryStore> =
+            Scheduler::<TestState, crate::node::DefaultParams, MemoryStore>::new();
         let workflow = create_test_workflow();
         scheduler.manual("test_task", workflow).unwrap();
 
@@ -660,7 +682,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_manual_trigger_success() {
-        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let mut scheduler: Scheduler<TestState, crate::node::DefaultParams, MemoryStore> =
+            Scheduler::<TestState, crate::node::DefaultParams, MemoryStore>::new();
         let workflow = create_test_workflow();
         scheduler.manual("test_task", workflow).unwrap();
 
@@ -682,7 +705,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_manual_trigger_nonexistent() {
-        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let mut scheduler: Scheduler<TestState, crate::node::DefaultParams, MemoryStore> =
+            Scheduler::<TestState, crate::node::DefaultParams, MemoryStore>::new();
         scheduler.start().await.unwrap();
 
         scheduler.trigger("nonexistent").await.unwrap(); // Should not fail, just do nothing
@@ -692,7 +716,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_workflow_execution_failure() {
-        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let mut scheduler: Scheduler<TestState, crate::node::DefaultParams, MemoryStore> =
+            Scheduler::<TestState, crate::node::DefaultParams, MemoryStore>::new();
         let workflow = create_failing_workflow();
         scheduler.manual("test_task", workflow).unwrap();
 
@@ -724,7 +749,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_list_multiple_workflows() {
-        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let mut scheduler: Scheduler<TestState, crate::node::DefaultParams, MemoryStore> =
+            Scheduler::<TestState, crate::node::DefaultParams, MemoryStore>::new();
 
         scheduler.manual("task1", create_test_workflow()).unwrap();
         scheduler.manual("task2", create_test_workflow()).unwrap();
@@ -741,7 +767,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_running_flows_tracking() {
-        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let mut scheduler: Scheduler<TestState, crate::node::DefaultParams, MemoryStore> =
+            Scheduler::<TestState, crate::node::DefaultParams, MemoryStore>::new();
         scheduler
             .manual("test_task", create_test_workflow())
             .unwrap();
@@ -827,7 +854,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_stop_with_timeout() {
-        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let mut scheduler: Scheduler<TestState, crate::node::DefaultParams, MemoryStore> =
+            Scheduler::<TestState, crate::node::DefaultParams, MemoryStore>::new();
         scheduler
             .manual("test_task", create_test_workflow())
             .unwrap();
@@ -841,7 +869,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_scheduler_default() {
-        let scheduler: Scheduler<TestState, MemoryStore> = Scheduler::default();
+        let scheduler: Scheduler<TestState, crate::node::DefaultParams, MemoryStore> =
+            Scheduler::default();
         assert!(scheduler.list().await.is_empty());
     }
 
@@ -889,7 +918,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_manual_triggers() {
-        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let mut scheduler: Scheduler<TestState, crate::node::DefaultParams, MemoryStore> =
+            Scheduler::<TestState, crate::node::DefaultParams, MemoryStore>::new();
         scheduler
             .manual("test_task", create_test_workflow())
             .unwrap();
@@ -919,7 +949,8 @@ mod tests {
     async fn test_scheduler_cleanup_on_drop() {
         // This test ensures that the scheduler can be dropped without issues
         {
-            let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+            let mut scheduler: Scheduler<TestState, crate::node::DefaultParams, MemoryStore> =
+                Scheduler::<TestState, crate::node::DefaultParams, MemoryStore>::new();
             scheduler
                 .manual("test_task", create_test_workflow())
                 .unwrap();
@@ -982,7 +1013,8 @@ mod tests {
     #[tokio::test]
     async fn test_time_based_scheduling_logic() {
         // Test the actual scheduling logic more thoroughly
-        let mut scheduler: Scheduler<TestState, MemoryStore> = Scheduler::new();
+        let mut scheduler: Scheduler<TestState, crate::node::DefaultParams, MemoryStore> =
+            Scheduler::<TestState, crate::node::DefaultParams, MemoryStore>::new();
 
         // Create a workflow that runs every 100ms
         scheduler

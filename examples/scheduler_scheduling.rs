@@ -53,7 +53,7 @@ impl Node<WorkflowAction, DefaultParams, MemoryStore> for ReportNode {
         NodeConfig::minimal()
     }
 
-    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         println!("📊 Preparing {} report...", self.report_type);
         store.put("report_start_time", Utc::now().to_rfc3339())?;
         Ok(format!("Preparing {} report", self.report_type))
@@ -68,7 +68,7 @@ impl Node<WorkflowAction, DefaultParams, MemoryStore> for ReportNode {
 
     async fn post(
         &self,
-        store: &impl Store,
+        store: &MemoryStore,
         exec_result: Self::ExecResult,
     ) -> Result<WorkflowAction, CanoError> {
         println!("📊 Report completed: {}", exec_result);
@@ -100,7 +100,7 @@ impl Node<WorkflowAction, DefaultParams, MemoryStore> for CleanupNode {
         NodeConfig::minimal()
     }
 
-    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         println!("🧹 Scanning for {} cleanup...", self.cleanup_type);
         store.put("cleanup_start", Utc::now().to_rfc3339())?;
         // Simulate finding items to clean
@@ -120,7 +120,7 @@ impl Node<WorkflowAction, DefaultParams, MemoryStore> for CleanupNode {
 
     async fn post(
         &self,
-        store: &impl Store,
+        store: &MemoryStore,
         exec_result: Self::ExecResult,
     ) -> Result<WorkflowAction, CanoError> {
         println!("🧹 Cleanup completed: {} items removed", exec_result);
@@ -152,7 +152,7 @@ impl Node<WorkflowAction, DefaultParams, MemoryStore> for ManualTaskNode {
         NodeConfig::minimal()
     }
 
-    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         println!("⚡ Starting manual task: {}", self.task_name);
         store.put("manual_task_start", Utc::now().to_rfc3339())?;
         Ok(format!("Manual task: {}", self.task_name))
@@ -167,7 +167,7 @@ impl Node<WorkflowAction, DefaultParams, MemoryStore> for ManualTaskNode {
 
     async fn post(
         &self,
-        store: &impl Store,
+        store: &MemoryStore,
         exec_result: Self::ExecResult,
     ) -> Result<WorkflowAction, CanoError> {
         println!("⚡ Manual task finished: {}", exec_result);
@@ -199,7 +199,7 @@ impl Node<WorkflowAction, DefaultParams, MemoryStore> for SetupNode {
         NodeConfig::minimal()
     }
 
-    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         println!("🔧 Preparing {} setup...", self.setup_type);
         store.put("setup_start", Utc::now().to_rfc3339())?;
         Ok(vec![
@@ -218,7 +218,7 @@ impl Node<WorkflowAction, DefaultParams, MemoryStore> for SetupNode {
 
     async fn post(
         &self,
-        store: &impl Store,
+        store: &MemoryStore,
         exec_result: Self::ExecResult,
     ) -> Result<WorkflowAction, CanoError> {
         println!("🔧 Setup completed successfully: {}", exec_result);
@@ -233,28 +233,32 @@ async fn main() -> CanoResult<()> {
     println!("=====================================");
 
     // Create flows
-    let mut hourly_report_flow = Workflow::new(WorkflowAction::Start);
+    let mut hourly_report_flow: Workflow<WorkflowAction, DefaultParams, MemoryStore> =
+        Workflow::new(WorkflowAction::Start);
     hourly_report_flow
         .register_node(WorkflowAction::Start, ReportNode::new("Hourly"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
-    let mut cleanup_flow = Workflow::new(WorkflowAction::Start);
+    let mut cleanup_flow: Workflow<WorkflowAction, DefaultParams, MemoryStore> =
+        Workflow::new(WorkflowAction::Start);
     cleanup_flow
         .register_node(WorkflowAction::Start, CleanupNode::new("Temporary"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
-    let mut manual_flow = Workflow::new(WorkflowAction::Start);
+    let mut manual_flow: Workflow<WorkflowAction, DefaultParams, MemoryStore> =
+        Workflow::new(WorkflowAction::Start);
     manual_flow
         .register_node(WorkflowAction::Start, ManualTaskNode::new("Data Migration"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
-    let mut setup_flow = Workflow::new(WorkflowAction::Start);
+    let mut setup_flow: Workflow<WorkflowAction, DefaultParams, MemoryStore> =
+        Workflow::new(WorkflowAction::Start);
     setup_flow
         .register_node(WorkflowAction::Start, SetupNode::new("System"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
     // Create scheduler with multiple flows
-    let mut scheduler: Scheduler<WorkflowAction, MemoryStore> = Scheduler::new();
+    let mut scheduler: Scheduler<WorkflowAction, DefaultParams, MemoryStore> = Scheduler::new();
 
     // Run hourly report every 5 seconds for demo to see concurrent executions
     scheduler.every_seconds("hourly_report", hourly_report_flow, 5)?;

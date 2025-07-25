@@ -48,7 +48,7 @@ impl Node<WorkflowState> for ProcessorNode {
     type PrepResult = String;
     type ExecResult = bool;
 
-    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         let input: String = store.get("input").unwrap_or_default();
         Ok(input)
     }
@@ -58,7 +58,7 @@ impl Node<WorkflowState> for ProcessorNode {
         true // Success
     }
 
-    async fn post(&self, store: &impl Store, exec_res: Self::ExecResult) 
+    async fn post(&self, store: &MemoryStore, exec_res: Self::ExecResult) 
         -> Result<WorkflowState, CanoError> {
         if exec_res {
             store.put("result", "processed".to_string())?;
@@ -118,7 +118,7 @@ impl Node<String> for EmailProcessor {
     type PrepResult = String;
     type ExecResult = bool;
 
-    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         // Load email data from store
         let email: String = store.get("email").unwrap_or_default();
         Ok(email)
@@ -130,7 +130,7 @@ impl Node<String> for EmailProcessor {
         true // Success
     }
 
-    async fn post(&self, store: &impl Store, success: Self::ExecResult) 
+    async fn post(&self, store: &MemoryStore, success: Self::ExecResult) 
         -> Result<String, CanoError> {
         // Store the result and return next action
         if success {
@@ -324,7 +324,7 @@ impl Node<OrderState> for ValidationNode {
     type PrepResult = String;
     type ExecResult = ValidationResult;
 
-    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         let data: String = store.get("raw_data")?;
         Ok(data)
     }
@@ -339,7 +339,7 @@ impl Node<OrderState> for ValidationNode {
         }
     }
 
-    async fn post(&self, store: &impl Store, result: Self::ExecResult) 
+    async fn post(&self, store: &MemoryStore, result: Self::ExecResult) 
         -> Result<OrderState, CanoError> {
         match result {
             ValidationResult::Valid => {
@@ -366,7 +366,7 @@ impl Node<OrderState> for QualityCheckNode {
     type PrepResult = (String, i32);
     type ExecResult = QualityScore;
 
-    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         let data: String = store.get("processed_data")?;
         let attempt: i32 = store.get("retry_count").unwrap_or(0);
         Ok((data, attempt))
@@ -377,7 +377,7 @@ impl Node<OrderState> for QualityCheckNode {
         QualityScore { score, attempt }
     }
 
-    async fn post(&self, store: &impl Store, result: Self::ExecResult) 
+    async fn post(&self, store: &MemoryStore, result: Self::ExecResult) 
         -> Result<OrderState, CanoError> {
         store.put("quality_score", result.score)?;
         

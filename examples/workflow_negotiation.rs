@@ -89,7 +89,7 @@ impl Node<NegotiationAction> for SellerNode {
     }
 
     /// Preparation phase: Load current negotiation state or initialize if first round
-    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         match store.get::<NegotiationState>("negotiation_state") {
             Ok(state) => {
                 println!(
@@ -146,7 +146,7 @@ impl Node<NegotiationAction> for SellerNode {
     /// Post-processing phase: Store the updated offer for buyer evaluation
     async fn post(
         &self,
-        store: &impl Store,
+        store: &MemoryStore,
         exec_res: Self::ExecResult,
     ) -> Result<NegotiationAction, CanoError> {
         // Store the current negotiation state
@@ -204,7 +204,7 @@ impl Node<NegotiationAction> for BuyerNode {
     }
 
     /// Preparation phase: Load the current negotiation state
-    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         let state: NegotiationState = store.get("negotiation_state").map_err(|e| {
             CanoError::preparation(format!("Failed to load negotiation state: {e}"))
         })?;
@@ -254,7 +254,7 @@ impl Node<NegotiationAction> for BuyerNode {
     /// Post-processing phase: Update state and determine next action
     async fn post(
         &self,
-        store: &impl Store,
+        store: &MemoryStore,
         exec_res: Self::ExecResult,
     ) -> Result<NegotiationAction, CanoError> {
         let (mut state, acceptable) = exec_res;

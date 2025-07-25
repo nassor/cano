@@ -24,6 +24,7 @@
 // Example: Graceful Shutdown with Timeout
 
 use async_trait::async_trait;
+use cano::node::DefaultParams;
 use cano::prelude::*;
 use tokio::time::Duration;
 
@@ -40,11 +41,11 @@ enum MyState {
 struct LongProcessingNode;
 
 #[async_trait]
-impl Node<MyState> for LongProcessingNode {
+impl Node<MyState, DefaultParams, MemoryStore> for LongProcessingNode {
     type PrepResult = ();
     type ExecResult = ();
 
-    async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         Ok(())
     }
 
@@ -56,7 +57,7 @@ impl Node<MyState> for LongProcessingNode {
 
     async fn post(
         &self,
-        _store: &impl Store,
+        _store: &MemoryStore,
         _result: Self::ExecResult,
     ) -> Result<MyState, CanoError> {
         Ok(MyState::End)
@@ -68,11 +69,11 @@ impl Node<MyState> for LongProcessingNode {
 struct QuickNode;
 
 #[async_trait]
-impl Node<MyState> for QuickNode {
+impl Node<MyState, DefaultParams, MemoryStore> for QuickNode {
     type PrepResult = ();
     type ExecResult = ();
 
-    async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         Ok(())
     }
 
@@ -82,7 +83,7 @@ impl Node<MyState> for QuickNode {
 
     async fn post(
         &self,
-        _store: &impl Store,
+        _store: &MemoryStore,
         _result: Self::ExecResult,
     ) -> Result<MyState, CanoError> {
         Ok(MyState::End)
@@ -91,14 +92,16 @@ impl Node<MyState> for QuickNode {
 
 #[tokio::main]
 async fn main() -> CanoResult<()> {
-    let mut scheduler: Scheduler<MyState, MemoryStore> = Scheduler::new();
+    let mut scheduler: Scheduler<MyState, DefaultParams, MemoryStore> = Scheduler::new();
 
     // Create flows with proper nodes
-    let mut long_flow_builder = Workflow::new(MyState::Start);
+    let mut long_flow_builder: Workflow<MyState, DefaultParams, MemoryStore> =
+        Workflow::new(MyState::Start);
     long_flow_builder.register_node(MyState::Start, LongProcessingNode);
     long_flow_builder.add_exit_state(MyState::End);
 
-    let mut quick_flow_builder = Workflow::new(MyState::Start);
+    let mut quick_flow_builder: Workflow<MyState, DefaultParams, MemoryStore> =
+        Workflow::new(MyState::Start);
     quick_flow_builder.register_node(MyState::Start, QuickNode);
     quick_flow_builder.add_exit_state(MyState::End);
 
