@@ -42,6 +42,10 @@ name = "workflow_negotiation"
 path = "examples/workflow_negotiation.rs"
 
 [[example]]
+name = "workflow_stack_store"
+path = "examples/workflow_stack_store.rs"
+
+[[example]]
 name = "scheduler_scheduling"
 path = "examples/scheduler_scheduling.rs"
 
