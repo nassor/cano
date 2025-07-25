@@ -1,3 +1,26 @@
+//! # Graceful Shutdown with Timeout Example
+//!
+//! This example demonstrates how to implement graceful shutdown handling in the Scheduler:
+//! 1. **Long Processing Workflow**: Simulates a long-running task that takes several seconds
+//! 2. **Graceful Shutdown**: Shows how to stop the scheduler cleanly
+//! 3. **Timeout Handling**: Demonstrates shutdown with timeout to prevent hanging
+//!
+//! The example showcases:
+//! - Scheduler graceful shutdown with `scheduler.shutdown_with_timeout()`
+//! - Handling of running workflows during shutdown
+//! - Timeout mechanisms to prevent indefinite waiting
+//! - Proper cleanup of resources and active tasks
+//!
+//! Key features:
+//! - Tasks in progress are allowed to complete during shutdown
+//! - Timeout prevents the application from hanging indefinitely
+//! - Clean resource cleanup and status reporting
+//!
+//! Run with:
+//! ```bash
+//! cargo run --example scheduler_graceful_shutdown
+//! ```
+
 // Example: Graceful Shutdown with Timeout
 
 use async_trait::async_trait;

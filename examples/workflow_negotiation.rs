@@ -17,7 +17,7 @@
 //!
 //! Run with:
 //! ```bash
-//! cargo run --example negotiator
+//! cargo run --example workflow_negotiation
 //! ```
 
 use async_trait::async_trait;

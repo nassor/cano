@@ -12,12 +12,7 @@
 //!
 //! - **Default**: Workflow orchestration with real downloads
 //!   ```bash
-//!   cargo run --example book_prepositions
-//!   ```
-//!
-//! - **Mock Mode**: Offline testing with simulated data
-//!   ```bash
-//!   CANO_MOCK_MODE=1 cargo run --example book_prepositions
+//!   cargo run --example workflow_book_prepositions
 //!   ```
 
 use async_trait::async_trait;

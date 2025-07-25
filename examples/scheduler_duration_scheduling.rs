@@ -1,3 +1,21 @@
+//! # Duration-based Scheduling Example
+//!
+//! This example demonstrates how to use the Scheduler with custom Duration intervals:
+//! 1. **Short Task**: Runs every 2 seconds with a quick execution
+//! 2. **Medium Task**: Runs every 5 seconds with moderate processing
+//! 3. **Long Task**: Runs every 10 seconds with extended execution time
+//!
+//! The example showcases:
+//! - Duration-based scheduling using `scheduler.every()`
+//! - Multiple workflows with different intervals
+//! - Concurrent execution of scheduled tasks
+//! - Precise timing control with std::time::Duration
+//!
+//! Run with:
+//! ```bash
+//! cargo run --example scheduler_duration_scheduling
+//! ```
+
 // Example: Duration-based Scheduling
 
 use async_trait::async_trait;

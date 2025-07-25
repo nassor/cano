@@ -9,7 +9,7 @@
 //!
 //! Run with:
 //! ```bash
-//! cargo run --example simple
+//! cargo run --example workflow_simple
 //! ```
 
 use async_trait::async_trait;

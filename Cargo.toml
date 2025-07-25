@@ -1,13 +1,14 @@
 [package]
 name = "cano"
-version = "0.2.1"
+version = "0.2.2"
+homepage = "https://github.com/nassor/cano"
 edition = "2024"
-description = "Simple & Fast Async Workflows in Rust - Build powerful data processing pipelines with minimal code"
+description = "Async AI & Data Workflows in Rust"
 license = "MIT"
 repository = "https://github.com/nassor/cano"
 readme = "README.md"
-keywords = ["async", "workflow", "pipeline", "data-processing", "tokio"]
-categories = ["asynchronous", "data-structures", "concurrency"]
+keywords = ["ai", "async", "workflow", "data-processing", "scheduler"]
+categories = ["finance", "development-tools", "concurrency", "asynchronous", "science"]
 authors = ["Nassor Frazier-Silva"]
 
 [dependencies]
@@ -22,6 +23,11 @@ cargo-audit = "0.21.2"
 criterion = { version = "0.6", features = ["html_reports", "async_tokio"] }
 futures = "0.3"
 reqwest = { version = "0.12", features = ["json"] }
+rig-core = "0.15"
+
+[[example]]
+name = "ai_workflow_yes_and"
+path = "examples/ai_workflow_yes_and.rs"
 
 [[example]]
 name = "workflow_simple"

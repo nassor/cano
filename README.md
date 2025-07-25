@@ -1,4 +1,4 @@
-# Cano: Simple & Fast Async Workflows in Rust
+# 🚀 Cano: Async Data & AI Workflows in Rust
 
 [![Crates.io](https://img.shields.io/crates/v/cano.svg)](https://crates.io/crates/cano)
 [![Documentation](https://docs.rs/cano/badge.svg)](https://docs.rs/cano)
@@ -8,9 +8,11 @@
 
 **Async workflow engine with built-in scheduling, retry logic, and state machine semantics.**
 
-Cano is an async workflow engine for Rust that manages complex processing through composable workflows.
+Cano is an async workflow engine for Rust that manages complex processing through composable workflows. It can be used for data processing, AI inference workflows, and background jobs. Cano provides a simple, fast and type-safe API for defining workflows with retry strategies, scheduling capabilities, and shared state management.
 
-The engine is built on three core concepts: **Nodes** to encapsulate business logic, **Workflows** to manage state transitions, and **Schedulers** to run workflows on a schedule. Only **Nodes** are required to implement your processing logic, while workflows and schedulers are optional and can be used as needed.
+The engine is built on three core concepts: **Nodes** to encapsulate business logic, **Workflows** to manage state transitions, and **Schedulers** to run workflows on a schedule.
+
+Only **Nodes** are required to implement your processing logic, while workflows and schedulers are optional and can be used as needed.
 
 *The Node API is inspired by the [PocketFlow](https://github.com/The-Pocket/PocketFlow) project, adapted for Rust's async ecosystem.*
 
@@ -105,7 +107,7 @@ Cano is built around three concepts:
 
 ### 1. Nodes - Processing Units
 
-A `Node` implements the processing logic for your workflow:
+A `Node` implements the processing logic for your workflow. Each node can perform preparation, execution, and post-processing steps, where the preparation step loads data from a shared store, execution performs the main logic, and post-processing updates the store and determines the next state.
 
 ```rust
 // Node with specific processing logic
@@ -213,13 +215,40 @@ Use the built-in store to pass data between workflow nodes:
 ```rust
 let store = MemoryStore::new();
 
-// Store some data
+// Store different types of data
 store.put("user_id", 123)?;
 store.put("name", "Alice".to_string())?;
+store.put("scores", vec![85, 92, 78])?;
+store.put("is_active", true)?;
 
-// Retrieve it later
-let user_id: Result<i32, _> = store.get("user_id");
-let name: Result<String, _> = store.get("name");
+// Retrieve data with type safety
+let user_id: i32 = store.get("user_id")?;
+let name: String = store.get("name")?;
+let scores: Vec<i32> = store.get("scores")?;
+let is_active: bool = store.get("is_active")?;
+
+// Append items to existing collections
+store.append("scores", 95)?;  // scores is now [85, 92, 78, 95]
+store.append("tags", "important".to_string())?;  // Creates new Vec if key doesn't exist
+
+// Remove individual items
+store.remove("user_id")?;
+
+// Check store status
+let count = store.len()?;           // Get number of items
+let is_empty = store.is_empty()?;   // Check if store is empty
+
+// Iterate over all keys
+let all_keys: Vec<String> = store.keys()?.collect();
+for key in all_keys {
+    println!("Found key: {}", key);
+}
+
+// Clear all data
+store.clear()?;
+
+// Alternative removal method
+store.delete("name")?;  // Alias for remove()
 ```
 
 ### 3. Workflows - State Management
@@ -492,6 +521,9 @@ cargo test
 cargo bench --bench store_performance
 cargo bench --bench flow_performance
 cargo bench --bench node_performance
+
+# Run AI workflow examples
+cargo run --example ai_workflow_yes_and
 
 # Run workflow examples
 cargo run --example workflow_simple
