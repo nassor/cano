@@ -18,7 +18,7 @@
 use async_trait::async_trait;
 use cano::error::CanoError;
 use cano::prelude::*;
-use cano::store::{MemoryStore, Store};
+use cano::store::{KeyValueStore, MemoryStore};
 use futures::future::join_all;
 use std::collections::{HashMap, HashSet};
 use tokio::time::{Duration, timeout};
@@ -459,7 +459,7 @@ impl Node<BookPrepositionAction> for PrepositionNode {
         store.put("book_analyses", exec_res.clone())?;
 
         // Clean up the raw book content to save memory
-        store.delete("downloaded_books")?;
+        store.remove("downloaded_books")?;
 
         println!(
             "✅ Stored {} book analyses and cleaned up raw content",

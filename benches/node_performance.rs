@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use cano::node::DefaultParams;
-use cano::store::Store;
+use cano::store::KeyValueStore;
 use cano::{CanoError, MemoryStore, Node};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 

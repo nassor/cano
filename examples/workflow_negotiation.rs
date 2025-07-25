@@ -262,7 +262,7 @@ impl Node<NegotiationAction> for BuyerNode {
         if acceptable && state.current_offer <= state.buyer_budget {
             // Store final deal details
             store.put("final_deal", state.clone())?;
-            store.delete("negotiation_state")?;
+            store.remove("negotiation_state")?;
 
             println!("✅ Deal reached in round {}!", state.round);
             return Ok(NegotiationAction::Deal);
@@ -272,7 +272,7 @@ impl Node<NegotiationAction> for BuyerNode {
         let offer_ratio = state.current_offer as f64 / state.buyer_budget as f64;
         if state.round >= 10 && offer_ratio > 3.0 {
             store.put("failed_negotiation", state)?;
-            store.delete("negotiation_state")?;
+            store.remove("negotiation_state")?;
             return Ok(NegotiationAction::NoDeal);
         }
 

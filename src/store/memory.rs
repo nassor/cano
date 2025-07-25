@@ -1,4 +1,4 @@
-use super::{Store, StoreResult, error::StoreError};
+use super::{KeyValueStore, StoreResult, error::StoreError};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -40,7 +40,7 @@ impl MemoryStore {
     }
 }
 
-impl Store for MemoryStore {
+impl KeyValueStore for MemoryStore {
     fn get<TState: 'static + Clone>(&self, key: &str) -> StoreResult<TState> {
         let data = self
             .data
@@ -273,21 +273,6 @@ mod tests {
             }
             _ => panic!("Expected KeyNotFound error"),
         }
-    }
-
-    #[test]
-    fn test_delete_alias() {
-        let store = MemoryStore::new();
-        let key = "test_delete";
-        let value = "to_be_deleted".to_string();
-
-        // Put and verify
-        store.put(key, value).unwrap();
-        assert!(store.get::<String>(key).is_ok());
-
-        // Delete using alias and verify
-        store.delete(key).unwrap();
-        assert!(store.get::<String>(key).is_err());
     }
 
     #[test]

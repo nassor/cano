@@ -255,7 +255,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{MemoryStore, Store};
+    use crate::store::{KeyValueStore, MemoryStore};
     use async_trait::async_trait;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};

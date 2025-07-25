@@ -52,9 +52,9 @@
 //!   - Built-in retry logic and error handling
 //!   - Fluent configuration API via [`NodeConfig`]
 //!
-//! - **[`store`]**: Thread-safe store for inter-node communication
+//! - **[`store`]**: Thread-safe key-value storage helpers for pipeline data sharing
 //!   - [`MemoryStore`] for in-memory data sharing
-//!   - [`Store`] trait for custom store backends
+//!   - [`KeyValueStore`] trait for custom storage backends
 //!
 //! - **[`error`]**: Comprehensive error handling system
 //!   - [`CanoError`] for categorized error types
@@ -85,7 +85,7 @@ pub mod workflow;
 pub use error::{CanoError, CanoResult};
 pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node, NodeConfig, RetryMode};
 pub use scheduler::{FlowInfo, Scheduler};
-pub use store::{MemoryStore, Store};
+pub use store::{KeyValueStore, MemoryStore};
 pub use workflow::{Workflow, WorkflowBuilder};
 
 // Convenience re-exports for common patterns
@@ -95,8 +95,8 @@ pub mod prelude {
     //! Use `use cano::prelude::*;` to import the most commonly used types and traits.
 
     pub use crate::{
-        CanoError, CanoResult, DefaultNodeResult, DefaultParams, FlowInfo, MemoryStore, Node,
-        NodeConfig, RetryMode, Scheduler, Store, Workflow, WorkflowBuilder,
+        CanoError, CanoResult, DefaultNodeResult, DefaultParams, FlowInfo, KeyValueStore,
+        MemoryStore, Node, NodeConfig, RetryMode, Scheduler, Workflow, WorkflowBuilder,
     };
 
     // Re-export async_trait for convenience

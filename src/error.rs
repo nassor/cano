@@ -42,7 +42,7 @@
 //! This means store operations can seamlessly workflow into the broader error system:
 //!
 //! ```rust
-//! use cano::{CanoResult, store::MemoryStore, store::Store};
+//! use cano::{CanoResult, store::{KeyValueStore, MemoryStore}};
 //!
 //! fn example_function() -> CanoResult<String> {
 //!     let store = MemoryStore::new();

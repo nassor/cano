@@ -89,10 +89,7 @@ impl Node<TaskState> for LongRunningTask {
     }
 }
 
-async fn print_flow_status(
-    scheduler: &Scheduler<TaskState>,
-    title: &str,
-) {
+async fn print_flow_status(scheduler: &Scheduler<TaskState>, title: &str) {
     println!("\n{title}");
     println!("{}", "=".repeat(title.len()));
     let flows_info = scheduler.list().await;
@@ -146,22 +143,19 @@ async fn main() -> CanoResult<()> {
     println!("Watch for overlapping execution messages and active instance counts!\n");
 
     // Create a long-running workflow (5 seconds execution time)
-    let mut long_task_flow: Workflow<TaskState> =
-        Workflow::new(TaskState::Execute);
+    let mut long_task_flow: Workflow<TaskState> = Workflow::new(TaskState::Execute);
     long_task_flow
         .register_node(TaskState::Execute, LongRunningTask::new("LongTask", 7000))
         .add_exit_states(vec![TaskState::Complete]);
 
     // Create a medium-running workflow (3 seconds execution time)
-    let mut medium_task_flow: Workflow<TaskState> =
-        Workflow::new(TaskState::Execute);
+    let mut medium_task_flow: Workflow<TaskState> = Workflow::new(TaskState::Execute);
     medium_task_flow
         .register_node(TaskState::Execute, LongRunningTask::new("MediumTask", 3000))
         .add_exit_states(vec![TaskState::Complete]);
 
     // Create a fast-running workflow (500ms execution time)
-    let mut fast_task_flow: Workflow<TaskState> =
-        Workflow::new(TaskState::Execute);
+    let mut fast_task_flow: Workflow<TaskState> = Workflow::new(TaskState::Execute);
     fast_task_flow
         .register_node(TaskState::Execute, LongRunningTask::new("FastTask", 500))
         .add_exit_states(vec![TaskState::Complete]);
