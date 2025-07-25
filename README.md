@@ -48,7 +48,7 @@ impl Node<WorkflowState> for ProcessorNode {
     type PrepResult = String;
     type ExecResult = bool;
 
-    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         let input: String = store.get("input").unwrap_or_default();
         Ok(input)
     }
@@ -58,7 +58,7 @@ impl Node<WorkflowState> for ProcessorNode {
         true // Success
     }
 
-    async fn post(&self, store: &impl Store, exec_res: Self::ExecResult) 
+    async fn post(&self, store: &MemoryStore, exec_res: Self::ExecResult) 
         -> Result<WorkflowState, CanoError> {
         if exec_res {
             store.put("result", "processed".to_string())?;
@@ -98,7 +98,7 @@ This example demonstrates a basic workflow with a single processing node.
 - **Shared state**: Thread-safe key-value store for data passing between nodes
 - **Scheduling**: Built-in scheduler for intervals, cron schedules, and manual triggers
 - **State machines**: Chain nodes together into complex workflows
-- **Type safety**: Enum-driven state transitions with compile-time checking
+- **Type safety**: Encourages Enum-driven state transitions with compile-time checking.
 - **Performance**: Minimal overhead with direct execution
 
 ## How It Works
@@ -118,7 +118,7 @@ impl Node<String> for EmailProcessor {
     type PrepResult = String;
     type ExecResult = bool;
 
-    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         // Load email data from store
         let email: String = store.get("email").unwrap_or_default();
         Ok(email)
@@ -130,7 +130,7 @@ impl Node<String> for EmailProcessor {
         true // Success
     }
 
-    async fn post(&self, store: &impl Store, success: Self::ExecResult) 
+    async fn post(&self, store: &MemoryStore, success: Self::ExecResult) 
         -> Result<String, CanoError> {
         // Store the result and return next action
         if success {
@@ -210,7 +210,11 @@ impl Node<WorkflowState> for CustomNode {
 
 ### 2. Store - Data Sharing
 
-Use the built-in store to pass data between workflow nodes:
+Cano allows **any type** to be used as a store for sharing data between workflow nodes. While MemoryStore is provided as a convenient key-value store implementation, you can use custom struct types for type-safe, performance-optimized data sharing.
+
+#### Using MemoryStore (Key-Value Store)
+
+The built-in MemoryStore provides a flexible key-value interface:
 
 ```rust
 let store = MemoryStore::new();
@@ -250,6 +254,47 @@ store.clear()?;
 // Alternative removal method
 store.delete("name")?;  // Alias for remove()
 ```
+
+#### Using Custom Store Types
+
+For better performance and type safety, you can use any custom struct as a store. This enables direct field access, stack allocation, and compile-time type checking:
+
+```rust
+// Custom store with direct field access
+#[derive(Debug, Clone, Default)]
+struct RequestCtx {
+    pub request_id: String,
+    pub revenue: f64,
+    pub customer_id: String,
+    pub transaction_count: i32,
+}
+
+// Nodes can access and modify the custom store directly
+#[async_trait]
+impl Node<ProcessingState, (), RequestCtx> for MetricsNode {
+    async fn prep(&self, store: &RequestCtx) -> Result<String, CanoError> {
+        // Direct field access - no hash map lookups
+        Ok(store.request_body.clone())
+    }
+
+    async fn post(&self, store: &RequestCtx, metrics: ProcessingResult) 
+        -> Result<ProcessingState, CanoError> {
+        // Nodes can read/modify store fields directly
+        println!("Processing request: {} with revenue: {}", 
+                 store.request_id, store.revenue);
+        Ok(ProcessingState::Complete)
+    }
+}
+```
+
+**Custom stores provide:**
+
+- **Performance**: Direct field access, no hash map overhead
+- **Type Safety**: Compile-time guarantees about data structure  
+- **Memory Efficiency**: Stack allocation, no heap allocations (if you are careful enough)
+- **API Clarity**: Explicit data contracts between nodes
+
+See the [`workflow_stack_store.rs`](./examples/workflow_stack_store.rs) example for a complete demonstration of custom store types with request processing pipelines.
 
 ### 3. Workflows - State Management
 
@@ -324,7 +369,7 @@ impl Node<OrderState> for ValidationNode {
     type PrepResult = String;
     type ExecResult = ValidationResult;
 
-    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         let data: String = store.get("raw_data")?;
         Ok(data)
     }
@@ -339,7 +384,7 @@ impl Node<OrderState> for ValidationNode {
         }
     }
 
-    async fn post(&self, store: &impl Store, result: Self::ExecResult) 
+    async fn post(&self, store: &MemoryStore, result: Self::ExecResult) 
         -> Result<OrderState, CanoError> {
         match result {
             ValidationResult::Valid => {
@@ -366,7 +411,7 @@ impl Node<OrderState> for QualityCheckNode {
     type PrepResult = (String, i32);
     type ExecResult = QualityScore;
 
-    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         let data: String = store.get("processed_data")?;
         let attempt: i32 = store.get("retry_count").unwrap_or(0);
         Ok((data, attempt))
@@ -377,7 +422,7 @@ impl Node<OrderState> for QualityCheckNode {
         QualityScore { score, attempt }
     }
 
-    async fn post(&self, store: &impl Store, result: Self::ExecResult) 
+    async fn post(&self, store: &MemoryStore, result: Self::ExecResult) 
         -> Result<OrderState, CanoError> {
         store.put("quality_score", result.score)?;
         
@@ -529,6 +574,7 @@ cargo run --example ai_workflow_yes_and
 cargo run --example workflow_simple
 cargo run --example workflow_book_prepositions
 cargo run --example workflow_negotiation
+cargo run --example workflow_stack_store
 
 # Run scheduler scheduling examples
 cargo run --example scheduler_scheduling

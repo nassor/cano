@@ -42,7 +42,7 @@
 //! This means store operations can seamlessly workflow into the broader error system:
 //!
 //! ```rust
-//! use cano::{CanoResult, store::MemoryStore, store::Store};
+//! use cano::{CanoResult, store::{KeyValueStore, MemoryStore}};
 //!
 //! fn example_function() -> CanoResult<String> {
 //!     let store = MemoryStore::new();
@@ -298,7 +298,7 @@ impl From<crate::store::error::StoreError> for CanoError {
 
 /// Convenient Result type alias for Cano operations
 ///
-/// This type alias wraps the standard `Result<T, E>` with [`CanoError`] as the error type.
+/// This type alias wraps the standard `Result<TState, E>` with [`CanoError`] as the error type.
 /// It's the recommended return type for all Cano-related functions that can fail.
 ///
 /// ## 🎯 Why Use CanoResult?
@@ -308,7 +308,7 @@ impl From<crate::store::error::StoreError> for CanoError {
 ///
 /// ## 📖 Examples
 ///
-/// Use `CanoResult<T>` for functions that process data and might fail.
+/// Use `CanoResult<TState>` for functions that process data and might fail.
 /// Return appropriate `CanoError` variants to indicate specific failure types.
 /// Use pattern matching to handle results, or use the `?` operator to
 /// propagate errors automatically in functions that return `CanoResult`.
@@ -325,7 +325,7 @@ impl From<crate::store::error::StoreError> for CanoError {
 /// Use the `?` operator to chain operations and short-circuit on the first error.
 /// This allows you to write clean, readable error-handling code that stops
 /// execution as soon as any step fails.
-pub type CanoResult<T> = Result<T, CanoError>;
+pub type CanoResult<TState> = Result<TState, CanoError>;
 
 #[cfg(test)]
 mod tests {

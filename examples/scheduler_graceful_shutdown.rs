@@ -44,7 +44,7 @@ impl Node<MyState> for LongProcessingNode {
     type PrepResult = ();
     type ExecResult = ();
 
-    async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         Ok(())
     }
 
@@ -56,7 +56,7 @@ impl Node<MyState> for LongProcessingNode {
 
     async fn post(
         &self,
-        _store: &impl Store,
+        _store: &MemoryStore,
         _result: Self::ExecResult,
     ) -> Result<MyState, CanoError> {
         Ok(MyState::End)
@@ -72,7 +72,7 @@ impl Node<MyState> for QuickNode {
     type PrepResult = ();
     type ExecResult = ();
 
-    async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         Ok(())
     }
 
@@ -82,7 +82,7 @@ impl Node<MyState> for QuickNode {
 
     async fn post(
         &self,
-        _store: &impl Store,
+        _store: &MemoryStore,
         _result: Self::ExecResult,
     ) -> Result<MyState, CanoError> {
         Ok(MyState::End)
@@ -91,14 +91,14 @@ impl Node<MyState> for QuickNode {
 
 #[tokio::main]
 async fn main() -> CanoResult<()> {
-    let mut scheduler: Scheduler<MyState, MemoryStore> = Scheduler::new();
+    let mut scheduler: Scheduler<MyState> = Scheduler::new();
 
     // Create flows with proper nodes
-    let mut long_flow_builder = Workflow::new(MyState::Start);
+    let mut long_flow_builder: Workflow<MyState> = Workflow::new(MyState::Start);
     long_flow_builder.register_node(MyState::Start, LongProcessingNode);
     long_flow_builder.add_exit_state(MyState::End);
 
-    let mut quick_flow_builder = Workflow::new(MyState::Start);
+    let mut quick_flow_builder: Workflow<MyState> = Workflow::new(MyState::Start);
     quick_flow_builder.register_node(MyState::Start, QuickNode);
     quick_flow_builder.add_exit_state(MyState::End);
 

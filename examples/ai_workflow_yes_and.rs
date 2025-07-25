@@ -110,7 +110,7 @@ fn filter_think_tags(text: &str) -> String {
 }
 
 /// Get conversation history from store as a formatted string
-fn get_conversation_history(store: &impl Store) -> Result<String, CanoError> {
+fn get_conversation_history(store: &MemoryStore) -> Result<String, CanoError> {
     let chat_history: Vec<String> = store
         .get::<Vec<String>>("chat")
         .unwrap_or_else(|_| Vec::new());
@@ -118,7 +118,7 @@ fn get_conversation_history(store: &impl Store) -> Result<String, CanoError> {
 }
 
 /// Update and check interaction count
-fn update_interaction_count(store: &impl Store) -> Result<u32, CanoError> {
+fn update_interaction_count(store: &MemoryStore) -> Result<u32, CanoError> {
     let current_count: u32 = store.get::<u32>("interaction_count").unwrap_or(0);
     let new_count = current_count + 1;
     store
@@ -178,7 +178,7 @@ impl Node<ConversationState> for Actor1Node {
     type PrepResult = String;
     type ExecResult = String;
 
-    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         get_conversation_history(store)
     }
 
@@ -212,7 +212,7 @@ impl Node<ConversationState> for Actor1Node {
 
     async fn post(
         &self,
-        store: &impl Store,
+        store: &MemoryStore,
         exec_result: Self::ExecResult,
     ) -> Result<ConversationState, CanoError> {
         store
@@ -263,7 +263,7 @@ impl Node<ConversationState> for Actor2Node {
     type PrepResult = String;
     type ExecResult = String;
 
-    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         get_conversation_history(store)
     }
 
@@ -281,7 +281,7 @@ impl Node<ConversationState> for Actor2Node {
 
     async fn post(
         &self,
-        store: &impl Store,
+        store: &MemoryStore,
         exec_result: Self::ExecResult,
     ) -> Result<ConversationState, CanoError> {
         store

@@ -1,6 +1,7 @@
 use async_trait::async_trait;
-use cano::store::Store;
-use cano::{CanoError, DefaultParams, MemoryStore, Node};
+use cano::node::DefaultParams;
+use cano::store::KeyValueStore;
+use cano::{CanoError, MemoryStore, Node};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 /// Simple do-nothing node for benchmarking
@@ -29,7 +30,7 @@ impl Node<TestState> for DoNothingNode {
     type PrepResult = ();
     type ExecResult = ();
 
-    async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         Ok(())
     }
 
@@ -40,7 +41,7 @@ impl Node<TestState> for DoNothingNode {
 
     async fn post(
         &self,
-        _store: &impl Store,
+        _store: &MemoryStore,
         _exec_res: Self::ExecResult,
     ) -> Result<TestState, CanoError> {
         Ok(self.next_state.clone())
@@ -68,7 +69,7 @@ impl Node<TestState> for CpuIntensiveNode {
     type PrepResult = Vec<u64>;
     type ExecResult = u64;
 
-    async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         // Generate some data to process
         Ok((0..self.iterations as u64).collect())
     }
@@ -80,7 +81,7 @@ impl Node<TestState> for CpuIntensiveNode {
 
     async fn post(
         &self,
-        store: &impl Store,
+        store: &MemoryStore,
         exec_res: Self::ExecResult,
     ) -> Result<TestState, CanoError> {
         // Store the result
@@ -110,7 +111,7 @@ impl Node<TestState> for IoSimulationNode {
     type PrepResult = String;
     type ExecResult = String;
 
-    async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         // Simulate I/O delay
         tokio::time::sleep(tokio::time::Duration::from_millis(self.delay_ms)).await;
         Ok("prepared_data".to_string())
@@ -124,7 +125,7 @@ impl Node<TestState> for IoSimulationNode {
 
     async fn post(
         &self,
-        store: &impl Store,
+        store: &MemoryStore,
         exec_res: Self::ExecResult,
     ) -> Result<TestState, CanoError> {
         // Simulate I/O delay

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use cano::{CanoError, MemoryStore, Node, Store, Workflow};
+use cano::{CanoError, MemoryStore, Node, Workflow};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 /// Simple do-nothing node for benchmarking
@@ -35,7 +35,7 @@ impl Node<TestState> for DoNothingNode {
     type PrepResult = ();
     type ExecResult = ();
 
-    async fn prep(&self, _store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         Ok(())
     }
 
@@ -46,7 +46,7 @@ impl Node<TestState> for DoNothingNode {
 
     async fn post(
         &self,
-        _store: &impl Store,
+        _store: &MemoryStore,
         _exec_res: Self::ExecResult,
     ) -> Result<TestState, CanoError> {
         Ok(self.next_state.clone())
@@ -54,8 +54,8 @@ impl Node<TestState> for DoNothingNode {
 }
 
 /// Create a workflow with a specified number of nodes
-fn create_flow(node_count: usize) -> Workflow<TestState, MemoryStore> {
-    let mut workflow = Workflow::new(TestState::Start);
+fn create_flow(node_count: usize) -> Workflow<TestState> {
+    let mut workflow: Workflow<TestState> = Workflow::new(TestState::Start);
 
     // Add the sequential chain of nodes
     for i in 0..node_count {

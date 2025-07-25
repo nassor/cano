@@ -89,7 +89,7 @@ impl Node<NegotiationAction> for SellerNode {
     }
 
     /// Preparation phase: Load current negotiation state or initialize if first round
-    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         match store.get::<NegotiationState>("negotiation_state") {
             Ok(state) => {
                 println!(
@@ -146,7 +146,7 @@ impl Node<NegotiationAction> for SellerNode {
     /// Post-processing phase: Store the updated offer for buyer evaluation
     async fn post(
         &self,
-        store: &impl Store,
+        store: &MemoryStore,
         exec_res: Self::ExecResult,
     ) -> Result<NegotiationAction, CanoError> {
         // Store the current negotiation state
@@ -204,7 +204,7 @@ impl Node<NegotiationAction> for BuyerNode {
     }
 
     /// Preparation phase: Load the current negotiation state
-    async fn prep(&self, store: &impl Store) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         let state: NegotiationState = store.get("negotiation_state").map_err(|e| {
             CanoError::preparation(format!("Failed to load negotiation state: {e}"))
         })?;
@@ -254,7 +254,7 @@ impl Node<NegotiationAction> for BuyerNode {
     /// Post-processing phase: Update state and determine next action
     async fn post(
         &self,
-        store: &impl Store,
+        store: &MemoryStore,
         exec_res: Self::ExecResult,
     ) -> Result<NegotiationAction, CanoError> {
         let (mut state, acceptable) = exec_res;
@@ -262,7 +262,7 @@ impl Node<NegotiationAction> for BuyerNode {
         if acceptable && state.current_offer <= state.buyer_budget {
             // Store final deal details
             store.put("final_deal", state.clone())?;
-            store.delete("negotiation_state")?;
+            store.remove("negotiation_state")?;
 
             println!("✅ Deal reached in round {}!", state.round);
             return Ok(NegotiationAction::Deal);
@@ -272,7 +272,7 @@ impl Node<NegotiationAction> for BuyerNode {
         let offer_ratio = state.current_offer as f64 / state.buyer_budget as f64;
         if state.round >= 10 && offer_ratio > 3.0 {
             store.put("failed_negotiation", state)?;
-            store.delete("negotiation_state")?;
+            store.remove("negotiation_state")?;
             return Ok(NegotiationAction::NoDeal);
         }
 

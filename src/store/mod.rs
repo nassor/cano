@@ -1,149 +1,148 @@
-//! # store API - Share Data Between Workflow Nodes
+//! # Key-Value Store Helpers for Processing Pipelines
 //!
-//! This module provides simple, thread-safe store for sharing data between nodes in workflows.
-//! Think of it as a shared key-value store that any node can read from and write to.
+//! This module provides optional helper utilities for common key-value store needs
+//! in processing pipelines. These are convenience tools - you can use any storage
+//! backend that meets your pipeline's requirements.
 //!
-//! ## 🎯 Why store?
+//! ## 🎯 Purpose
 //!
-//! In workflows, nodes often need to pass data to each other:
-//! - A data loader puts results for a processor to use
-//! - A validator stores validation results for an auditor
-//! - A processor saves intermediate results for a reporter
+//! Processing pipelines often need to share data between stages:
+//! - A data loader stores results for downstream processors
+//! - Validation stages store results for audit trails
+//! - Processing steps cache intermediate results
 //!
-//! store makes this communication simple and type-safe.
+//! This module provides common patterns for these use cases, but you're free
+//! to use any storage solution that fits your needs.
 //!
 //! ## 🚀 Quick Start
 //!
-//! Use `MemoryStore` to store different types of data using key-value pairs.
-//! Store data with `put()` and retrieve it later with `get()` - the store
-//! handles type safety automatically through generic methods.
+//! The included `MemoryStore` provides a simple in-memory key-value store
+//! for basic pipeline data sharing needs. Use `put()` to store data and
+//! `get()` to retrieve it with automatic type safety.
 //!
-//! ## 🔧 How It Works
+//! ## 🔧 Design Philosophy
 //!
-//! ### Stack and Heap Values
+//! ### Optional Helper, Not a Requirement
 //!
-//! The store system can accept both stack-based and heap-based values.
-//! It's the user's responsibility to decide whether to use Copy-on-Write (Cow)
-//! or direct value store based on their performance requirements.
+//! These store helpers are optional conveniences. Your pipeline nodes can use:
+//! - The provided `MemoryStore` for simple in-memory sharing
+//! - Custom implementations of `KeyValueStore` for specific needs
+//! - Any other storage solution that fits your architecture
 //!
-//! ### Type Safety with Any
+//! ### Type Safety with Flexibility
 //!
-//! store uses `Box<dyn Any>` internally but provides type-safe access.
-//! When you request data with the correct type, it returns `Some(value)`.
-//! When the type doesn't match, it safely returns `None`.
+//! The system uses `Box<dyn Any>` internally while providing type-safe access
+//! through generic methods. Store any type and retrieve it safely - the system
+//! handles type mismatches gracefully.
 //!
-//! ## 🏗️ Using store in Nodes
+//! ## 🏗️ Integration with Processing Nodes
 //!
-//! In your custom nodes, use store to read input data in the `prep()` phase,
-//! process it in `exec()`, and store results in the `post()` phase for the next node.
+//! In pipeline nodes, use the store in different phases:
+//! - `prep()`: Read input data from previous stages
+//! - `exec()`: Process data (store is available but not required)
+//! - `post()`: Store results for downstream stages
 //!
-//! ## 🔧 Available store Types
+//! ## 🔧 Available Store Options
 //!
-//! ### MemoryStore (Default)
+//! ### MemoryStore (Included)
 //!
-//! A thread-safe, in-memory HashMap-based store that's ready to use out of the box.
-//! Perfect for most workflows where data fits in memory.
+//! A thread-safe, in-memory HashMap-based store ready for immediate use.
+//! Ideal for pipelines where data fits in memory and doesn't need persistence.
 //!
-//! ### Custom store
+//! ### Custom Key-Value Stores
 //!
-//! Implement the [`Store`] trait for custom backends like databases,
-//! file systems, or network store. The trait requires implementing
-//! `get`, `put`, `remove`, `append`, `delete`, `keys`, `len`, and `clear` methods.
+//! Implement the [`KeyValueStore`] trait for specialized backends like databases,
+//! file systems, or distributed caches. The trait provides a simple interface
+//! with `get`, `put`, `remove`, `append`, and utility methods.
 //!
 //! ## 💡 Best Practices
 //!
-//! ### Key Naming
+//! ### Key Naming Conventions
 //!
-//! Use consistent, descriptive key names throughout your workflow.
-//! Good keys are clear about what data they contain (e.g., "user_profile",
-//! "validation_errors", "processing_status").
+//! Use consistent, descriptive key names across your pipeline stages.
+//! Clear keys improve maintainability (e.g., "user_profile", "validation_errors",
+//! "processing_status").
 //!
-//! ### Memory Management
+//! ### Memory and Performance
 //!
-//! - Choose between stack and heap allocation based on data size and lifetime
-//! - Use Copy-on-Write (Cow) when you need memory efficiency
-//! - Clear store when workflows complete to free memory
+//! - Choose appropriate data structures for your use case
+//! - Clear temporary data when pipeline stages complete
+//! - Consider using Copy-on-Write patterns for large data sets
 //!
 //! ### Error Handling
 //!
-//! Always handle missing keys gracefully by providing sensible defaults.
-//! Use the `unwrap_or()` pattern to provide fallback values when data
-//! might not be present in store.
+//! Handle missing keys gracefully with sensible defaults. Use patterns like
+//! `store.get("key").unwrap_or_default()` for robust pipeline behavior.
 
 pub mod error;
 pub mod memory;
 
 /// Type alias for store operation results
-pub type StoreResult<T> = Result<T, error::StoreError>;
+pub type StoreResult<TState> = Result<TState, error::StoreError>;
 
-/// Core store trait for workflow data sharing
+/// Core key-value store trait for pipeline data sharing
 ///
-/// This trait defines the interface for store backends used in Cano workflows.
-/// It provides a simple key-value store that any node can read from and write to.
+/// This trait provides a simple interface for key-value storage backends used in
+/// processing pipelines. It's designed as a helper for common storage patterns,
+/// not as a comprehensive database solution.
 ///
 /// ## 🎯 Purpose
 ///
-/// The `Store` enables different store backends while keeping the same API:
-/// - [`MemoryStore`]: Fast in-memory store (default)
-/// - File-based store: For persistent workflows
-/// - Database store: For enterprise workflows
-/// - Network store: For distributed workflows
+/// The `KeyValueStore` trait enables different storage backends while maintaining
+/// a consistent API for pipeline data sharing:
+/// - [`MemoryStore`]: Fast in-memory storage (included)
+/// - File-based stores: For persistent pipeline data
+/// - Database backends: For enterprise processing workflows
+/// - Distributed caches: For scaled pipeline architectures
 ///
-/// ## 🔧 Type Safety
+/// ## 🔧 Type Safety Approach
 ///
-/// The store system uses type erasure with `Box<dyn Any>` internally but provides
-/// type-safe access through generic methods. Store data with automatic type inference
-/// and retrieve with explicit type annotation for safety.
+/// Uses type erasure with `Box<dyn Any>` internally while providing type-safe
+/// access through generic methods. Store any type and retrieve it with automatic
+/// type checking - mismatches return errors rather than panicking.
 ///
-/// ## 🔒 Thread Safety Requirements
+/// ## 🔒 Thread Safety
 ///
-/// All `Store` implementations are always thread-safe (`Send + Sync`) to support
-/// concurrent access from async tasks. This typically means using interior mutability
-/// patterns like `Arc<Mutex<_>>` or `Arc<RwLock<_>>`.
+/// All `KeyValueStore` implementations must be thread-safe (`Send + Sync`) to support
+/// concurrent access from async pipeline stages. This typically requires interior
+/// mutability patterns like `Arc<Mutex<_>>` or `Arc<RwLock<_>>`.
 ///
-/// ## 🚀 Implementation Example
+/// ## 🚀 Implementation Guide
 ///
-/// A simple thread-safe store implementation using `Arc<RwLock<HashMap>>`.
-/// Custom store backends can implement the Store to provide
-/// persistence, distribution, or other specialized functionality.
+/// Implement this trait for custom storage backends. The interface is intentionally
+/// simple to support a wide range of storage solutions while maintaining performance.
 ///
-/// ## 📋 Method Overview
+/// ## 📋 Method Reference
 ///
-/// | Method | Purpose | Example |
-/// |--------|---------|---------|
-/// | `get` | Retrieve a value | `let val: Result<T, StoreError> = store.get("key")` |
-/// | `put` | Store a value | `store.put("key", value)?` |
-/// | `remove` | Delete a key | `store.remove("key")?` |
-/// | `append` | Append to existing value | `store.append("key", item)?` |
-/// | `delete` | Alias for remove | `store.delete("key")?` |
-/// | `keys` | Get all keys | `for key in store.keys()? { ... }` |
-/// | `len` | Get count of items | `let count = store.len()?` |
+/// | Method | Purpose | Example Usage |
+/// |--------|---------|---------------|
+/// | `get` | Retrieve typed value | `let val: String = store.get("key")?` |
+/// | `put` | Store typed value | `store.put("key", value)?` |
+/// | `remove` | Delete by key | `store.remove("key")?` |
+/// | `append` | Add to collection | `store.append("list", item)?` |
+/// | `keys` | List all keys | `for key in store.keys()? { ... }` |
+/// | `len` | Count stored items | `let count = store.len()?` |
 /// | `clear` | Remove all data | `store.clear()?` |
 ///
-/// ## Type Safety
+/// ## Design Considerations
 ///
-/// The store system uses type erasure with `Box<dyn Any + Send + Sync>` to allow
-/// storing arbitrary types. Users must handle type safety through downcasting.
+/// This trait prioritizes simplicity and flexibility over advanced features.
+/// For complex storage needs, consider using specialized database libraries
+/// alongside or instead of this helper interface.
 ///
-/// ## Implementation Requirements
+/// ## Thread Safety Requirements
 ///
-/// All methods must be implemented to provide complete store functionality.
-/// The trait provides no default implementations to ensure optimal performance
-/// for different store backends.
-///
-/// ## Thread Safety
-///
-/// All implementations are guaranteed to be thread-safe (`Send + Sync`).
-/// For mutable operations, this typically means using interior mutability patterns
-/// or external synchronization.
-pub trait Store: Send + Sync {
+/// All implementations guarantee thread-safe access (`Send + Sync`).
+/// Mutable operations typically require interior mutability patterns or
+/// external synchronization mechanisms.
+pub trait KeyValueStore: Send + Sync {
     /// Get a typed value by key
     ///
     /// Returns the value if the key exists and can be downcast to type T.
     /// Returns an error if the key doesn't exist or type mismatch occurs.
     /// The user is responsible for choosing whether to use
     /// Copy-on-Write or direct value store.
-    fn get<T: 'static + Clone>(&self, key: &str) -> StoreResult<T>;
+    fn get<TState: 'static + Clone>(&self, key: &str) -> StoreResult<TState>;
 
     /// Store a typed value by key
     ///
@@ -151,7 +150,11 @@ pub trait Store: Send + Sync {
     /// the previous value is replaced. The store accepts both stack and
     /// heap-based values - it's the user's responsibility to choose the
     /// appropriate allocation strategy.
-    fn put<T: 'static + Send + Sync + Clone>(&self, key: &str, value: T) -> StoreResult<()>;
+    fn put<TState: 'static + Send + Sync + Clone>(
+        &self,
+        key: &str,
+        value: TState,
+    ) -> StoreResult<()>;
 
     /// Remove a value by key
     ///
@@ -161,19 +164,14 @@ pub trait Store: Send + Sync {
 
     /// Append an item to an existing collection value
     ///
-    /// If the key exists and contains a `Vec<T>`, appends the item to it.
-    /// If the key doesn't exist, creates a new `Vec<T>` with the single item.
-    /// Returns an error if the key exists but doesn't contain a `Vec<T>`.
-    fn append<T: 'static + Send + Sync + Clone>(&self, key: &str, item: T) -> StoreResult<()>;
-
-    /// Delete a value by key (alias for remove)
-    ///
-    /// This is an alias for `remove()` to provide a more explicit API.
-    /// Removes the value associated with the key and returns Ok(()) if successful.
-    /// Returns an error if the operation fails.
-    fn delete(&self, key: &str) -> StoreResult<()> {
-        self.remove(key)
-    }
+    /// If the key exists and contains a `Vec<TState>`, appends the item to it.
+    /// If the key doesn't exist, creates a new `Vec<TState>` with the single item.
+    /// Returns an error if the key exists but doesn't contain a `Vec<TState>`.
+    fn append<TState: 'static + Send + Sync + Clone>(
+        &self,
+        key: &str,
+        item: TState,
+    ) -> StoreResult<()>;
 
     /// Get all keys in the store
     ///

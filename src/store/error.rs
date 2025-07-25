@@ -16,7 +16,7 @@ use std::fmt;
 /// - `KeyNotFound`: The requested key doesn't exist in store
 /// - `TypeMismatch`: The stored value can't be cast to the requested type
 /// - `LockError`: Failed to acquire read/write lock on store
-/// - `AppendTypeMismatch`: Tried to append to a value that isn't a `Vec<T>`
+/// - `AppendTypeMismatch`: Tried to append to a value that isn't a `Vec<TState>`
 /// - `Generic`: General store errors with custom messages
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
@@ -41,10 +41,10 @@ pub enum StoreError {
     /// or deadlock situations.
     LockError(String),
 
-    /// Attempted to append to a value that isn't a `Vec<T>`
+    /// Attempted to append to a value that isn't a `Vec<TState>`
     ///
     /// This error occurs when trying to append to an existing key that
-    /// contains a value of a different type than `Vec<T>`.
+    /// contains a value of a different type than `Vec<TState>`.
     AppendTypeMismatch(String),
 
     /// General store error with custom message
@@ -56,30 +56,30 @@ pub enum StoreError {
 
 impl StoreError {
     /// Create a new key not found error
-    pub fn key_not_found<S: Into<String>>(key: S) -> Self {
+    pub fn key_not_found<TStore: Into<String>>(key: TStore) -> Self {
         StoreError::KeyNotFound(format!("Key '{}' not found in store", key.into()))
     }
 
     /// Create a new type mismatch error
-    pub fn type_mismatch<S: Into<String>>(msg: S) -> Self {
+    pub fn type_mismatch<TStore: Into<String>>(msg: TStore) -> Self {
         StoreError::TypeMismatch(msg.into())
     }
 
     /// Create a new lock error
-    pub fn lock_error<S: Into<String>>(msg: S) -> Self {
+    pub fn lock_error<TStore: Into<String>>(msg: TStore) -> Self {
         StoreError::LockError(msg.into())
     }
 
     /// Create a new append type mismatch error
-    pub fn append_type_mismatch<S: Into<String>>(key: S) -> Self {
+    pub fn append_type_mismatch<TStore: Into<String>>(key: TStore) -> Self {
         StoreError::AppendTypeMismatch(format!(
-            "Cannot append to key '{}': existing value is not a Vec<T>",
+            "Cannot append to key '{}': existing value is not a Vec<TState>",
             key.into()
         ))
     }
 
     /// Create a new generic store error
-    pub fn generic<S: Into<String>>(msg: S) -> Self {
+    pub fn generic<TStore: Into<String>>(msg: TStore) -> Self {
         StoreError::Generic(msg.into())
     }
 }
