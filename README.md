@@ -250,9 +250,6 @@ for key in all_keys {
 
 // Clear all data
 store.clear()?;
-
-// Alternative removal method
-store.delete("name")?;  // Alias for remove()
 ```
 
 #### Using Custom Store Types
