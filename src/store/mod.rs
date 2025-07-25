@@ -74,7 +74,7 @@ pub mod error;
 pub mod memory;
 
 /// Type alias for store operation results
-pub type StoreResult<T> = Result<T, error::StoreError>;
+pub type StoreResult<TState> = Result<TState, error::StoreError>;
 
 /// Core store trait for workflow data sharing
 ///
@@ -111,7 +111,7 @@ pub type StoreResult<T> = Result<T, error::StoreError>;
 ///
 /// | Method | Purpose | Example |
 /// |--------|---------|---------|
-/// | `get` | Retrieve a value | `let val: Result<T, StoreError> = store.get("key")` |
+/// | `get` | Retrieve a value | `let val: Result<TState, StoreError> = store.get("key")` |
 /// | `put` | Store a value | `store.put("key", value)?` |
 /// | `remove` | Delete a key | `store.remove("key")?` |
 /// | `append` | Append to existing value | `store.append("key", item)?` |
@@ -143,7 +143,7 @@ pub trait Store: Send + Sync {
     /// Returns an error if the key doesn't exist or type mismatch occurs.
     /// The user is responsible for choosing whether to use
     /// Copy-on-Write or direct value store.
-    fn get<T: 'static + Clone>(&self, key: &str) -> StoreResult<T>;
+    fn get<TState: 'static + Clone>(&self, key: &str) -> StoreResult<TState>;
 
     /// Store a typed value by key
     ///
@@ -151,7 +151,11 @@ pub trait Store: Send + Sync {
     /// the previous value is replaced. The store accepts both stack and
     /// heap-based values - it's the user's responsibility to choose the
     /// appropriate allocation strategy.
-    fn put<T: 'static + Send + Sync + Clone>(&self, key: &str, value: T) -> StoreResult<()>;
+    fn put<TState: 'static + Send + Sync + Clone>(
+        &self,
+        key: &str,
+        value: TState,
+    ) -> StoreResult<()>;
 
     /// Remove a value by key
     ///
@@ -161,10 +165,14 @@ pub trait Store: Send + Sync {
 
     /// Append an item to an existing collection value
     ///
-    /// If the key exists and contains a `Vec<T>`, appends the item to it.
-    /// If the key doesn't exist, creates a new `Vec<T>` with the single item.
-    /// Returns an error if the key exists but doesn't contain a `Vec<T>`.
-    fn append<T: 'static + Send + Sync + Clone>(&self, key: &str, item: T) -> StoreResult<()>;
+    /// If the key exists and contains a `Vec<TState>`, appends the item to it.
+    /// If the key doesn't exist, creates a new `Vec<TState>` with the single item.
+    /// Returns an error if the key exists but doesn't contain a `Vec<TState>`.
+    fn append<TState: 'static + Send + Sync + Clone>(
+        &self,
+        key: &str,
+        item: TState,
+    ) -> StoreResult<()>;
 
     /// Delete a value by key (alias for remove)
     ///

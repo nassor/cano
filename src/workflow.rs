@@ -67,61 +67,62 @@ use crate::node::Node;
 ///
 /// This allows the Workflow to accept nodes of different concrete types as long as they
 /// implement the Node trait with compatible associated types. The trait object erases
-/// the specific Params, PrepResult, and ExecResult types but maintains the essential
+/// the specific TParams, PrepResult, and ExecResult types but maintains the essential
 /// functionality needed for workflow execution.
-pub type DynNode<T, Params, S> = Box<dyn DynNodeTrait<T, Params, S> + Send + Sync>;
+pub type DynNode<TState, TParams, TStore> =
+    Box<dyn DynNodeTrait<TState, TParams, TStore> + Send + Sync>;
 
 /// Trait object-safe version of the Node trait for dynamic dispatch
 ///
 /// This trait provides the essential functionality needed for workflow execution
 /// while being object-safe (can be used as a trait object).
 #[async_trait::async_trait]
-pub trait DynNodeTrait<T, Params, S>: Send + Sync
+pub trait DynNodeTrait<TState, TParams, TStore>: Send + Sync
 where
-    T: Clone + std::fmt::Debug + Send + Sync + 'static,
+    TState: Clone + std::fmt::Debug + Send + Sync + 'static,
 {
     /// Execute the node and return the next state
-    async fn run(&self, store: &S) -> Result<T, CanoError>;
+    async fn run(&self, store: &TStore) -> Result<TState, CanoError>;
 }
 
-/// Blanket implementation of `DynNodeTrait<T, S>` for any `N: Node<T, P, S>`
+/// Blanket implementation of `DynNodeTrait<TState, TStore>` for any `N: Node<TState, P, TStore>`
 #[async_trait::async_trait]
-impl<T, Params, S, N> DynNodeTrait<T, Params, S> for N
+impl<TState, TParams, TStore, N> DynNodeTrait<TState, TParams, TStore> for N
 where
-    T: Clone + std::fmt::Debug + Send + Sync + 'static,
-    S: Send + Sync + 'static,
-    Params: Clone + Send + Sync + 'static,
-    N: Node<T, Params, S> + Send + Sync + 'static,
+    TState: Clone + std::fmt::Debug + Send + Sync + 'static,
+    TStore: Send + Sync + 'static,
+    TParams: Clone + Send + Sync + 'static,
+    N: Node<TState, TParams, TStore> + Send + Sync + 'static,
 {
-    async fn run(&self, store: &S) -> Result<T, CanoError> {
+    async fn run(&self, store: &TStore) -> Result<TState, CanoError> {
         // just forward to the inherent `Node::run`
         Node::run(self, store).await
     }
 }
 
 /// State machine workflow orchestration
-pub struct Workflow<T, Params = crate::node::DefaultParams, S = MemoryStore>
+pub struct Workflow<TState, TParams = crate::node::DefaultParams, TStore = MemoryStore>
 where
-    T: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    Params: Clone + Send + Sync + 'static,
-    S: Send + Sync + 'static,
+    TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
+    TParams: Clone + Send + Sync + 'static,
+    TStore: Send + Sync + 'static,
 {
     /// The starting state of the workflow
-    pub start_state: Option<T>,
+    pub start_state: Option<TState>,
     /// Map of states to their corresponding node trait objects
-    pub state_nodes: HashMap<T, DynNode<T, Params, S>>,
+    pub state_nodes: HashMap<TState, DynNode<TState, TParams, TStore>>,
     /// Set of states that will terminate the workflow when reached
-    pub exit_states: std::collections::HashSet<T>,
+    pub exit_states: std::collections::HashSet<TState>,
 }
 
-impl<T, Params, S> Workflow<T, Params, S>
+impl<TState, TParams, TStore> Workflow<TState, TParams, TStore>
 where
-    T: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    Params: Clone + Send + Sync + 'static,
-    S: Send + Sync + 'static,
+    TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
+    TParams: Clone + Send + Sync + 'static,
+    TStore: Send + Sync + 'static,
 {
     /// Create a new Workflow with a starting state
-    pub fn new(start_state: T) -> Self {
+    pub fn new(start_state: TState) -> Self {
         Self {
             start_state: Some(start_state),
             state_nodes: HashMap::new(),
@@ -129,29 +130,29 @@ where
         }
     }
 
-    /// Register a node for a specific state (accepts any type implementing `Node<T>`)
-    pub fn register_node<N>(&mut self, state: T, node: N) -> &mut Self
+    /// Register a node for a specific state (accepts any type implementing `Node<TState>`)
+    pub fn register_node<N>(&mut self, state: TState, node: N) -> &mut Self
     where
-        N: Node<T, Params, S> + Send + Sync + 'static,
+        N: Node<TState, TParams, TStore> + Send + Sync + 'static,
     {
         self.state_nodes.insert(state, Box::new(node));
         self
     }
 
     /// Register multiple exit states
-    pub fn add_exit_states(&mut self, states: Vec<T>) -> &mut Self {
+    pub fn add_exit_states(&mut self, states: Vec<TState>) -> &mut Self {
         self.exit_states.extend(states);
         self
     }
 
     /// Register a single exit state
-    pub fn add_exit_state(&mut self, state: T) -> &mut Self {
+    pub fn add_exit_state(&mut self, state: TState) -> &mut Self {
         self.exit_states.insert(state);
         self
     }
 
     /// Set the starting state
-    pub fn start(&mut self, state: T) -> &mut Self {
+    pub fn start(&mut self, state: TState) -> &mut Self {
         self.start_state = Some(state);
         self
     }
@@ -178,7 +179,7 @@ where
     /// ## Return Value
     ///
     /// Returns the final state that terminated the workflow (always an exit state).
-    pub async fn orchestrate(&self, store: &S) -> Result<T, CanoError> {
+    pub async fn orchestrate(&self, store: &TStore) -> Result<TState, CanoError> {
         let mut current = self
             .start_state
             .as_ref()
@@ -202,51 +203,51 @@ where
 /// Builder for creating Workflow instances with a fluent API
 ///
 /// Provides a convenient way to construct flows with method chaining.
-pub struct WorkflowBuilder<T, Params = crate::node::DefaultParams, S = MemoryStore>
+pub struct WorkflowBuilder<TState, TParams = crate::node::DefaultParams, TStore = MemoryStore>
 where
-    T: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    Params: Clone + Send + Sync + 'static,
-    S: Send + Sync + 'static,
+    TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
+    TParams: Clone + Send + Sync + 'static,
+    TStore: Send + Sync + 'static,
 {
-    workflow: Workflow<T, Params, S>,
+    workflow: Workflow<TState, TParams, TStore>,
 }
 
-impl<T, Params, S> WorkflowBuilder<T, Params, S>
+impl<TState, TParams, TStore> WorkflowBuilder<TState, TParams, TStore>
 where
-    T: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    Params: Clone + Send + Sync + 'static,
-    S: Send + Sync + 'static,
+    TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
+    TParams: Clone + Send + Sync + 'static,
+    TStore: Send + Sync + 'static,
 {
     /// Create a new WorkflowBuilder with a starting state
-    pub fn new(start_state: T) -> Self {
+    pub fn new(start_state: TState) -> Self {
         Self {
             workflow: Workflow::new(start_state),
         }
     }
 
-    /// Register a node for a state (accepts any type implementing `Node<T>`)
-    pub fn register_node<N>(mut self, state: T, node: N) -> Self
+    /// Register a node for a state (accepts any type implementing `Node<TState>`)
+    pub fn register_node<N>(mut self, state: TState, node: N) -> Self
     where
-        N: Node<T, Params, S> + Send + Sync + 'static,
+        N: Node<TState, TParams, TStore> + Send + Sync + 'static,
     {
         self.workflow.register_node(state, node);
         self
     }
 
     /// Add an exit state
-    pub fn add_exit_state(mut self, state: T) -> Self {
+    pub fn add_exit_state(mut self, state: TState) -> Self {
         self.workflow.add_exit_state(state);
         self
     }
 
     /// Add multiple exit states
-    pub fn add_exit_states(mut self, states: Vec<T>) -> Self {
+    pub fn add_exit_states(mut self, states: Vec<TState>) -> Self {
         self.workflow.add_exit_states(states);
         self
     }
 
     /// Build the final Workflow instance
-    pub fn build(self) -> Workflow<T, Params, S> {
+    pub fn build(self) -> Workflow<TState, TParams, TStore> {
         self.workflow
     }
 }

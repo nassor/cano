@@ -80,25 +80,29 @@ pub struct FlowInfo {
 }
 
 /// Type alias for the complex workflow data stored in the scheduler
-type FlowData<T, Params, S> = (Arc<Workflow<T, Params, S>>, Schedule, Arc<RwLock<FlowInfo>>);
+type FlowData<TState, TParams, TStore> = (
+    Arc<Workflow<TState, TParams, TStore>>,
+    Schedule,
+    Arc<RwLock<FlowInfo>>,
+);
 
 /// Simplified scheduler system
-pub struct Scheduler<T, Params = crate::node::DefaultParams, S = crate::MemoryStore>
+pub struct Scheduler<TState, TParams = crate::node::DefaultParams, TStore = crate::MemoryStore>
 where
-    T: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    Params: Clone + Send + Sync + 'static,
-    S: Clone + Default + Send + Sync + 'static,
+    TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
+    TParams: Clone + Send + Sync + 'static,
+    TStore: Clone + Default + Send + Sync + 'static,
 {
-    flows: HashMap<String, FlowData<T, Params, S>>,
+    flows: HashMap<String, FlowData<TState, TParams, TStore>>,
     command_tx: Option<mpsc::UnboundedSender<String>>,
     running: Arc<RwLock<bool>>,
 }
 
-impl<T, Params, S> Scheduler<T, Params, S>
+impl<TState, TParams, TStore> Scheduler<TState, TParams, TStore>
 where
-    T: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    Params: Clone + Send + Sync + 'static,
-    S: Clone + Default + Send + Sync + 'static,
+    TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
+    TParams: Clone + Send + Sync + 'static,
+    TStore: Clone + Default + Send + Sync + 'static,
 {
     /// Create a new scheduler
     pub fn new() -> Self {
@@ -113,7 +117,7 @@ where
     pub fn every(
         &mut self,
         id: &str,
-        workflow: Workflow<T, Params, S>,
+        workflow: Workflow<TState, TParams, TStore>,
         interval: Duration,
     ) -> CanoResult<()> {
         self.add_flow(id, workflow, Schedule::Every(interval))
@@ -123,7 +127,7 @@ where
     pub fn every_seconds(
         &mut self,
         id: &str,
-        workflow: Workflow<T, Params, S>,
+        workflow: Workflow<TState, TParams, TStore>,
         seconds: u64,
     ) -> CanoResult<()> {
         self.every(id, workflow, Duration::from_secs(seconds))
@@ -133,7 +137,7 @@ where
     pub fn every_minutes(
         &mut self,
         id: &str,
-        workflow: Workflow<T, Params, S>,
+        workflow: Workflow<TState, TParams, TStore>,
         minutes: u64,
     ) -> CanoResult<()> {
         self.every(id, workflow, Duration::from_secs(minutes * 60))
@@ -143,7 +147,7 @@ where
     pub fn every_hours(
         &mut self,
         id: &str,
-        workflow: Workflow<T, Params, S>,
+        workflow: Workflow<TState, TParams, TStore>,
         hours: u64,
     ) -> CanoResult<()> {
         self.every(id, workflow, Duration::from_secs(hours * 3600))
@@ -153,7 +157,7 @@ where
     pub fn cron(
         &mut self,
         id: &str,
-        workflow: Workflow<T, Params, S>,
+        workflow: Workflow<TState, TParams, TStore>,
         expr: &str,
     ) -> CanoResult<()> {
         // Validate cron expression
@@ -163,7 +167,11 @@ where
     }
 
     /// Add a manually triggered workflow
-    pub fn manual(&mut self, id: &str, workflow: Workflow<T, Params, S>) -> CanoResult<()> {
+    pub fn manual(
+        &mut self,
+        id: &str,
+        workflow: Workflow<TState, TParams, TStore>,
+    ) -> CanoResult<()> {
         self.add_flow(id, workflow, Schedule::Manual)
     }
 
@@ -171,7 +179,7 @@ where
     fn add_flow(
         &mut self,
         id: &str,
-        workflow: Workflow<T, Params, S>,
+        workflow: Workflow<TState, TParams, TStore>,
         schedule: Schedule,
     ) -> CanoResult<()> {
         if self.flows.contains_key(id) {
@@ -224,7 +232,7 @@ where
                             if should_run(schedule, &mut last_check, id, now) {
                                 let workflow = Arc::clone(workflow);
                                 let info = Arc::clone(info);
-                                let store = S::default();
+                                let store = TStore::default();
 
                                 tokio::spawn(async move {
                                     execute_flow(workflow, info, store).await;
@@ -239,7 +247,7 @@ where
                                 if let Some((workflow, _, info)) = flows.get(&flow_id) {
                                     let workflow = Arc::clone(workflow);
                                     let info = Arc::clone(info);
-                                    let store = S::default();
+                                    let store = TStore::default();
 
                                     tokio::spawn(async move {
                                         execute_flow(workflow, info, store).await;
@@ -360,11 +368,11 @@ where
     }
 }
 
-impl<T, Params, S> Default for Scheduler<T, Params, S>
+impl<TState, TParams, TStore> Default for Scheduler<TState, TParams, TStore>
 where
-    T: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    Params: Clone + Send + Sync + 'static,
-    S: Clone + Default + Send + Sync + 'static,
+    TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
+    TParams: Clone + Send + Sync + 'static,
+    TStore: Clone + Default + Send + Sync + 'static,
 {
     fn default() -> Self {
         Self::new()
@@ -416,14 +424,14 @@ fn should_run(
 }
 
 /// Execute a workflow
-async fn execute_flow<T, Params, S>(
-    workflow: Arc<Workflow<T, Params, S>>,
+async fn execute_flow<TState, TParams, TStore>(
+    workflow: Arc<Workflow<TState, TParams, TStore>>,
     info: Arc<RwLock<FlowInfo>>,
-    store: S,
+    store: TStore,
 ) where
-    T: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    Params: Clone + Send + Sync + 'static,
-    S: Clone + Default + Send + Sync + 'static,
+    TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
+    TParams: Clone + Send + Sync + 'static,
+    TStore: Clone + Default + Send + Sync + 'static,
 {
     // Update status to running
     {

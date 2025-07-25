@@ -41,14 +41,14 @@ impl MemoryStore {
 }
 
 impl Store for MemoryStore {
-    fn get<T: 'static + Clone>(&self, key: &str) -> StoreResult<T> {
+    fn get<TState: 'static + Clone>(&self, key: &str) -> StoreResult<TState> {
         let data = self
             .data
             .read()
             .map_err(|_| StoreError::lock_error("Failed to acquire read lock on store"))?;
 
         match data.get(key) {
-            Some(value) => value.downcast_ref::<T>().cloned().ok_or_else(|| {
+            Some(value) => value.downcast_ref::<TState>().cloned().ok_or_else(|| {
                 StoreError::type_mismatch(format!(
                     "Cannot downcast value for key '{key}' to requested type"
                 ))
@@ -57,7 +57,11 @@ impl Store for MemoryStore {
         }
     }
 
-    fn put<T: 'static + Send + Sync + Clone>(&self, key: &str, value: T) -> StoreResult<()> {
+    fn put<TState: 'static + Send + Sync + Clone>(
+        &self,
+        key: &str,
+        value: TState,
+    ) -> StoreResult<()> {
         let mut data = self
             .data
             .write()
@@ -78,23 +82,27 @@ impl Store for MemoryStore {
             .ok_or_else(|| StoreError::key_not_found(key))
     }
 
-    fn append<T: 'static + Send + Sync + Clone>(&self, key: &str, item: T) -> StoreResult<()> {
+    fn append<TState: 'static + Send + Sync + Clone>(
+        &self,
+        key: &str,
+        item: TState,
+    ) -> StoreResult<()> {
         let mut data = self
             .data
             .write()
             .map_err(|_| StoreError::lock_error("Failed to acquire write lock on store"))?;
 
         if let Some(existing) = data.get_mut(key) {
-            // Try to downcast to Vec<T> and append
-            if let Some(vec) = existing.downcast_mut::<Vec<T>>() {
+            // Try to downcast to Vec<TState> and append
+            if let Some(vec) = existing.downcast_mut::<Vec<TState>>() {
                 vec.push(item);
                 Ok(())
             } else {
-                // Key exists but is not a Vec<T>
+                // Key exists but is not a Vec<TState>
                 Err(StoreError::append_type_mismatch(key))
             }
         } else {
-            // Key doesn't exist, create new Vec<T> with the item
+            // Key doesn't exist, create new Vec<TState> with the item
             data.insert(key.to_string(), Box::new(vec![item]));
             Ok(())
         }
@@ -332,7 +340,7 @@ mod tests {
         match result.unwrap_err() {
             StoreError::AppendTypeMismatch(msg) => assert_eq!(
                 msg,
-                "Cannot append to key 'test_append_error': existing value is not a Vec<T>"
+                "Cannot append to key 'test_append_error': existing value is not a Vec<TState>"
             ),
             _ => panic!("Expected AppendTypeMismatch error"),
         }

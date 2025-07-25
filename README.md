@@ -98,7 +98,7 @@ This example demonstrates a basic workflow with a single processing node.
 - **Shared state**: Thread-safe key-value store for data passing between nodes
 - **Scheduling**: Built-in scheduler for intervals, cron schedules, and manual triggers
 - **State machines**: Chain nodes together into complex workflows
-- **Type safety**: Enum-driven state transitions with compile-time checking
+- **Type safety**: Encourages Enum-driven state transitions with compile-time checking.
 - **Performance**: Minimal overhead with direct execution
 
 ## How It Works

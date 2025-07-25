@@ -222,9 +222,9 @@ impl NodeConfig {
 ///
 /// # Generic Types
 ///
-/// - **`T`**: The return type from the post method (typically an enum for workflow control)
-/// - **`Params`**: The parameter type for this node (e.g., `HashMap<String, String>`)
-/// - **`Store`**: The store backend type (e.g., `MemoryStore`)
+/// - **`TState`**: The return type from the post method (typically an enum for workflow control)
+/// - **`TParams`**: The parameter type for this node (e.g., `HashMap<String, String>`)
+/// - **`TStore`**: The store backend type (e.g., `MemoryStore`)
 /// - **`PrepResult`**: The result type from the `prep` phase, passed to `exec`.
 /// - **`ExecResult`**: The result type from the `exec` phase, passed to `post`.
 ///
@@ -280,11 +280,11 @@ impl NodeConfig {
 /// }
 /// ```
 #[async_trait]
-pub trait Node<Enum, Params = DefaultParams, ST = MemoryStore>: Send + Sync
+pub trait Node<TState, TParams = DefaultParams, TStore = MemoryStore>: Send + Sync
 where
-    Enum: Clone + std::fmt::Debug + Send + Sync + 'static,
-    Params: Send + Sync + Clone,
-    ST: Send + Sync + 'static,
+    TState: Clone + std::fmt::Debug + Send + Sync + 'static,
+    TParams: Send + Sync + Clone,
+    TStore: Send + Sync + 'static,
 {
     /// Result type from the prep phase
     type PrepResult: Send + Sync;
@@ -295,7 +295,7 @@ where
     ///
     /// Default implementation that does nothing. Override this method if your node
     /// needs to store or process parameters when they are set.
-    fn set_params(&mut self, _params: Params) {
+    fn set_params(&mut self, _params: TParams) {
         // Default implementation does nothing
     }
 
@@ -322,7 +322,7 @@ where
     /// - Prepare any data structures
     ///
     /// The result of this phase is passed to the [`exec`](Node::exec) method.
-    async fn prep(&self, store: &ST) -> Result<Self::PrepResult, CanoError>;
+    async fn prep(&self, store: &TStore) -> Result<Self::PrepResult, CanoError>;
 
     /// Execution phase - main processing logic
     ///
@@ -346,7 +346,7 @@ where
     /// - Handle errors from the exec phase
     ///
     /// This method returns a typed value that determines what happens next in the workflow.
-    async fn post(&self, store: &ST, exec_res: Self::ExecResult) -> Result<Enum, CanoError>;
+    async fn post(&self, store: &TStore, exec_res: Self::ExecResult) -> Result<TState, CanoError>;
 
     /// Run the complete node lifecycle with configuration-driven execution
     ///
@@ -355,7 +355,7 @@ where
     /// Nodes execute with minimal overhead for maximum throughput.
     ///
     /// You can override this method for completely custom orchestration.
-    async fn run(&self, store: &ST) -> Result<Enum, CanoError> {
+    async fn run(&self, store: &TStore) -> Result<TState, CanoError> {
         let config = self.config();
         self.run_with_retries(store, &config).await
     }
@@ -364,7 +364,11 @@ where
     ///
     /// This method handles the actual execution of the three phases (prep, exec, post)
     /// with retry logic based on the node configuration.
-    async fn run_with_retries(&self, store: &ST, config: &NodeConfig) -> Result<Enum, CanoError> {
+    async fn run_with_retries(
+        &self,
+        store: &TStore,
+        config: &NodeConfig,
+    ) -> Result<TState, CanoError> {
         let max_attempts = config.retry_mode.max_attempts();
         let mut attempt = 0;
 
@@ -406,24 +410,24 @@ where
 ///
 /// This trait provides a concrete implementation of Node using the default types,
 /// enabling dynamic dispatch and trait object usage.
-pub trait DynNode<Enum>:
+pub trait DynNode<TState>:
     Node<
-        Enum,
+        TState,
         DefaultParams,
         MemoryStore,
         PrepResult = Box<dyn std::any::Any + Send + Sync>,
         ExecResult = DefaultNodeResult,
     >
 where
-    Enum: Clone + std::fmt::Debug + Send + Sync + 'static,
+    TState: Clone + std::fmt::Debug + Send + Sync + 'static,
 {
 }
 
-impl<Enum, N> DynNode<Enum> for N
+impl<TState, N> DynNode<TState> for N
 where
-    Enum: Clone + std::fmt::Debug + Send + Sync + 'static,
+    TState: Clone + std::fmt::Debug + Send + Sync + 'static,
     N: Node<
-            Enum,
+            TState,
             DefaultParams,
             MemoryStore,
             PrepResult = Box<dyn std::any::Any + Send + Sync>,
@@ -436,7 +440,7 @@ where
 ///
 /// This alias simplifies working with dynamic node collections in workflows.
 /// Use this when you need to store different node types in the same collection.
-pub type NodeObject<T> = dyn DynNode<T> + Send + Sync;
+pub type NodeObject<TState> = dyn DynNode<TState> + Send + Sync;
 
 #[cfg(test)]
 mod tests {
