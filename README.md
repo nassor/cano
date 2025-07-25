@@ -210,7 +210,11 @@ impl Node<WorkflowState> for CustomNode {
 
 ### 2. Store - Data Sharing
 
-Use the built-in store to pass data between workflow nodes:
+Cano allows **any type** to be used as a store for sharing data between workflow nodes. While MemoryStore is provided as a convenient key-value store implementation, you can use custom struct types for type-safe, performance-optimized data sharing.
+
+#### Using MemoryStore (Key-Value Store)
+
+The built-in MemoryStore provides a flexible key-value interface:
 
 ```rust
 let store = MemoryStore::new();
@@ -250,6 +254,47 @@ store.clear()?;
 // Alternative removal method
 store.delete("name")?;  // Alias for remove()
 ```
+
+#### Using Custom Store Types
+
+For better performance and type safety, you can use any custom struct as a store. This enables direct field access, stack allocation, and compile-time type checking:
+
+```rust
+// Custom store with direct field access
+#[derive(Debug, Clone, Default)]
+struct RequestCtx {
+    pub request_id: String,
+    pub revenue: f64,
+    pub customer_id: String,
+    pub transaction_count: i32,
+}
+
+// Nodes can access and modify the custom store directly
+#[async_trait]
+impl Node<ProcessingState, (), RequestCtx> for MetricsNode {
+    async fn prep(&self, store: &RequestCtx) -> Result<String, CanoError> {
+        // Direct field access - no hash map lookups
+        Ok(store.request_body.clone())
+    }
+
+    async fn post(&self, store: &RequestCtx, metrics: ProcessingResult) 
+        -> Result<ProcessingState, CanoError> {
+        // Nodes can read/modify store fields directly
+        println!("Processing request: {} with revenue: {}", 
+                 store.request_id, store.revenue);
+        Ok(ProcessingState::Complete)
+    }
+}
+```
+
+**Custom stores provide:**
+
+- **Performance**: Direct field access, no hash map overhead
+- **Type Safety**: Compile-time guarantees about data structure  
+- **Memory Efficiency**: Stack allocation, no heap allocations (if you are careful enough)
+- **API Clarity**: Explicit data contracts between nodes
+
+See the [`workflow_stack_store.rs`](./examples/workflow_stack_store.rs) example for a complete demonstration of custom store types with request processing pipelines.
 
 ### 3. Workflows - State Management
 
@@ -529,6 +574,7 @@ cargo run --example ai_workflow_yes_and
 cargo run --example workflow_simple
 cargo run --example workflow_book_prepositions
 cargo run --example workflow_negotiation
+cargo run --example workflow_stack_store
 
 # Run scheduler scheduling examples
 cargo run --example scheduler_scheduling
