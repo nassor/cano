@@ -1384,4 +1384,474 @@ mod tests {
         // Allow some tolerance for test timing
         assert!(elapsed >= Duration::from_millis(90));
     }
+
+    // Custom store struct for testing Node trait with non-MemoryStore types
+    #[derive(Debug, Clone, Default)]
+    struct RequestContext {
+        pub request_id: String,
+        pub user_id: i32,
+        pub status: String,
+        pub data: Vec<String>,
+        pub metadata: HashMap<String, String>,
+        pub processing_time: Duration,
+    }
+
+    impl RequestContext {
+        fn new(request_id: &str, user_id: i32) -> Self {
+            Self {
+                request_id: request_id.to_string(),
+                user_id,
+                status: "pending".to_string(),
+                data: Vec::new(),
+                metadata: HashMap::new(),
+                processing_time: Duration::from_secs(0),
+            }
+        }
+
+        fn add_data(&mut self, item: String) {
+            self.data.push(item);
+        }
+
+        fn set_metadata(&mut self, key: &str, value: &str) {
+            self.metadata.insert(key.to_string(), value.to_string());
+        }
+
+        fn mark_completed(&mut self, processing_time: Duration) {
+            self.status = "completed".to_string();
+            self.processing_time = processing_time;
+        }
+
+        #[allow(dead_code)]
+        fn mark_failed(&mut self, error_msg: &str) {
+            self.status = "failed".to_string();
+            self.metadata
+                .insert("error".to_string(), error_msg.to_string());
+        }
+    }
+
+    // Node that uses custom store for request processing
+    struct RequestProcessorNode {
+        name: String,
+    }
+
+    impl RequestProcessorNode {
+        fn new(name: &str) -> Self {
+            Self {
+                name: name.to_string(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Node<TestAction, RequestContext> for RequestProcessorNode {
+        type PrepResult = (String, i32);
+        type ExecResult = (String, Duration);
+
+        async fn prep(&self, store: &RequestContext) -> Result<Self::PrepResult, CanoError> {
+            if store.status != "pending" {
+                return Err(CanoError::preparation(format!(
+                    "Invalid status for processing: {}",
+                    store.status
+                )));
+            }
+
+            Ok((store.request_id.clone(), store.user_id))
+        }
+
+        async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
+            let (request_id, user_id) = prep_res;
+
+            // Simulate processing time
+            let processing_time = Duration::from_millis(100);
+            tokio::time::sleep(Duration::from_millis(10)).await; // Small actual delay for test
+
+            let result = format!(
+                "{} processed request {} for user {}",
+                self.name, request_id, user_id
+            );
+
+            (result, processing_time)
+        }
+
+        async fn post(
+            &self,
+            store: &RequestContext,
+            exec_res: Self::ExecResult,
+        ) -> Result<TestAction, CanoError> {
+            // Note: In real usage, store would be mutable reference, but for this test
+            // we're demonstrating that the Node trait accepts any store type
+            let (result, _processing_time) = exec_res;
+
+            // In a real implementation, you'd modify the store here
+            // For test purposes, we'll just validate the data
+            assert_eq!(store.status, "pending");
+            assert!(!store.request_id.is_empty());
+            assert!(store.user_id > 0);
+
+            // Simulate successful processing
+            if result.contains("processed") {
+                Ok(TestAction::Complete)
+            } else {
+                Ok(TestAction::Error)
+            }
+        }
+    }
+
+    // Node that works with mutable custom store operations
+    struct CustomStoreMutatorNode;
+
+    #[async_trait]
+    impl Node<TestAction, Arc<std::sync::RwLock<RequestContext>>> for CustomStoreMutatorNode {
+        type PrepResult = String;
+        type ExecResult = String;
+
+        async fn prep(
+            &self,
+            store: &Arc<std::sync::RwLock<RequestContext>>,
+        ) -> Result<Self::PrepResult, CanoError> {
+            let ctx = store.read().unwrap();
+            if ctx.request_id.is_empty() {
+                return Err(CanoError::preparation("Empty request ID"));
+            }
+            Ok(ctx.request_id.clone())
+        }
+
+        async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
+            format!("Processed: {}", prep_res)
+        }
+
+        async fn post(
+            &self,
+            store: &Arc<std::sync::RwLock<RequestContext>>,
+            exec_res: Self::ExecResult,
+        ) -> Result<TestAction, CanoError> {
+            let mut ctx = store.write().unwrap();
+            ctx.add_data(exec_res);
+            ctx.set_metadata("processor", "CustomStoreMutatorNode");
+            ctx.mark_completed(Duration::from_millis(150));
+
+            Ok(TestAction::Complete)
+        }
+    }
+
+    // Node using a simple primitive store
+    struct CounterNode;
+
+    #[async_trait]
+    impl Node<TestAction, Arc<AtomicU32>> for CounterNode {
+        type PrepResult = u32;
+        type ExecResult = u32;
+
+        async fn prep(&self, store: &Arc<AtomicU32>) -> Result<Self::PrepResult, CanoError> {
+            let current = store.load(Ordering::SeqCst);
+            Ok(current)
+        }
+
+        async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
+            prep_res + 1
+        }
+
+        async fn post(
+            &self,
+            store: &Arc<AtomicU32>,
+            exec_res: Self::ExecResult,
+        ) -> Result<TestAction, CanoError> {
+            store.store(exec_res, Ordering::SeqCst);
+            Ok(TestAction::Complete)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_node_with_custom_struct_store() {
+        let store = RequestContext::new("req-123", 42);
+        let node = RequestProcessorNode::new("TestProcessor");
+
+        let result = node.run(&store).await.unwrap();
+        assert_eq!(result, TestAction::Complete);
+
+        // Verify that the node correctly read from the custom store
+        assert_eq!(store.request_id, "req-123");
+        assert_eq!(store.user_id, 42);
+        assert_eq!(store.status, "pending");
+    }
+
+    #[tokio::test]
+    async fn test_node_with_custom_struct_store_error_handling() {
+        let mut store = RequestContext::new("req-456", 99);
+        store.status = "completed".to_string(); // Invalid status for processing
+
+        let node = RequestProcessorNode::new("ErrorTestProcessor");
+
+        let result = node.run(&store).await;
+        assert!(result.is_err());
+
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("Invalid status for processing"));
+    }
+
+    #[tokio::test]
+    async fn test_node_with_mutable_custom_store() {
+        let store = Arc::new(std::sync::RwLock::new(RequestContext::new("req-789", 123)));
+        let node = CustomStoreMutatorNode;
+
+        let result = node.run(&store).await.unwrap();
+        assert_eq!(result, TestAction::Complete);
+
+        // Verify the store was modified
+        let ctx = store.read().unwrap();
+        assert_eq!(ctx.status, "completed");
+        assert_eq!(ctx.data.len(), 1);
+        assert!(ctx.data[0].contains("Processed: req-789"));
+        assert_eq!(
+            ctx.metadata.get("processor").unwrap(),
+            "CustomStoreMutatorNode"
+        );
+        assert_eq!(ctx.processing_time, Duration::from_millis(150));
+    }
+
+    #[tokio::test]
+    async fn test_node_with_atomic_primitive_store() {
+        let store = Arc::new(AtomicU32::new(10));
+        let node = CounterNode;
+
+        // Run the node multiple times
+        for expected in 11..=15 {
+            let result = node.run(&store).await.unwrap();
+            assert_eq!(result, TestAction::Complete);
+            assert_eq!(store.load(Ordering::SeqCst), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_node_concurrent_custom_store_access() {
+        use tokio::task;
+
+        let store = Arc::new(std::sync::Mutex::new(RequestContext::new(
+            "concurrent-test",
+            1,
+        )));
+
+        // Node that works with Arc<Mutex<CustomStore>>
+        struct ConcurrentNode {
+            id: u32,
+        }
+
+        #[async_trait]
+        impl Node<TestAction, Arc<std::sync::Mutex<RequestContext>>> for ConcurrentNode {
+            type PrepResult = u32;
+            type ExecResult = String;
+
+            async fn prep(
+                &self,
+                store: &Arc<std::sync::Mutex<RequestContext>>,
+            ) -> Result<Self::PrepResult, CanoError> {
+                let ctx = store.lock().unwrap();
+                Ok(ctx.user_id as u32 + self.id)
+            }
+
+            async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
+                format!("Node-{} processed value: {}", self.id, prep_res)
+            }
+
+            async fn post(
+                &self,
+                store: &Arc<std::sync::Mutex<RequestContext>>,
+                exec_res: Self::ExecResult,
+            ) -> Result<TestAction, CanoError> {
+                let mut ctx = store.lock().unwrap();
+                ctx.add_data(exec_res);
+                Ok(TestAction::Complete)
+            }
+        }
+
+        let mut handles = vec![];
+
+        // Spawn multiple concurrent nodes
+        for i in 1..=5 {
+            let store_clone = Arc::clone(&store);
+            let node = ConcurrentNode { id: i };
+
+            let handle = task::spawn(async move { node.run(&store_clone).await });
+            handles.push(handle);
+        }
+
+        // Wait for all to complete
+        let mut success_count = 0;
+        for handle in handles {
+            let result = handle.await.unwrap();
+            if result.is_ok() && result.unwrap() == TestAction::Complete {
+                success_count += 1;
+            }
+        }
+
+        assert_eq!(success_count, 5);
+
+        // Verify all nodes added their data
+        let ctx = store.lock().unwrap();
+        assert_eq!(ctx.data.len(), 5);
+
+        for data_item in ctx.data.iter() {
+            assert!(data_item.contains("Node-"));
+            assert!(data_item.contains("processed value:"));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_custom_store_type_safety() {
+        // Test that different custom store types are properly type-checked
+
+        // Store type 1: Simple config struct
+        #[derive(Debug, Clone)]
+        struct Config {
+            setting: String,
+            value: i32,
+        }
+
+        struct ConfigNode;
+
+        #[async_trait]
+        impl Node<TestAction, Config> for ConfigNode {
+            type PrepResult = String;
+            type ExecResult = i32;
+
+            async fn prep(&self, store: &Config) -> Result<Self::PrepResult, CanoError> {
+                Ok(store.setting.clone())
+            }
+
+            async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
+                prep_res.len() as i32
+            }
+
+            async fn post(
+                &self,
+                store: &Config,
+                exec_res: Self::ExecResult,
+            ) -> Result<TestAction, CanoError> {
+                if exec_res == store.value {
+                    Ok(TestAction::Complete)
+                } else {
+                    Ok(TestAction::Error)
+                }
+            }
+        }
+
+        // Store type 2: Different struct entirely
+        #[derive(Debug)]
+        struct DatabaseConfig {
+            connection_string: String,
+            timeout: Duration,
+        }
+
+        struct DatabaseNode;
+
+        #[async_trait]
+        impl Node<TestAction, DatabaseConfig> for DatabaseNode {
+            type PrepResult = Duration;
+            type ExecResult = bool;
+
+            async fn prep(&self, store: &DatabaseConfig) -> Result<Self::PrepResult, CanoError> {
+                Ok(store.timeout)
+            }
+
+            async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
+                prep_res > Duration::from_secs(0)
+            }
+
+            async fn post(
+                &self,
+                store: &DatabaseConfig,
+                exec_res: Self::ExecResult,
+            ) -> Result<TestAction, CanoError> {
+                if exec_res && !store.connection_string.is_empty() {
+                    Ok(TestAction::Complete)
+                } else {
+                    Ok(TestAction::Error)
+                }
+            }
+        }
+
+        // Test both nodes with their respective store types
+        let config_store = Config {
+            setting: "test".to_string(),
+            value: 4, // Length of "test"
+        };
+        let config_node = ConfigNode;
+        let result1 = config_node.run(&config_store).await.unwrap();
+        assert_eq!(result1, TestAction::Complete);
+
+        let db_store = DatabaseConfig {
+            connection_string: "postgresql://localhost:5432/test".to_string(),
+            timeout: Duration::from_secs(30),
+        };
+        let db_node = DatabaseNode;
+        let result2 = db_node.run(&db_store).await.unwrap();
+        assert_eq!(result2, TestAction::Complete);
+    }
+
+    #[tokio::test]
+    async fn test_custom_store_with_generics() {
+        // Test custom store that is itself generic
+        #[derive(Debug, Clone)]
+        struct GenericContainer<T> {
+            pub data: T,
+            #[allow(dead_code)]
+            pub timestamp: Duration,
+        }
+
+        impl<T> GenericContainer<T> {
+            fn new(data: T) -> Self {
+                Self {
+                    data,
+                    timestamp: Duration::from_secs(0),
+                }
+            }
+        }
+
+        struct GenericNode<T> {
+            _phantom: std::marker::PhantomData<T>,
+        }
+
+        impl<T> GenericNode<T> {
+            fn new() -> Self {
+                Self {
+                    _phantom: std::marker::PhantomData,
+                }
+            }
+        }
+
+        #[async_trait]
+        impl Node<TestAction, GenericContainer<String>> for GenericNode<String> {
+            type PrepResult = String;
+            type ExecResult = usize;
+
+            async fn prep(
+                &self,
+                store: &GenericContainer<String>,
+            ) -> Result<Self::PrepResult, CanoError> {
+                Ok(store.data.clone())
+            }
+
+            async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
+                prep_res.len()
+            }
+
+            async fn post(
+                &self,
+                _store: &GenericContainer<String>,
+                exec_res: Self::ExecResult,
+            ) -> Result<TestAction, CanoError> {
+                if exec_res > 0 {
+                    Ok(TestAction::Complete)
+                } else {
+                    Ok(TestAction::Error)
+                }
+            }
+        }
+
+        let store = GenericContainer::new("Hello World".to_string());
+        let node = GenericNode::<String>::new();
+
+        let result = node.run(&store).await.unwrap();
+        assert_eq!(result, TestAction::Complete);
+    }
 }
