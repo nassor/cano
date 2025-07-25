@@ -17,15 +17,15 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> CanoResult<()> {
-//!     let mut scheduler: Scheduler<MyState, DefaultParams, MemoryStore> = Scheduler::new();
+//!     let mut scheduler: Scheduler<MyState> = Scheduler::new();
 //!     
 //!     // Create separate workflows for each scheduled task
-//!     let workflow1: Workflow<MyState, DefaultParams, MemoryStore> = Workflow::new(MyState::Start);
-//!     let workflow2: Workflow<MyState, DefaultParams, MemoryStore> = Workflow::new(MyState::Start);
-//!     let workflow3: Workflow<MyState, DefaultParams, MemoryStore> = Workflow::new(MyState::Start);
-//!     let workflow4: Workflow<MyState, DefaultParams, MemoryStore> = Workflow::new(MyState::Start);
-//!     let workflow5: Workflow<MyState, DefaultParams, MemoryStore> = Workflow::new(MyState::Start);
-//!     let workflow6: Workflow<MyState, DefaultParams, MemoryStore> = Workflow::new(MyState::Start);
+//!     let workflow1: Workflow<MyState> = Workflow::new(MyState::Start);
+//!     let workflow2: Workflow<MyState> = Workflow::new(MyState::Start);
+//!     let workflow3: Workflow<MyState> = Workflow::new(MyState::Start);
+//!     let workflow4: Workflow<MyState> = Workflow::new(MyState::Start);
+//!     let workflow5: Workflow<MyState> = Workflow::new(MyState::Start);
+//!     let workflow6: Workflow<MyState> = Workflow::new(MyState::Start);
 //!     
 //!     // Multiple ways to schedule workflows:
 //!     scheduler.every_seconds("task1", workflow1, 30)?;                    // Every 30 seconds

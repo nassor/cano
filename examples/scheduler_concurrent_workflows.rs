@@ -44,7 +44,7 @@ impl LongRunningTask {
 }
 
 #[async_trait]
-impl Node<TaskState, DefaultParams, MemoryStore> for LongRunningTask {
+impl Node<TaskState> for LongRunningTask {
     type PrepResult = String;
     type ExecResult = String;
 
@@ -90,7 +90,7 @@ impl Node<TaskState, DefaultParams, MemoryStore> for LongRunningTask {
 }
 
 async fn print_flow_status(
-    scheduler: &Scheduler<TaskState, DefaultParams, MemoryStore>,
+    scheduler: &Scheduler<TaskState>,
     title: &str,
 ) {
     println!("\n{title}");
@@ -146,28 +146,28 @@ async fn main() -> CanoResult<()> {
     println!("Watch for overlapping execution messages and active instance counts!\n");
 
     // Create a long-running workflow (5 seconds execution time)
-    let mut long_task_flow: Workflow<TaskState, DefaultParams, MemoryStore> =
+    let mut long_task_flow: Workflow<TaskState> =
         Workflow::new(TaskState::Execute);
     long_task_flow
         .register_node(TaskState::Execute, LongRunningTask::new("LongTask", 7000))
         .add_exit_states(vec![TaskState::Complete]);
 
     // Create a medium-running workflow (3 seconds execution time)
-    let mut medium_task_flow: Workflow<TaskState, DefaultParams, MemoryStore> =
+    let mut medium_task_flow: Workflow<TaskState> =
         Workflow::new(TaskState::Execute);
     medium_task_flow
         .register_node(TaskState::Execute, LongRunningTask::new("MediumTask", 3000))
         .add_exit_states(vec![TaskState::Complete]);
 
     // Create a fast-running workflow (500ms execution time)
-    let mut fast_task_flow: Workflow<TaskState, DefaultParams, MemoryStore> =
+    let mut fast_task_flow: Workflow<TaskState> =
         Workflow::new(TaskState::Execute);
     fast_task_flow
         .register_node(TaskState::Execute, LongRunningTask::new("FastTask", 500))
         .add_exit_states(vec![TaskState::Complete]);
 
     // Setup scheduler with aggressive scheduling to force overlaps
-    let mut scheduler: Scheduler<TaskState, DefaultParams, MemoryStore> = Scheduler::new();
+    let mut scheduler: Scheduler<TaskState> = Scheduler::new();
 
     // Long task every 2 seconds (7s execution, 2s interval = lots of overlap)
     scheduler.every_seconds("long_task", long_task_flow, 2)?;

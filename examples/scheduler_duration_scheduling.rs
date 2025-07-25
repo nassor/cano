@@ -19,7 +19,6 @@
 // Example: Duration-based Scheduling
 
 use async_trait::async_trait;
-use cano::node::DefaultParams;
 use cano::prelude::*;
 use tokio::time::Duration;
 
@@ -58,26 +57,22 @@ impl Node<TaskState> for DemoNode {
 
 #[tokio::main]
 async fn main() -> CanoResult<()> {
-    let mut scheduler: Scheduler<TaskState, DefaultParams, MemoryStore> = Scheduler::new();
+    let mut scheduler: Scheduler<TaskState> = Scheduler::new();
 
     // Create different flows
-    let mut daily_flow: Workflow<TaskState, DefaultParams, MemoryStore> =
-        Workflow::new(TaskState::Start);
+    let mut daily_flow: Workflow<TaskState> = Workflow::new(TaskState::Start);
     daily_flow.register_node(TaskState::Start, DemoNode("Daily Report".to_string()));
     daily_flow.add_exit_state(TaskState::End);
 
-    let mut hourly_flow: Workflow<TaskState, DefaultParams, MemoryStore> =
-        Workflow::new(TaskState::Start);
+    let mut hourly_flow: Workflow<TaskState> = Workflow::new(TaskState::Start);
     hourly_flow.register_node(TaskState::Start, DemoNode("Hourly Check".to_string()));
     hourly_flow.add_exit_state(TaskState::End);
 
-    let mut frequent_flow: Workflow<TaskState, DefaultParams, MemoryStore> =
-        Workflow::new(TaskState::Start);
+    let mut frequent_flow: Workflow<TaskState> = Workflow::new(TaskState::Start);
     frequent_flow.register_node(TaskState::Start, DemoNode("Frequent Task".to_string()));
     frequent_flow.add_exit_state(TaskState::End);
 
-    let mut manual_flow: Workflow<TaskState, DefaultParams, MemoryStore> =
-        Workflow::new(TaskState::Start);
+    let mut manual_flow: Workflow<TaskState> = Workflow::new(TaskState::Start);
     manual_flow.register_node(TaskState::Start, DemoNode("Manual Task".to_string()));
     manual_flow.add_exit_state(TaskState::End);
 

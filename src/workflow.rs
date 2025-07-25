@@ -61,7 +61,7 @@ use std::collections::HashMap;
 
 use crate::MemoryStore;
 use crate::error::CanoError;
-use crate::node::Node;
+use crate::node::{DefaultParams, Node};
 
 /// Type alias for trait objects that can store different node types
 ///
@@ -69,7 +69,7 @@ use crate::node::Node;
 /// implement the Node trait with compatible associated types. The trait object erases
 /// the specific TParams, PrepResult, and ExecResult types but maintains the essential
 /// functionality needed for workflow execution.
-pub type DynNode<TState, TParams, TStore> =
+pub type DynNode<TState, TParams = DefaultParams, TStore = MemoryStore> =
     Box<dyn DynNodeTrait<TState, TParams, TStore> + Send + Sync>;
 
 /// Trait object-safe version of the Node trait for dynamic dispatch
@@ -77,7 +77,7 @@ pub type DynNode<TState, TParams, TStore> =
 /// This trait provides the essential functionality needed for workflow execution
 /// while being object-safe (can be used as a trait object).
 #[async_trait::async_trait]
-pub trait DynNodeTrait<TState, TParams, TStore>: Send + Sync
+pub trait DynNodeTrait<TState, TParams = DefaultParams, TStore = MemoryStore>: Send + Sync
 where
     TState: Clone + std::fmt::Debug + Send + Sync + 'static,
 {
@@ -90,8 +90,8 @@ where
 impl<TState, TParams, TStore, N> DynNodeTrait<TState, TParams, TStore> for N
 where
     TState: Clone + std::fmt::Debug + Send + Sync + 'static,
-    TStore: Send + Sync + 'static,
     TParams: Clone + Send + Sync + 'static,
+    TStore: Send + Sync + 'static,
     N: Node<TState, TParams, TStore> + Send + Sync + 'static,
 {
     async fn run(&self, store: &TStore) -> Result<TState, CanoError> {
@@ -101,7 +101,7 @@ where
 }
 
 /// State machine workflow orchestration
-pub struct Workflow<TState, TParams = crate::node::DefaultParams, TStore = MemoryStore>
+pub struct Workflow<TState, TParams = DefaultParams, TStore = MemoryStore>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
     TParams: Clone + Send + Sync + 'static,

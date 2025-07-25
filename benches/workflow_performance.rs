@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use cano::node::DefaultParams;
 use cano::{CanoError, MemoryStore, Node, Workflow};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
@@ -32,7 +31,7 @@ impl TestState {
 }
 
 #[async_trait]
-impl Node<TestState, DefaultParams, MemoryStore> for DoNothingNode {
+impl Node<TestState> for DoNothingNode {
     type PrepResult = ();
     type ExecResult = ();
 
@@ -55,9 +54,8 @@ impl Node<TestState, DefaultParams, MemoryStore> for DoNothingNode {
 }
 
 /// Create a workflow with a specified number of nodes
-fn create_flow(node_count: usize) -> Workflow<TestState, DefaultParams, MemoryStore> {
-    let mut workflow: Workflow<TestState, DefaultParams, MemoryStore> =
-        Workflow::new(TestState::Start);
+fn create_flow(node_count: usize) -> Workflow<TestState> {
+    let mut workflow: Workflow<TestState> = Workflow::new(TestState::Start);
 
     // Add the sequential chain of nodes
     for i in 0..node_count {

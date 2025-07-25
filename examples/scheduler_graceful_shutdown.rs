@@ -24,7 +24,6 @@
 // Example: Graceful Shutdown with Timeout
 
 use async_trait::async_trait;
-use cano::node::DefaultParams;
 use cano::prelude::*;
 use tokio::time::Duration;
 
@@ -41,7 +40,7 @@ enum MyState {
 struct LongProcessingNode;
 
 #[async_trait]
-impl Node<MyState, DefaultParams, MemoryStore> for LongProcessingNode {
+impl Node<MyState> for LongProcessingNode {
     type PrepResult = ();
     type ExecResult = ();
 
@@ -69,7 +68,7 @@ impl Node<MyState, DefaultParams, MemoryStore> for LongProcessingNode {
 struct QuickNode;
 
 #[async_trait]
-impl Node<MyState, DefaultParams, MemoryStore> for QuickNode {
+impl Node<MyState> for QuickNode {
     type PrepResult = ();
     type ExecResult = ();
 
@@ -92,16 +91,14 @@ impl Node<MyState, DefaultParams, MemoryStore> for QuickNode {
 
 #[tokio::main]
 async fn main() -> CanoResult<()> {
-    let mut scheduler: Scheduler<MyState, DefaultParams, MemoryStore> = Scheduler::new();
+    let mut scheduler: Scheduler<MyState> = Scheduler::new();
 
     // Create flows with proper nodes
-    let mut long_flow_builder: Workflow<MyState, DefaultParams, MemoryStore> =
-        Workflow::new(MyState::Start);
+    let mut long_flow_builder: Workflow<MyState> = Workflow::new(MyState::Start);
     long_flow_builder.register_node(MyState::Start, LongProcessingNode);
     long_flow_builder.add_exit_state(MyState::End);
 
-    let mut quick_flow_builder: Workflow<MyState, DefaultParams, MemoryStore> =
-        Workflow::new(MyState::Start);
+    let mut quick_flow_builder: Workflow<MyState> = Workflow::new(MyState::Start);
     quick_flow_builder.register_node(MyState::Start, QuickNode);
     quick_flow_builder.add_exit_state(MyState::End);
 
