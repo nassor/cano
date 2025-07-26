@@ -39,6 +39,10 @@ name = "workflow_book_prepositions"
 path = "examples/workflow_book_prepositions.rs"
 
 [[example]]
+name = "workflow_concurrent_book_prepositions"
+path = "examples/workflow_concurrent_book_prepositions.rs"
+
+[[example]]
 name = "workflow_negotiation"
 path = "examples/workflow_negotiation.rs"
 
