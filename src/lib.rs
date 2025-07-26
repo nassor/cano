@@ -86,7 +86,10 @@ pub use error::{CanoError, CanoResult};
 pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node, NodeConfig, RetryMode};
 pub use scheduler::{FlowInfo, Scheduler};
 pub use store::{KeyValueStore, MemoryStore};
-pub use workflow::{Workflow, WorkflowBuilder};
+pub use workflow::{
+    ConcurrentStrategy, ConcurrentWorkflow, ConcurrentWorkflowBuilder, ConcurrentWorkflowInstance,
+    ConcurrentWorkflowResults, Workflow, WorkflowBuilder, WorkflowResult,
+};
 
 // Convenience re-exports for common patterns
 pub mod prelude {

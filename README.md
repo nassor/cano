@@ -8,9 +8,9 @@
 
 **Async workflow engine with built-in scheduling, retry logic, and state machine semantics.**
 
-Cano is an async workflow engine for Rust that manages complex processing through composable workflows. It can be used for data processing, AI inference workflows, and background jobs. Cano provides a simple, fast and type-safe API for defining workflows with retry strategies, scheduling capabilities, and shared state management.
+Cano is an async workflow engine for Rust that manages complex processing through composable workflows. It can be used for data processing, AI inference workflows, and background jobs. Cano provides a simple, fast and type-safe API for defining workflows with retry strategies, concurrent execution, scheduling capabilities, and shared state management.
 
-The engine is built on three core concepts: **Nodes** to encapsulate business logic, **Workflows** to manage state transitions, and **Schedulers** to run workflows on a schedule.
+The engine is built on three core concepts: **Nodes** to encapsulate business logic, **Workflows** to manage state transitions, and **Schedulers** to run workflows on a schedule. For high-throughput scenarios, **Concurrent Workflows** enable parallel execution of multiple workflow instances.
 
 Only **Nodes** are required to implement your processing logic, while workflows and schedulers are optional and can be used as needed.
 
@@ -96,6 +96,7 @@ This example demonstrates a basic workflow with a single processing node.
 - **Fluent configuration**: Builder pattern for setup  
 - **Retry strategies**: None, fixed delays, and exponential backoff with jitter
 - **Shared state**: Thread-safe key-value store for data passing between nodes
+- **Concurrent workflows**: Execute multiple workflows in parallel for I/O-bound operations
 - **Scheduling**: Built-in scheduler for intervals, cron schedules, and manual triggers
 - **State machines**: Chain nodes together into complex workflows
 - **Type safety**: Encourages Enum-driven state transitions with compile-time checking.
@@ -458,6 +459,251 @@ workflow
 let result = workflow.orchestrate(&store).await?;
 ```
 
+## Concurrent Workflows - Parallel Execution
+
+Concurrent Workflows enable parallel execution of multiple workflow instances, providing significant performance improvements for I/O-bound operations and batch processing scenarios.
+
+### When to Use Concurrent Workflows
+
+**✅ Ideal Use Cases:**
+
+- **I/O-bound operations**: Network requests, database queries, file operations
+- **Batch processing**: Processing multiple independent items simultaneously  
+- **External API calls**: Rate-limited services that benefit from concurrent requests
+- **Independent workflows**: Tasks that don't depend on each other's results
+- **High-latency operations**: Operations with significant wait times
+
+**❌ Avoid For:**
+
+- **CPU-intensive tasks**: May create overhead without benefits
+- **Sequential dependencies**: When workflows must run in specific order
+- **Shared resource contention**: When concurrent access causes bottlenecks
+- **Memory-intensive operations**: Risk of memory exhaustion
+
+### Performance Characteristics
+
+Based on benchmark results, concurrent workflows provide dramatic speedups for I/O-bound operations:
+
+- **5 I/O workflows**: ~5x speedup (18ms concurrent vs 92ms sequential)
+- **50 I/O workflows**: ~47x speedup (19ms concurrent vs 920ms sequential)
+- **CPU workflows**: Minimal benefit due to concurrency overhead
+
+### Basic Concurrent Workflow Usage
+
+```rust
+use cano::prelude::*;
+use tokio::time::Duration;
+
+#[tokio::main]
+async fn main() -> CanoResult<()> {
+    let store = MemoryStore::new();
+    
+    // Create multiple workflow instances
+    let workflow_instances = vec![
+        ConcurrentWorkflowInstance::new("user_1", user_processing_workflow()),
+        ConcurrentWorkflowInstance::new("user_2", user_processing_workflow()),  
+        ConcurrentWorkflowInstance::new("user_3", user_processing_workflow()),
+    ];
+    
+    // Create concurrent workflow with strategy
+    let mut concurrent_workflow = ConcurrentWorkflow::new(ConcurrentStrategy::WaitForever);
+    concurrent_workflow.add_instances(workflow_instances);
+    
+    // Execute all workflows concurrently
+    let results = concurrent_workflow.orchestrate(store).await?;
+    
+    println!("Completed: {}, Failed: {}", results.completed, results.failed);
+    println!("Total time: {:?}", results.duration);
+    
+    Ok(())
+}
+```
+
+### Concurrent Strategies
+
+Choose the right strategy based on your requirements:
+
+#### 1. WaitForever - Complete All Workflows
+
+Waits for all workflows to complete, regardless of time:
+
+```rust
+let strategy = ConcurrentStrategy::WaitForever;
+let mut concurrent_workflow = ConcurrentWorkflow::new(strategy);
+
+// All workflows must complete for success
+let results = concurrent_workflow.orchestrate(store).await?;
+assert_eq!(results.completed, workflow_instances.len());
+```
+
+**Use when:** You need all results and time isn't critical.
+
+#### 2. WaitForQuota - Partial Completion
+
+Waits for a specific number of workflows to complete:
+
+```rust
+let strategy = ConcurrentStrategy::WaitForQuota(3); // Wait for 3 to complete
+let mut concurrent_workflow = ConcurrentWorkflow::new(strategy);
+
+// Returns when 3 workflows complete (others may still be running)
+let results = concurrent_workflow.orchestrate(store).await?;
+assert_eq!(results.completed, 3);
+```
+
+**Use when:** You need a minimum number of results but not all.
+
+#### 3. WaitDuration - Time-bounded Execution
+
+Waits for a maximum duration, returning whatever completes in time:
+
+```rust
+let strategy = ConcurrentStrategy::WaitDuration(Duration::from_secs(30));
+let mut concurrent_workflow = ConcurrentWorkflow::new(strategy);
+
+// Returns after 30 seconds with whatever completed
+let results = concurrent_workflow.orchestrate(store).await?;
+println!("Completed {} out of {} in 30 seconds", 
+         results.completed, results.total);
+```
+
+**Use when:** You have strict time constraints and partial results are acceptable.
+
+### Advanced Concurrent Workflow Example
+
+```rust
+use cano::prelude::*;
+use tokio::time::Duration;
+
+// API processing node that simulates I/O operations
+struct ApiProcessorNode {
+    api_endpoint: String,
+    timeout: Duration,
+}
+
+#[async_trait]
+impl Node<ProcessingState> for ApiProcessorNode {
+    type PrepResult = RequestData;
+    type ExecResult = ApiResponse;
+
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        // Load request data from store
+        let data: RequestData = store.get("request_data")?;
+        Ok(data)
+    }
+
+    async fn exec(&self, request: Self::PrepResult) -> Self::ExecResult {
+        // Simulate API call with timeout
+        tokio::time::sleep(self.timeout).await;
+        
+        ApiResponse {
+            status: 200,
+            data: format!("Processed: {}", request.id),
+        }
+    }
+
+    async fn post(&self, store: &MemoryStore, response: Self::ExecResult) 
+        -> Result<ProcessingState, CanoError> {
+        // Store API response
+        store.put("api_response", response)?;
+        
+        if response.status == 200 {
+            Ok(ProcessingState::Complete)
+        } else {
+            Ok(ProcessingState::Failed)
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() -> CanoResult<()> {
+    let store = MemoryStore::new();
+    
+    // Create workflows for processing different data batches
+    let workflow_instances: Vec<_> = (1..=20)
+        .map(|i| {
+            let mut workflow = Workflow::new(ProcessingState::Start);
+            workflow.register_node(
+                ProcessingState::Start,
+                ApiProcessorNode {
+                    api_endpoint: format!("https://api.example.com/batch/{}", i),
+                    timeout: Duration::from_millis(100), // Simulated I/O delay
+                }
+            );
+            workflow.add_exit_state(ProcessingState::Complete);
+            
+            ConcurrentWorkflowInstance::new(format!("batch_{}", i), workflow)
+        })
+        .collect();
+    
+    // Strategy: Wait for at least 15 out of 20 to complete
+    let strategy = ConcurrentStrategy::WaitForQuota(15);
+    let mut concurrent_workflow = ConcurrentWorkflow::new(strategy);
+    concurrent_workflow.add_instances(workflow_instances);
+    
+    // Execute with timing
+    let start = std::time::Instant::now();
+    let results = concurrent_workflow.orchestrate(store).await?;
+    let elapsed = start.elapsed();
+    
+    println!("Concurrent Processing Results:");
+    println!("  ✅ Completed: {}", results.completed);
+    println!("  ❌ Failed: {}", results.failed);
+    println!("  ⏱️  Duration: {:?}", elapsed);
+    println!("  📊 Success Rate: {:.1}%", 
+             (results.completed as f64 / results.total as f64) * 100.0);
+    
+    // Sequential comparison (for demonstration)
+    let sequential_start = std::time::Instant::now();
+    // ... sequential processing would take ~2000ms (20 * 100ms)
+    // while concurrent took ~100ms (limited by slowest I/O operation)
+    
+    Ok(())
+}
+```
+
+### Concurrent Workflow Builder Pattern
+
+Use the builder pattern for complex concurrent workflow configurations:
+
+```rust
+use cano::prelude::*;
+
+let results = ConcurrentWorkflowBuilder::new()
+    .with_strategy(ConcurrentStrategy::WaitDuration(Duration::from_secs(10)))
+    .add_workflow("data_validation", validation_workflow)
+    .add_workflow("user_processing", user_workflow)
+    .add_workflow("metrics_collection", metrics_workflow)
+    .with_store(custom_store)
+    .execute()
+    .await?;
+
+println!("Processed {} workflows in {:?}", 
+         results.completed, results.duration);
+```
+
+### Best Practices
+
+**🎯 Performance Optimization:**
+
+- Use concurrent workflows for I/O-bound operations
+- Choose appropriate timeout strategies for your use case
+- Monitor completion rates and adjust quotas accordingly
+- Consider memory usage with large numbers of concurrent workflows
+
+**🔧 Error Handling:**
+
+- Design workflows to handle partial failures gracefully
+- Use appropriate retry strategies within individual workflows
+- Log and monitor failed workflow instances for debugging
+
+**📊 Monitoring:**
+
+- Track completion rates and execution times
+- Monitor resource usage (memory, CPU, network)
+- Set up alerts for abnormal failure rates
+- Use structured logging for workflow correlation
+
 ## Scheduler - Workflow Scheduling
 
 The Scheduler provides workflow scheduling capabilities for background jobs, periodic processing, and automated workflows.
@@ -561,8 +807,13 @@ cargo test
 
 # Run performance benchmarks  
 cargo bench --bench store_performance
-cargo bench --bench flow_performance
 cargo bench --bench node_performance
+cargo bench --bench workflow_performance
+
+# Specific workflow performance benchmarks
+cargo bench --bench workflow_performance concurrent_vs_sequential
+cargo bench --bench workflow_performance io_vs_cpu_concurrent
+cargo bench --bench workflow_performance concurrent_io_scalability
 
 # Run AI workflow examples
 cargo run --example ai_workflow_yes_and

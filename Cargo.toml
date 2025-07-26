@@ -17,6 +17,7 @@ tokio = { version = "1.0", features = ["full"] }
 rand = "0.9"
 cron = "0.15"
 chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
 
 [dev-dependencies]
 cargo-audit = "0.21.2"
@@ -60,6 +61,10 @@ path = "examples/scheduler_duration_scheduling.rs"
 [[example]]
 name = "scheduler_graceful_shutdown"
 path = "examples/scheduler_graceful_shutdown.rs"
+
+[[example]]
+name = "concurrent_workflow_example"
+path = "examples/concurrent_workflow_example.rs"
 
 [[bench]]
 name = "workflow_performance"
