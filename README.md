@@ -1,4 +1,4 @@
-# 🚀 Cano: Async Data & AI Workflows in Rust
+# Cano: Async Data & AI Workflows in Rust
 
 [![Crates.io](https://img.shields.io/crates/v/cano.svg)](https://crates.io/crates/cano)
 [![Documentation](https://docs.rs/cano/badge.svg)](https://docs.rs/cano)
@@ -16,7 +16,7 @@ Only **Nodes** are required to implement your processing logic, while workflows 
 
 *The Node API is inspired by the [PocketFlow](https://github.com/The-Pocket/PocketFlow) project, adapted for Rust's async ecosystem.*
 
-## Getting Started
+## 🚀 Getting Started
 
 Add Cano to your `Cargo.toml`:
 
@@ -90,28 +90,25 @@ async fn main() -> Result<(), CanoError> {
 
 This example demonstrates a basic workflow with a single processing node.
 
-## Features
+## ✨ Features
 
 - **Node-based API**: Single `Node` trait for implementing processing logic
-- **Fluent configuration**: Builder pattern for setup  
 - **Retry strategies**: None, fixed delays, and exponential backoff with jitter
 - **Shared state**: Thread-safe key-value store for data passing between nodes
+- **Sequential workflows**: Define workflows with state transitions and exit states, allowing complex branching logic
 - **Concurrent workflows**: Execute multiple workflows in parallel for I/O-bound operations
-- **Scheduling**: Built-in scheduler for intervals, cron schedules, and manual triggers
+- **Scheduling**: Built-in scheduler for intervals, cron schedules, manual triggers, and concurrent workflows
 - **State machines**: Chain nodes together into complex workflows
-- **Type safety**: Encourages Enum-driven state transitions with compile-time checking.
-- **Performance**: Minimal overhead with direct execution
+- **Type safety**: Encourages Enum-driven state transitions with compile-time checking
+- **🚀 Performance**: Minimal overhead with direct execution
 
-## How It Works
+## 🏗️ Core Concepts
 
-Cano is built around three concepts:
+### 🔧 Nodes - Processing Units
 
-### 1. Nodes - Processing Units
-
-A `Node` implements the processing logic for your workflow. Each node can perform preparation, execution, and post-processing steps, where the preparation step loads data from a shared store, execution performs the main logic, and post-processing updates the store and determines the next state.
+A `Node` implements the processing logic for your workflow with three phases: preparation (load data), execution (main logic), and post-processing (update state):
 
 ```rust
-// Node with specific processing logic
 struct EmailProcessor;
 
 #[async_trait]
@@ -120,20 +117,17 @@ impl Node<String> for EmailProcessor {
     type ExecResult = bool;
 
     async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
-        // Load email data from store
         let email: String = store.get("email").unwrap_or_default();
         Ok(email)
     }
 
     async fn exec(&self, email: Self::PrepResult) -> Self::ExecResult {
-        // Process the email
         println!("Sending email to: {email}");
         true // Success
     }
 
     async fn post(&self, store: &MemoryStore, success: Self::ExecResult) 
         -> Result<String, CanoError> {
-        // Store the result and return next action
         if success {
             store.put("result", "sent".to_string())?;
             Ok("complete".to_string())
@@ -144,222 +138,83 @@ impl Node<String> for EmailProcessor {
 }
 ```
 
-#### Retry Logic
+#### 🔄 Retry Strategies
 
-Each node can be configured with retry logic using different strategies:
-
-**No Retries** - Fail immediately:
+Configure retry behavior based on your needs:
 
 ```rust
-impl Node<WorkflowState> for CriticalNode {
+impl Node<WorkflowState> for MyNode {
     fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()  // No retries, fail immediately
-    }
-    // ... rest of implementation
-}
-```
-
-**Fixed Retries** - Consistent delays:
-
-```rust
-impl Node<WorkflowState> for ReliableNode {
-    fn config(&self) -> NodeConfig {
+        // No retries - fail immediately
+        NodeConfig::minimal()
+        
+        // Fixed retries - consistent delays
         NodeConfig::new().with_fixed_retry(3, Duration::from_secs(2))
-        // 3 retries with 2 second delays
-    }
-    // ... rest of implementation
-}
-```
-
-**Exponential Backoff** - Increasing delays:
-
-```rust
-impl Node<WorkflowState> for ResilientNode {
-    fn config(&self) -> NodeConfig {
+        
+        // Exponential backoff - increasing delays (100ms, 200ms, 400ms...)
         NodeConfig::new().with_exponential_retry(5)
-        // 5 retries with exponential backoff (100ms, 200ms, 400ms, 800ms, 1.6s)
-    }
-    // ... rest of implementation
-}
-```
-
-**Custom Exponential Backoff** - Fine-tuned retry behavior:
-
-```rust
-impl Node<WorkflowState> for CustomNode {
-    fn config(&self) -> NodeConfig {
+        
+        // Custom exponential with jitter
         NodeConfig::new().with_retry(
-            RetryMode::exponential_custom(
-                3,                              // max retries
-                Duration::from_millis(50),      // base delay
-                3.0,                            // multiplier  
-                Duration::from_secs(10),        // max delay cap
-                0.2,                            // 20% jitter
-            )
+            RetryMode::exponential_custom(3, Duration::from_millis(50), 2.0, Some(0.1))
         )
     }
-    // ... rest of implementation
 }
 ```
 
-**When to Use Different Retry Modes:**
+**When to use:** None (DB transactions), Fixed (network calls), Exponential (APIs), Custom (high-load scenarios).
 
-- **None**: Database transactions, critical validations
-- **Fixed**: Network calls, file operations  
-- **Exponential**: API calls, external services
-- **Custom Exponential**: High-load scenarios requiring precise timing control
+### 🗃️ Store - Data Sharing
 
-### 2. Store - Data Sharing
-
-Cano allows **any type** to be used as a store for sharing data between workflow nodes. While MemoryStore is provided as a convenient key-value store implementation, you can use custom struct types for type-safe, performance-optimized data sharing.
-
-#### Using MemoryStore (Key-Value Store)
-
-The built-in MemoryStore provides a flexible key-value interface:
+Choose between **MemoryStore** (flexible key-value) or **custom structs** (type-safe, performant):
 
 ```rust
+// MemoryStore - flexible key-value storage
 let store = MemoryStore::new();
-
-// Store different types of data
 store.put("user_id", 123)?;
-store.put("name", "Alice".to_string())?;
 store.put("scores", vec![85, 92, 78])?;
-store.put("is_active", true)?;
-
-// Retrieve data with type safety
+store.append("scores", 95)?;  // [85, 92, 78, 95]
 let user_id: i32 = store.get("user_id")?;
-let name: String = store.get("name")?;
-let scores: Vec<i32> = store.get("scores")?;
-let is_active: bool = store.get("is_active")?;
 
-// Append items to existing collections
-store.append("scores", 95)?;  // scores is now [85, 92, 78, 95]
-store.append("tags", "important".to_string())?;  // Creates new Vec if key doesn't exist
-
-// Remove individual items
-store.remove("user_id")?;
-
-// Check store status
-let count = store.len()?;           // Get number of items
-let is_empty = store.is_empty()?;   // Check if store is empty
-
-// Iterate over all keys
-let all_keys: Vec<String> = store.keys()?.collect();
-for key in all_keys {
-    println!("Found key: {}", key);
-}
-
-// Clear all data
-store.clear()?;
-```
-
-#### Using Custom Store Types
-
-For better performance and type safety, you can use any custom struct as a store. This enables direct field access, stack allocation, and compile-time type checking:
-
-```rust
-// Custom store with direct field access
+// Custom store - direct field access, better performance
 #[derive(Debug, Clone, Default)]
 struct RequestCtx {
     pub request_id: String,
     pub revenue: f64,
     pub customer_id: String,
-    pub transaction_count: i32,
 }
 
-// Nodes can access and modify the custom store directly
 #[async_trait]
 impl Node<ProcessingState, RequestCtx> for MetricsNode {
     async fn prep(&self, store: &RequestCtx) -> Result<String, CanoError> {
-        // Direct field access - no hash map lookups
-        Ok(store.request_body.clone())
+        Ok(store.request_id.clone())  // Direct field access
     }
-
-    async fn post(&self, store: &RequestCtx, metrics: ProcessingResult) 
+    
+    async fn post(&self, store: &RequestCtx, result: ProcessingResult) 
         -> Result<ProcessingState, CanoError> {
-        // Nodes can read/modify store fields directly
-        println!("Processing request: {} with revenue: {}", 
-                 store.request_id, store.revenue);
+        println!("Revenue: {}", store.revenue);  // Type-safe access
         Ok(ProcessingState::Complete)
     }
 }
 ```
 
-**Custom stores provide:**
+### 🔗 Workflows - State Management
 
-- **Performance**: Direct field access, no hash map overhead
-- **Type Safety**: Compile-time guarantees about data structure  
-- **Memory Efficiency**: Stack allocation, no heap allocations (if you are careful enough)
-- **API Clarity**: Explicit data contracts between nodes
-
-See the [`workflow_stack_store.rs`](./examples/workflow_stack_store.rs) example for a complete demonstration of custom store types with request processing pipelines.
-
-### 3. Workflows - State Management
-
-Build workflows with state machine semantics:
-
-```rust
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum WorkflowState {
-    Validate,
-    Process,
-    SendEmail,
-    Complete,
-    Error,
-}
-
-let mut workflow = Workflow::new(WorkflowState::Validate);
-workflow.register_node(WorkflowState::Validate, validator)
-    .register_node(WorkflowState::Process, processor)
-    .register_node(WorkflowState::SendEmail, email_sender)
-    .add_exit_states(vec![WorkflowState::Complete, WorkflowState::Error]);
-
-let result = workflow.orchestrate(&store).await?;
-```
-
-#### Complex Workflows
-
-Build state machine pipelines with conditional branching, error handling, and retry logic:
-
-```mermaid
-graph TD
-    A[Start] --> B[LoadData]
-    B --> C{Validate}
-    C -->|Valid| D[Process]
-    C -->|Invalid| E[Sanitize]  
-    C -->|Critical Error| F[Error]
-    E --> D
-    D --> G{QualityCheck}
-    G -->|High Quality| H[Enrich]
-    G -->|Low Quality| I[BasicProcess]
-    G -->|Failed & Retries Left| J[Retry]
-    G -->|Failed & No Retries| K[Failed]
-    H --> L[Complete]
-    I --> L
-    J --> D
-    F --> M[Cleanup]
-    M --> K
-```
+Build workflows with state machine semantics and conditional branching:
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum OrderState {
-    Start,
-    LoadData,
-    Validate,
-    Sanitize,
-    Process,
-    QualityCheck,
-    Enrich,
-    BasicProcess,
-    Retry,
-    Cleanup,
-    Complete,
-    Failed,
-    Error,
+    Start, Validate, Process, Complete, Failed
 }
 
-// Validation node with multiple possible outcomes
+// Simple workflow
+let mut workflow = Workflow::new(OrderState::Start);
+workflow.register_node(OrderState::Start, ValidatorNode)
+    .register_node(OrderState::Validate, ProcessorNode)
+    .add_exit_states(vec![OrderState::Complete, OrderState::Failed]);
+
+// Complex branching with conditional logic
 struct ValidationNode;
 
 #[async_trait]
@@ -367,488 +222,159 @@ impl Node<OrderState> for ValidationNode {
     type PrepResult = String;
     type ExecResult = ValidationResult;
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
-        let data: String = store.get("raw_data")?;
-        Ok(data)
-    }
-
-    async fn exec(&self, data: Self::PrepResult) -> Self::ExecResult {
-        if data.contains("critical_error") {
-            ValidationResult::CriticalError
-        } else if data.len() < 10 {
-            ValidationResult::Invalid
-        } else {
-            ValidationResult::Valid
-        }
-    }
-
     async fn post(&self, store: &MemoryStore, result: Self::ExecResult) 
         -> Result<OrderState, CanoError> {
         match result {
-            ValidationResult::Valid => {
-                store.put("validation_status", "passed")?;
-                Ok(OrderState::Process)
-            }
-            ValidationResult::Invalid => {
-                store.put("validation_status", "needs_sanitization")?;
-                Ok(OrderState::Sanitize)
-            }
-            ValidationResult::CriticalError => {
-                store.put("error_reason", "critical_validation_failure")?;
-                Ok(OrderState::Error)
-            }
+            ValidationResult::Valid => Ok(OrderState::Process),
+            ValidationResult::Invalid => Ok(OrderState::Failed),
+            ValidationResult::Retry => Ok(OrderState::Start),
         }
     }
 }
-
-// Quality check node with conditional processing paths
-struct QualityCheckNode;
-
-#[async_trait]
-impl Node<OrderState> for QualityCheckNode {
-    type PrepResult = (String, i32);
-    type ExecResult = QualityScore;
-
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
-        let data: String = store.get("processed_data")?;
-        let attempt: i32 = store.get("retry_count").unwrap_or(0);
-        Ok((data, attempt))
-    }
-
-    async fn exec(&self, (data, attempt): Self::PrepResult) -> Self::ExecResult {
-        let score = calculate_quality_score(&data);
-        QualityScore { score, attempt }
-    }
-
-    async fn post(&self, store: &MemoryStore, result: Self::ExecResult) 
-        -> Result<OrderState, CanoError> {
-        store.put("quality_score", result.score)?;
-        
-        match result.score {
-            90..=100 => Ok(OrderState::Enrich),
-            60..=89 => Ok(OrderState::BasicProcess),
-            _ if result.attempt < 3 => {
-                store.put("retry_count", result.attempt + 1)?;
-                Ok(OrderState::Retry)
-            }
-            _ => Ok(OrderState::Failed),
-        }
-    }
-}
-
-// # ALL OTHER NODES...
-
-// Build the complex workflow
-let mut workflow = Workflow::new(OrderState::Start);
-workflow
-    .register_node(OrderState::Start, DataLoaderNode)
-    .register_node(OrderState::LoadData, ValidationNode)
-    .register_node(OrderState::Validate, SanitizeNode)
-    .register_node(OrderState::Sanitize, ProcessNode)  
-    .register_node(OrderState::Process, QualityCheckNode)
-    .register_node(OrderState::QualityCheck, EnrichNode)
-    .register_node(OrderState::Enrich, CompleteNode)     // -> Complete
-    .register_node(OrderState::BasicProcess, CompleteNode) // -> Complete
-    .register_node(OrderState::Retry, ProcessNode)        // -> Process
-    .register_node(OrderState::Error, CleanupNode)        // -> Failed
-    .add_exit_states(vec![
-        OrderState::Complete, 
-        OrderState::Failed
-    ]);
 
 let result = workflow.orchestrate(&store).await?;
 ```
 
-## Concurrent Workflows - Parallel Execution
+## ⚡ Concurrent Workflows
 
-Concurrent Workflows enable parallel execution of multiple workflow instances, providing significant performance improvements for I/O-bound operations and batch processing scenarios.
+Execute multiple workflows in parallel for I/O-bound operations and batch processing with dramatic performance improvements.
 
-### When to Use Concurrent Workflows
+### 🎯 When to Use
 
-**✅ Ideal Use Cases:**
+**✅ Ideal for:** I/O operations, batch processing, API calls, independent workflows  
+**❌ Avoid for:** CPU-intensive tasks, sequential dependencies, shared resource contention
 
-- **I/O-bound operations**: Network requests, database queries, file operations
-- **Batch processing**: Processing multiple independent items simultaneously  
-- **External API calls**: Rate-limited services that benefit from concurrent requests
-- **Independent workflows**: Tasks that don't depend on each other's results
-- **High-latency operations**: Operations with significant wait times
+**Performance:** 5x-47x speedup for I/O-bound operations (5 workflows: 18ms vs 92ms sequential)
 
-**❌ Avoid For:**
-
-- **CPU-intensive tasks**: May create overhead without benefits
-- **Sequential dependencies**: When workflows must run in specific order
-- **Shared resource contention**: When concurrent access causes bottlenecks
-- **Memory-intensive operations**: Risk of memory exhaustion
-
-### Performance Characteristics
-
-Based on benchmark results, concurrent workflows provide dramatic speedups for I/O-bound operations:
-
-- **5 I/O workflows**: ~5x speedup (18ms concurrent vs 92ms sequential)
-- **50 I/O workflows**: ~47x speedup (19ms concurrent vs 920ms sequential)
-- **CPU workflows**: Minimal benefit due to concurrency overhead
-
-### Basic Concurrent Workflow Usage
+### 📋 Usage & Strategies
 
 ```rust
 use cano::prelude::*;
-use tokio::time::Duration;
 
 #[tokio::main]
 async fn main() -> CanoResult<()> {
-    let store = MemoryStore::new();
-    
-    // Create multiple workflow instances
+    // Create workflow instances
     let workflow_instances = vec![
-        ConcurrentWorkflowInstance::new("user_1", user_processing_workflow()),
-        ConcurrentWorkflowInstance::new("user_2", user_processing_workflow()),  
-        ConcurrentWorkflowInstance::new("user_3", user_processing_workflow()),
+        ConcurrentWorkflowInstance::new("batch_1", processing_workflow()),
+        ConcurrentWorkflowInstance::new("batch_2", processing_workflow()),
+        ConcurrentWorkflowInstance::new("batch_3", processing_workflow()),
     ];
     
-    // Create concurrent workflow with strategy
-    let mut concurrent_workflow = ConcurrentWorkflow::new(ConcurrentStrategy::WaitForever);
+    // Choose strategy based on requirements
+    let strategies = vec![
+        ConcurrentStrategy::WaitForever,                          // Wait for all
+        ConcurrentStrategy::WaitForQuota(2),                      // Wait for 2 to complete
+        ConcurrentStrategy::WaitDuration(Duration::from_secs(30)), // 30-second timeout
+    ];
+    
+    let mut concurrent_workflow = ConcurrentWorkflow::new(strategies[0]);
     concurrent_workflow.add_instances(workflow_instances);
     
-    // Execute all workflows concurrently
     let results = concurrent_workflow.orchestrate(store).await?;
-    
-    println!("Completed: {}, Failed: {}", results.completed, results.failed);
-    println!("Total time: {:?}", results.duration);
+    println!("✅ Completed: {}, ❌ Failed: {}, ⏱️ Duration: {:?}", 
+             results.completed, results.failed, results.duration);
     
     Ok(())
 }
 ```
 
-### Concurrent Strategies
+## ⏰ Scheduler
 
-Choose the right strategy based on your requirements:
+Schedule workflows for background jobs, periodic processing, and automated workflows with multiple trigger options.
 
-#### 1. WaitForever - Complete All Workflows
-
-Waits for all workflows to complete, regardless of time:
-
-```rust
-let strategy = ConcurrentStrategy::WaitForever;
-let mut concurrent_workflow = ConcurrentWorkflow::new(strategy);
-
-// All workflows must complete for success
-let results = concurrent_workflow.orchestrate(store).await?;
-assert_eq!(results.completed, workflow_instances.len());
-```
-
-**Use when:** You need all results and time isn't critical.
-
-#### 2. WaitForQuota - Partial Completion
-
-Waits for a specific number of workflows to complete:
-
-```rust
-let strategy = ConcurrentStrategy::WaitForQuota(3); // Wait for 3 to complete
-let mut concurrent_workflow = ConcurrentWorkflow::new(strategy);
-
-// Returns when 3 workflows complete (others may still be running)
-let results = concurrent_workflow.orchestrate(store).await?;
-assert_eq!(results.completed, 3);
-```
-
-**Use when:** You need a minimum number of results but not all.
-
-#### 3. WaitDuration - Time-bounded Execution
-
-Waits for a maximum duration, returning whatever completes in time:
-
-```rust
-let strategy = ConcurrentStrategy::WaitDuration(Duration::from_secs(30));
-let mut concurrent_workflow = ConcurrentWorkflow::new(strategy);
-
-// Returns after 30 seconds with whatever completed
-let results = concurrent_workflow.orchestrate(store).await?;
-println!("Completed {} out of {} in 30 seconds", 
-         results.completed, results.total);
-```
-
-**Use when:** You have strict time constraints and partial results are acceptable.
-
-### Advanced Concurrent Workflow Example
+### 📋 Basic Usage
 
 ```rust
 use cano::prelude::*;
-use tokio::time::Duration;
-
-// API processing node that simulates I/O operations
-struct ApiProcessorNode {
-    api_endpoint: String,
-    timeout: Duration,
-}
-
-#[async_trait]
-impl Node<ProcessingState> for ApiProcessorNode {
-    type PrepResult = RequestData;
-    type ExecResult = ApiResponse;
-
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
-        // Load request data from store
-        let data: RequestData = store.get("request_data")?;
-        Ok(data)
-    }
-
-    async fn exec(&self, request: Self::PrepResult) -> Self::ExecResult {
-        // Simulate API call with timeout
-        tokio::time::sleep(self.timeout).await;
-        
-        ApiResponse {
-            status: 200,
-            data: format!("Processed: {}", request.id),
-        }
-    }
-
-    async fn post(&self, store: &MemoryStore, response: Self::ExecResult) 
-        -> Result<ProcessingState, CanoError> {
-        // Store API response
-        store.put("api_response", response)?;
-        
-        if response.status == 200 {
-            Ok(ProcessingState::Complete)
-        } else {
-            Ok(ProcessingState::Failed)
-        }
-    }
-}
-
-#[tokio::main]
-async fn main() -> CanoResult<()> {
-    let store = MemoryStore::new();
-    
-    // Create workflows for processing different data batches
-    let workflow_instances: Vec<_> = (1..=20)
-        .map(|i| {
-            let mut workflow = Workflow::new(ProcessingState::Start);
-            workflow.register_node(
-                ProcessingState::Start,
-                ApiProcessorNode {
-                    api_endpoint: format!("https://api.example.com/batch/{}", i),
-                    timeout: Duration::from_millis(100), // Simulated I/O delay
-                }
-            );
-            workflow.add_exit_state(ProcessingState::Complete);
-            
-            ConcurrentWorkflowInstance::new(format!("batch_{}", i), workflow)
-        })
-        .collect();
-    
-    // Strategy: Wait for at least 15 out of 20 to complete
-    let strategy = ConcurrentStrategy::WaitForQuota(15);
-    let mut concurrent_workflow = ConcurrentWorkflow::new(strategy);
-    concurrent_workflow.add_instances(workflow_instances);
-    
-    // Execute with timing
-    let start = std::time::Instant::now();
-    let results = concurrent_workflow.orchestrate(store).await?;
-    let elapsed = start.elapsed();
-    
-    println!("Concurrent Processing Results:");
-    println!("  ✅ Completed: {}", results.completed);
-    println!("  ❌ Failed: {}", results.failed);
-    println!("  ⏱️  Duration: {:?}", elapsed);
-    println!("  📊 Success Rate: {:.1}%", 
-             (results.completed as f64 / results.total as f64) * 100.0);
-    
-    // Sequential comparison (for demonstration)
-    let sequential_start = std::time::Instant::now();
-    // ... sequential processing would take ~2000ms (20 * 100ms)
-    // while concurrent took ~100ms (limited by slowest I/O operation)
-    
-    Ok(())
-}
-```
-
-### Concurrent Workflow Builder Pattern
-
-Use the builder pattern for complex concurrent workflow configurations:
-
-```rust
-use cano::prelude::*;
-
-let results = ConcurrentWorkflowBuilder::new()
-    .with_strategy(ConcurrentStrategy::WaitDuration(Duration::from_secs(10)))
-    .add_workflow("data_validation", validation_workflow)
-    .add_workflow("user_processing", user_workflow)
-    .add_workflow("metrics_collection", metrics_workflow)
-    .with_store(custom_store)
-    .execute()
-    .await?;
-
-println!("Processed {} workflows in {:?}", 
-         results.completed, results.duration);
-```
-
-### Best Practices
-
-**🎯 Performance Optimization:**
-
-- Use concurrent workflows for I/O-bound operations
-- Choose appropriate timeout strategies for your use case
-- Monitor completion rates and adjust quotas accordingly
-- Consider memory usage with large numbers of concurrent workflows
-
-**🔧 Error Handling:**
-
-- Design workflows to handle partial failures gracefully
-- Use appropriate retry strategies within individual workflows
-- Log and monitor failed workflow instances for debugging
-
-**📊 Monitoring:**
-
-- Track completion rates and execution times
-- Monitor resource usage (memory, CPU, network)
-- Set up alerts for abnormal failure rates
-- Use structured logging for workflow correlation
-
-## Scheduler - Workflow Scheduling
-
-The Scheduler provides workflow scheduling capabilities for background jobs, periodic processing, and automated workflows.
-
-### Scheduler Usage
-
-```rust
-use cano::prelude::*;
-use tokio::time::Duration;
 
 #[tokio::main]
 async fn main() -> CanoResult<()> {
     let mut scheduler: Scheduler<MyState, MemoryStore> = Scheduler::new();
-    
     let workflow = Workflow::new(MyState::Start);
     
-    // Multiple scheduling options:
-    scheduler.every_seconds("task1", workflow.clone(), 30)?;                    // Every 30 seconds
-    scheduler.every_minutes("task2", workflow.clone(), 5)?;                     // Every 5 minutes  
-    scheduler.every_hours("task3", workflow.clone(), 2)?;                       // Every 2 hours
-    scheduler.every("task4", workflow.clone(), Duration::from_millis(500))?;    // Every 500ms
-    scheduler.cron("task5", workflow.clone(), "0 */10 * * * *")?;              // Every 10 minutes (cron)
-    scheduler.manual("task6", workflow)?;                                       // Manual trigger only
+    // Multiple scheduling options
+    scheduler.every_seconds("health_check", workflow.clone(), 30)?;           // Every 30s
+    scheduler.every_minutes("data_sync", workflow.clone(), 5)?;               // Every 5min
+    scheduler.every_hours("reports", workflow.clone(), 2)?;                   // Every 2h
+    scheduler.cron("daily_cleanup", workflow.clone(), "0 0 2 * * *")?;       // Daily 2 AM
+    scheduler.manual("emergency_task", workflow)?;                            // Manual only
     
-    // Start the scheduler
     scheduler.start().await?;
     
-    // Trigger a manual workflow
-    scheduler.trigger("task6").await?;
-    
-    // Check workflow status
-    if let Some(status) = scheduler.status("task1").await {
-        println!("Task1 status: {:?}", status);
+    // Manual trigger and monitoring
+    scheduler.trigger("emergency_task").await?;
+    if let Some(status) = scheduler.status("health_check").await {
+        println!("Task status: {:?}", status);
     }
     
-    // Graceful shutdown with timeout
     scheduler.stop().await?;
-    
     Ok(())
 }
 ```
 
-### Scheduler Features
+### 🔄 Scheduled Concurrent Workflows
 
-- **Flexible Scheduling**: Support for intervals, cron expressions, and manual triggers
-- **Convenience Methods**: `every_seconds()`, `every_minutes()`, `every_hours()` helpers
-- **Status Monitoring**: Check workflow status, run counts, and execution times
-- **Manual Control**: Trigger flows manually and monitor execution
-- **Graceful Shutdown**: Stop with timeout for running flows to complete
-- **Concurrent Execution**: Multiple flows can run simultaneously
-
-### Advanced Scheduler Usage
+Combine scheduling with parallel execution for high-throughput batch processing:
 
 ```rust
-// Scheduled workflow examples
-let mut scheduler = Scheduler::new();
-
-// Data processing every hour
-scheduler.every_hours("data_sync", data_processing_flow, 1)?;
-
-// Health checks every 30 seconds  
-scheduler.every_seconds("health_check", monitoring_flow, 30)?;
-
-// Daily reports at 9 AM using cron
-scheduler.cron("daily_report", reporting_flow, "0 0 9 * * *")?;
-
-// Manual cleanup task
-scheduler.manual("cleanup", cleanup_flow)?;
-
-// Start the scheduler
-scheduler.start().await?;
-
-// Monitor running flows
-tokio::spawn(async move {
-    loop {
-        let running_count = scheduler.running_count().await;
-        println!("Currently running flows: {}", running_count);
-        
-        // List all workflow statuses
-        let flows = scheduler.list().await;
-        for flow_info in flows {
-            println!("Workflow {}: {:?} (runs: {})", 
-                flow_info.id, flow_info.status, flow_info.run_count);
+#[tokio::main]
+async fn main() -> CanoResult<()> {
+    let mut scheduler = Scheduler::new();
+    
+    // Create concurrent workflow for batch processing
+    let mut batch_workflow = ConcurrentWorkflow::new(ConcurrentStrategy::WaitForQuota(8));
+    let workflow_instances: Vec<_> = (1..=10)
+        .map(|i| ConcurrentWorkflowInstance::new(format!("item_{}", i), processing_workflow()))
+        .collect();
+    batch_workflow.add_instances(workflow_instances);
+    
+    // Schedule concurrent workflows
+    scheduler.every_seconds_concurrent("batch_process", batch_workflow, 30)?;    // Every 30s
+    scheduler.cron_concurrent("daily_reports", reporting_workflow, "0 0 2 * * *")?; // Daily 2 AM
+    scheduler.manual_concurrent("emergency_sync", emergency_workflow)?;          // Manual trigger
+    
+    scheduler.start().await?;
+    
+    // Monitor execution
+    tokio::spawn(async move {
+        loop {
+            let flows = scheduler.list().await;
+            for flow in flows {
+                if flow.is_concurrent {
+                    println!("Concurrent flow {}: {} completed, {} failed", 
+                             flow.id, flow.completed_instances, flow.failed_instances);
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(30)).await;
         }
-        
-        tokio::time::sleep(Duration::from_secs(10)).await;
-    }
-});
-
-// Graceful shutdown with 30 second timeout
-scheduler.stop_with_timeout(Duration::from_secs(30)).await?;
+    });
+    
+    scheduler.stop().await?;
+    Ok(())
+}
 ```
 
-## Testing & Benchmarks
-
-Run tests and view performance metrics:
+## 🧪 Testing & Examples
 
 ```bash
-# Run all tests
+# Run tests, examples, and benchmarks
 cargo test
 
-# Run performance benchmarks  
-cargo bench --bench store_performance
-cargo bench --bench node_performance
-cargo bench --bench workflow_performance
+# Run examples
+cargo run --example <example_name>
 
-# Specific workflow performance benchmarks
-cargo bench --bench workflow_performance concurrent_vs_sequential
-cargo bench --bench workflow_performance io_vs_cpu_concurrent
-cargo bench --bench workflow_performance concurrent_io_scalability
-
-# Run AI workflow examples
-cargo run --example ai_workflow_yes_and
-
-# Run workflow examples
-cargo run --example workflow_simple
-cargo run --example workflow_book_prepositions
-cargo run --example workflow_negotiation
-cargo run --example workflow_stack_store
-
-# Run scheduler scheduling examples
-cargo run --example scheduler_scheduling
-cargo run --example scheduler_duration_scheduling
-cargo run --example scheduler_concurrent_workflows
-cargo run --example scheduler_graceful_shutdown
-
-Benchmark results are saved in `target/criterion/`.
+# Run benchmarks (view benchmark results in target/criterion/)
+cargo bench --bench <benchmark_name>
 ```
 
-## Documentation
+## 📚 Documentation & Contributing
 
 - **[API Documentation](https://docs.rs/cano)** - Complete API reference
-- **[Examples Directory](./examples/)** - Hands-on code examples
-- **[Benchmarks](./benches/)** - Performance testing and optimization
+- **[Examples Directory](./examples/)** - Hands-on code examples  
+- **[Benchmarks](./benches/)** - Performance testing
 
-## Contributing
+**Contributing areas:** Documentation, features, performance optimization, testing, bug fixes.
 
-Contributions are welcome in the following areas:
+## 📄 License
 
-- **Documentation** - Improve guides and examples
-- **Features** - Add new store backends or workflow capabilities  
-- **Performance** - Optimize performance and memory usage
-- **Testing** - Add test cases and edge case coverage
-- **Bug Fixes** - Report and fix issues
-
-## License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+Licensed under the MIT License - see [LICENSE](LICENSE) for details.
