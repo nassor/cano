@@ -235,6 +235,134 @@ impl Node<OrderState> for ValidationNode {
 let result = workflow.orchestrate(&store).await?;
 ```
 
+#### Complex Workflow Example
+
+For more sophisticated processing pipelines with conditional branching, error handling, and retry logic:
+
+```mermaid
+graph TD
+    A[Start] --> B[LoadData]
+    B --> C{Validate}
+    C -->|Valid| D[Process]
+    C -->|Invalid| E[Sanitize]  
+    C -->|Critical Error| F[Error]
+    E --> D
+    D --> G{QualityCheck}
+    G -->|High Quality| H[Enrich]
+    G -->|Low Quality| I[BasicProcess]
+    G -->|Failed & Retries Left| J[Retry]
+    G -->|Failed & No Retries| K[Failed]
+    H --> L[Complete]
+    I --> L
+    J --> D
+    F --> M[Cleanup]
+    M --> K
+```
+
+```rust
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum OrderState {
+    Start, LoadData, Validate, Sanitize, Process, QualityCheck,
+    Enrich, BasicProcess, Retry, Cleanup, Complete, Failed, Error,
+}
+
+// Validation node with multiple possible outcomes
+struct ValidationNode;
+
+#[async_trait]
+impl Node<OrderState> for ValidationNode {
+    type PrepResult = String;
+    type ExecResult = ValidationResult;
+
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        let data: String = store.get("raw_data")?;
+        Ok(data)
+    }
+
+    async fn exec(&self, data: Self::PrepResult) -> Self::ExecResult {
+        if data.contains("critical_error") {
+            ValidationResult::CriticalError
+        } else if data.len() < 10 {
+            ValidationResult::Invalid
+        } else {
+            ValidationResult::Valid
+        }
+    }
+
+    async fn post(&self, store: &MemoryStore, result: Self::ExecResult) 
+        -> Result<OrderState, CanoError> {
+        match result {
+            ValidationResult::Valid => {
+                store.put("validation_status", "passed")?;
+                Ok(OrderState::Process)
+            }
+            ValidationResult::Invalid => {
+                store.put("validation_status", "needs_sanitization")?;
+                Ok(OrderState::Sanitize)
+            }
+            ValidationResult::CriticalError => {
+                store.put("error_reason", "critical_validation_failure")?;
+                Ok(OrderState::Error)
+            }
+        }
+    }
+}
+
+// Quality check node with conditional processing paths
+struct QualityCheckNode;
+
+#[async_trait]
+impl Node<OrderState> for QualityCheckNode {
+    type PrepResult = (String, i32);
+    type ExecResult = QualityScore;
+
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        let data: String = store.get("processed_data")?;
+        let attempt: i32 = store.get("retry_count").unwrap_or(0);
+        Ok((data, attempt))
+    }
+
+    async fn exec(&self, (data, attempt): Self::PrepResult) -> Self::ExecResult {
+        let score = calculate_quality_score(&data);
+        QualityScore { score, attempt }
+    }
+
+    async fn post(&self, store: &MemoryStore, result: Self::ExecResult) 
+        -> Result<OrderState, CanoError> {
+        store.put("quality_score", result.score)?;
+        
+        match result.score {
+            90..=100 => Ok(OrderState::Enrich),
+            60..=89 => Ok(OrderState::BasicProcess),
+            _ if result.attempt < 3 => {
+                store.put("retry_count", result.attempt + 1)?;
+                Ok(OrderState::Retry)
+            }
+            _ => Ok(OrderState::Failed),
+        }
+    }
+}
+
+// ALL OTHER NODES...
+
+// Build the complex workflow
+let mut workflow = Workflow::new(OrderState::Start);
+workflow
+    .register_node(OrderState::Start, DataLoaderNode)
+    .register_node(OrderState::LoadData, ValidationNode)
+    .register_node(OrderState::Validate, SanitizeNode)
+    .register_node(OrderState::Sanitize, ProcessNode)  
+    .register_node(OrderState::Process, QualityCheckNode)
+    .register_node(OrderState::QualityCheck, EnrichNode)
+    .register_node(OrderState::Enrich, CompleteNode)
+    .register_node(OrderState::BasicProcess, CompleteNode)
+    .register_node(OrderState::Retry, ProcessNode)        // Retry goes back to Process
+    .register_node(OrderState::Error, CleanupNode)        // Error handling
+    .add_exit_states(vec![OrderState::Complete, OrderState::Failed]);
+
+let result = workflow.orchestrate(&store).await?;
+```
+
 ## ⚡ Concurrent Workflows
 
 Execute multiple workflows in parallel for I/O-bound operations and batch processing with dramatic performance improvements.
