@@ -17,17 +17,25 @@ tokio = { version = "1.0", features = ["full"] }
 rand = "0.9"
 cron = "0.15"
 chrono = { version = "0.4", features = ["serde"] }
+futures = "0.3"
 
 [dev-dependencies]
 cargo-audit = "0.21.2"
 criterion = { version = "0.6", features = ["html_reports", "async_tokio"] }
-futures = "0.3"
 reqwest = { version = "0.12", features = ["json"] }
 rig-core = "0.15"
 
 [[example]]
 name = "ai_workflow_yes_and"
 path = "examples/ai_workflow_yes_and.rs"
+
+[[example]]
+name = "workflow_concurrent"
+path = "examples/workflow_concurrent.rs"
+
+[[example]]
+name = "scheduler_mixed_workflows"
+path = "examples/scheduler_mixed_workflows.rs"
 
 [[example]]
 name = "workflow_simple"

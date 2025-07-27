@@ -1,47 +1,84 @@
-use async_trait::async_trait;
-use cano::{CanoError, MemoryStore, Node, Workflow};
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+//! # Workflow Performance Benchmarks
+//!
+//! Simple benchmarks focusing on the current API functionality.
 
-/// Simple do-nothing node for benchmarking
+use async_trait::async_trait;
+use cano::prelude::*;
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use std::time::Duration;
+
+/// Simple node for benchmarking
 #[derive(Clone)]
-struct DoNothingNode {
+struct SimpleNode {
     next_state: TestState,
+    duration: Duration,
 }
 
-impl DoNothingNode {
-    fn new(next_state: TestState) -> Self {
-        Self { next_state }
+impl SimpleNode {
+    fn new(next_state: TestState, duration: Duration) -> Self {
+        Self {
+            next_state,
+            duration,
+        }
+    }
+}
+
+/// IO-bound node that simulates network/disk operations
+#[derive(Clone)]
+struct IOBoundNode {
+    next_state: TestState,
+    io_duration: Duration,
+    operation_type: String,
+}
+
+impl IOBoundNode {
+    fn new(next_state: TestState, io_duration: Duration, operation_type: &str) -> Self {
+        Self {
+            next_state,
+            io_duration,
+            operation_type: operation_type.to_string(),
+        }
+    }
+}
+
+/// CPU-bound node that performs intensive calculations
+#[derive(Clone)]
+struct CPUBoundNode {
+    next_state: TestState,
+    iterations: usize,
+    operation_type: String,
+}
+
+impl CPUBoundNode {
+    fn new(next_state: TestState, iterations: usize, operation_type: &str) -> Self {
+        Self {
+            next_state,
+            iterations,
+            operation_type: operation_type.to_string(),
+        }
     }
 }
 
 /// Test states for workflow benchmarking
-/// Using a simple enum with node IDs for scalability
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum TestState {
-    Start,
-    Node(usize),
+    Step1,
     Complete,
 }
 
-impl TestState {
-    /// Generate a state for a given node number
-    fn node(n: usize) -> Self {
-        if n == 0 { Self::Start } else { Self::Node(n) }
-    }
-}
-
 #[async_trait]
-impl Node<TestState> for DoNothingNode {
-    type PrepResult = ();
-    type ExecResult = ();
+impl Node<TestState> for SimpleNode {
+    type PrepResult = String;
+    type ExecResult = String;
 
     async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
-        Ok(())
+        tokio::time::sleep(self.duration / 4).await;
+        Ok("prepared".to_string())
     }
 
-    async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
-        // Do nothing - minimal overhead
-        ()
+    async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
+        tokio::time::sleep(self.duration / 2).await;
+        format!("processed_{}", prep_res)
     }
 
     async fn post(
@@ -49,64 +86,195 @@ impl Node<TestState> for DoNothingNode {
         _store: &MemoryStore,
         _exec_res: Self::ExecResult,
     ) -> Result<TestState, CanoError> {
+        tokio::time::sleep(self.duration / 4).await;
         Ok(self.next_state.clone())
     }
 }
 
-/// Create a workflow with a specified number of nodes
-fn create_flow(node_count: usize) -> Workflow<TestState> {
-    let mut workflow: Workflow<TestState> = Workflow::new(TestState::Start);
+#[async_trait]
+impl Node<TestState> for IOBoundNode {
+    type PrepResult = String;
+    type ExecResult = String;
 
-    // Add the sequential chain of nodes
-    for i in 0..node_count {
-        let current_state = TestState::node(i);
-        let next_state = if i == node_count - 1 {
-            TestState::Complete
-        } else {
-            TestState::node(i + 1)
-        };
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        // Simulate database connection or file opening
+        tokio::time::sleep(self.io_duration / 8).await;
 
-        workflow.register_node(current_state, DoNothingNode::new(next_state));
+        // Store some metadata about the operation
+        let metadata = format!("io_prep_{}", self.operation_type);
+        let _ = store.put("io_metadata", metadata);
+
+        Ok(format!("io_prepared_{}", self.operation_type))
     }
 
-    // Set the Complete state as exit state
-    workflow.add_exit_state(TestState::Complete);
+    async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
+        // Simulate the main IO operation (network request, file read, database query)
+        tokio::time::sleep(self.io_duration).await;
+        format!("io_result_{}_{}", self.operation_type, prep_res)
+    }
 
-    workflow
+    async fn post(
+        &self,
+        store: &MemoryStore,
+        exec_res: Self::ExecResult,
+    ) -> Result<TestState, CanoError> {
+        // Simulate cleanup and result storage
+        tokio::time::sleep(self.io_duration / 16).await;
+
+        // Store the result for potential downstream nodes
+        let result_key = format!("io_result_{}", self.operation_type);
+        let _ = store.put(&result_key, exec_res);
+
+        Ok(self.next_state.clone())
+    }
 }
 
-fn bench_flow_performance(c: &mut Criterion) {
-    let mut group = c.benchmark_group("flow_performance");
+#[async_trait]
+impl Node<TestState> for CPUBoundNode {
+    type PrepResult = Vec<u64>;
+    type ExecResult = u64;
 
-    // Test different workflow sizes
-    let node_counts = vec![10, 100, 1000, 10000];
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        // Prepare data for CPU-intensive computation
+        let data: Vec<u64> = (0..self.iterations as u64).collect();
 
-    for &node_count in &node_counts {
+        // Store computation metadata
+        let metadata = format!("cpu_prep_{}_{}", self.operation_type, self.iterations);
+        let _ = store.put("cpu_metadata", metadata);
+
+        Ok(data)
+    }
+
+    async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
+        // Perform CPU-intensive calculation
+        match self.operation_type.as_str() {
+            "fibonacci" => {
+                // Calculate Fibonacci numbers
+                prep_res.iter().map(|&n| fibonacci(n % 40)).sum()
+            }
+            "prime_check" => {
+                // Check for prime numbers
+                prep_res.iter().filter(|&&n| is_prime(n)).count() as u64
+            }
+            "matrix_multiply" => {
+                // Simulate matrix multiplication
+                prep_res.iter().map(|&n| n * n).sum()
+            }
+            _ => {
+                // Default: simple sum
+                prep_res.iter().sum()
+            }
+        }
+    }
+
+    async fn post(
+        &self,
+        store: &MemoryStore,
+        exec_res: Self::ExecResult,
+    ) -> Result<TestState, CanoError> {
+        // Store computation result
+        let result_key = format!("cpu_result_{}", self.operation_type);
+        let _ = store.put(&result_key, exec_res);
+
+        Ok(self.next_state.clone())
+    }
+}
+
+// Helper functions for CPU-bound operations
+fn fibonacci(n: u64) -> u64 {
+    if n <= 1 {
+        n
+    } else {
+        fibonacci(n - 1) + fibonacci(n - 2)
+    }
+}
+
+fn is_prime(n: u64) -> bool {
+    if n < 2 {
+        return false;
+    }
+    for i in 2..=(n as f64).sqrt() as u64 {
+        if n % i == 0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn bench_node_performance(c: &mut Criterion) {
+    let mut group = c.benchmark_group("node_performance");
+
+    let durations = vec![
+        Duration::from_micros(1),
+        Duration::from_micros(10),
+        Duration::from_micros(100),
+        Duration::from_millis(1),
+    ];
+
+    for &duration in &durations {
         group.bench_with_input(
-            BenchmarkId::new("sequential_execution", node_count),
-            &node_count,
-            |b, &node_count| {
-                let workflow = create_flow(node_count);
+            BenchmarkId::new("single_node_execution", duration.as_micros()),
+            &duration,
+            |b, &duration| {
+                let node = SimpleNode::new(TestState::Complete, duration);
+                let store = MemoryStore::new();
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let store = MemoryStore::new();
-                        let result = workflow.orchestrate(&store).await;
+                        let result = node.run(&store).await;
                         assert!(result.is_ok());
-                        assert_eq!(result.unwrap(), TestState::Complete);
+                    });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_concurrent_node_execution(c: &mut Criterion) {
+    let mut group = c.benchmark_group("concurrent_node_execution");
+
+    let counts = vec![2, 5, 10, 20];
+    let duration = Duration::from_micros(100);
+
+    for &count in &counts {
+        group.bench_with_input(
+            BenchmarkId::new("parallel_nodes", count),
+            &count,
+            |b, &count| {
+                let nodes: Vec<SimpleNode> = (0..count)
+                    .map(|_| SimpleNode::new(TestState::Complete, duration))
+                    .collect();
+                let store = MemoryStore::new();
+
+                b.to_async(tokio::runtime::Runtime::new().unwrap())
+                    .iter(|| async {
+                        let tasks: Vec<_> = nodes.iter().map(|node| node.run(&store)).collect();
+
+                        let results = futures::future::join_all(tasks).await;
+                        for result in results {
+                            assert!(result.is_ok());
+                        }
                     });
             },
         );
 
         group.bench_with_input(
-            BenchmarkId::new("flow_creation", node_count),
-            &node_count,
-            |b, &node_count| {
-                b.iter(|| {
-                    let workflow = create_flow(node_count);
-                    // Just to ensure the workflow is created properly
-                    assert_eq!(workflow.state_nodes.len(), node_count);
-                });
+            BenchmarkId::new("sequential_nodes", count),
+            &count,
+            |b, &count| {
+                let nodes: Vec<SimpleNode> = (0..count)
+                    .map(|_| SimpleNode::new(TestState::Complete, duration))
+                    .collect();
+                let store = MemoryStore::new();
+
+                b.to_async(tokio::runtime::Runtime::new().unwrap())
+                    .iter(|| async {
+                        for node in &nodes {
+                            let result = node.run(&store).await;
+                            assert!(result.is_ok());
+                        }
+                    });
             },
         );
     }
@@ -114,67 +282,41 @@ fn bench_flow_performance(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark workflow execution overhead vs direct node execution
-fn bench_flow_vs_direct_execution(c: &mut Criterion) {
-    let mut group = c.benchmark_group("flow_vs_direct");
+fn bench_store_operations(c: &mut Criterion) {
+    let mut group = c.benchmark_group("store_operations");
 
-    let node_count = 100;
+    let operation_counts = vec![10, 100, 1000];
 
-    group.bench_function("flow_execution_100_nodes", |b| {
-        let workflow = create_flow(node_count);
-
-        b.to_async(tokio::runtime::Runtime::new().unwrap())
-            .iter(|| async {
-                let store = MemoryStore::new();
-                let result = workflow.orchestrate(&store).await;
-                assert!(result.is_ok());
-            });
-    });
-
-    group.bench_function("direct_node_execution_100_nodes", |b| {
-        let nodes: Vec<DoNothingNode> = (0..node_count)
-            .map(|_i| DoNothingNode::new(TestState::Complete))
-            .collect();
-
-        b.to_async(tokio::runtime::Runtime::new().unwrap())
-            .iter(|| async {
-                let store = MemoryStore::new();
-                for node in &nodes {
-                    let result = node.run(&store).await;
-                    assert!(result.is_ok());
-                }
-            });
-    });
-
-    group.finish();
-}
-
-/// Benchmark memory allocation patterns for different workflow sizes
-fn bench_memory_patterns(c: &mut Criterion) {
-    let mut group = c.benchmark_group("memory_patterns");
-
-    for &node_count in &[10, 100, 1000] {
+    for &count in &operation_counts {
         group.bench_with_input(
-            BenchmarkId::new("heap_allocation", node_count),
-            &node_count,
-            |b, &node_count| {
+            BenchmarkId::new("put_operations", count),
+            &count,
+            |b, &count| {
                 b.iter(|| {
-                    // Create workflow on heap
-                    let workflow = Box::new(create_flow(node_count));
-                    assert_eq!(workflow.state_nodes.len(), node_count);
+                    let store = MemoryStore::new();
+                    for i in 0..count {
+                        let key = format!("key_{i}");
+                        let _ = store.put(&key, i);
+                    }
                 });
             },
         );
 
         group.bench_with_input(
-            BenchmarkId::new("stack_creation", node_count),
-            &node_count,
-            |b, &node_count| {
+            BenchmarkId::new("get_operations", count),
+            &count,
+            |b, &count| {
+                let store = MemoryStore::new();
+                // Pre-populate the store
+                for i in 0..count {
+                    let key = format!("key_{i}");
+                    let _ = store.put(&key, i);
+                }
+
                 b.iter(|| {
-                    // Create workflow on stack (smaller sizes only)
-                    if node_count <= 100 {
-                        let workflow = create_flow(node_count);
-                        assert_eq!(workflow.state_nodes.len(), node_count);
+                    for i in 0..count {
+                        let key = format!("key_{i}");
+                        let _ = store.get::<i32>(&key);
                     }
                 });
             },
@@ -184,10 +326,261 @@ fn bench_memory_patterns(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_memory_patterns(c: &mut Criterion) {
+    let mut group = c.benchmark_group("memory_patterns");
+
+    let sizes = vec![100, 1000, 10000];
+
+    for &size in &sizes {
+        group.bench_with_input(
+            BenchmarkId::new("node_creation", size),
+            &size,
+            |b, &size| {
+                b.iter(|| {
+                    let _nodes: Vec<SimpleNode> = (0..size)
+                        .map(|_| SimpleNode::new(TestState::Complete, Duration::from_micros(1)))
+                        .collect();
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("store_creation", size),
+            &size,
+            |b, &size| {
+                b.iter(|| {
+                    let _stores: Vec<MemoryStore> = (0..size).map(|_| MemoryStore::new()).collect();
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_io_bound_workflows(c: &mut Criterion) {
+    let mut group = c.benchmark_group("io_bound_workflows");
+
+    let io_durations = vec![
+        Duration::from_millis(1),
+        Duration::from_millis(5),
+        Duration::from_millis(10),
+        Duration::from_millis(25),
+    ];
+
+    let node_counts = vec![2, 5, 10];
+
+    for &duration in &io_durations {
+        for &count in &node_counts {
+            // Sequential IO-bound workflow
+            group.bench_with_input(
+                BenchmarkId::new(
+                    "sequential_io",
+                    format!("{}ms_{}nodes", duration.as_millis(), count),
+                ),
+                &(duration, count),
+                |b, &(duration, count)| {
+                    let nodes: Vec<IOBoundNode> = (0..count)
+                        .map(|i| {
+                            IOBoundNode::new(
+                                TestState::Complete,
+                                duration,
+                                &format!("db_query_{i}"),
+                            )
+                        })
+                        .collect();
+                    let store = MemoryStore::new();
+
+                    b.to_async(tokio::runtime::Runtime::new().unwrap())
+                        .iter(|| async {
+                            for node in &nodes {
+                                let result = node.run(&store).await;
+                                assert!(result.is_ok());
+                            }
+                        });
+                },
+            );
+
+            // Concurrent IO-bound workflow
+            group.bench_with_input(
+                BenchmarkId::new(
+                    "concurrent_io",
+                    format!("{}ms_{}nodes", duration.as_millis(), count),
+                ),
+                &(duration, count),
+                |b, &(duration, count)| {
+                    let nodes: Vec<IOBoundNode> = (0..count)
+                        .map(|i| {
+                            IOBoundNode::new(
+                                TestState::Complete,
+                                duration,
+                                &format!("api_call_{i}"),
+                            )
+                        })
+                        .collect();
+                    let store = MemoryStore::new();
+
+                    b.to_async(tokio::runtime::Runtime::new().unwrap())
+                        .iter(|| async {
+                            let tasks: Vec<_> = nodes.iter().map(|node| node.run(&store)).collect();
+
+                            let results = futures::future::join_all(tasks).await;
+                            for result in results {
+                                assert!(result.is_ok());
+                            }
+                        });
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
+fn bench_cpu_bound_workflows(c: &mut Criterion) {
+    let mut group = c.benchmark_group("cpu_bound_workflows");
+
+    let cpu_configs = vec![
+        (100, "fibonacci"),
+        (500, "fibonacci"),
+        (1000, "prime_check"),
+        (5000, "matrix_multiply"),
+    ];
+
+    let node_counts = vec![2, 4, 8];
+
+    for &(iterations, operation) in &cpu_configs {
+        for &count in &node_counts {
+            // Sequential CPU-bound workflow
+            group.bench_with_input(
+                BenchmarkId::new(
+                    "sequential_cpu",
+                    format!("{operation}_{iterations}_{count}nodes"),
+                ),
+                &(iterations, operation, count),
+                |b, &(iterations, operation, count)| {
+                    let nodes: Vec<CPUBoundNode> = (0..count)
+                        .map(|i| {
+                            CPUBoundNode::new(
+                                TestState::Complete,
+                                iterations,
+                                &format!("{operation}_{i}"),
+                            )
+                        })
+                        .collect();
+                    let store = MemoryStore::new();
+
+                    b.to_async(tokio::runtime::Runtime::new().unwrap())
+                        .iter(|| async {
+                            for node in &nodes {
+                                let result = node.run(&store).await;
+                                assert!(result.is_ok());
+                            }
+                        });
+                },
+            );
+
+            // Concurrent CPU-bound workflow
+            group.bench_with_input(
+                BenchmarkId::new(
+                    "concurrent_cpu",
+                    format!("{operation}_{iterations}_{count}nodes"),
+                ),
+                &(iterations, operation, count),
+                |b, &(iterations, operation, count)| {
+                    let nodes: Vec<CPUBoundNode> = (0..count)
+                        .map(|i| {
+                            CPUBoundNode::new(
+                                TestState::Complete,
+                                iterations,
+                                &format!("{operation}_{i}"),
+                            )
+                        })
+                        .collect();
+                    let store = MemoryStore::new();
+
+                    b.to_async(tokio::runtime::Runtime::new().unwrap())
+                        .iter(|| async {
+                            let tasks: Vec<_> = nodes.iter().map(|node| node.run(&store)).collect();
+
+                            let results = futures::future::join_all(tasks).await;
+                            for result in results {
+                                assert!(result.is_ok());
+                            }
+                        });
+                },
+            );
+        }
+    }
+
+    group.finish();
+}
+
+fn bench_mixed_workload_workflows(c: &mut Criterion) {
+    let mut group = c.benchmark_group("mixed_workload_workflows");
+
+    let scenarios = vec![
+        ("light_mixed", Duration::from_millis(1), 100),
+        ("medium_mixed", Duration::from_millis(5), 500),
+        ("heavy_mixed", Duration::from_millis(10), 1000),
+    ];
+
+    for &(scenario_name, io_duration, cpu_iterations) in &scenarios {
+        // Sequential mixed workflow (IO + CPU alternating)
+        group.bench_with_input(
+            BenchmarkId::new("sequential_mixed", scenario_name),
+            &(io_duration, cpu_iterations),
+            |b, &(io_duration, cpu_iterations)| {
+                let io_node = IOBoundNode::new(TestState::Step1, io_duration, "database");
+                let cpu_node = CPUBoundNode::new(TestState::Complete, cpu_iterations, "processing");
+                let store = MemoryStore::new();
+
+                b.to_async(tokio::runtime::Runtime::new().unwrap())
+                    .iter(|| async {
+                        let io_result = io_node.run(&store).await;
+                        assert!(io_result.is_ok());
+
+                        let cpu_result = cpu_node.run(&store).await;
+                        assert!(cpu_result.is_ok());
+                    });
+            },
+        );
+
+        // Concurrent mixed workflow (IO and CPU in parallel)
+        group.bench_with_input(
+            BenchmarkId::new("concurrent_mixed", scenario_name),
+            &(io_duration, cpu_iterations),
+            |b, &(io_duration, cpu_iterations)| {
+                let io_node = IOBoundNode::new(TestState::Complete, io_duration, "api_service");
+                let cpu_node = CPUBoundNode::new(TestState::Complete, cpu_iterations, "analytics");
+                let store = MemoryStore::new();
+
+                b.to_async(tokio::runtime::Runtime::new().unwrap())
+                    .iter(|| async {
+                        let io_task = io_node.run(&store);
+                        let cpu_task = cpu_node.run(&store);
+
+                        let (io_result, cpu_result) =
+                            futures::future::join(io_task, cpu_task).await;
+                        assert!(io_result.is_ok());
+                        assert!(cpu_result.is_ok());
+                    });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
-    bench_flow_performance,
-    bench_flow_vs_direct_execution,
-    bench_memory_patterns
+    bench_node_performance,
+    bench_concurrent_node_execution,
+    bench_store_operations,
+    bench_memory_patterns,
+    bench_io_bound_workflows,
+    bench_cpu_bound_workflows,
+    bench_mixed_workload_workflows,
 );
+
 criterion_main!(benches);

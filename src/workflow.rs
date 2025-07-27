@@ -56,8 +56,23 @@
 //! - Use store to pass data between nodes
 //! - Keep store keys consistent across your workflow
 //! - Consider using strongly-typed store wrappers for complex data
+//!
+//! ## 🔄 Concurrent Workflows
+//!
+//! The [`ConcurrentWorkflow`] type enables executing multiple workflow instances in parallel:
+//! - Flexible timeout strategies for different execution patterns
+//! - Enhanced monitoring with detailed status tracking
+//! - Configurable completion criteria for batch processing
+//!
+//! ### Timeout Strategies
+//!
+//! - [`WaitStrategy::WaitForever`] - Execute all workflows to completion
+//! - [`WaitStrategy::WaitForQuota(n)`] - Complete a specific number, then cancel the rest
+//! - [`WaitStrategy::WaitDuration(duration)`] - Execute within a time limit
+//! - [`WaitStrategy::WaitQuotaOrDuration`] - Complete quota OR wait for duration, whichever comes first
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use crate::MemoryStore;
 use crate::error::CanoError;
@@ -97,6 +112,97 @@ where
     async fn run(&self, store: &TStore) -> Result<TState, CanoError> {
         // just forward to the inherent `Node::run`
         Node::run(self, store).await
+    }
+}
+
+/// Wait strategy for concurrent workflow execution
+#[derive(Debug, Clone)]
+pub enum WaitStrategy {
+    /// Execute all workflows to completion
+    WaitForever,
+    /// Complete a specific number of workflows, then cancel the rest
+    WaitForQuota(usize),
+    /// Execute workflows within a time limit
+    WaitDuration(Duration),
+    /// Complete quota OR wait for duration, whichever comes first
+    WaitQuotaOrDuration { quota: usize, duration: Duration },
+}
+
+/// Status of a concurrent workflow execution
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConcurrentWorkflowStatus {
+    /// Total number of workflows that were started
+    pub total_workflows: usize,
+    /// Number of workflows that completed successfully
+    pub completed: usize,
+    /// Number of workflows that failed
+    pub failed: usize,
+    /// Number of workflows that were cancelled
+    pub cancelled: usize,
+    /// Execution duration
+    pub duration: Duration,
+}
+
+impl ConcurrentWorkflowStatus {
+    /// Create a new status with zero counts
+    pub fn new(total_workflows: usize) -> Self {
+        Self {
+            total_workflows,
+            completed: 0,
+            failed: 0,
+            cancelled: 0,
+            duration: Duration::from_millis(0),
+        }
+    }
+
+    /// Check if all workflows have finished (completed, failed, or cancelled)
+    pub fn is_complete(&self) -> bool {
+        self.completed + self.failed + self.cancelled >= self.total_workflows
+    }
+
+    /// Get the number of workflows still running
+    pub fn running(&self) -> usize {
+        self.total_workflows.saturating_sub(self.completed + self.failed + self.cancelled)
+    }
+}
+
+/// Result of a single workflow execution in a concurrent batch
+#[derive(Debug, Clone)]
+pub enum WorkflowResult<TState> {
+    /// Workflow completed successfully with final state
+    Success(TState),
+    /// Workflow failed with error
+    Failed(CanoError),
+    /// Workflow was cancelled before completion
+    Cancelled,
+}
+
+/// Type alias for cloneable node trait objects for concurrent workflows
+///
+/// This ensures nodes can be cloned for use across multiple concurrent workflow instances.
+pub type CloneableNode<TState, TStore = MemoryStore, TParams = DefaultParams> =
+    Box<dyn CloneableNodeTrait<TState, TStore, TParams> + Send + Sync>;
+
+/// Trait for nodes that can be cloned for concurrent workflow execution
+pub trait CloneableNodeTrait<TState, TStore = MemoryStore, TParams = DefaultParams>: 
+    DynNodeTrait<TState, TStore, TParams> + Send + Sync
+where
+    TState: Clone + std::fmt::Debug + Send + Sync + 'static,
+{
+    /// Clone the node for concurrent execution
+    fn clone_node(&self) -> CloneableNode<TState, TStore, TParams>;
+}
+
+/// Blanket implementation for any Node that implements Clone
+impl<TState, TStore, TParams, N> CloneableNodeTrait<TState, TStore, TParams> for N
+where
+    TState: Clone + std::fmt::Debug + Send + Sync + 'static,
+    TParams: Clone + Send + Sync + 'static,
+    TStore: Send + Sync + 'static,
+    N: Node<TState, TStore, TParams> + Clone + Send + Sync + 'static,
+{
+    fn clone_node(&self) -> CloneableNode<TState, TStore, TParams> {
+        Box::new(self.clone())
     }
 }
 
@@ -200,6 +306,21 @@ where
     }
 }
 
+impl<TState, TStore, TParams> std::fmt::Debug for Workflow<TState, TStore, TParams>
+where
+    TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
+    TParams: Clone + Send + Sync + 'static,
+    TStore: Send + Sync + 'static,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Workflow")
+            .field("start_state", &self.start_state)
+            .field("state_nodes", &format!("{} nodes", self.state_nodes.len()))
+            .field("exit_states", &self.exit_states)
+            .finish()
+    }
+}
+
 /// Builder for creating Workflow instances with a fluent API
 ///
 /// Provides a convenient way to construct flows with method chaining.
@@ -249,6 +370,354 @@ where
     /// Build the final Workflow instance
     pub fn build(self) -> Workflow<TState, TStore, TParams> {
         self.workflow
+    }
+}
+
+/// Concurrent workflow orchestration for executing multiple workflow instances in parallel
+pub struct ConcurrentWorkflow<TState, TStore = MemoryStore, TParams = DefaultParams>
+where
+    TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
+    TParams: Clone + Send + Sync + 'static,
+    TStore: Clone + Send + Sync + 'static,
+{
+    /// Template workflow that will be cloned for each concurrent execution
+    template_workflow: Workflow<TState, TStore, TParams>,
+    /// Cloneable nodes that can be used across multiple workflow instances
+    cloneable_nodes: HashMap<TState, CloneableNode<TState, TStore, TParams>>,
+}
+
+impl<TState, TStore, TParams> ConcurrentWorkflow<TState, TStore, TParams>
+where
+    TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
+    TParams: Clone + Send + Sync + 'static,
+    TStore: Clone + Send + Sync + 'static,
+{
+    /// Create a new ConcurrentWorkflow from a template workflow
+    pub fn new(template_workflow: Workflow<TState, TStore, TParams>) -> Self {
+        Self {
+            template_workflow,
+            cloneable_nodes: HashMap::new(),
+        }
+    }
+
+    /// Register a cloneable node for concurrent execution
+    /// The node must implement Clone to be used across multiple workflow instances
+    pub fn register_cloneable_node<N>(&mut self, state: TState, node: N) -> &mut Self
+    where
+        N: Node<TState, TStore, TParams> + Clone + Send + Sync + 'static,
+    {
+        self.cloneable_nodes.insert(state, Box::new(node));
+        self
+    }
+
+    /// Create a workflow instance for concurrent execution
+    fn create_workflow_instance(&self) -> Result<Workflow<TState, TStore, TParams>, CanoError> {
+        let mut workflow = Workflow {
+            start_state: self.template_workflow.start_state.clone(),
+            state_nodes: HashMap::new(),
+            exit_states: self.template_workflow.exit_states.clone(),
+        };
+
+        // Clone all registered nodes for this instance
+        for (state, cloneable_node) in &self.cloneable_nodes {
+            let cloned_node = cloneable_node.clone_node();
+            workflow.state_nodes.insert(state.clone(), cloned_node);
+        }
+
+        Ok(workflow)
+    }
+
+    /// Execute multiple workflow instances concurrently with the specified wait strategy
+    ///
+    /// This method creates separate workflow instances and executes them in parallel,
+    /// applying the wait strategy to control completion behavior.
+    ///
+    /// ## Arguments
+    ///
+    /// - `stores`: Vector of store instances, one for each workflow
+    /// - `wait_strategy`: Strategy for determining when to complete execution
+    ///
+    /// ## Wait Strategies
+    ///
+    /// - `WaitForever`: All workflows must complete
+    /// - `WaitForQuota(n)`: Stop after n workflows complete
+    /// - `WaitDuration(d)`: Stop after duration d
+    /// - `WaitQuotaOrDuration`: Stop when quota is reached OR duration elapsed
+    ///
+    /// ## Returns
+    ///
+    /// Returns a tuple of:
+    /// - Vector of workflow results (one per workflow)
+    /// - Status information about the execution
+    pub async fn execute_concurrent(
+        &self,
+        stores: Vec<TStore>,
+        wait_strategy: WaitStrategy,
+    ) -> Result<(Vec<WorkflowResult<TState>>, ConcurrentWorkflowStatus), CanoError> {
+        use tokio::time::{timeout, Instant};
+
+        let start_time = Instant::now();
+        let workflow_count = stores.len();
+        let mut status = ConcurrentWorkflowStatus::new(workflow_count);
+
+        if workflow_count == 0 {
+            status.duration = start_time.elapsed();
+            return Ok((Vec::new(), status));
+        }
+
+        // Create workflow instances and spawn tasks
+        let mut tasks = Vec::new();
+        for store in stores {
+            let workflow = self.create_workflow_instance()?;
+            let task = tokio::spawn(async move {
+                match workflow.orchestrate(&store).await {
+                    Ok(final_state) => WorkflowResult::Success(final_state),
+                    Err(error) => WorkflowResult::Failed(error),
+                }
+            });
+            tasks.push(task);
+        }
+
+        let mut results = vec![WorkflowResult::Cancelled; workflow_count];
+
+        match wait_strategy {
+            WaitStrategy::WaitForever => {
+                // Wait for all tasks to complete
+                for (index, task) in tasks.into_iter().enumerate() {
+                    match task.await {
+                        Ok(result) => {
+                            match &result {
+                                WorkflowResult::Success(_) => status.completed += 1,
+                                WorkflowResult::Failed(_) => status.failed += 1,
+                                WorkflowResult::Cancelled => status.cancelled += 1,
+                            }
+                            results[index] = result;
+                        }
+                        Err(_) => {
+                            results[index] = WorkflowResult::Failed(
+                                CanoError::node_execution("Task join error")
+                            );
+                            status.failed += 1;
+                        }
+                    }
+                }
+            }
+
+            WaitStrategy::WaitForQuota(quota) => {
+                // Wait for the specified number of workflows to complete
+                let mut completed_count = 0;
+                let mut pending_tasks = tasks;
+
+                while completed_count < quota && !pending_tasks.is_empty() {
+                    let (result, index, remaining) = futures::future::select_all(pending_tasks).await;
+                    pending_tasks = remaining;
+
+                    match result {
+                        Ok(workflow_result) => {
+                            match &workflow_result {
+                                WorkflowResult::Success(_) => status.completed += 1,
+                                WorkflowResult::Failed(_) => status.failed += 1,
+                                WorkflowResult::Cancelled => status.cancelled += 1,
+                            }
+                            results[index] = workflow_result;
+                            completed_count += 1;
+                        }
+                        Err(_) => {
+                            results[index] = WorkflowResult::Failed(
+                                CanoError::node_execution("Task join error")
+                            );
+                            status.failed += 1;
+                            completed_count += 1;
+                        }
+                    }
+                }
+
+                // Cancel remaining tasks
+                for task in pending_tasks {
+                    task.abort();
+                    status.cancelled += 1;
+                }
+            }
+
+            WaitStrategy::WaitDuration(duration) => {
+                // Wait for the specified duration
+                let timeout_result = timeout(duration, async {
+                    let mut pending_tasks = tasks;
+                    let mut results_temp = Vec::new();
+
+                    while !pending_tasks.is_empty() {
+                        let (result, index, remaining) = futures::future::select_all(pending_tasks).await;
+                        pending_tasks = remaining;
+                        results_temp.push((index, result));
+                    }
+
+                    results_temp
+                }).await;
+
+                match timeout_result {
+                    Ok(completed_tasks) => {
+                        // All tasks completed within the timeout
+                        for (index, result) in completed_tasks {
+                            match result {
+                                Ok(workflow_result) => {
+                                    match &workflow_result {
+                                        WorkflowResult::Success(_) => status.completed += 1,
+                                        WorkflowResult::Failed(_) => status.failed += 1,
+                                        WorkflowResult::Cancelled => status.cancelled += 1,
+                                    }
+                                    results[index] = workflow_result;
+                                }
+                                Err(_) => {
+                                    results[index] = WorkflowResult::Failed(
+                                        CanoError::node_execution("Task join error")
+                                    );
+                                    status.failed += 1;
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        // Timeout occurred - we need to handle the tasks that were still running
+                        // For simplicity, we'll count them as cancelled
+                        status.cancelled = workflow_count;
+                    }
+                }
+            }
+
+            WaitStrategy::WaitQuotaOrDuration { quota, duration } => {
+                // Wait for quota completion OR duration timeout, whichever comes first
+                let quota_future = async {
+                    let mut completed_count = 0;
+                    let mut pending_tasks = tasks;
+                    let mut completed_results = Vec::new();
+
+                    while completed_count < quota && !pending_tasks.is_empty() {
+                        let (result, index, remaining) = futures::future::select_all(pending_tasks).await;
+                        pending_tasks = remaining;
+                        completed_results.push((index, result));
+                        completed_count += 1;
+                    }
+
+                    // Cancel remaining tasks
+                    for task in pending_tasks {
+                        task.abort();
+                    }
+
+                    completed_results
+                };
+
+                let timeout_result = timeout(duration, quota_future).await;
+
+                match timeout_result {
+                    Ok(completed_tasks) => {
+                        // Quota was reached within the timeout
+                        for (index, result) in completed_tasks {
+                            match result {
+                                Ok(workflow_result) => {
+                                    match &workflow_result {
+                                        WorkflowResult::Success(_) => status.completed += 1,
+                                        WorkflowResult::Failed(_) => status.failed += 1,
+                                        WorkflowResult::Cancelled => status.cancelled += 1,
+                                    }
+                                    results[index] = workflow_result;
+                                }
+                                Err(_) => {
+                                    results[index] = WorkflowResult::Failed(
+                                        CanoError::node_execution("Task join error")
+                                    );
+                                    status.failed += 1;
+                                }
+                            }
+                        }
+                        
+                        // Mark uncompleted workflows as cancelled
+                        let uncompleted = workflow_count - (status.completed + status.failed);
+                        status.cancelled = uncompleted;
+                    }
+                    Err(_) => {
+                        // Duration timeout occurred before quota was reached
+                        status.cancelled = workflow_count;
+                    }
+                }
+            }
+        }
+
+        status.duration = start_time.elapsed();
+        Ok((results, status))
+    }
+}
+
+impl<TState, TStore, TParams> Clone for ConcurrentWorkflow<TState, TStore, TParams>
+where
+    TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
+    TParams: Clone + Send + Sync + 'static,
+    TStore: Clone + Send + Sync + 'static,
+{
+    fn clone(&self) -> Self {
+        // Clone the cloneable nodes
+        let mut cloned_nodes = HashMap::new();
+        for (state, node) in &self.cloneable_nodes {
+            cloned_nodes.insert(state.clone(), node.clone_node());
+        }
+        
+        Self {
+            template_workflow: Workflow::new(
+                self.template_workflow.start_state.as_ref().unwrap().clone()
+            ),
+            cloneable_nodes: cloned_nodes,
+        }
+    }
+}
+
+impl<TState, TStore, TParams> std::fmt::Debug for ConcurrentWorkflow<TState, TStore, TParams>
+where
+    TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
+    TParams: Clone + Send + Sync + 'static,
+    TStore: Clone + Send + Sync + 'static,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConcurrentWorkflow")
+            .field("template_workflow", &self.template_workflow)
+            .field("cloneable_nodes", &format!("{} cloneable nodes", self.cloneable_nodes.len()))
+            .finish()
+    }
+}
+
+/// Builder for creating ConcurrentWorkflow instances with a fluent API
+pub struct ConcurrentWorkflowBuilder<TState, TStore = MemoryStore, TParams = DefaultParams>
+where
+    TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
+    TParams: Clone + Send + Sync + 'static,
+    TStore: Clone + Send + Sync + 'static,
+{
+    concurrent_workflow: ConcurrentWorkflow<TState, TStore, TParams>,
+}
+
+impl<TState, TStore, TParams> ConcurrentWorkflowBuilder<TState, TStore, TParams>
+where
+    TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
+    TParams: Clone + Send + Sync + 'static,
+    TStore: Clone + Send + Sync + 'static,
+{
+    /// Create a new ConcurrentWorkflowBuilder from a template workflow
+    pub fn new(template_workflow: Workflow<TState, TStore, TParams>) -> Self {
+        Self {
+            concurrent_workflow: ConcurrentWorkflow::new(template_workflow),
+        }
+    }
+
+    /// Register a cloneable node for concurrent execution
+    pub fn register_cloneable_node<N>(mut self, state: TState, node: N) -> Self
+    where
+        N: Node<TState, TStore, TParams> + Clone + Send + Sync + 'static,
+    {
+        self.concurrent_workflow.register_cloneable_node(state, node);
+        self
+    }
+
+    /// Build the final ConcurrentWorkflow instance
+    pub fn build(self) -> ConcurrentWorkflow<TState, TStore, TParams> {
+        self.concurrent_workflow
     }
 }
 
@@ -854,5 +1323,330 @@ mod tests {
         // Verify data was stored and processed correctly
         let stored_data: String = store.get("workflow_data").unwrap();
         assert_eq!(stored_data, "test_value");
+    }
+
+    // Tests for Concurrent Workflows
+    #[tokio::test]
+    async fn test_concurrent_workflow_creation() {
+        let template_workflow: Workflow<TestState> = Workflow::new(TestState::Start);
+        let concurrent_workflow: ConcurrentWorkflow<TestState> = 
+            ConcurrentWorkflow::new(template_workflow);
+
+        assert!(concurrent_workflow.cloneable_nodes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_workflow_register_cloneable_node() {
+        let template_workflow: Workflow<TestState> = Workflow::new(TestState::Start);
+        let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
+
+        let node = SuccessNode::new(TestState::Complete);
+        concurrent_workflow.register_cloneable_node(TestState::Start, node);
+
+        assert_eq!(concurrent_workflow.cloneable_nodes.len(), 1);
+        assert!(concurrent_workflow.cloneable_nodes.contains_key(&TestState::Start));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_workflow_wait_forever() {
+        let mut template_workflow = Workflow::new(TestState::Start);
+        template_workflow.add_exit_state(TestState::Complete);
+
+        let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
+        let node = SuccessNode::new(TestState::Complete);
+        concurrent_workflow.register_cloneable_node(TestState::Start, node);
+
+        // Create multiple stores for concurrent execution
+        let stores = vec![
+            MemoryStore::new(),
+            MemoryStore::new(),
+            MemoryStore::new(),
+        ];
+
+        let (results, status) = concurrent_workflow
+            .execute_concurrent(stores, WaitStrategy::WaitForever)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(status.total_workflows, 3);
+        assert_eq!(status.completed, 3);
+        assert_eq!(status.failed, 0);
+        assert_eq!(status.cancelled, 0);
+        assert!(status.is_complete());
+        assert_eq!(status.running(), 0);
+
+        // Verify all results are successful
+        for result in results {
+            match result {
+                WorkflowResult::Success(state) => assert_eq!(state, TestState::Complete),
+                _ => panic!("Expected success result"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_workflow_wait_for_quota() {
+        let mut template_workflow = Workflow::new(TestState::Start);
+        template_workflow.add_exit_state(TestState::Complete);
+
+        let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
+        let node = SuccessNode::new(TestState::Complete);
+        concurrent_workflow.register_cloneable_node(TestState::Start, node);
+
+        // Create multiple stores
+        let stores = vec![
+            MemoryStore::new(),
+            MemoryStore::new(),
+            MemoryStore::new(),
+            MemoryStore::new(),
+            MemoryStore::new(),
+        ];
+
+        let quota = 3;
+        let (results, status) = concurrent_workflow
+            .execute_concurrent(stores, WaitStrategy::WaitForQuota(quota))
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 5);
+        assert_eq!(status.total_workflows, 5);
+        
+        // Should complete at least the quota
+        assert!(status.completed + status.failed >= quota);
+        
+        // Total should add up correctly
+        assert_eq!(
+            status.completed + status.failed + status.cancelled, 
+            status.total_workflows
+        );
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_workflow_wait_duration() {
+        let mut template_workflow = Workflow::new(TestState::Start);
+        template_workflow.add_exit_state(TestState::Complete);
+
+        let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
+        let node = SuccessNode::new(TestState::Complete);
+        concurrent_workflow.register_cloneable_node(TestState::Start, node);
+
+        // Create stores
+        let stores = vec![
+            MemoryStore::new(),
+            MemoryStore::new(),
+        ];
+
+        let duration = Duration::from_millis(100);
+        let (results, status) = concurrent_workflow
+            .execute_concurrent(stores, WaitStrategy::WaitDuration(duration))
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(status.total_workflows, 2);
+        
+        // Should complete within reasonable time since our nodes are fast
+        assert!(status.duration <= Duration::from_millis(1000));
+        
+        // All workflows should complete successfully given the simple nature of our test nodes
+        assert_eq!(status.completed, 2);
+        assert_eq!(status.failed, 0);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_workflow_wait_quota_or_duration() {
+        let mut template_workflow = Workflow::new(TestState::Start);
+        template_workflow.add_exit_state(TestState::Complete);
+
+        let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
+        let node = SuccessNode::new(TestState::Complete);
+        concurrent_workflow.register_cloneable_node(TestState::Start, node);
+
+        // Create stores
+        let stores = vec![
+            MemoryStore::new(),
+            MemoryStore::new(),
+            MemoryStore::new(),
+        ];
+
+        let strategy = WaitStrategy::WaitQuotaOrDuration {
+            quota: 2,
+            duration: Duration::from_millis(100),
+        };
+
+        let (results, status) = concurrent_workflow
+            .execute_concurrent(stores, strategy)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(status.total_workflows, 3);
+        
+        // Should complete quickly since our nodes are simple
+        assert!(status.duration <= Duration::from_millis(1000));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_workflow_with_errors() {
+        let mut template_workflow = Workflow::new(TestState::Start);
+        template_workflow.add_exit_states(vec![TestState::Complete, TestState::Error]);
+
+        let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
+        let failing_node = FailureNode::new("Test failure");
+        concurrent_workflow.register_cloneable_node(TestState::Start, failing_node);
+
+        // Create stores
+        let stores = vec![
+            MemoryStore::new(),
+            MemoryStore::new(),
+        ];
+
+        let (results, status) = concurrent_workflow
+            .execute_concurrent(stores, WaitStrategy::WaitForever)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert_eq!(status.total_workflows, 2);
+        assert_eq!(status.failed, 2);
+        assert_eq!(status.completed, 0);
+        assert_eq!(status.cancelled, 0);
+
+        // Verify all results are failures
+        for result in results {
+            match result {
+                WorkflowResult::Failed(error) => {
+                    assert!(error.to_string().contains("Preparation error"));
+                }
+                _ => panic!("Expected failed result"),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_workflow_empty_stores() {
+        let template_workflow: Workflow<TestState> = Workflow::new(TestState::Start);
+        let concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
+
+        let (results, status) = concurrent_workflow
+            .execute_concurrent(Vec::new(), WaitStrategy::WaitForever)
+            .await
+            .unwrap();
+
+        assert!(results.is_empty());
+        assert_eq!(status.total_workflows, 0);
+        assert_eq!(status.completed, 0);
+        assert_eq!(status.failed, 0);
+        assert_eq!(status.cancelled, 0);
+        assert!(status.is_complete());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_workflow_builder() {
+        let template_workflow: Workflow<TestState> = Workflow::new(TestState::Start);
+        let node = SuccessNode::new(TestState::Complete);
+
+        let concurrent_workflow = ConcurrentWorkflowBuilder::new(template_workflow)
+            .register_cloneable_node(TestState::Start, node)
+            .build();
+
+        assert_eq!(concurrent_workflow.cloneable_nodes.len(), 1);
+        assert!(concurrent_workflow.cloneable_nodes.contains_key(&TestState::Start));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_workflow_status_tracking() {
+        let mut status = ConcurrentWorkflowStatus::new(10);
+        
+        assert_eq!(status.total_workflows, 10);
+        assert_eq!(status.completed, 0);
+        assert_eq!(status.failed, 0);
+        assert_eq!(status.cancelled, 0);
+        assert_eq!(status.running(), 10);
+        assert!(!status.is_complete());
+
+        // Simulate some completions
+        status.completed = 3;
+        status.failed = 2;
+        status.cancelled = 1;
+        
+        assert_eq!(status.running(), 4);
+        assert!(!status.is_complete());
+        
+        // Complete all
+        status.completed = 5;
+        status.failed = 3;
+        status.cancelled = 2;
+        
+        assert_eq!(status.running(), 0);
+        assert!(status.is_complete());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_workflow_with_data_sharing() {
+        let mut template_workflow = Workflow::new(TestState::Start);
+        template_workflow.add_exit_state(TestState::Process);
+
+        let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
+        let data_node = DataStoringNode::new("concurrent_data", "test_value", TestState::Process);
+        concurrent_workflow.register_cloneable_node(TestState::Start, data_node);
+
+        // Create stores with different initial data
+        let store1 = MemoryStore::new();
+        let store2 = MemoryStore::new();
+        let store3 = MemoryStore::new();
+        
+        let stores = vec![store1.clone(), store2.clone(), store3.clone()];
+
+        let (results, status) = concurrent_workflow
+            .execute_concurrent(stores, WaitStrategy::WaitForever)
+            .await
+            .unwrap();
+
+        assert_eq!(results.len(), 3);
+        assert_eq!(status.completed, 3);
+
+        // Verify each store has the expected data
+        let data1: String = store1.get("concurrent_data").unwrap();
+        let data2: String = store2.get("concurrent_data").unwrap();
+        let data3: String = store3.get("concurrent_data").unwrap();
+        
+        assert_eq!(data1, "test_value");
+        assert_eq!(data2, "test_value");
+        assert_eq!(data3, "test_value");
+    }
+
+    #[tokio::test]
+    async fn test_wait_strategy_debug() {
+        let wait_forever = WaitStrategy::WaitForever;
+        let wait_quota = WaitStrategy::WaitForQuota(5);
+        let wait_duration = WaitStrategy::WaitDuration(Duration::from_secs(10));
+        let wait_quota_or_duration = WaitStrategy::WaitQuotaOrDuration {
+            quota: 3,
+            duration: Duration::from_secs(5),
+        };
+
+        // Just verify they implement Debug (compilation test)
+        let _debug_strings = [
+            format!("{wait_forever:?}"),
+            format!("{wait_quota:?}"),
+            format!("{wait_duration:?}"),
+            format!("{wait_quota_or_duration:?}"),
+        ];
+    }
+
+    #[tokio::test]
+    async fn test_workflow_result_debug() {
+        let success = WorkflowResult::Success(TestState::Complete);
+        let failed = WorkflowResult::<TestState>::Failed(CanoError::workflow("test error"));
+        let cancelled = WorkflowResult::<TestState>::Cancelled;
+
+        // Just verify they implement Debug (compilation test)  
+        let _debug_strings = [
+            format!("{success:?}"),
+            format!("{failed:?}"),
+            format!("{cancelled:?}"),
+        ];
     }
 }
