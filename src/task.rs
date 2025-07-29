@@ -49,7 +49,218 @@
 use crate::error::CanoError;
 use crate::store::MemoryStore;
 use async_trait::async_trait;
+use rand::Rng;
 use std::collections::HashMap;
+use std::time::Duration;
+
+/// Retry modes for task execution
+///
+/// Defines different retry strategies that can be used when task execution fails.
+#[derive(Debug, Clone)]
+pub enum RetryMode {
+    /// No retries - fail immediately on first error
+    None,
+
+    /// Fixed number of retries with constant delay
+    ///
+    /// # Fields
+    /// - `retries`: Number of retry attempts
+    /// - `delay`: Fixed delay between attempts
+    Fixed { retries: usize, delay: Duration },
+
+    /// Exponential backoff with optional jitter
+    ///
+    /// Implements exponential backoff: delay = base_delay * multiplier^attempt + jitter
+    ///
+    /// # Fields
+    /// - `max_retries`: Maximum number of retry attempts
+    /// - `base_delay`: Initial delay duration
+    /// - `multiplier`: Exponential multiplier (typically 2.0)
+    /// - `max_delay`: Maximum delay cap to prevent excessive waits
+    /// - `jitter`: Add randomness to prevent thundering herd (0.0 to 1.0)
+    ExponentialBackoff {
+        max_retries: usize,
+        base_delay: Duration,
+        multiplier: f64,
+        max_delay: Duration,
+        jitter: f64,
+    },
+}
+
+impl RetryMode {
+    /// Create a fixed retry mode with specified retries and delay
+    pub fn fixed(retries: usize, delay: Duration) -> Self {
+        Self::Fixed { retries, delay }
+    }
+
+    /// Create an exponential backoff retry mode with sensible defaults
+    ///
+    /// Uses base_delay=100ms, multiplier=2.0, max_delay=30s, jitter=0.1
+    pub fn exponential(max_retries: usize) -> Self {
+        Self::ExponentialBackoff {
+            max_retries,
+            base_delay: Duration::from_millis(100),
+            multiplier: 2.0,
+            max_delay: Duration::from_secs(30),
+            jitter: 0.1,
+        }
+    }
+
+    /// Create a custom exponential backoff retry mode
+    pub fn exponential_custom(
+        max_retries: usize,
+        base_delay: Duration,
+        multiplier: f64,
+        max_delay: Duration,
+        jitter: f64,
+    ) -> Self {
+        Self::ExponentialBackoff {
+            max_retries,
+            base_delay,
+            multiplier,
+            max_delay,
+            jitter: jitter.clamp(0.0, 1.0), // Ensure jitter is between 0 and 1
+        }
+    }
+
+    /// Get the maximum number of attempts (initial + retries)
+    pub fn max_attempts(&self) -> usize {
+        match self {
+            Self::None => 1,
+            Self::Fixed { retries, .. } => retries + 1,
+            Self::ExponentialBackoff { max_retries, .. } => max_retries + 1,
+        }
+    }
+
+    /// Calculate delay for a specific attempt number (0-based)
+    pub fn delay_for_attempt(&self, attempt: usize) -> Option<Duration> {
+        match self {
+            Self::None => None,
+            Self::Fixed { retries, delay } => {
+                if attempt < *retries {
+                    Some(*delay)
+                } else {
+                    None
+                }
+            }
+            Self::ExponentialBackoff {
+                max_retries,
+                base_delay,
+                multiplier,
+                max_delay,
+                jitter,
+            } => {
+                if attempt < *max_retries {
+                    let base_ms = base_delay.as_millis() as f64;
+                    let exponential_delay = base_ms * multiplier.powi(attempt as i32);
+                    let capped_delay = exponential_delay.min(max_delay.as_millis() as f64);
+
+                    // Add jitter: delay * (1 ± jitter * random_factor)
+                    let jitter_factor = if *jitter > 0.0 {
+                        let mut rng = rand::rng();
+                        let random_factor: f64 = rng.random_range(-1.0..=1.0);
+                        1.0 + (jitter * random_factor)
+                    } else {
+                        1.0
+                    };
+
+                    let final_delay = (capped_delay * jitter_factor).max(0.0) as u64;
+                    Some(Duration::from_millis(final_delay))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
+impl Default for RetryMode {
+    fn default() -> Self {
+        Self::ExponentialBackoff {
+            max_retries: 3,
+            base_delay: Duration::from_millis(100),
+            multiplier: 2.0,
+            max_delay: Duration::from_secs(30),
+            jitter: 0.1,
+        }
+    }
+}
+
+/// Task configuration for retry behavior and parameters
+///
+/// This struct provides configuration for task execution behavior,
+/// including retry logic and custom parameters.
+#[derive(Clone, Default)]
+pub struct TaskConfig {
+    /// Retry strategy for failed executions
+    pub retry_mode: RetryMode,
+}
+
+impl TaskConfig {
+    /// Create a new TaskConfig with default configuration
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a minimal configuration with no retries
+    ///
+    /// Useful for tasks that should fail fast without any retry attempts.
+    pub fn minimal() -> Self {
+        Self {
+            retry_mode: RetryMode::None,
+        }
+    }
+
+    /// Set the retry mode for this configuration
+    pub fn with_retry(mut self, retry_mode: RetryMode) -> Self {
+        self.retry_mode = retry_mode;
+        self
+    }
+
+    /// Convenience method for fixed retry configuration
+    pub fn with_fixed_retry(self, retries: usize, delay: Duration) -> Self {
+        self.with_retry(RetryMode::fixed(retries, delay))
+    }
+
+    /// Convenience method for exponential backoff retry configuration
+    pub fn with_exponential_retry(self, max_retries: usize) -> Self {
+        self.with_retry(RetryMode::exponential(max_retries))
+    }
+}
+
+/// Default implementation for retry logic that can be used by any task
+///
+/// This function provides a standard retry mechanism that can be used by any task
+/// that implements a simple run function.
+pub async fn run_with_retries<TState, TStore, F, Fut>(
+    config: &TaskConfig,
+    run_fn: F,
+) -> Result<TState, CanoError>
+where
+    TState: Send + Sync,
+    TStore: Send + Sync,
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<TState, CanoError>>,
+{
+    let max_attempts = config.retry_mode.max_attempts();
+    let mut attempt = 0;
+
+    loop {
+        match run_fn().await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                attempt += 1;
+                if attempt >= max_attempts {
+                    return Err(e);
+                }
+
+                if let Some(delay) = config.retry_mode.delay_for_attempt(attempt - 1) {
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+}
 
 /// Simple key-value parameters for task configuration
 ///
@@ -128,6 +339,20 @@ where
         // Default implementation does nothing
     }
 
+    /// Get the task configuration that controls execution behavior
+    ///
+    /// Returns the TaskConfig that determines how this task should be executed.
+    /// The default implementation returns `TaskConfig::default()` which configures
+    /// the task with standard retry logic.
+    ///
+    /// Override this method to customize execution behavior:
+    /// - Use `TaskConfig::minimal()` for fast-failing tasks with minimal retries
+    /// - Use `TaskConfig::new().with_fixed_retry(n, duration)` for custom retry behavior
+    /// - Return a custom configuration with specific retry/parameter settings
+    fn config(&self) -> TaskConfig {
+        TaskConfig::default()
+    }
+
     /// Execute the task with the given store
     ///
     /// This method contains all the task logic in a single place. Unlike [`crate::node::Node`],
@@ -169,6 +394,13 @@ where
 {
     fn set_params(&mut self, params: TParams) {
         crate::node::Node::set_params(self, params);
+    }
+
+    fn config(&self) -> TaskConfig {
+        let node_config = crate::node::Node::config(self);
+        TaskConfig {
+            retry_mode: node_config.retry_mode,
+        }
     }
 
     async fn run(&self, store: &TStore) -> Result<TState, CanoError> {
@@ -298,7 +530,7 @@ mod tests {
     impl Task<TestAction> for FailingTask {
         async fn run(&self, store: &MemoryStore) -> Result<TestAction, CanoError> {
             if self.should_fail {
-                Err(CanoError::node_execution("Task intentionally failed"))
+                Err(CanoError::task_execution("Task intentionally failed"))
             } else {
                 store.put("failing_task_executed", true)?;
                 Ok(TestAction::Complete)
@@ -327,7 +559,7 @@ mod tests {
             // Read input data
             let input_data: String = store
                 .get(&self.input_key)
-                .map_err(|e| CanoError::node_execution(format!("Failed to read input: {e}")))?;
+                .map_err(|e| CanoError::task_execution(format!("Failed to read input: {e}")))?;
 
             // Process data
             let processed_data = format!("processed: {input_data}");
@@ -564,5 +796,163 @@ mod tests {
 
         let executed: bool = store.get("node_executed").unwrap();
         assert!(executed);
+    }
+
+    // Tests for RetryMode and TaskConfig
+    #[test]
+    fn test_retry_mode_none() {
+        let retry_mode = RetryMode::None;
+
+        assert_eq!(retry_mode.max_attempts(), 1);
+        assert_eq!(retry_mode.delay_for_attempt(0), None);
+        assert_eq!(retry_mode.delay_for_attempt(1), None);
+    }
+
+    #[test]
+    fn test_retry_mode_fixed() {
+        let retry_mode = RetryMode::fixed(3, Duration::from_millis(100));
+
+        assert_eq!(retry_mode.max_attempts(), 4); // 1 initial + 3 retries
+
+        // Test delay calculations
+        assert_eq!(
+            retry_mode.delay_for_attempt(0),
+            Some(Duration::from_millis(100))
+        );
+        assert_eq!(
+            retry_mode.delay_for_attempt(1),
+            Some(Duration::from_millis(100))
+        );
+        assert_eq!(
+            retry_mode.delay_for_attempt(2),
+            Some(Duration::from_millis(100))
+        );
+        assert_eq!(retry_mode.delay_for_attempt(3), None); // No more retries
+        assert_eq!(retry_mode.delay_for_attempt(4), None);
+    }
+
+    #[test]
+    fn test_retry_mode_exponential_basic() {
+        let retry_mode = RetryMode::exponential(3);
+
+        assert_eq!(retry_mode.max_attempts(), 4); // 1 initial + 3 retries
+
+        // Test that delays increase (exact values may vary due to jitter)
+        let delay0 = retry_mode.delay_for_attempt(0).unwrap();
+        let delay1 = retry_mode.delay_for_attempt(1).unwrap();
+        let delay2 = retry_mode.delay_for_attempt(2).unwrap();
+
+        // With exponential backoff, each delay should generally be larger
+        // (allowing for some jitter variance)
+        assert!(delay1.as_millis() >= delay0.as_millis() / 2); // Account for negative jitter
+        assert!(delay2.as_millis() >= delay1.as_millis() / 2);
+
+        // No delay for attempts beyond max_retries
+        assert_eq!(retry_mode.delay_for_attempt(3), None);
+        assert_eq!(retry_mode.delay_for_attempt(4), None);
+    }
+
+    #[test]
+    fn test_task_config_creation() {
+        let config = TaskConfig::new();
+        assert_eq!(config.retry_mode.max_attempts(), 4);
+    }
+
+    #[test]
+    fn test_task_config_default() {
+        let config = TaskConfig::default();
+        assert_eq!(config.retry_mode.max_attempts(), 4);
+    }
+
+    #[test]
+    fn test_task_config_minimal() {
+        let config = TaskConfig::minimal();
+        assert_eq!(config.retry_mode.max_attempts(), 1);
+    }
+
+    #[test]
+    fn test_task_config_with_fixed_retry() {
+        let config = TaskConfig::new().with_fixed_retry(5, Duration::from_millis(100));
+
+        assert_eq!(config.retry_mode.max_attempts(), 6);
+    }
+
+    #[test]
+    fn test_task_config_builder_pattern() {
+        let config = TaskConfig::new().with_fixed_retry(10, Duration::from_secs(1));
+
+        assert_eq!(config.retry_mode.max_attempts(), 11);
+    }
+
+    #[tokio::test]
+    async fn test_run_with_retries_success() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let config = TaskConfig::minimal();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&counter);
+
+        let result = run_with_retries::<String, (), _, _>(&config, || {
+            let counter = Arc::clone(&counter_clone);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok::<String, CanoError>("success".to_string())
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result, "success");
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn test_run_with_retries_failure() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let config = TaskConfig::new().with_fixed_retry(2, Duration::from_millis(1));
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&counter);
+
+        let result = run_with_retries::<String, (), _, _>(&config, || {
+            let counter = Arc::clone(&counter_clone);
+            async move {
+                let count = counter.fetch_add(1, Ordering::SeqCst);
+                if count < 2 {
+                    Err(CanoError::task_execution("failure"))
+                } else {
+                    Ok::<String, CanoError>("success".to_string())
+                }
+            }
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(result, "success");
+        assert_eq!(counter.load(Ordering::SeqCst), 3); // 1 initial + 2 retries
+    }
+
+    #[tokio::test]
+    async fn test_run_with_retries_exhausted() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let config = TaskConfig::new().with_fixed_retry(2, Duration::from_millis(1));
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&counter);
+
+        let result = run_with_retries::<String, (), _, _>(&config, || {
+            let counter = Arc::clone(&counter_clone);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err::<String, CanoError>(CanoError::task_execution("always fails"))
+            }
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(counter.load(Ordering::SeqCst), 3); // 1 initial + 2 retries
     }
 }

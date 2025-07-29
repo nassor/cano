@@ -140,6 +140,12 @@ pub enum CanoError {
     /// core processing logic. Include specific details about what went wrong.
     NodeExecution(String),
 
+    /// Error during task execution
+    ///
+    /// Use this when your task's `run` method encounters an error during
+    /// execution. This is the task-specific equivalent of NodeExecution.
+    TaskExecution(String),
+
     /// Error during node preparation phase (data loading/setup)
     ///
     /// Use this when your node's `prep` method fails to load or prepare data.
@@ -181,6 +187,11 @@ impl CanoError {
     /// Create a new node execution error
     pub fn node_execution<S: Into<String>>(msg: S) -> Self {
         CanoError::NodeExecution(msg.into())
+    }
+
+    /// Create a new task execution error
+    pub fn task_execution<S: Into<String>>(msg: S) -> Self {
+        CanoError::TaskExecution(msg.into())
     }
 
     /// Create a new preparation error
@@ -225,6 +236,7 @@ impl CanoError {
     pub fn message(&self) -> &str {
         match self {
             CanoError::NodeExecution(msg) => msg,
+            CanoError::TaskExecution(msg) => msg,
             CanoError::Preparation(msg) => msg,
             CanoError::Store(msg) => msg,
             CanoError::Workflow(msg) => msg,
@@ -238,6 +250,7 @@ impl CanoError {
     pub fn category(&self) -> &'static str {
         match self {
             CanoError::NodeExecution(_) => "node_execution",
+            CanoError::TaskExecution(_) => "task_execution",
             CanoError::Preparation(_) => "preparation",
             CanoError::Store(_) => "store",
             CanoError::Workflow(_) => "workflow",
@@ -252,6 +265,7 @@ impl std::fmt::Display for CanoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CanoError::NodeExecution(msg) => write!(f, "Node execution error: {msg}"),
+            CanoError::TaskExecution(msg) => write!(f, "Task execution error: {msg}"),
             CanoError::Preparation(msg) => write!(f, "Preparation error: {msg}"),
             CanoError::Store(msg) => write!(f, "Store error: {msg}"),
             CanoError::Workflow(msg) => write!(f, "Workflow error: {msg}"),

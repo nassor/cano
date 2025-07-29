@@ -48,8 +48,8 @@ impl Node<TaskState> for LongRunningTask {
     type PrepResult = String;
     type ExecResult = String;
 
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal()
     }
 
     async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {

@@ -94,10 +94,10 @@ pub mod workflow;
 
 // Core public API - simplified imports
 pub use error::{CanoError, CanoResult};
-pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node, NodeConfig, RetryMode};
+pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node};
 pub use scheduler::{FlowInfo, Scheduler};
 pub use store::{KeyValueStore, MemoryStore};
-pub use task::{DefaultTaskParams, DynTask, Task, TaskObject};
+pub use task::{DefaultTaskParams, DynTask, RetryMode, Task, TaskConfig, TaskObject};
 pub use workflow::{
     ConcurrentWorkflow, ConcurrentWorkflowBuilder, ConcurrentWorkflowStatus, WaitStrategy,
     Workflow, WorkflowBuilder, WorkflowResult,
@@ -112,7 +112,7 @@ pub mod prelude {
     pub use crate::{
         CanoError, CanoResult, ConcurrentWorkflow, ConcurrentWorkflowBuilder,
         ConcurrentWorkflowStatus, DefaultNodeResult, DefaultParams, DefaultTaskParams, FlowInfo,
-        KeyValueStore, MemoryStore, Node, NodeConfig, RetryMode, Scheduler, Task, TaskObject,
+        KeyValueStore, MemoryStore, Node, RetryMode, Scheduler, Task, TaskConfig, TaskObject,
         WaitStrategy, Workflow, WorkflowBuilder, WorkflowResult,
     };
 

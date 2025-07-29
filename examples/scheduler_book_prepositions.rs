@@ -272,8 +272,8 @@ impl Node<WorkflowPhase> for BookDownloadNode {
     type PrepResult = Option<(u32, String, String)>;
     type ExecResult = Option<Book>;
 
-    fn config(&self) -> NodeConfig {
-        NodeConfig::new().with_fixed_retry(2, Duration::from_secs(1))
+    fn config(&self) -> TaskConfig {
+        TaskConfig::new().with_fixed_retry(2, Duration::from_secs(1))
     }
 
     /// Preparation: Get next book from the download queue
@@ -407,8 +407,8 @@ impl Node<WorkflowPhase> for PrepositionAnalysisNode {
     type PrepResult = Vec<Book>;
     type ExecResult = Vec<BookAnalysis>;
 
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal()
     }
 
     /// Preparation: Load downloaded books from shared store
@@ -490,8 +490,8 @@ impl Node<WorkflowPhase> for BookRankingNode {
     type PrepResult = Vec<BookAnalysis>;
     type ExecResult = Vec<BookRanking>;
 
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal()
     }
 
     /// Preparation: Load book analyses from shared store

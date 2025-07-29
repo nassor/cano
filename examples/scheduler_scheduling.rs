@@ -49,8 +49,8 @@ impl Node<WorkflowAction> for ReportNode {
     type PrepResult = String;
     type ExecResult = String;
 
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal()
     }
 
     async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
@@ -96,8 +96,8 @@ impl Node<WorkflowAction> for CleanupNode {
     type PrepResult = Vec<String>;
     type ExecResult = usize;
 
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal()
     }
 
     async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
@@ -148,8 +148,8 @@ impl Node<WorkflowAction> for ManualTaskNode {
     type PrepResult = String;
     type ExecResult = String;
 
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal()
     }
 
     async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
@@ -195,8 +195,8 @@ impl Node<WorkflowAction> for SetupNode {
     type PrepResult = Vec<String>;
     type ExecResult = bool;
 
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal()
     }
 
     async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {

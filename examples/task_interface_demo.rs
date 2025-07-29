@@ -40,8 +40,8 @@ impl Node<TaskState> for ProcessingNode {
     type PrepResult = String;
     type ExecResult = String;
 
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal() // Fast execution
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal() // Fast execution
     }
 
     async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {

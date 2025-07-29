@@ -21,7 +21,6 @@
 use async_trait::async_trait;
 use cano::prelude::*;
 use rand::Rng;
-use std::collections::HashMap;
 
 /// Action enum for controlling workflow workflow
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -34,15 +33,11 @@ enum WorkflowAction {
 
 /// First node: Generates random numbers and filters out odd numbers
 #[derive(Clone)]
-struct GeneratorNode {
-    params: HashMap<String, String>,
-}
+struct GeneratorNode;
 
 impl GeneratorNode {
     fn new() -> Self {
-        Self {
-            params: HashMap::new(),
-        }
+        Self
     }
 }
 
@@ -51,12 +46,8 @@ impl Node<WorkflowAction> for GeneratorNode {
     type PrepResult = Vec<u32>;
     type ExecResult = Vec<u32>;
 
-    fn set_params(&mut self, params: HashMap<String, String>) {
-        self.params = params;
-    }
-
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal() // Fast execution with minimal retries
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal() // Fast execution with minimal retries
     }
 
     /// Preparation phase: Generate a random vector of u32 numbers (25 to 150 elements)
@@ -105,15 +96,11 @@ impl Node<WorkflowAction> for GeneratorNode {
 
 /// Second node: Loads data, counts numbers, and cleans up
 #[derive(Clone)]
-struct CounterNode {
-    params: HashMap<String, String>,
-}
+struct CounterNode;
 
 impl CounterNode {
     fn new() -> Self {
-        Self {
-            params: HashMap::new(),
-        }
+        Self
     }
 }
 
@@ -122,12 +109,8 @@ impl Node<WorkflowAction> for CounterNode {
     type PrepResult = Vec<u32>;
     type ExecResult = usize;
 
-    fn set_params(&mut self, params: HashMap<String, String>) {
-        self.params = params;
-    }
-
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal()
     }
 
     /// Preparation phase: Load the filtered numbers from memory

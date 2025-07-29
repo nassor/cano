@@ -214,8 +214,8 @@ impl Node<PipelineState> for MatrixGenerator {
     type PrepResult = ();
     type ExecResult = Vec<SimdMatrix>;
 
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal()
     }
 
     async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
@@ -270,8 +270,8 @@ impl Node<PipelineState> for SimdMatrixMultiplier {
     type PrepResult = Vec<SimdMatrix>;
     type ExecResult = Vec<SimdMatrix>;
 
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal()
     }
 
     async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
@@ -331,8 +331,8 @@ impl Node<PipelineState> for SimdMatrixTransformer {
     type PrepResult = Vec<SimdMatrix>;
     type ExecResult = Vec<SimdMatrix>;
 
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal()
     }
 
     async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
@@ -393,8 +393,8 @@ impl Node<PipelineState> for SimdStatisticsCalculator {
     type PrepResult = Vec<SimdMatrix>;
     type ExecResult = Vec<(f32, f32, f32)>; // (sum, mean, variance)
 
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal()
     }
 
     async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {

@@ -23,7 +23,6 @@
 use async_trait::async_trait;
 use cano::prelude::*;
 use rand::Rng;
-use std::collections::HashMap;
 
 /// Action enum for controlling negotiation workflow
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -57,15 +56,11 @@ impl NegotiationState {
 
 /// Seller node: Manages pricing and decrements offers
 #[derive(Clone)]
-struct SellerNode {
-    params: HashMap<String, String>,
-}
+struct SellerNode;
 
 impl SellerNode {
     fn new() -> Self {
-        Self {
-            params: HashMap::new(),
-        }
+        Self
     }
 
     /// Generate a random price reduction between 500 and 2000
@@ -80,12 +75,8 @@ impl Node<NegotiationAction> for SellerNode {
     type PrepResult = NegotiationState;
     type ExecResult = NegotiationState;
 
-    fn set_params(&mut self, params: HashMap<String, String>) {
-        self.params = params;
-    }
-
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal()
     }
 
     /// Preparation phase: Load current negotiation state or initialize if first round
@@ -161,15 +152,11 @@ impl Node<NegotiationAction> for SellerNode {
 
 /// Buyer node: Evaluates offers and makes decisions
 #[derive(Clone)]
-struct BuyerNode {
-    params: HashMap<String, String>,
-}
+struct BuyerNode;
 
 impl BuyerNode {
     fn new() -> Self {
-        Self {
-            params: HashMap::new(),
-        }
+        Self
     }
 
     /// Evaluate if the offer is acceptable based on budget and negotiation strategy
@@ -195,12 +182,8 @@ impl Node<NegotiationAction> for BuyerNode {
     type PrepResult = NegotiationState;
     type ExecResult = (NegotiationState, bool);
 
-    fn set_params(&mut self, params: HashMap<String, String>) {
-        self.params = params;
-    }
-
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal()
     }
 
     /// Preparation phase: Load the current negotiation state

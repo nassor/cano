@@ -1003,7 +1003,7 @@ mod tests {
         scheduler.trigger("test_task").await.unwrap();
 
         // Give more time for execution and poll status
-        for _ in 0..10 {
+        for _ in 0..50 {
             sleep(Duration::from_millis(100)).await;
             let status = scheduler.status("test_task").await.unwrap();
             if !matches!(status.status, Status::Running) {

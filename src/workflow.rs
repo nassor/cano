@@ -84,7 +84,7 @@ use std::time::Duration;
 
 use crate::MemoryStore;
 use crate::error::CanoError;
-use crate::task::{DefaultTaskParams, Task};
+use crate::task::{DefaultTaskParams, Task, TaskConfig, run_with_retries};
 
 /// Type alias for trait objects that can store different task types
 ///
@@ -104,6 +104,9 @@ pub trait DynTaskTrait<TState, TStore = MemoryStore, TParams = DefaultTaskParams
 where
     TState: Clone + std::fmt::Debug + Send + Sync + 'static,
 {
+    /// Get the task configuration for retry behavior
+    fn config(&self) -> TaskConfig;
+
     /// Execute the task and return the next state
     async fn run(&self, store: &TStore) -> Result<TState, CanoError>;
 }
@@ -117,9 +120,13 @@ where
     TStore: Send + Sync + 'static,
     T: Task<TState, TStore, TParams> + Send + Sync + 'static,
 {
+    fn config(&self) -> TaskConfig {
+        Task::config(self)
+    }
+
     async fn run(&self, store: &TStore) -> Result<TState, CanoError> {
-        // just forward to the inherent `Task::run`
-        Task::run(self, store).await
+        let config = self.config();
+        run_with_retries::<TState, TStore, _, _>(&config, || Task::run(self, store)).await
     }
 }
 

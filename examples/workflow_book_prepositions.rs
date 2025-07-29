@@ -20,7 +20,7 @@ use cano::error::CanoError;
 use cano::prelude::*;
 use cano::store::{KeyValueStore, MemoryStore};
 use futures::future::join_all;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use tokio::time::{Duration, timeout};
 
 /// Result type for workflow workflow control
@@ -133,15 +133,11 @@ const PREPOSITIONS: &[&str] = &[
 ];
 
 /// Node 1: Downloads books from Project Gutenberg in parallel
-struct BookDownloaderNode {
-    params: HashMap<String, String>,
-}
+struct BookDownloaderNode;
 
 impl BookDownloaderNode {
     fn new() -> Self {
-        Self {
-            params: HashMap::new(),
-        }
+        Self
     }
 
     /// List of popular Project Gutenberg books with their plain text URLs
@@ -261,12 +257,8 @@ impl Node<BookPrepositionAction> for BookDownloaderNode {
     type PrepResult = Vec<(u32, String, String)>;
     type ExecResult = Vec<Book>;
 
-    fn set_params(&mut self, params: HashMap<String, String>) {
-        self.params = params;
-    }
-
-    fn config(&self) -> NodeConfig {
-        NodeConfig::new().with_fixed_retry(2, Duration::from_secs(1))
+    fn config(&self) -> TaskConfig {
+        TaskConfig::new().with_fixed_retry(2, Duration::from_secs(1))
     }
 
     /// Preparation: Get the list of books to download
@@ -334,15 +326,11 @@ impl Node<BookPrepositionAction> for BookDownloaderNode {
 }
 
 /// Node 2: Analyzes prepositions in each book
-struct PrepositionNode {
-    params: HashMap<String, String>,
-}
+struct PrepositionNode;
 
 impl PrepositionNode {
     fn new() -> Self {
-        Self {
-            params: HashMap::new(),
-        }
+        Self
     }
 
     /// Analyze prepositions in a single book
@@ -401,12 +389,8 @@ impl Node<BookPrepositionAction> for PrepositionNode {
     type PrepResult = Vec<Book>;
     type ExecResult = Vec<BookAnalysis>;
 
-    fn set_params(&mut self, params: HashMap<String, String>) {
-        self.params = params;
-    }
-
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal()
     }
 
     /// Preparation: Load downloaded books from memory
@@ -470,15 +454,11 @@ impl Node<BookPrepositionAction> for PrepositionNode {
 }
 
 /// Node 3: Ranks books by their preposition diversity
-struct BookRankingByPrepositionNode {
-    params: HashMap<String, String>,
-}
+struct BookRankingByPrepositionNode;
 
 impl BookRankingByPrepositionNode {
     fn new() -> Self {
-        Self {
-            params: HashMap::new(),
-        }
+        Self
     }
 }
 
@@ -487,12 +467,8 @@ impl Node<BookPrepositionAction> for BookRankingByPrepositionNode {
     type PrepResult = Vec<BookAnalysis>;
     type ExecResult = Vec<BookRanking>;
 
-    fn set_params(&mut self, params: HashMap<String, String>) {
-        self.params = params;
-    }
-
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal()
     }
 
     /// Preparation: Load book analyses from memory
