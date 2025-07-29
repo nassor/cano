@@ -280,8 +280,7 @@ async fn main() -> CanoResult<()> {
     println!("Demonstrating custom store types for node communication\n");
 
     // Create the processing workflow
-    let mut workflow: Workflow<ProcessingState, RequestCtx> =
-        Workflow::new(ProcessingState::IncomingRequest);
+    let mut workflow = Workflow::new(ProcessingState::IncomingRequest);
 
     workflow
         .register_node(ProcessingState::IncomingRequest, MetricsNode)

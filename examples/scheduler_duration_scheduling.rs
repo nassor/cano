@@ -25,16 +25,15 @@ use tokio::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum TaskState {
     Start,
-    #[allow(dead_code)]
-    End,
+    Complete,
 }
 
-// Simple demo node
+// Demo nodes for different schedules
 #[derive(Clone)]
-struct DemoNode(String);
+struct DailyTask;
 
 #[async_trait]
-impl Node<TaskState> for DemoNode {
+impl Node<TaskState> for DailyTask {
     type PrepResult = ();
     type ExecResult = ();
 
@@ -43,7 +42,10 @@ impl Node<TaskState> for DemoNode {
     }
 
     async fn exec(&self, _data: Self::PrepResult) -> Self::ExecResult {
-        println!("Executing {}", self.0);
+        println!(
+            "📅 Daily task executed at {}",
+            chrono::Utc::now().format("%H:%M:%S")
+        );
     }
 
     async fn post(
@@ -51,67 +53,107 @@ impl Node<TaskState> for DemoNode {
         _store: &MemoryStore,
         _result: Self::ExecResult,
     ) -> Result<TaskState, CanoError> {
-        Ok(TaskState::End)
+        Ok(TaskState::Complete)
+    }
+}
+
+#[derive(Clone)]
+struct HourlyTask;
+
+#[async_trait]
+impl Node<TaskState> for HourlyTask {
+    type PrepResult = ();
+    type ExecResult = ();
+
+    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        Ok(())
+    }
+
+    async fn exec(&self, _data: Self::PrepResult) -> Self::ExecResult {
+        println!(
+            "⏰ Hourly task executed at {}",
+            chrono::Utc::now().format("%H:%M:%S")
+        );
+    }
+
+    async fn post(
+        &self,
+        _store: &MemoryStore,
+        _result: Self::ExecResult,
+    ) -> Result<TaskState, CanoError> {
+        Ok(TaskState::Complete)
+    }
+}
+
+#[derive(Clone)]
+struct FrequentTask;
+
+#[async_trait]
+impl Node<TaskState> for FrequentTask {
+    type PrepResult = ();
+    type ExecResult = ();
+
+    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        Ok(())
+    }
+
+    async fn exec(&self, _data: Self::PrepResult) -> Self::ExecResult {
+        println!(
+            "🔄 Frequent task executed at {}",
+            chrono::Utc::now().format("%H:%M:%S")
+        );
+    }
+
+    async fn post(
+        &self,
+        _store: &MemoryStore,
+        _result: Self::ExecResult,
+    ) -> Result<TaskState, CanoError> {
+        Ok(TaskState::Complete)
     }
 }
 
 #[tokio::main]
 async fn main() -> CanoResult<()> {
-    let mut scheduler: Scheduler<TaskState> = Scheduler::new();
+    println!("⏰ Duration-Based Scheduling Example");
+    println!("====================================");
 
-    // Create different flows
-    let mut daily_flow: Workflow<TaskState> = Workflow::new(TaskState::Start);
-    daily_flow.register_node(TaskState::Start, DemoNode("Daily Report".to_string()));
-    daily_flow.add_exit_state(TaskState::End);
+    let mut scheduler = Scheduler::new();
 
-    let mut hourly_flow: Workflow<TaskState> = Workflow::new(TaskState::Start);
-    hourly_flow.register_node(TaskState::Start, DemoNode("Hourly Check".to_string()));
-    hourly_flow.add_exit_state(TaskState::End);
+    // Create workflows with different durations
+    let mut daily_flow = Workflow::new(TaskState::Start);
+    daily_flow
+        .register_node(TaskState::Start, DailyTask)
+        .add_exit_state(TaskState::Complete);
 
-    let mut frequent_flow: Workflow<TaskState> = Workflow::new(TaskState::Start);
-    frequent_flow.register_node(TaskState::Start, DemoNode("Frequent Task".to_string()));
-    frequent_flow.add_exit_state(TaskState::End);
+    let mut hourly_flow = Workflow::new(TaskState::Start);
+    hourly_flow
+        .register_node(TaskState::Start, HourlyTask)
+        .add_exit_state(TaskState::Complete);
 
-    let mut manual_flow: Workflow<TaskState> = Workflow::new(TaskState::Start);
-    manual_flow.register_node(TaskState::Start, DemoNode("Manual Task".to_string()));
-    manual_flow.add_exit_state(TaskState::End);
+    let mut frequent_flow = Workflow::new(TaskState::Start);
+    frequent_flow
+        .register_node(TaskState::Start, FrequentTask)
+        .add_exit_state(TaskState::Complete);
 
-    // ===============================
-    // DURATION-BASED SCHEDULING
-    // ===============================
+    // Schedule workflows with different durations
+    scheduler.every("daily_task", daily_flow, Duration::from_secs(86400))?; // 24 hours
+    scheduler.every("hourly_task", hourly_flow, Duration::from_secs(3600))?; // 1 hour
+    scheduler.every("frequent_task", frequent_flow, Duration::from_secs(2))?; // 2 seconds for demo
 
-    // Convenience methods for common intervals
-    scheduler.every_hours("daily_report", daily_flow, 24)?; // Every 24 hours
-    scheduler.every_minutes("hourly_check", hourly_flow, 60)?; // Every hour (60 minutes)
-    scheduler.every_seconds("frequent_task", frequent_flow, 30)?; // Every 30 seconds
+    println!("📅 Scheduled workflows:");
+    println!("  • Daily task: Every 24 hours");
+    println!("  • Hourly task: Every 1 hour");
+    println!("  • Frequent task: Every 2 seconds (for demo)");
+    println!();
 
-    // Precise Duration control for sub-second timing
-    scheduler.every("high_freq", manual_flow, Duration::from_millis(500))?; // Every 500ms
-
-    // Cron for complex schedules
-    // scheduler.cron("business_hours", workflow, "0 9-17 * * 1-5")?;  // Weekdays 9-5
-
-    // Manual triggers
-    // scheduler.manual("on_demand", workflow)?;
-
-    println!("🚀 Starting scheduler with multiple interval types...");
     scheduler.start().await?;
 
-    // Let it run for demonstration
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    println!("🚀 Scheduler started! Running for 10 seconds...");
+    tokio::time::sleep(Duration::from_secs(10)).await;
 
-    println!("📊 Current status:");
-    for flow_info in scheduler.list().await {
-        println!(
-            "  {} - {:?} (runs: {})",
-            flow_info.id, flow_info.status, flow_info.run_count
-        );
-    }
-
-    // Graceful shutdown
-    println!("🛑 Stopping scheduler...");
     scheduler.stop().await?;
-    println!("✅ Done!");
+    println!("✅ Scheduler stopped gracefully");
 
     Ok(())
 }

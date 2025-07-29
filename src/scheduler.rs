@@ -17,15 +17,15 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> CanoResult<()> {
-//!     let mut scheduler: Scheduler<MyState> = Scheduler::new();
+//!     let mut scheduler = Scheduler::<MyState>::new();
 //!     
 //!     // Create separate workflows for each scheduled task
-//!     let workflow1: Workflow<MyState> = Workflow::new(MyState::Start);
-//!     let workflow2: Workflow<MyState> = Workflow::new(MyState::Start);
-//!     let workflow3: Workflow<MyState> = Workflow::new(MyState::Start);
-//!     let workflow4: Workflow<MyState> = Workflow::new(MyState::Start);
-//!     let workflow5: Workflow<MyState> = Workflow::new(MyState::Start);
-//!     let workflow6: Workflow<MyState> = Workflow::new(MyState::Start);
+//!     let workflow1 = Workflow::new(MyState::Start);
+//!     let workflow2 = Workflow::new(MyState::Start);
+//!     let workflow3 = Workflow::new(MyState::Start);
+//!     let workflow4 = Workflow::new(MyState::Start);
+//!     let workflow5 = Workflow::new(MyState::Start);
+//!     let workflow6 = Workflow::new(MyState::Start);
 //!     
 //!     // Multiple ways to schedule workflows:
 //!     scheduler.every_seconds("task1", workflow1, 30)?;                    // Every 30 seconds
@@ -43,7 +43,7 @@
 use crate::MemoryStore;
 use crate::error::{CanoError, CanoResult};
 use crate::node::DefaultParams;
-use crate::workflow::Workflow;
+use crate::workflow::{ConcurrentWorkflow, ConcurrentWorkflowStatus, WaitStrategy, Workflow};
 use chrono::{DateTime, Utc};
 use cron::Schedule as CronSchedule;
 use std::collections::HashMap;
@@ -70,15 +70,21 @@ pub enum Status {
     Idle,
     Running,
     Failed(String),
+    /// Concurrent workflow is running with current status
+    ConcurrentRunning(ConcurrentWorkflowStatus),
+    /// Concurrent workflow completed with final status
+    ConcurrentCompleted(ConcurrentWorkflowStatus),
 }
 
-/// Minimal workflow information
+/// Enhanced workflow information with concurrent workflow support
 #[derive(Debug, Clone)]
 pub struct FlowInfo {
     pub id: String,
     pub status: Status,
     pub run_count: u64,
     pub last_run: Option<DateTime<Utc>>,
+    /// Tracks concurrent workflow instances if applicable
+    pub concurrent_instances: Option<usize>,
 }
 
 /// Type alias for the complex workflow data stored in the scheduler
@@ -88,14 +94,35 @@ type FlowData<TState, TStore, TParams> = (
     Arc<RwLock<FlowInfo>>,
 );
 
-/// Simplified scheduler system
+/// Type alias for concurrent workflow data
+type ConcurrentFlowData<TState, TStore, TParams> = (
+    Arc<ConcurrentWorkflow<TState, TStore, TParams>>,
+    Schedule,
+    Arc<RwLock<FlowInfo>>,
+    WaitStrategy, // Wait strategy for concurrent execution
+    usize,        // Number of concurrent instances
+);
+
+/// Enum to distinguish between regular and concurrent workflows
+#[derive(Debug, Clone)]
+enum WorkflowType<TState, TStore, TParams>
+where
+    TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
+    TParams: Clone + Send + Sync + 'static,
+    TStore: Clone + Default + Send + Sync + 'static,
+{
+    Regular(FlowData<TState, TStore, TParams>),
+    Concurrent(ConcurrentFlowData<TState, TStore, TParams>),
+}
+
+/// Enhanced scheduler system with concurrent workflow support
 pub struct Scheduler<TState, TStore = MemoryStore, TParams = DefaultParams>
 where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
     TParams: Clone + Send + Sync + 'static,
     TStore: Clone + Default + Send + Sync + 'static,
 {
-    flows: HashMap<String, FlowData<TState, TStore, TParams>>,
+    workflows: HashMap<String, WorkflowType<TState, TStore, TParams>>,
     command_tx: Option<mpsc::UnboundedSender<String>>,
     running: Arc<RwLock<bool>>,
 }
@@ -109,7 +136,7 @@ where
     /// Create a new scheduler
     pub fn new() -> Self {
         Self {
-            flows: HashMap::new(),
+            workflows: HashMap::new(),
             command_tx: None,
             running: Arc::new(RwLock::new(false)),
         }
@@ -122,7 +149,7 @@ where
         workflow: Workflow<TState, TStore, TParams>,
         interval: Duration,
     ) -> CanoResult<()> {
-        self.add_flow(id, workflow, Schedule::Every(interval))
+        self.add_regular_flow(id, workflow, Schedule::Every(interval))
     }
 
     /// Add a workflow that runs every N seconds (convenience method)
@@ -165,7 +192,7 @@ where
         // Validate cron expression
         CronSchedule::from_str(expr)
             .map_err(|e| CanoError::Configuration(format!("Invalid cron expression: {e}")))?;
-        self.add_flow(id, workflow, Schedule::Cron(expr.to_string()))
+        self.add_regular_flow(id, workflow, Schedule::Cron(expr.to_string()))
     }
 
     /// Add a manually triggered workflow
@@ -174,17 +201,127 @@ where
         id: &str,
         workflow: Workflow<TState, TStore, TParams>,
     ) -> CanoResult<()> {
-        self.add_flow(id, workflow, Schedule::Manual)
+        self.add_regular_flow(id, workflow, Schedule::Manual)
     }
 
-    /// Internal method to add flows
-    fn add_flow(
+    /// Add a concurrent workflow that runs every Duration interval
+    pub fn every_concurrent(
+        &mut self,
+        id: &str,
+        concurrent_workflow: ConcurrentWorkflow<TState, TStore, TParams>,
+        interval: Duration,
+        instances: usize,
+        wait_strategy: WaitStrategy,
+    ) -> CanoResult<()> {
+        self.add_concurrent_flow(
+            id,
+            concurrent_workflow,
+            Schedule::Every(interval),
+            instances,
+            wait_strategy,
+        )
+    }
+
+    /// Add a concurrent workflow that runs every N seconds
+    pub fn every_seconds_concurrent(
+        &mut self,
+        id: &str,
+        concurrent_workflow: ConcurrentWorkflow<TState, TStore, TParams>,
+        seconds: u64,
+        instances: usize,
+        wait_strategy: WaitStrategy,
+    ) -> CanoResult<()> {
+        self.every_concurrent(
+            id,
+            concurrent_workflow,
+            Duration::from_secs(seconds),
+            instances,
+            wait_strategy,
+        )
+    }
+
+    /// Add a concurrent workflow that runs every N minutes
+    pub fn every_minutes_concurrent(
+        &mut self,
+        id: &str,
+        concurrent_workflow: ConcurrentWorkflow<TState, TStore, TParams>,
+        minutes: u64,
+        instances: usize,
+        wait_strategy: WaitStrategy,
+    ) -> CanoResult<()> {
+        self.every_concurrent(
+            id,
+            concurrent_workflow,
+            Duration::from_secs(minutes * 60),
+            instances,
+            wait_strategy,
+        )
+    }
+
+    /// Add a concurrent workflow that runs every N hours
+    pub fn every_hours_concurrent(
+        &mut self,
+        id: &str,
+        concurrent_workflow: ConcurrentWorkflow<TState, TStore, TParams>,
+        hours: u64,
+        instances: usize,
+        wait_strategy: WaitStrategy,
+    ) -> CanoResult<()> {
+        self.every_concurrent(
+            id,
+            concurrent_workflow,
+            Duration::from_secs(hours * 3600),
+            instances,
+            wait_strategy,
+        )
+    }
+
+    /// Add a concurrent workflow with cron schedule
+    pub fn cron_concurrent(
+        &mut self,
+        id: &str,
+        concurrent_workflow: ConcurrentWorkflow<TState, TStore, TParams>,
+        expr: &str,
+        instances: usize,
+        wait_strategy: WaitStrategy,
+    ) -> CanoResult<()> {
+        // Validate cron expression
+        CronSchedule::from_str(expr)
+            .map_err(|e| CanoError::Configuration(format!("Invalid cron expression: {e}")))?;
+        self.add_concurrent_flow(
+            id,
+            concurrent_workflow,
+            Schedule::Cron(expr.to_string()),
+            instances,
+            wait_strategy,
+        )
+    }
+
+    /// Add a manually triggered concurrent workflow
+    pub fn manual_concurrent(
+        &mut self,
+        id: &str,
+        concurrent_workflow: ConcurrentWorkflow<TState, TStore, TParams>,
+        instances: usize,
+        wait_strategy: WaitStrategy,
+    ) -> CanoResult<()> {
+        self.add_concurrent_flow(
+            id,
+            concurrent_workflow,
+            Schedule::Manual,
+            instances,
+            wait_strategy,
+        )
+    }
+
+    /// Internal method to add regular flows
+    fn add_regular_flow(
         &mut self,
         id: &str,
         workflow: Workflow<TState, TStore, TParams>,
         schedule: Schedule,
     ) -> CanoResult<()> {
-        if self.flows.contains_key(id) {
+        if self.workflows.contains_key(id) {
             return Err(CanoError::Configuration(format!(
                 "Workflow '{id}' already exists"
             )));
@@ -195,12 +332,53 @@ where
             status: Status::Idle,
             run_count: 0,
             last_run: None,
+            concurrent_instances: None,
         };
 
-        self.flows.insert(
-            id.to_string(),
-            (Arc::new(workflow), schedule, Arc::new(RwLock::new(info))),
+        let flow_data = (Arc::new(workflow), schedule, Arc::new(RwLock::new(info)));
+        self.workflows
+            .insert(id.to_string(), WorkflowType::Regular(flow_data));
+        Ok(())
+    }
+
+    /// Internal method to add concurrent flows
+    fn add_concurrent_flow(
+        &mut self,
+        id: &str,
+        concurrent_workflow: ConcurrentWorkflow<TState, TStore, TParams>,
+        schedule: Schedule,
+        instances: usize,
+        wait_strategy: WaitStrategy,
+    ) -> CanoResult<()> {
+        if self.workflows.contains_key(id) {
+            return Err(CanoError::Configuration(format!(
+                "Workflow '{id}' already exists"
+            )));
+        }
+
+        if instances == 0 {
+            return Err(CanoError::Configuration(
+                "Concurrent workflow instances must be greater than 0".to_string(),
+            ));
+        }
+
+        let info = FlowInfo {
+            id: id.to_string(),
+            status: Status::Idle,
+            run_count: 0,
+            last_run: None,
+            concurrent_instances: Some(instances),
+        };
+
+        let flow_data = (
+            Arc::new(concurrent_workflow),
+            schedule,
+            Arc::new(RwLock::new(info)),
+            wait_strategy,
+            instances,
         );
+        self.workflows
+            .insert(id.to_string(), WorkflowType::Concurrent(flow_data));
         Ok(())
     }
 
@@ -215,7 +393,7 @@ where
         *self.running.write().await = true;
 
         // Clone data for the scheduler task
-        let flows = self.flows.clone();
+        let workflows = self.workflows.clone();
         let running = Arc::clone(&self.running);
 
         tokio::spawn(async move {
@@ -230,15 +408,31 @@ where
                         }
 
                         let now = Utc::now();
-                        for (id, (workflow, schedule, info)) in &flows {
-                            if should_run(schedule, &mut last_check, id, now) {
-                                let workflow = Arc::clone(workflow);
-                                let info = Arc::clone(info);
-                                let store = TStore::default();
+                        for (id, workflow_type) in &workflows {
+                            match workflow_type {
+                                WorkflowType::Regular((workflow, schedule, info)) => {
+                                    if should_run(schedule, &mut last_check, id, now) {
+                                        let workflow = Arc::clone(workflow);
+                                        let info = Arc::clone(info);
+                                        let store = TStore::default();
 
-                                tokio::spawn(async move {
-                                    execute_flow(workflow, info, store).await;
-                                });
+                                        tokio::spawn(async move {
+                                            execute_regular_flow(workflow, info, store).await;
+                                        });
+                                    }
+                                }
+                                WorkflowType::Concurrent((concurrent_workflow, schedule, info, wait_strategy, instances)) => {
+                                    if should_run(schedule, &mut last_check, id, now) {
+                                        let concurrent_workflow = Arc::clone(concurrent_workflow);
+                                        let info = Arc::clone(info);
+                                        let wait_strategy = wait_strategy.clone();
+                                        let instances = *instances;
+
+                                        tokio::spawn(async move {
+                                            execute_concurrent_flow(concurrent_workflow, info, wait_strategy, instances).await;
+                                        });
+                                    }
+                                }
                             }
                         }
                     }
@@ -246,14 +440,28 @@ where
                     command = rx.recv() => {
                         match command {
                             Some(flow_id) => {
-                                if let Some((workflow, _, info)) = flows.get(&flow_id) {
-                                    let workflow = Arc::clone(workflow);
-                                    let info = Arc::clone(info);
-                                    let store = TStore::default();
+                                if let Some(workflow_type) = workflows.get(&flow_id) {
+                                    match workflow_type {
+                                        WorkflowType::Regular((workflow, _, info)) => {
+                                            let workflow = Arc::clone(workflow);
+                                            let info = Arc::clone(info);
+                                            let store = TStore::default();
 
-                                    tokio::spawn(async move {
-                                        execute_flow(workflow, info, store).await;
-                                    });
+                                            tokio::spawn(async move {
+                                                execute_regular_flow(workflow, info, store).await;
+                                            });
+                                        }
+                                        WorkflowType::Concurrent((concurrent_workflow, _, info, wait_strategy, instances)) => {
+                                            let concurrent_workflow = Arc::clone(concurrent_workflow);
+                                            let info = Arc::clone(info);
+                                            let wait_strategy = wait_strategy.clone();
+                                            let instances = *instances;
+
+                                            tokio::spawn(async move {
+                                                execute_concurrent_flow(concurrent_workflow, info, wait_strategy, instances).await;
+                                            });
+                                        }
+                                    }
                                 }
                             }
                             None => break,
@@ -296,11 +504,18 @@ where
         loop {
             // Check if any flows are still running
             let mut any_running = false;
-            for (_, _, info) in self.flows.values() {
-                let status = &info.read().await.status;
-                if *status == Status::Running {
-                    any_running = true;
-                    break;
+            for workflow_type in self.workflows.values() {
+                let status = match workflow_type {
+                    WorkflowType::Regular((_, _, info)) => &info.read().await.status,
+                    WorkflowType::Concurrent((_, _, info, _, _)) => &info.read().await.status,
+                };
+
+                match status {
+                    Status::Running | Status::ConcurrentRunning(_) => {
+                        any_running = true;
+                        break;
+                    }
+                    _ => {}
                 }
             }
 
@@ -332,9 +547,15 @@ where
 
     /// Check if any flows are currently running
     pub async fn has_running_flows(&self) -> bool {
-        for (_, _, info) in self.flows.values() {
-            if info.read().await.status == Status::Running {
-                return true;
+        for workflow_type in self.workflows.values() {
+            let status = match workflow_type {
+                WorkflowType::Regular((_, _, info)) => &info.read().await.status,
+                WorkflowType::Concurrent((_, _, info, _, _)) => &info.read().await.status,
+            };
+
+            match status {
+                Status::Running | Status::ConcurrentRunning(_) => return true,
+                _ => {}
             }
         }
         false
@@ -343,9 +564,15 @@ where
     /// Get count of currently running flows
     pub async fn running_count(&self) -> usize {
         let mut count = 0;
-        for (_, _, info) in self.flows.values() {
-            if info.read().await.status == Status::Running {
-                count += 1;
+        for workflow_type in self.workflows.values() {
+            let status = match workflow_type {
+                WorkflowType::Regular((_, _, info)) => &info.read().await.status,
+                WorkflowType::Concurrent((_, _, info, _, _)) => &info.read().await.status,
+            };
+
+            match status {
+                Status::Running | Status::ConcurrentRunning(_) => count += 1,
+                _ => {}
             }
         }
         count
@@ -353,7 +580,11 @@ where
 
     /// Get workflow status
     pub async fn status(&self, id: &str) -> Option<FlowInfo> {
-        if let Some((_, _, info)) = self.flows.get(id) {
+        if let Some(workflow_type) = self.workflows.get(id) {
+            let info = match workflow_type {
+                WorkflowType::Regular((_, _, info)) => info,
+                WorkflowType::Concurrent((_, _, info, _, _)) => info,
+            };
             Some(info.read().await.clone())
         } else {
             None
@@ -363,7 +594,11 @@ where
     /// List all flows
     pub async fn list(&self) -> Vec<FlowInfo> {
         let mut result = Vec::new();
-        for (_, _, info) in self.flows.values() {
+        for workflow_type in self.workflows.values() {
+            let info = match workflow_type {
+                WorkflowType::Regular((_, _, info)) => info,
+                WorkflowType::Concurrent((_, _, info, _, _)) => info,
+            };
             result.push(info.read().await.clone());
         }
         result
@@ -425,8 +660,8 @@ fn should_run(
     }
 }
 
-/// Execute a workflow
-async fn execute_flow<TState, TStore, TParams>(
+/// Execute a regular workflow
+async fn execute_regular_flow<TState, TStore, TParams>(
     workflow: Arc<Workflow<TState, TStore, TParams>>,
     info: Arc<RwLock<FlowInfo>>,
     store: TStore,
@@ -451,6 +686,48 @@ async fn execute_flow<TState, TStore, TParams>(
         match result {
             Ok(_) => {
                 info_guard.status = Status::Idle;
+                info_guard.run_count += 1;
+            }
+            Err(e) => {
+                info_guard.status = Status::Failed(e.to_string());
+            }
+        }
+    }
+}
+
+/// Execute a concurrent workflow
+async fn execute_concurrent_flow<TState, TStore, TParams>(
+    concurrent_workflow: Arc<ConcurrentWorkflow<TState, TStore, TParams>>,
+    info: Arc<RwLock<FlowInfo>>,
+    wait_strategy: WaitStrategy,
+    instances: usize,
+) where
+    TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
+    TParams: Clone + Send + Sync + 'static,
+    TStore: Clone + Default + Send + Sync + 'static,
+{
+    // Create stores for each instance
+    let stores: Vec<TStore> = (0..instances).map(|_| TStore::default()).collect();
+
+    // Update status to concurrent running
+    {
+        let mut info_guard = info.write().await;
+        let initial_status = ConcurrentWorkflowStatus::new(instances);
+        info_guard.status = Status::ConcurrentRunning(initial_status);
+        info_guard.last_run = Some(Utc::now());
+    }
+
+    // Execute concurrent workflow
+    let result = concurrent_workflow
+        .execute_concurrent(stores, wait_strategy)
+        .await;
+
+    // Update final status
+    {
+        let mut info_guard = info.write().await;
+        match result {
+            Ok((_, final_status)) => {
+                info_guard.status = Status::ConcurrentCompleted(final_status);
                 info_guard.run_count += 1;
             }
             Err(e) => {
@@ -489,6 +766,10 @@ mod tests {
                 execution_count: Arc::new(AtomicU32::new(0)),
                 should_fail: false,
             }
+        }
+
+        fn new_success() -> Self {
+            Self::new()
         }
 
         fn new_failing() -> Self {
@@ -543,7 +824,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_scheduler_creation() {
-        let scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
+        let scheduler: Scheduler<TestState> = Scheduler::new();
         assert!(!scheduler.has_running_flows().await);
         assert_eq!(scheduler.running_count().await, 0);
         assert!(scheduler.list().await.is_empty());
@@ -873,6 +1154,7 @@ mod tests {
             status: Status::Idle,
             run_count: 5,
             last_run: Some(Utc::now()),
+            concurrent_instances: None,
         };
 
         assert_eq!(info.id, "test");
@@ -953,14 +1235,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_flow_function() {
-        // Test the execute_flow function directly
+    async fn test_execute_regular_flow_function() {
+        // Test the execute_regular_flow function directly
         let workflow = Arc::new(create_test_workflow());
         let info = Arc::new(RwLock::new(FlowInfo {
             id: "test".to_string(),
             status: Status::Idle,
             run_count: 0,
             last_run: None,
+            concurrent_instances: None,
         }));
         let store = MemoryStore::default();
 
@@ -969,7 +1252,7 @@ mod tests {
         assert_eq!(info.read().await.run_count, 0);
 
         // Execute
-        execute_flow(workflow, Arc::clone(&info), store).await;
+        execute_regular_flow(workflow, Arc::clone(&info), store).await;
 
         // After execution
         let final_info = info.read().await;
@@ -979,25 +1262,130 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_execute_flow_function_failure() {
-        // Test the execute_flow function with a failing workflow
+    async fn test_execute_regular_flow_function_failure() {
+        // Test the execute_regular_flow function with a failing workflow
         let workflow = Arc::new(create_failing_workflow());
         let info = Arc::new(RwLock::new(FlowInfo {
             id: "test".to_string(),
             status: Status::Idle,
             run_count: 0,
             last_run: None,
+            concurrent_instances: None,
         }));
         let store = MemoryStore::default();
 
         // Execute
-        execute_flow(workflow, Arc::clone(&info), store).await;
+        execute_regular_flow(workflow, Arc::clone(&info), store).await;
 
         // After execution
         let final_info = info.read().await;
         assert!(matches!(final_info.status, Status::Failed(_)));
-        assert_eq!(final_info.run_count, 0); // Should not increment on failure
+        assert_eq!(final_info.run_count, 0);
         assert!(final_info.last_run.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_workflow_scheduling() {
+        let mut scheduler: Scheduler<TestState> = Scheduler::new();
+
+        // Create a concurrent workflow
+        let mut concurrent_workflow = ConcurrentWorkflow::new(TestState::Start);
+        concurrent_workflow.add_exit_state(TestState::Complete);
+
+        let node = TestNode::new_success();
+        concurrent_workflow.register_node(TestState::Start, node);
+
+        scheduler
+            .manual_concurrent(
+                "concurrent_test",
+                concurrent_workflow,
+                3, // 3 instances
+                WaitStrategy::WaitForever,
+            )
+            .unwrap();
+
+        // Verify the workflow was added
+        let flows = scheduler.list().await;
+        assert_eq!(flows.len(), 1);
+        assert_eq!(flows[0].id, "concurrent_test");
+        assert_eq!(flows[0].concurrent_instances, Some(3));
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_workflow_status_tracking() {
+        // Create a concurrent workflow
+        let mut concurrent_workflow = ConcurrentWorkflow::new(TestState::Start);
+        concurrent_workflow.add_exit_state(TestState::Complete);
+
+        let node = TestNode::new_success();
+        concurrent_workflow.register_node(TestState::Start, node);
+
+        let info = Arc::new(RwLock::new(FlowInfo {
+            id: "test".to_string(),
+            status: Status::Idle,
+            run_count: 0,
+            last_run: None,
+            concurrent_instances: Some(3),
+        }));
+
+        // Test concurrent execution
+        execute_concurrent_flow(
+            Arc::new(concurrent_workflow),
+            Arc::clone(&info),
+            WaitStrategy::WaitForever,
+            3,
+        )
+        .await;
+
+        // Check final status
+        let final_info = info.read().await;
+        assert!(matches!(final_info.status, Status::ConcurrentCompleted(_)));
+        assert_eq!(final_info.run_count, 1);
+        assert!(final_info.last_run.is_some());
+
+        if let Status::ConcurrentCompleted(status) = &final_info.status {
+            assert_eq!(status.total_workflows, 3);
+            assert_eq!(status.completed, 3);
+            assert_eq!(status.failed, 0);
+            assert_eq!(status.cancelled, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_scheduler_with_mixed_workflow_types() {
+        let mut scheduler: Scheduler<TestState> = Scheduler::new();
+
+        // Add a regular workflow
+        scheduler
+            .manual("regular_test", create_test_workflow())
+            .unwrap();
+
+        // Add a concurrent workflow
+        let mut concurrent_workflow = ConcurrentWorkflow::new(TestState::Start);
+        concurrent_workflow.add_exit_state(TestState::Complete);
+
+        let node = TestNode::new_success();
+        concurrent_workflow.register_node(TestState::Start, node);
+
+        scheduler
+            .manual_concurrent(
+                "concurrent_test",
+                concurrent_workflow,
+                2,
+                WaitStrategy::WaitForever,
+            )
+            .unwrap();
+
+        // Verify both workflows were added
+        let flows = scheduler.list().await;
+        assert_eq!(flows.len(), 2);
+
+        // Check workflow types
+        let regular_flow = flows.iter().find(|f| f.id == "regular_test").unwrap();
+        let concurrent_flow = flows.iter().find(|f| f.id == "concurrent_test").unwrap();
+
+        assert_eq!(regular_flow.concurrent_instances, None);
+        assert_eq!(concurrent_flow.concurrent_instances, Some(2));
     }
 
     #[tokio::test]
