@@ -91,7 +91,8 @@ pub type DynTask<TState, TStore = MemoryStore, TParams = DefaultTaskParams> =
 /// This trait provides the essential functionality needed for workflow execution
 /// while being object-safe (can be used as a trait object).
 #[async_trait::async_trait]
-pub trait DynTaskTrait<TState, TStore = MemoryStore, TParams = DefaultTaskParams>: Send + Sync
+pub trait DynTaskTrait<TState, TStore = MemoryStore, TParams = DefaultTaskParams>:
+    Send + Sync
 where
     TState: Clone + std::fmt::Debug + Send + Sync + 'static,
 {

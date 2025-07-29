@@ -101,8 +101,8 @@ pub mod prelude {
 
     pub use crate::{
         CanoError, CanoResult, ConcurrentWorkflow, ConcurrentWorkflowBuilder,
-        ConcurrentWorkflowStatus, DefaultNodeResult, DefaultParams, DefaultTaskParams, FlowInfo, 
-        KeyValueStore, MemoryStore, Node, NodeConfig, RetryMode, Scheduler, Task, TaskObject, 
+        ConcurrentWorkflowStatus, DefaultNodeResult, DefaultParams, DefaultTaskParams, FlowInfo,
+        KeyValueStore, MemoryStore, Node, NodeConfig, RetryMode, Scheduler, Task, TaskObject,
         WaitStrategy, Workflow, WorkflowBuilder, WorkflowResult,
     };
 

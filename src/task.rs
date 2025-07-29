@@ -152,8 +152,7 @@ where
 ///
 /// This trait provides a concrete implementation of Task using the default types,
 /// enabling dynamic dispatch and trait object usage.
-pub trait DynTask<TState>:
-    Task<TState, MemoryStore, DefaultTaskParams>
+pub trait DynTask<TState>: Task<TState, MemoryStore, DefaultTaskParams>
 where
     TState: Clone + std::fmt::Debug + Send + Sync + 'static,
 {
@@ -183,6 +182,7 @@ mod tests {
 
     // Test enum for task return values
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    #[allow(dead_code)]
     enum TestAction {
         Continue,
         Complete,
@@ -297,11 +297,12 @@ mod tests {
     impl Task<TestAction> for DataProcessingTask {
         async fn run(&self, store: &MemoryStore) -> Result<TestAction, CanoError> {
             // Read input data
-            let input_data: String = store.get(&self.input_key)
-                .map_err(|e| CanoError::node_execution(format!("Failed to read input: {}", e)))?;
+            let input_data: String = store
+                .get(&self.input_key)
+                .map_err(|e| CanoError::node_execution(format!("Failed to read input: {e}")))?;
 
             // Process data
-            let processed_data = format!("processed: {}", input_data);
+            let processed_data = format!("processed: {input_data}");
 
             // Write output data
             store.put(&self.output_key, processed_data)?;
@@ -413,9 +414,7 @@ mod tests {
             let task_clone = Arc::clone(&task);
             let store_clone = Arc::clone(&store);
 
-            let handle = task::spawn(async move { 
-                task_clone.run(&*store_clone).await 
-            });
+            let handle = task::spawn(async move { task_clone.run(&*store_clone).await });
             handles.push(handle);
         }
 
@@ -494,7 +493,7 @@ mod tests {
     // Test that demonstrates Node -> Task compatibility
     // This uses the existing Node from the node module
     use crate::node::Node;
-    
+
     struct TestNode;
 
     #[async_trait]
@@ -531,7 +530,7 @@ mod tests {
 
         // Use the node as a task - this should work due to the blanket implementation
         let result: Result<TestAction, CanoError> = Task::run(&node, &store).await;
-        
+
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), TestAction::Complete);
 

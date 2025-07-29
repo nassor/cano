@@ -50,7 +50,10 @@ impl Node<TaskState> for ProcessingNode {
     }
 
     async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
-        println!("⚙️  Node '{}' - Exec phase: Processing {}", self.name, prep_res);
+        println!(
+            "⚙️  Node '{}' - Exec phase: Processing {}",
+            self.name, prep_res
+        );
         format!("processed_{}", prep_res)
     }
 
@@ -82,20 +85,24 @@ impl ProcessingTask {
 #[async_trait]
 impl Task<TaskState> for ProcessingTask {
     async fn run(&self, store: &MemoryStore) -> Result<TaskState, CanoError> {
-        println!("🚀 Task '{}' - Single run method: doing everything", self.name);
-        
+        println!(
+            "🚀 Task '{}' - Single run method: doing everything",
+            self.name
+        );
+
         // All-in-one: prep, exec, post
-        let node_result: String = store.get("node_result")
-            .map_err(|e| CanoError::node_execution(format!("Failed to load node result: {}", e)))?;
-        
+        let node_result: String = store
+            .get("node_result")
+            .map_err(|e| CanoError::node_execution(format!("Failed to load node result: {e}")))?;
+
         println!("   📥 Loading previous result: {}", node_result);
-        
-        let processed = format!("task_enhanced_{}", node_result);
+
+        let processed = format!("task_enhanced_{node_result}");
         println!("   ⚙️  Processing: {}", processed);
-        
+
         store.put("final_result", processed.clone())?;
         println!("   📤 Stored final result: {}", processed);
-        
+
         Ok(TaskState::Complete)
     }
 }
@@ -130,37 +137,45 @@ async fn main() -> Result<(), CanoError> {
 
     // Create workflow with mixed Node and Task implementations
     let mut workflow = Workflow::new(TaskState::Start);
-    
+
     workflow
         .register(TaskState::Start, InitializerTask) // Task implementation
-        .register(TaskState::ProcessWithNode, ProcessingNode::new("NodeProcessor")) // Node implementation  
-        .register(TaskState::ProcessWithTask, ProcessingTask::new("TaskProcessor")) // Task implementation
+        .register(
+            TaskState::ProcessWithNode,
+            ProcessingNode::new("NodeProcessor"),
+        ) // Node implementation
+        .register(
+            TaskState::ProcessWithTask,
+            ProcessingTask::new("TaskProcessor"),
+        ) // Task implementation
         .add_exit_states(vec![TaskState::Complete, TaskState::Error]);
 
     println!("📋 Workflow Overview:");
-    println!("   Start → InitializerTask (Task) → ProcessingNode (Node) → ProcessingTask (Task) → Complete");
+    println!(
+        "   Start → InitializerTask (Task) → ProcessingNode (Node) → ProcessingTask (Task) → Complete"
+    );
     println!();
 
     // Execute the workflow
     println!("🏃 Executing workflow...");
     println!();
-    
+
     match workflow.orchestrate(&store).await {
         Ok(final_state) => {
             println!();
             println!("✅ Workflow completed successfully!");
-            println!("   Final state: {:?}", final_state);
-            
+            println!("   Final state: {final_state:?}");
+
             // Show results
             if let Ok(workflow_id) = store.get::<String>("workflow_id") {
-                println!("   Workflow ID: {}", workflow_id);
+                println!("   Workflow ID: {workflow_id}");
             }
             if let Ok(final_result) = store.get::<String>("final_result") {
-                println!("   Final result: {}", final_result);
+                println!("   Final result: {final_result}");
             }
         }
         Err(e) => {
-            println!("❌ Workflow failed: {}", e);
+            println!("❌ Workflow failed: {e}");
             return Err(e);
         }
     }
@@ -173,6 +188,6 @@ async fn main() -> Result<(), CanoError> {
     println!("• Nodes provide structured lifecycle management for complex operations");
     println!("• Both can be mixed in the same workflow seamlessly");
     println!("• Existing Node implementations automatically work as Tasks");
-    
+
     Ok(())
 }
