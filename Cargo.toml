@@ -24,6 +24,7 @@ cargo-audit = "0.21.2"
 criterion = { version = "0.7", features = ["html_reports", "async_tokio"] }
 reqwest = { version = "0.12", features = ["json"] }
 rig-core = "0.15"
+wide = "0.7"
 
 [[example]]
 name = "ai_workflow_yes_and"
@@ -48,6 +49,10 @@ path = "examples/workflow_book_prepositions.rs"
 [[example]]
 name = "workflow_negotiation"
 path = "examples/workflow_negotiation.rs"
+
+[[example]]
+name = "workflow_simd_matrix_pipeline"
+path = "examples/workflow_simd_matrix_pipeline.rs"
 
 [[example]]
 name = "workflow_stack_store"
