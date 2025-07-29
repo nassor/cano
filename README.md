@@ -4,7 +4,7 @@
 [![Documentation](https://docs.rs/cano/badge.svg)](https://docs.rs/cano)
 [![Downloads](https://img.shields.io/crates/d/cano.svg)](https://crates.io/crates/cano)
 [![License](https://img.shields.io/crates/l/cano.svg)](https://github.com/nassor/cano/blob/main/LICENSE)
-[![CI](https://github.com/nassor/cano/workflows/CI/badge.svg)](https://github.com/nassor/cano/actions)
+[![CI](https://github.com/nassor/cano/workflows/CI/badge.svg?branch=main)](https://github.com/nassor/cano/actions)
 
 **Async workflow engine with built-in scheduling, retry logic, and state machine semantics.**
 
