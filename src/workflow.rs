@@ -261,6 +261,34 @@ where
         self
     }
 
+    /// Register a node for a specific state
+    ///
+    /// # Deprecated
+    ///
+    /// This method is deprecated. Use [`register`](Self::register) instead.
+    /// The unified `register` method accepts both Tasks and Nodes and provides
+    /// the same functionality with a cleaner API.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Instead of:
+    /// workflow.register_node(state, my_node);
+    ///
+    /// // Use:
+    /// workflow.register(state, my_node);
+    /// ```
+    #[deprecated(
+        since = "0.5.0",
+        note = "Use `register` instead. The unified `register` method accepts both Tasks and Nodes."
+    )]
+    pub fn register_node<T>(&mut self, state: TState, task: T) -> &mut Self
+    where
+        T: Task<TState, TStore, TParams> + Send + Sync + 'static,
+    {
+        self.register(state, task)
+    }
+
     /// Register multiple exit states
     pub fn add_exit_states(&mut self, states: Vec<TState>) -> &mut Self {
         self.exit_states.extend(states);
@@ -371,6 +399,34 @@ where
         self
     }
 
+    /// Register a node for a state
+    ///
+    /// # Deprecated
+    ///
+    /// This method is deprecated. Use [`register`](Self::register) instead.
+    /// The unified `register` method accepts both Tasks and Nodes and provides
+    /// the same functionality with a cleaner API.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Instead of:
+    /// builder.register_node(state, my_node);
+    ///
+    /// // Use:
+    /// builder.register(state, my_node);
+    /// ```
+    #[deprecated(
+        since = "0.5.0",
+        note = "Use `register` instead. The unified `register` method accepts both Tasks and Nodes."
+    )]
+    pub fn register_node<T>(self, state: TState, task: T) -> Self
+    where
+        T: Task<TState, TStore, TParams> + Send + Sync + 'static,
+    {
+        self.register(state, task)
+    }
+
     /// Add an exit state
     pub fn add_exit_state(mut self, state: TState) -> Self {
         self.workflow.add_exit_state(state);
@@ -431,6 +487,34 @@ where
     {
         self.state_tasks.insert(state, Box::new(task));
         self
+    }
+
+    /// Register a cloneable node for a specific state
+    ///
+    /// # Deprecated
+    ///
+    /// This method is deprecated. Use [`register`](Self::register) instead.
+    /// The unified `register` method accepts both Tasks and Nodes and provides
+    /// the same functionality with a cleaner API.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Instead of:
+    /// concurrent_workflow.register_node(state, my_node);
+    ///
+    /// // Use:
+    /// concurrent_workflow.register(state, my_node);
+    /// ```
+    #[deprecated(
+        since = "0.5.0",
+        note = "Use `register` instead. The unified `register` method accepts both Tasks and Nodes."
+    )]
+    pub fn register_node<T>(&mut self, state: TState, task: T) -> &mut Self
+    where
+        T: Task<TState, TStore, TParams> + Clone + Send + Sync + 'static,
+    {
+        self.register(state, task)
     }
 
     /// Register multiple exit states
@@ -744,6 +828,34 @@ where
     {
         self.concurrent_workflow.register(state, task);
         self
+    }
+
+    /// Register a cloneable node for concurrent execution
+    ///
+    /// # Deprecated
+    ///
+    /// This method is deprecated. Use [`register`](Self::register) instead.
+    /// The unified `register` method accepts both Tasks and Nodes and provides
+    /// the same functionality with a cleaner API.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Instead of:
+    /// builder.register_node(state, my_node);
+    ///
+    /// // Use:
+    /// builder.register(state, my_node);
+    /// ```
+    #[deprecated(
+        since = "0.5.0",
+        note = "Use `register` instead. The unified `register` method accepts both Tasks and Nodes."
+    )]
+    pub fn register_node<T>(self, state: TState, task: T) -> Self
+    where
+        T: Task<TState, TStore, TParams> + Clone + Send + Sync + 'static,
+    {
+        self.register(state, task)
     }
 
     /// Add an exit state
