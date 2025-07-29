@@ -30,7 +30,7 @@ Add Cano to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-cano = "0.3"
+cano = "0.4"
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
 ```
