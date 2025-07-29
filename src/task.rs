@@ -1,31 +1,41 @@
 //! # Task API - Simplified Workflow Interface
 //!
 //! This module provides the [`Task`] trait, which offers a simplified interface for workflow processing.
-//! While [`Node`] requires implementing three phases (`prep`, `exec`, `post`), [`Task`] only requires
-//! implementing a single `run` method.
+//! While [`crate::node::Node`] requires implementing three phases (`prep`, `exec`, `post`) with built-in retry logic,
+//! [`Task`] only requires implementing a single `run` method.
 //!
 //! ## Key Differences
 //!
-//! - **[`Task`]**: Simple interface with just a `run` method
-//! - **[`Node`]**: Full control with `prep`, `exec`, and `post` phases
+//! - **[`Task`]**: Simple interface with just a `run` method - perfect for quick prototypes and simple operations
+//! - **[`crate::node::Node`]**: Structured three-phase lifecycle with built-in retry strategies - ideal for production workloads
+//!
+//! ## Relationship & Compatibility
+//!
+//! **Every [`crate::node::Node`] automatically implements [`Task`]** through a blanket implementation. This means:
+//! - You can use any existing Node wherever Tasks are expected
+//! - Workflows can register both Tasks and Nodes using the same `register()` method
+//! - Seamless migration path from simple Tasks to full-featured Nodes
 //!
 //! ## When to Use Which
 //!
-//! - Use **[`Task`]** when you want simplicity and don't need fine-grained phase control
-//! - Use **[`Node`]** when you need the full three-phase lifecycle with retry logic and separation of concerns
+//! - Use **[`Task`]** when you want simplicity, don't need retry logic, or are prototyping
+//! - Use **[`crate::node::Node`]** when you need structured error handling, built-in retry strategies, or production-grade resilience
 //!
 //! ## Example
 //!
 //! ```rust
 //! use cano::prelude::*;
 //!
+//! // Simple Task implementation
 //! struct SimpleTask;
 //!
 //! #[async_trait]
 //! impl Task<String> for SimpleTask {
 //!     async fn run(&self, store: &MemoryStore) -> Result<String, CanoError> {
-//!         // Do all your work here
-//!         store.put("result", "task completed")?;
+//!         // Do all your work here - load, process, store
+//!         let input: String = store.get("input")?;
+//!         let result = format!("processed: {input}");
+//!         store.put("result", result)?;
 //!         Ok("next_state".to_string())
 //!     }
 //! }
@@ -33,7 +43,7 @@
 //!
 //! ## Interoperability
 //!
-//! Every [`Node`] automatically implements [`Task`], so you can use existing nodes
+//! Every [`crate::node::Node`] automatically implements [`Task`], so you can use existing nodes
 //! wherever tasks are expected. This provides a smooth upgrade path and backward compatibility.
 
 use crate::error::CanoError;
@@ -48,9 +58,16 @@ pub type DefaultTaskParams = HashMap<String, String>;
 
 /// Task trait for simplified workflow processing
 ///
-/// This trait provides a simplified interface for workflow processing compared to [`Node`].
+/// This trait provides a simplified interface for workflow processing compared to [`crate::node::Node`].
 /// Instead of implementing three separate phases (`prep`, `exec`, `post`), you only need
 /// to implement a single `run` method.
+///
+/// # Relationship with Node
+///
+/// **Every [`crate::node::Node`] automatically implements [`Task`]** through a blanket implementation.
+/// This means [`crate::node::Node`] is a superset of [`Task`] with additional structure and retry capabilities:
+/// - [`Task`]: Simple `run()` method - great for prototypes and simple operations
+/// - [`crate::node::Node`]: Three-phase lifecycle + retry strategies - ideal for production workloads
 ///
 /// # Generic Types
 ///
@@ -62,8 +79,9 @@ pub type DefaultTaskParams = HashMap<String, String>;
 ///
 /// - **Simplicity**: Single method to implement instead of three
 /// - **Flexibility**: Full control over execution flow
-/// - **Compatibility**: Works seamlessly with existing [`Node`] implementations
-/// - **Type Safety**: Same type safety guarantees as [`Node`]
+/// - **Compatibility**: Works seamlessly with existing [`crate::node::Node`] implementations
+/// - **Type Safety**: Same type safety guarantees as [`crate::node::Node`]
+/// - **Performance**: Zero-cost abstraction with direct execution
 ///
 /// # Example
 ///
@@ -112,7 +130,7 @@ where
 
     /// Execute the task with the given store
     ///
-    /// This method contains all the task logic in a single place. Unlike [`Node`],
+    /// This method contains all the task logic in a single place. Unlike [`crate::node::Node`],
     /// there's no separation into prep/exec/post phases - you have full control
     /// over the execution flow.
     ///
@@ -128,9 +146,19 @@ where
 
 /// Blanket implementation: Every Node is automatically a Task
 ///
-/// This implementation makes all existing [`Node`] implementations automatically
-/// work as [`Task`] implementations. The [`Node::run`] method is used directly
-/// as the [`Task::run`] implementation.
+/// This implementation makes all existing [`crate::node::Node`] implementations automatically
+/// work as [`Task`] implementations. This means [`crate::node::Node`] is a superset of [`Task`]:
+///
+/// - **[`Task`]**: Simple `run()` method
+/// - **[`crate::node::Node`]**: Three-phase lifecycle (`prep`, `exec`, `post`) + retry strategies
+///
+/// The [`crate::node::Node::run`] method (which orchestrates the three phases) is used directly
+/// as the [`Task::run`] implementation, providing seamless interoperability.
+///
+/// This enables:
+/// - Using any Node wherever Tasks are expected
+/// - Mixing Tasks and Nodes in the same workflow
+/// - Gradual migration from simple Tasks to full-featured Nodes
 #[async_trait]
 impl<TState, TStore, TParams, N> Task<TState, TStore, TParams> for N
 where
