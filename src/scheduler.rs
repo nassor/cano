@@ -1295,7 +1295,7 @@ mod tests {
         // Create a concurrent workflow
         let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
         let node = TestNode::new_success();
-        concurrent_workflow.register_cloneable_node(TestState::Start, node);
+        concurrent_workflow.register_node(TestState::Start, node);
 
         scheduler
             .manual_concurrent(
@@ -1322,7 +1322,7 @@ mod tests {
         // Create a concurrent workflow
         let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
         let node = TestNode::new_success();
-        concurrent_workflow.register_cloneable_node(TestState::Start, node);
+        concurrent_workflow.register_node(TestState::Start, node);
 
         let info = Arc::new(RwLock::new(FlowInfo {
             id: "test".to_string(),
@@ -1369,7 +1369,7 @@ mod tests {
         template_workflow.add_exit_state(TestState::Complete);
         let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
         let node = TestNode::new_success();
-        concurrent_workflow.register_cloneable_node(TestState::Start, node);
+        concurrent_workflow.register_node(TestState::Start, node);
 
         scheduler
             .manual_concurrent(

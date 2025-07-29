@@ -162,7 +162,8 @@ impl ConcurrentWorkflowStatus {
 
     /// Get the number of workflows still running
     pub fn running(&self) -> usize {
-        self.total_workflows.saturating_sub(self.completed + self.failed + self.cancelled)
+        self.total_workflows
+            .saturating_sub(self.completed + self.failed + self.cancelled)
     }
 }
 
@@ -184,7 +185,7 @@ pub type CloneableNode<TState, TStore = MemoryStore, TParams = DefaultParams> =
     Box<dyn CloneableNodeTrait<TState, TStore, TParams> + Send + Sync>;
 
 /// Trait for nodes that can be cloned for concurrent workflow execution
-pub trait CloneableNodeTrait<TState, TStore = MemoryStore, TParams = DefaultParams>: 
+pub trait CloneableNodeTrait<TState, TStore = MemoryStore, TParams = DefaultParams>:
     DynNodeTrait<TState, TStore, TParams> + Send + Sync
 where
     TState: Clone + std::fmt::Debug + Send + Sync + 'static,
@@ -374,15 +375,18 @@ where
 }
 
 /// Concurrent workflow orchestration for executing multiple workflow instances in parallel
+///
+/// Use the `register_node()` method to add cloneable nodes, or configure a template workflow
+/// and use the builder pattern for more complex setups.
 pub struct ConcurrentWorkflow<TState, TStore = MemoryStore, TParams = DefaultParams>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
     TParams: Clone + Send + Sync + 'static,
     TStore: Clone + Send + Sync + 'static,
 {
-    /// Template workflow that will be cloned for each concurrent execution
+    /// Template workflow that contains the structure (start state, exit states)
     template_workflow: Workflow<TState, TStore, TParams>,
-    /// Cloneable nodes that can be used across multiple workflow instances
+    /// Cloneable nodes that will be used for concurrent execution
     cloneable_nodes: HashMap<TState, CloneableNode<TState, TStore, TParams>>,
 }
 
@@ -401,8 +405,10 @@ where
     }
 
     /// Register a cloneable node for concurrent execution
-    /// The node must implement Clone to be used across multiple workflow instances
-    pub fn register_cloneable_node<N>(&mut self, state: TState, node: N) -> &mut Self
+    ///
+    /// This is the new, simplified API. Just call this method to add nodes that will be
+    /// automatically cloned for each concurrent workflow instance.
+    pub fn register_node<N>(&mut self, state: TState, node: N) -> &mut Self
     where
         N: Node<TState, TStore, TParams> + Clone + Send + Sync + 'static,
     {
@@ -411,6 +417,9 @@ where
     }
 
     /// Create a workflow instance for concurrent execution
+    ///
+    /// This method creates a new workflow instance by copying the template workflow's structure
+    /// and cloning all registered nodes.
     fn create_workflow_instance(&self) -> Result<Workflow<TState, TStore, TParams>, CanoError> {
         let mut workflow = Workflow {
             start_state: self.template_workflow.start_state.clone(),
@@ -454,7 +463,7 @@ where
         stores: Vec<TStore>,
         wait_strategy: WaitStrategy,
     ) -> Result<(Vec<WorkflowResult<TState>>, ConcurrentWorkflowStatus), CanoError> {
-        use tokio::time::{timeout, Instant};
+        use tokio::time::{Instant, timeout};
 
         let start_time = Instant::now();
         let workflow_count = stores.len();
@@ -494,9 +503,9 @@ where
                             results[index] = result;
                         }
                         Err(_) => {
-                            results[index] = WorkflowResult::Failed(
-                                CanoError::node_execution("Task join error")
-                            );
+                            results[index] = WorkflowResult::Failed(CanoError::node_execution(
+                                "Task join error",
+                            ));
                             status.failed += 1;
                         }
                     }
@@ -509,7 +518,8 @@ where
                 let mut pending_tasks = tasks;
 
                 while completed_count < quota && !pending_tasks.is_empty() {
-                    let (result, index, remaining) = futures::future::select_all(pending_tasks).await;
+                    let (result, index, remaining) =
+                        futures::future::select_all(pending_tasks).await;
                     pending_tasks = remaining;
 
                     match result {
@@ -523,9 +533,9 @@ where
                             completed_count += 1;
                         }
                         Err(_) => {
-                            results[index] = WorkflowResult::Failed(
-                                CanoError::node_execution("Task join error")
-                            );
+                            results[index] = WorkflowResult::Failed(CanoError::node_execution(
+                                "Task join error",
+                            ));
                             status.failed += 1;
                             completed_count += 1;
                         }
@@ -546,13 +556,15 @@ where
                     let mut results_temp = Vec::new();
 
                     while !pending_tasks.is_empty() {
-                        let (result, index, remaining) = futures::future::select_all(pending_tasks).await;
+                        let (result, index, remaining) =
+                            futures::future::select_all(pending_tasks).await;
                         pending_tasks = remaining;
                         results_temp.push((index, result));
                     }
 
                     results_temp
-                }).await;
+                })
+                .await;
 
                 match timeout_result {
                     Ok(completed_tasks) => {
@@ -569,7 +581,7 @@ where
                                 }
                                 Err(_) => {
                                     results[index] = WorkflowResult::Failed(
-                                        CanoError::node_execution("Task join error")
+                                        CanoError::node_execution("Task join error"),
                                     );
                                     status.failed += 1;
                                 }
@@ -592,7 +604,8 @@ where
                     let mut completed_results = Vec::new();
 
                     while completed_count < quota && !pending_tasks.is_empty() {
-                        let (result, index, remaining) = futures::future::select_all(pending_tasks).await;
+                        let (result, index, remaining) =
+                            futures::future::select_all(pending_tasks).await;
                         pending_tasks = remaining;
                         completed_results.push((index, result));
                         completed_count += 1;
@@ -623,13 +636,13 @@ where
                                 }
                                 Err(_) => {
                                     results[index] = WorkflowResult::Failed(
-                                        CanoError::node_execution("Task join error")
+                                        CanoError::node_execution("Task join error"),
                                     );
                                     status.failed += 1;
                                 }
                             }
                         }
-                        
+
                         // Mark uncompleted workflows as cancelled
                         let uncompleted = workflow_count - (status.completed + status.failed);
                         status.cancelled = uncompleted;
@@ -659,10 +672,10 @@ where
         for (state, node) in &self.cloneable_nodes {
             cloned_nodes.insert(state.clone(), node.clone_node());
         }
-        
+
         Self {
             template_workflow: Workflow::new(
-                self.template_workflow.start_state.as_ref().unwrap().clone()
+                self.template_workflow.start_state.as_ref().unwrap().clone(),
             ),
             cloneable_nodes: cloned_nodes,
         }
@@ -678,7 +691,10 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConcurrentWorkflow")
             .field("template_workflow", &self.template_workflow)
-            .field("cloneable_nodes", &format!("{} cloneable nodes", self.cloneable_nodes.len()))
+            .field(
+                "cloneable_nodes",
+                &format!("{} cloneable nodes", self.cloneable_nodes.len()),
+            )
             .finish()
     }
 }
@@ -707,11 +723,17 @@ where
     }
 
     /// Register a cloneable node for concurrent execution
+    ///
+    /// **DEPRECATED**: Use the ConcurrentWorkflow directly instead.
+    #[deprecated(
+        note = "Use ConcurrentWorkflow.register_node() directly instead of the builder pattern."
+    )]
     pub fn register_cloneable_node<N>(mut self, state: TState, node: N) -> Self
     where
         N: Node<TState, TStore, TParams> + Clone + Send + Sync + 'static,
     {
-        self.concurrent_workflow.register_cloneable_node(state, node);
+        // Add the node to the concurrent workflow directly
+        self.concurrent_workflow.register_node(state, node);
         self
     }
 
@@ -1329,22 +1351,26 @@ mod tests {
     #[tokio::test]
     async fn test_concurrent_workflow_creation() {
         let template_workflow: Workflow<TestState> = Workflow::new(TestState::Start);
-        let concurrent_workflow: ConcurrentWorkflow<TestState> = 
+        let concurrent_workflow: ConcurrentWorkflow<TestState> =
             ConcurrentWorkflow::new(template_workflow);
 
         assert!(concurrent_workflow.cloneable_nodes.is_empty());
     }
 
     #[tokio::test]
-    async fn test_concurrent_workflow_register_cloneable_node() {
+    async fn test_concurrent_workflow_register_node() {
         let template_workflow: Workflow<TestState> = Workflow::new(TestState::Start);
         let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
 
         let node = SuccessNode::new(TestState::Complete);
-        concurrent_workflow.register_cloneable_node(TestState::Start, node);
+        concurrent_workflow.register_node(TestState::Start, node);
 
         assert_eq!(concurrent_workflow.cloneable_nodes.len(), 1);
-        assert!(concurrent_workflow.cloneable_nodes.contains_key(&TestState::Start));
+        assert!(
+            concurrent_workflow
+                .cloneable_nodes
+                .contains_key(&TestState::Start)
+        );
     }
 
     #[tokio::test]
@@ -1354,14 +1380,10 @@ mod tests {
 
         let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
         let node = SuccessNode::new(TestState::Complete);
-        concurrent_workflow.register_cloneable_node(TestState::Start, node);
+        concurrent_workflow.register_node(TestState::Start, node);
 
         // Create multiple stores for concurrent execution
-        let stores = vec![
-            MemoryStore::new(),
-            MemoryStore::new(),
-            MemoryStore::new(),
-        ];
+        let stores = vec![MemoryStore::new(), MemoryStore::new(), MemoryStore::new()];
 
         let (results, status) = concurrent_workflow
             .execute_concurrent(stores, WaitStrategy::WaitForever)
@@ -1392,7 +1414,7 @@ mod tests {
 
         let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
         let node = SuccessNode::new(TestState::Complete);
-        concurrent_workflow.register_cloneable_node(TestState::Start, node);
+        concurrent_workflow.register_node(TestState::Start, node);
 
         // Create multiple stores
         let stores = vec![
@@ -1411,13 +1433,13 @@ mod tests {
 
         assert_eq!(results.len(), 5);
         assert_eq!(status.total_workflows, 5);
-        
+
         // Should complete at least the quota
         assert!(status.completed + status.failed >= quota);
-        
+
         // Total should add up correctly
         assert_eq!(
-            status.completed + status.failed + status.cancelled, 
+            status.completed + status.failed + status.cancelled,
             status.total_workflows
         );
     }
@@ -1429,13 +1451,10 @@ mod tests {
 
         let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
         let node = SuccessNode::new(TestState::Complete);
-        concurrent_workflow.register_cloneable_node(TestState::Start, node);
+        concurrent_workflow.register_node(TestState::Start, node);
 
         // Create stores
-        let stores = vec![
-            MemoryStore::new(),
-            MemoryStore::new(),
-        ];
+        let stores = vec![MemoryStore::new(), MemoryStore::new()];
 
         let duration = Duration::from_millis(100);
         let (results, status) = concurrent_workflow
@@ -1445,10 +1464,10 @@ mod tests {
 
         assert_eq!(results.len(), 2);
         assert_eq!(status.total_workflows, 2);
-        
+
         // Should complete within reasonable time since our nodes are fast
         assert!(status.duration <= Duration::from_millis(1000));
-        
+
         // All workflows should complete successfully given the simple nature of our test nodes
         assert_eq!(status.completed, 2);
         assert_eq!(status.failed, 0);
@@ -1461,14 +1480,10 @@ mod tests {
 
         let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
         let node = SuccessNode::new(TestState::Complete);
-        concurrent_workflow.register_cloneable_node(TestState::Start, node);
+        concurrent_workflow.register_node(TestState::Start, node);
 
         // Create stores
-        let stores = vec![
-            MemoryStore::new(),
-            MemoryStore::new(),
-            MemoryStore::new(),
-        ];
+        let stores = vec![MemoryStore::new(), MemoryStore::new(), MemoryStore::new()];
 
         let strategy = WaitStrategy::WaitQuotaOrDuration {
             quota: 2,
@@ -1482,7 +1497,7 @@ mod tests {
 
         assert_eq!(results.len(), 3);
         assert_eq!(status.total_workflows, 3);
-        
+
         // Should complete quickly since our nodes are simple
         assert!(status.duration <= Duration::from_millis(1000));
     }
@@ -1494,13 +1509,10 @@ mod tests {
 
         let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
         let failing_node = FailureNode::new("Test failure");
-        concurrent_workflow.register_cloneable_node(TestState::Start, failing_node);
+        concurrent_workflow.register_node(TestState::Start, failing_node);
 
         // Create stores
-        let stores = vec![
-            MemoryStore::new(),
-            MemoryStore::new(),
-        ];
+        let stores = vec![MemoryStore::new(), MemoryStore::new()];
 
         let (results, status) = concurrent_workflow
             .execute_concurrent(stores, WaitStrategy::WaitForever)
@@ -1547,18 +1559,21 @@ mod tests {
         let template_workflow: Workflow<TestState> = Workflow::new(TestState::Start);
         let node = SuccessNode::new(TestState::Complete);
 
-        let concurrent_workflow = ConcurrentWorkflowBuilder::new(template_workflow)
-            .register_cloneable_node(TestState::Start, node)
-            .build();
+        let mut concurrent_workflow = ConcurrentWorkflowBuilder::new(template_workflow).build();
+        concurrent_workflow.register_node(TestState::Start, node);
 
         assert_eq!(concurrent_workflow.cloneable_nodes.len(), 1);
-        assert!(concurrent_workflow.cloneable_nodes.contains_key(&TestState::Start));
+        assert!(
+            concurrent_workflow
+                .cloneable_nodes
+                .contains_key(&TestState::Start)
+        );
     }
 
     #[tokio::test]
     async fn test_concurrent_workflow_status_tracking() {
         let mut status = ConcurrentWorkflowStatus::new(10);
-        
+
         assert_eq!(status.total_workflows, 10);
         assert_eq!(status.completed, 0);
         assert_eq!(status.failed, 0);
@@ -1570,15 +1585,15 @@ mod tests {
         status.completed = 3;
         status.failed = 2;
         status.cancelled = 1;
-        
+
         assert_eq!(status.running(), 4);
         assert!(!status.is_complete());
-        
+
         // Complete all
         status.completed = 5;
         status.failed = 3;
         status.cancelled = 2;
-        
+
         assert_eq!(status.running(), 0);
         assert!(status.is_complete());
     }
@@ -1590,13 +1605,13 @@ mod tests {
 
         let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
         let data_node = DataStoringNode::new("concurrent_data", "test_value", TestState::Process);
-        concurrent_workflow.register_cloneable_node(TestState::Start, data_node);
+        concurrent_workflow.register_node(TestState::Start, data_node);
 
         // Create stores with different initial data
         let store1 = MemoryStore::new();
         let store2 = MemoryStore::new();
         let store3 = MemoryStore::new();
-        
+
         let stores = vec![store1.clone(), store2.clone(), store3.clone()];
 
         let (results, status) = concurrent_workflow
@@ -1611,7 +1626,7 @@ mod tests {
         let data1: String = store1.get("concurrent_data").unwrap();
         let data2: String = store2.get("concurrent_data").unwrap();
         let data3: String = store3.get("concurrent_data").unwrap();
-        
+
         assert_eq!(data1, "test_value");
         assert_eq!(data2, "test_value");
         assert_eq!(data3, "test_value");
@@ -1642,7 +1657,7 @@ mod tests {
         let failed = WorkflowResult::<TestState>::Failed(CanoError::workflow("test error"));
         let cancelled = WorkflowResult::<TestState>::Cancelled;
 
-        // Just verify they implement Debug (compilation test)  
+        // Just verify they implement Debug (compilation test)
         let _debug_strings = [
             format!("{success:?}"),
             format!("{failed:?}"),

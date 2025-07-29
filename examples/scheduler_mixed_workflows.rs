@@ -102,7 +102,7 @@ async fn main() -> CanoResult<()> {
     // Create concurrent workflow
     let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
     concurrent_workflow
-        .register_cloneable_node(TaskState::Start, SimpleTask::new("ConcurrentTask"));
+        .register_node(TaskState::Start, SimpleTask::new("ConcurrentTask"));
 
     // Schedule concurrent workflows with different strategies
     scheduler.manual_concurrent(
