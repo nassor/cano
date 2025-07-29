@@ -84,7 +84,7 @@ use std::time::Duration;
 
 use crate::MemoryStore;
 use crate::error::CanoError;
-use crate::task::{DefaultTaskParams, Task, TaskConfig, run_with_retries};
+use crate::task::{DefaultTaskParams, Task, TaskConfig};
 
 /// Type alias for trait objects that can store different task types
 ///
@@ -125,6 +125,8 @@ where
     }
 
     async fn run(&self, store: &TStore) -> Result<TState, CanoError> {
+        use crate::task::run_with_retries;
+
         let config = self.config();
         run_with_retries::<TState, TStore, _, _>(&config, || Task::run(self, store)).await
     }
