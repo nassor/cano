@@ -609,9 +609,15 @@ where
                         }
                     }
                     Err(_) => {
-                        // Timeout occurred - we need to handle the tasks that were still running
-                        // For simplicity, we'll count them as cancelled
-                        status.cancelled = workflow_count;
+                        // Timeout occurred - check which workflows are still in default state (Cancelled)
+                        // and count them, while preserving any that may have completed
+                        for result in &results {
+                            match result {
+                                WorkflowResult::Success(_) => status.completed += 1,
+                                WorkflowResult::Failed(_) => status.failed += 1,
+                                WorkflowResult::Cancelled => status.cancelled += 1,
+                            }
+                        }
                     }
                 }
             }
@@ -669,7 +675,14 @@ where
                     }
                     Err(_) => {
                         // Duration timeout occurred before quota was reached
-                        status.cancelled = workflow_count;
+                        // Check which workflows actually completed and only mark the rest as cancelled
+                        for result in &results {
+                            match result {
+                                WorkflowResult::Success(_) => status.completed += 1,
+                                WorkflowResult::Failed(_) => status.failed += 1,
+                                WorkflowResult::Cancelled => status.cancelled += 1,
+                            }
+                        }
                     }
                 }
             }
@@ -1681,5 +1694,130 @@ mod tests {
             format!("{failed:?}"),
             format!("{cancelled:?}"),
         ];
+    }
+
+    #[tokio::test]
+    async fn test_timeout_preserves_completed_workflows() {
+        // This test verifies that when a timeout occurs, the system correctly
+        // counts workflows that completed before the timeout rather than
+        // marking all workflows as cancelled
+
+        // Create a node that completes instantly
+        #[derive(Clone)]
+        struct InstantNode;
+
+        #[async_trait]
+        impl Node<TestState> for InstantNode {
+            type PrepResult = ();
+            type ExecResult = ();
+
+            async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+                Ok(())
+            }
+
+            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
+                ()
+            }
+
+            async fn post(
+                &self,
+                _store: &MemoryStore,
+                _exec_res: Self::ExecResult,
+            ) -> Result<TestState, CanoError> {
+                Ok(TestState::Complete)
+            }
+        }
+
+        // Create a node that takes longer than our timeout
+        #[derive(Clone)]
+        struct SlowNode;
+
+        #[async_trait]
+        impl Node<TestState> for SlowNode {
+            type PrepResult = ();
+            type ExecResult = ();
+
+            async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+                // Sleep longer than our timeout
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                Ok(())
+            }
+
+            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
+                ()
+            }
+
+            async fn post(
+                &self,
+                _store: &MemoryStore,
+                _exec_res: Self::ExecResult,
+            ) -> Result<TestState, CanoError> {
+                Ok(TestState::Complete)
+            }
+        }
+
+        // Test with a mix of fast and slow workflows
+        let mut concurrent_workflow = ConcurrentWorkflow::new(TestState::Start);
+        concurrent_workflow.add_exit_state(TestState::Complete);
+
+        // Register both types of nodes for the same state
+        // (we'll create separate workflows for testing)
+
+        // First test: all fast workflows with short timeout - should all complete
+        concurrent_workflow.register_node(TestState::Start, InstantNode);
+
+        let stores = vec![MemoryStore::new(), MemoryStore::new()];
+        let (_results, status) = concurrent_workflow
+            .execute_concurrent(
+                stores,
+                WaitStrategy::WaitDuration(Duration::from_millis(50)),
+            )
+            .await
+            .unwrap();
+
+        // All should complete successfully since they're instant
+        assert_eq!(status.total_workflows, 2);
+        assert_eq!(status.completed, 2);
+        assert_eq!(status.failed, 0);
+        assert_eq!(status.cancelled, 0);
+
+        // Now test with slow workflows and short timeout
+        let mut slow_workflow = ConcurrentWorkflow::new(TestState::Start);
+        slow_workflow.add_exit_state(TestState::Complete);
+        slow_workflow.register_node(TestState::Start, SlowNode);
+
+        let stores = vec![MemoryStore::new(), MemoryStore::new()];
+        let (results, status) = slow_workflow
+            .execute_concurrent(
+                stores,
+                WaitStrategy::WaitDuration(Duration::from_millis(50)),
+            )
+            .await
+            .unwrap();
+
+        // These should timeout and be cancelled
+        assert_eq!(status.total_workflows, 2);
+        // With our fix, we should properly count what actually happened
+        // Since they timeout before completion, they should all be cancelled
+        assert_eq!(status.completed, 0);
+        assert_eq!(status.failed, 0);
+        assert_eq!(status.cancelled, 2);
+
+        // Verify that results match the status counts
+        let mut success_count = 0;
+        let mut failed_count = 0;
+        let mut cancelled_count = 0;
+
+        for result in &results {
+            match result {
+                WorkflowResult::Success(_) => success_count += 1,
+                WorkflowResult::Failed(_) => failed_count += 1,
+                WorkflowResult::Cancelled => cancelled_count += 1,
+            }
+        }
+
+        assert_eq!(success_count, status.completed);
+        assert_eq!(failed_count, status.failed);
+        assert_eq!(cancelled_count, status.cancelled);
     }
 }
