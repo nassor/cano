@@ -42,7 +42,10 @@ impl Node<TaskState> for DailyTask {
     }
 
     async fn exec(&self, _data: Self::PrepResult) -> Self::ExecResult {
-        println!("📅 Daily task executed at {}", chrono::Utc::now().format("%H:%M:%S"));
+        println!(
+            "📅 Daily task executed at {}",
+            chrono::Utc::now().format("%H:%M:%S")
+        );
     }
 
     async fn post(
@@ -67,7 +70,10 @@ impl Node<TaskState> for HourlyTask {
     }
 
     async fn exec(&self, _data: Self::PrepResult) -> Self::ExecResult {
-        println!("⏰ Hourly task executed at {}", chrono::Utc::now().format("%H:%M:%S"));
+        println!(
+            "⏰ Hourly task executed at {}",
+            chrono::Utc::now().format("%H:%M:%S")
+        );
     }
 
     async fn post(
@@ -92,7 +98,10 @@ impl Node<TaskState> for FrequentTask {
     }
 
     async fn exec(&self, _data: Self::PrepResult) -> Self::ExecResult {
-        println!("🔄 Frequent task executed at {}", chrono::Utc::now().format("%H:%M:%S"));
+        println!(
+            "🔄 Frequent task executed at {}",
+            chrono::Utc::now().format("%H:%M:%S")
+        );
     }
 
     async fn post(

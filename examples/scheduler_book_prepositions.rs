@@ -34,7 +34,7 @@ enum WorkflowPhase {
     Download,
     DownloadComplete,
     DownloadError,
-    
+
     // Analysis workflow states
     Analyze,
     Rank,
@@ -72,14 +72,73 @@ struct BookRanking {
 
 /// Common English prepositions for analysis
 const PREPOSITIONS: &[&str] = &[
-    "aboard", "about", "above", "across", "after", "against", "along", "amid", "among", 
-    "around", "as", "at", "before", "behind", "below", "beneath", "beside", "between", 
-    "beyond", "by", "concerning", "considering", "despite", "down", "during", "except", 
-    "excepting", "excluding", "following", "for", "from", "in", "inside", "into", "like", 
-    "minus", "near", "of", "off", "on", "onto", "opposite", "outside", "over", "past", 
-    "per", "plus", "regarding", "round", "save", "since", "than", "through", "to", 
-    "toward", "towards", "under", "underneath", "unlike", "until", "up", "upon", 
-    "versus", "via", "with", "within", "without",
+    "aboard",
+    "about",
+    "above",
+    "across",
+    "after",
+    "against",
+    "along",
+    "amid",
+    "among",
+    "around",
+    "as",
+    "at",
+    "before",
+    "behind",
+    "below",
+    "beneath",
+    "beside",
+    "between",
+    "beyond",
+    "by",
+    "concerning",
+    "considering",
+    "despite",
+    "down",
+    "during",
+    "except",
+    "excepting",
+    "excluding",
+    "following",
+    "for",
+    "from",
+    "in",
+    "inside",
+    "into",
+    "like",
+    "minus",
+    "near",
+    "of",
+    "off",
+    "on",
+    "onto",
+    "opposite",
+    "outside",
+    "over",
+    "past",
+    "per",
+    "plus",
+    "regarding",
+    "round",
+    "save",
+    "since",
+    "than",
+    "through",
+    "to",
+    "toward",
+    "towards",
+    "under",
+    "underneath",
+    "unlike",
+    "until",
+    "up",
+    "upon",
+    "versus",
+    "via",
+    "with",
+    "within",
+    "without",
 ];
 
 /// Global shared store for inter-workflow communication
@@ -220,7 +279,7 @@ impl Node<WorkflowPhase> for BookDownloadNode {
     /// Preparation: Get next book from the download queue
     async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         let shared_store = self.shared_store.write().await;
-        
+
         // Get the download queue
         let mut queue: Vec<(u32, String, String)> = shared_store
             .get("download_queue")
@@ -264,15 +323,15 @@ impl Node<WorkflowPhase> for BookDownloadNode {
         if let Some(book) = exec_res {
             // Store the book in the shared store
             let shared_store = self.shared_store.write().await;
-            
+
             // Get existing books or create new vector
             let mut books: Vec<Book> = shared_store
                 .get("downloaded_books")
                 .unwrap_or_else(|_| Vec::new());
-            
+
             books.push(book.clone());
             shared_store.put("downloaded_books", books)?;
-            
+
             println!("✅ Stored book: {} in shared store", book.title);
             Ok(WorkflowPhase::DownloadComplete)
         } else {
@@ -552,10 +611,10 @@ impl Node<WorkflowPhase> for BookRankingNode {
     }
 }
 
-/// Create the concurrent download workflow 
+/// Create the concurrent download workflow
 fn create_download_workflow(shared_store: SharedStore) -> ConcurrentWorkflow<WorkflowPhase> {
     let mut concurrent_workflow = ConcurrentWorkflow::new(WorkflowPhase::Download);
-    
+
     // Register the download node (will be cloned for each instance)
     concurrent_workflow
         .register_node(WorkflowPhase::Download, BookDownloadNode::new(shared_store))
@@ -563,28 +622,22 @@ fn create_download_workflow(shared_store: SharedStore) -> ConcurrentWorkflow<Wor
             WorkflowPhase::DownloadComplete,
             WorkflowPhase::DownloadError,
         ]);
-    
+
     concurrent_workflow
 }
 
 /// Create the sequential analysis workflow
 fn create_analysis_workflow(shared_store: SharedStore) -> Workflow<WorkflowPhase> {
     let mut workflow = Workflow::new(WorkflowPhase::Analyze);
-    
+
     workflow
         .register_node(
             WorkflowPhase::Analyze,
             PrepositionAnalysisNode::new(shared_store.clone()),
         )
-        .register_node(
-            WorkflowPhase::Rank,
-            BookRankingNode::new(shared_store),
-        )
-        .add_exit_states(vec![
-            WorkflowPhase::Complete,
-            WorkflowPhase::Error,
-        ]);
-    
+        .register_node(WorkflowPhase::Rank, BookRankingNode::new(shared_store))
+        .add_exit_states(vec![WorkflowPhase::Complete, WorkflowPhase::Error]);
+
     workflow
 }
 
@@ -614,18 +667,18 @@ async fn run_scheduler_based_analysis() -> Result<(), CanoError> {
 
     // Create and register concurrent download workflow
     let download_workflow = create_download_workflow(shared_store.clone());
-    
+
     println!("📥 Registering concurrent download workflow with 12 instances...");
     scheduler.manual_concurrent(
         "book_downloads",
         download_workflow,
-        12, // One instance per book
+        12,                        // One instance per book
         WaitStrategy::WaitForever, // Wait for all downloads to complete
     )?;
 
     // Create and register sequential analysis workflow
     let analysis_workflow = create_analysis_workflow(shared_store.clone());
-    
+
     println!("📊 Registering sequential analysis workflow...");
     scheduler.manual("book_analysis", analysis_workflow)?;
 
@@ -639,24 +692,26 @@ async fn run_scheduler_based_analysis() -> Result<(), CanoError> {
 
     // Wait for downloads to complete
     println!("⏳ Waiting for downloads to complete...");
-    
+
     // Poll for download completion
     let mut download_completed = false;
     let mut check_count = 0;
     const MAX_CHECKS: usize = 60; // 5 minutes max wait
-    
+
     while !download_completed && check_count < MAX_CHECKS {
         tokio::time::sleep(Duration::from_secs(5)).await;
         check_count += 1;
-        
+
         // Check download status
         if let Some(info) = scheduler.status("book_downloads").await {
             match &info.status {
                 cano::scheduler::Status::ConcurrentCompleted(status) => {
                     println!(
                         "📊 Download status: {}/{} completed, {}/{} failed",
-                        status.completed, status.total_workflows,
-                        status.failed, status.total_workflows
+                        status.completed,
+                        status.total_workflows,
+                        status.failed,
+                        status.total_workflows
                     );
                     if status.completed + status.failed >= status.total_workflows {
                         download_completed = true;
@@ -665,7 +720,9 @@ async fn run_scheduler_based_analysis() -> Result<(), CanoError> {
                 cano::scheduler::Status::ConcurrentRunning(status) => {
                     println!(
                         "📥 Downloads in progress: {}/{} completed, {} running",
-                        status.completed, status.total_workflows, status.running()
+                        status.completed,
+                        status.total_workflows,
+                        status.running()
                     );
                 }
                 _ => {
@@ -686,9 +743,12 @@ async fn run_scheduler_based_analysis() -> Result<(), CanoError> {
         let books: Vec<Book> = shared_store_guard
             .get("downloaded_books")
             .unwrap_or_else(|_| Vec::new());
-        
-        println!("✅ Downloads completed! {} books successfully downloaded", books.len());
-        
+
+        println!(
+            "✅ Downloads completed! {} books successfully downloaded",
+            books.len()
+        );
+
         if books.is_empty() {
             eprintln!("❌ No books were successfully downloaded");
             return Err(CanoError::workflow("No books downloaded"));
@@ -701,14 +761,14 @@ async fn run_scheduler_based_analysis() -> Result<(), CanoError> {
 
     // Wait for analysis to complete
     println!("⏳ Waiting for analysis to complete...");
-    
+
     let mut analysis_completed = false;
     check_count = 0;
-    
+
     while !analysis_completed && check_count < MAX_CHECKS {
         tokio::time::sleep(Duration::from_secs(2)).await;
         check_count += 1;
-        
+
         // Check analysis status
         if let Some(info) = scheduler.status("book_analysis").await {
             match &info.status {
@@ -755,7 +815,7 @@ async fn run_scheduler_based_analysis() -> Result<(), CanoError> {
                     bottom.analysis.title, bottom.analysis.preposition_count
                 );
             }
-            
+
             println!("\n✨ Architecture Benefits Demonstrated:");
             println!("  • Concurrent workflow with work queue maximized download throughput");
             println!("  • Sequential analysis ensured data consistency");

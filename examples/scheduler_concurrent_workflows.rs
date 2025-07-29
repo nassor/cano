@@ -142,7 +142,7 @@ async fn main() -> CanoResult<()> {
     println!("This demo shows multiple instances of the same workflow running concurrently.");
     println!("Watch for overlapping execution messages and active instance counts!\n");
 
-        // Create a long-running workflow (5 seconds execution time)
+    // Create a long-running workflow (5 seconds execution time)
     let mut long_task_flow = Workflow::new(TaskState::Execute);
     long_task_flow
         .register_node(TaskState::Execute, LongRunningTask::new("LongTask", 7000))

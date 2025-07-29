@@ -80,9 +80,9 @@ impl SimdMatrix {
     /// Standard scalar matrix multiplication for comparison
     fn multiply_scalar(&self, other: &SimdMatrix) -> SimdMatrix {
         assert_eq!(self.cols, other.rows);
-        
+
         let mut result = SimdMatrix::new(self.rows, other.cols);
-        
+
         for i in 0..self.rows {
             for j in 0..other.cols {
                 let mut sum = 0.0;
@@ -92,47 +92,47 @@ impl SimdMatrix {
                 result.set(i, j, sum);
             }
         }
-        
+
         result
     }
 
     /// SIMD-accelerated matrix multiplication
     fn multiply_simd(&self, other: &SimdMatrix) -> SimdMatrix {
         assert_eq!(self.cols, other.rows);
-        
+
         let mut result = SimdMatrix::new(self.rows, other.cols);
-        
+
         // Process 8 elements at a time using SIMD
         for i in 0..self.rows {
             for j in (0..other.cols).step_by(8) {
                 let mut sum = f32x8::ZERO;
-                
+
                 for k in 0..self.cols {
                     let a_val = f32x8::splat(self.get(i, k));
-                    
+
                     // Load 8 consecutive elements from matrix B
                     let remaining = (other.cols - j).min(8);
                     let mut b_vals = [0.0f32; 8];
-                    for l in 0..remaining {
+                    for (l, item) in b_vals.iter_mut().enumerate().take(remaining) {
                         if j + l < other.cols {
-                            b_vals[l] = other.get(k, j + l);
+                            *item = other.get(k, j + l);
                         }
                     }
                     let b_vec = f32x8::from(b_vals);
-                    
+
                     sum += a_val * b_vec;
                 }
-                
+
                 // Store the results back
                 let sum_array: [f32; 8] = sum.into();
-                for l in 0..8 {
+                for (l, &value) in sum_array.iter().enumerate() {
                     if j + l < other.cols {
-                        result.set(i, j + l, sum_array[l]);
+                        result.set(i, j + l, value);
                     }
                 }
             }
         }
-        
+
         result
     }
 
@@ -140,30 +140,26 @@ impl SimdMatrix {
     fn add_simd(&self, other: &SimdMatrix) -> SimdMatrix {
         assert_eq!(self.rows, other.rows);
         assert_eq!(self.cols, other.cols);
-        
+
         let mut result = SimdMatrix::new(self.rows, self.cols);
-        
+
         // Process 8 elements at a time
         for i in (0..self.data.len()).step_by(8) {
             let remaining = (self.data.len() - i).min(8);
             let mut a_vals = [0.0f32; 8];
             let mut b_vals = [0.0f32; 8];
-            
-            for j in 0..remaining {
-                a_vals[j] = self.data[i + j];
-                b_vals[j] = other.data[i + j];
-            }
-            
+
+            a_vals[..remaining].copy_from_slice(&self.data[i..(remaining + i)]);
+            b_vals[..remaining].copy_from_slice(&other.data[i..(remaining + i)]);
+
             let a_vec = f32x8::from(a_vals);
             let b_vec = f32x8::from(b_vals);
             let sum_vec = a_vec + b_vec;
             let sum_array: [f32; 8] = sum_vec.into();
-            
-            for j in 0..remaining {
-                result.data[i + j] = sum_array[j];
-            }
+
+            result.data[i..(remaining + i)].copy_from_slice(&sum_array[..remaining]);
         }
-        
+
         result
     }
 
@@ -171,24 +167,20 @@ impl SimdMatrix {
     fn scale_simd(&self, scalar: f32) -> SimdMatrix {
         let mut result = SimdMatrix::new(self.rows, self.cols);
         let scalar_vec = f32x8::splat(scalar);
-        
+
         for i in (0..self.data.len()).step_by(8) {
             let remaining = (self.data.len() - i).min(8);
             let mut vals = [0.0f32; 8];
-            
-            for j in 0..remaining {
-                vals[j] = self.data[i + j];
-            }
-            
+
+            vals[..remaining].copy_from_slice(&self.data[i..(remaining + i)]);
+
             let vec = f32x8::from(vals);
             let scaled = vec * scalar_vec;
             let scaled_array: [f32; 8] = scaled.into();
-            
-            for j in 0..remaining {
-                result.data[i + j] = scaled_array[j];
-            }
+
+            result.data[i..(remaining + i)].copy_from_slice(&scaled_array[..remaining]);
         }
-        
+
         result
     }
 }
@@ -227,35 +219,42 @@ impl Node<PipelineState> for MatrixGenerator {
     }
 
     async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
-        println!("🔢 Preparing to generate {} {}x{} matrices...", self.count, self.size, self.size);
+        println!(
+            "🔢 Preparing to generate {} {}x{} matrices...",
+            self.count, self.size, self.size
+        );
         Ok(())
     }
 
     async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
         println!("🔢 Generating matrices...");
-        
+
         let mut matrices = Vec::new();
-        
+
         for i in 0..self.count {
             let mut data = Vec::with_capacity(self.size * self.size);
-            
+
             // Generate random matrix data
             for _ in 0..(self.size * self.size) {
                 data.push(rand::random::<f32>() * 10.0);
             }
-            
+
             let matrix = SimdMatrix::from_data(data, self.size, self.size);
             matrices.push(matrix);
-            
+
             if i % 10 == 0 {
                 println!("  Generated matrix {}/{}", i + 1, self.count);
             }
         }
-        
+
         matrices
     }
 
-    async fn post(&self, store: &MemoryStore, exec_res: Self::ExecResult) -> Result<PipelineState, CanoError> {
+    async fn post(
+        &self,
+        store: &MemoryStore,
+        exec_res: Self::ExecResult,
+    ) -> Result<PipelineState, CanoError> {
         store.put("matrices", exec_res)?;
         println!("✅ Matrix generation complete!");
         Ok(PipelineState::Multiply)
@@ -284,9 +283,9 @@ impl Node<PipelineState> for SimdMatrixMultiplier {
     async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
         println!("🧮 Performing SIMD matrix multiplications...");
         let start = Instant::now();
-        
+
         let mut results = Vec::new();
-        
+
         // Multiply consecutive pairs of matrices
         for chunk in prep_res.chunks(2) {
             if chunk.len() == 2 {
@@ -294,15 +293,22 @@ impl Node<PipelineState> for SimdMatrixMultiplier {
                 results.push(result);
             }
         }
-        
+
         let duration = start.elapsed();
-        println!("✅ Matrix multiplications complete in {:?} (SIMD accelerated)", duration);
+        println!(
+            "✅ Matrix multiplications complete in {:?} (SIMD accelerated)",
+            duration
+        );
         println!("  Processed {} matrix pairs", results.len());
-        
+
         results
     }
 
-    async fn post(&self, store: &MemoryStore, exec_res: Self::ExecResult) -> Result<PipelineState, CanoError> {
+    async fn post(
+        &self,
+        store: &MemoryStore,
+        exec_res: Self::ExecResult,
+    ) -> Result<PipelineState, CanoError> {
         store.put("multiplied_matrices", exec_res)?;
         Ok(PipelineState::Transform)
     }
@@ -336,15 +342,18 @@ impl Node<PipelineState> for SimdMatrixTransformer {
     }
 
     async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
-        println!("🔄 Applying SIMD transformations (scale factor: {})...", self.scale_factor);
+        println!(
+            "🔄 Applying SIMD transformations (scale factor: {})...",
+            self.scale_factor
+        );
         let start = Instant::now();
-        
+
         let mut results: Vec<SimdMatrix> = Vec::new();
-        
+
         for (i, matrix) in prep_res.iter().enumerate() {
             // Scale the matrix using SIMD
             let scaled = matrix.scale_simd(self.scale_factor);
-            
+
             // If we have multiple matrices, add them together using SIMD
             if i > 0 && !results.is_empty() {
                 let last_idx = results.len() - 1;
@@ -354,15 +363,22 @@ impl Node<PipelineState> for SimdMatrixTransformer {
                 results.push(scaled);
             }
         }
-        
+
         let duration = start.elapsed();
-        println!("✅ Matrix transformations complete in {:?} (SIMD accelerated)", duration);
+        println!(
+            "✅ Matrix transformations complete in {:?} (SIMD accelerated)",
+            duration
+        );
         println!("  Processed {} matrices", prep_res.len());
-        
+
         results
     }
 
-    async fn post(&self, store: &MemoryStore, exec_res: Self::ExecResult) -> Result<PipelineState, CanoError> {
+    async fn post(
+        &self,
+        store: &MemoryStore,
+        exec_res: Self::ExecResult,
+    ) -> Result<PipelineState, CanoError> {
         store.put("transformed_matrices", exec_res)?;
         Ok(PipelineState::Statistics)
     }
@@ -390,68 +406,76 @@ impl Node<PipelineState> for SimdStatisticsCalculator {
     async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
         println!("📊 Calculating matrix statistics using SIMD...");
         let start = Instant::now();
-        
+
         let mut results = Vec::new();
-        
+
         for matrix in prep_res {
             // Calculate sum using SIMD
             let mut sum = f32x8::ZERO;
             let data_len = matrix.data.len();
-            
+
             for i in (0..data_len).step_by(8) {
                 let remaining = (data_len - i).min(8);
                 let mut vals = [0.0f32; 8];
-                
-                for j in 0..remaining {
-                    vals[j] = matrix.data[i + j];
-                }
-                
+
+                vals[..remaining].copy_from_slice(&matrix.data[i..(remaining + i)]);
+
                 let vec = f32x8::from(vals);
                 sum += vec;
             }
-            
+
             // Sum all elements in the SIMD vector
             let sum_array: [f32; 8] = sum.into();
             let total_sum = sum_array.iter().sum::<f32>();
             let mean = total_sum / data_len as f32;
-            
+
             // Calculate variance using SIMD
             let mean_vec = f32x8::splat(mean);
             let mut variance_sum = f32x8::ZERO;
-            
+
             for i in (0..data_len).step_by(8) {
                 let remaining = (data_len - i).min(8);
                 let mut vals = [0.0f32; 8];
-                
-                for j in 0..remaining {
-                    vals[j] = matrix.data[i + j];
-                }
-                
+
+                vals[..remaining].copy_from_slice(&matrix.data[i..(remaining + i)]);
+
                 let vec = f32x8::from(vals);
                 let diff = vec - mean_vec;
                 variance_sum += diff * diff;
             }
-            
+
             let variance_array: [f32; 8] = variance_sum.into();
             let total_variance = variance_array.iter().sum::<f32>() / data_len as f32;
-            
+
             results.push((total_sum, mean, total_variance));
         }
-        
+
         let duration = start.elapsed();
-        println!("✅ Statistics calculation complete in {:?} (SIMD accelerated)", duration);
-        
+        println!(
+            "✅ Statistics calculation complete in {:?} (SIMD accelerated)",
+            duration
+        );
+
         results
     }
 
-    async fn post(&self, store: &MemoryStore, exec_res: Self::ExecResult) -> Result<PipelineState, CanoError> {
+    async fn post(
+        &self,
+        store: &MemoryStore,
+        exec_res: Self::ExecResult,
+    ) -> Result<PipelineState, CanoError> {
         store.put("statistics", exec_res.clone())?;
-        
+
         for (i, (sum, mean, variance)) in exec_res.iter().enumerate() {
-            println!("  Matrix {}: sum={:.2}, mean={:.2}, variance={:.2}", 
-                     i + 1, sum, mean, variance);
+            println!(
+                "  Matrix {}: sum={:.2}, mean={:.2}, variance={:.2}",
+                i + 1,
+                sum,
+                mean,
+                variance
+            );
         }
-        
+
         Ok(PipelineState::Complete)
     }
 }
@@ -489,11 +513,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let _simd_result = test_matrix_a.multiply_simd(&test_matrix_b);
     let simd_duration = simd_start.elapsed();
 
-    println!("  Scalar 16x16 matrix multiplication: {:?}", scalar_duration);
-    println!("  SIMD 16x16 matrix multiplication:   {:?}", simd_duration);
+    println!("  Scalar 16x16 matrix multiplication: {scalar_duration:?}");
+    println!("  SIMD 16x16 matrix multiplication:   {simd_duration:?}");
     if scalar_duration > simd_duration {
         let speedup = scalar_duration.as_nanos() as f64 / simd_duration.as_nanos() as f64;
-        println!("  🚀 SIMD speedup: {:.2}x faster!\n", speedup);
+        println!("  🚀 SIMD speedup: {speedup:.2}x faster!\n");
     } else {
         println!("  📊 Results may vary based on CPU architecture\n");
     }
@@ -511,7 +535,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .register_node(PipelineState::Statistics, SimdStatisticsCalculator)
         .add_exit_states(vec![PipelineState::Complete, PipelineState::Error]);
 
-    println!("🔧 Pipeline configured with {} nodes", workflow.state_nodes.len());
+    println!(
+        "🔧 Pipeline configured with {} nodes",
+        workflow.state_nodes.len()
+    );
     println!("Pipeline: Generate → Multiply → Transform → Statistics → Complete\n");
 
     // Execute the workflow
@@ -520,10 +547,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let total_duration = start_time.elapsed();
     println!("\n🎉 SIMD Matrix Processing Pipeline completed!");
-    println!("Total execution time: {:?}", total_duration);
-    
+    println!("Total execution time: {total_duration:?}");
+
     if let Ok(stats) = store.get::<Vec<(f32, f32, f32)>>("statistics") {
-        println!("📈 Final results: {} statistical summaries generated", stats.len());
+        println!(
+            "📈 Final results: {} statistical summaries generated",
+            stats.len()
+        );
     }
 
     println!("\n💡 This example showcased:");
