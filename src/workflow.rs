@@ -456,6 +456,33 @@ where
         Ok(workflow)
     }
 
+    /// Helper function to process a task result and update status accordingly
+    ///
+    /// This function handles both successful workflow results and task join errors,
+    /// updating the status counters and results vector.
+    fn process_task_result(
+        task_result: Result<WorkflowResult<TState>, tokio::task::JoinError>,
+        index: usize,
+        results: &mut [WorkflowResult<TState>],
+        status: &mut ConcurrentWorkflowStatus,
+    ) {
+        match task_result {
+            Ok(workflow_result) => {
+                match &workflow_result {
+                    WorkflowResult::Success(_) => status.completed += 1,
+                    WorkflowResult::Failed(_) => status.failed += 1,
+                    WorkflowResult::Cancelled => status.cancelled += 1,
+                }
+                results[index] = workflow_result;
+            }
+            Err(_) => {
+                results[index] =
+                    WorkflowResult::Failed(CanoError::node_execution("Task join error"));
+                status.failed += 1;
+            }
+        }
+    }
+
     /// Execute multiple workflow instances concurrently with the specified wait strategy
     ///
     /// This method creates separate workflow instances and executes them in parallel,
@@ -513,22 +540,8 @@ where
             WaitStrategy::WaitForever => {
                 // Wait for all tasks to complete
                 for (index, task) in tasks.into_iter().enumerate() {
-                    match task.await {
-                        Ok(result) => {
-                            match &result {
-                                WorkflowResult::Success(_) => status.completed += 1,
-                                WorkflowResult::Failed(_) => status.failed += 1,
-                                WorkflowResult::Cancelled => status.cancelled += 1,
-                            }
-                            results[index] = result;
-                        }
-                        Err(_) => {
-                            results[index] = WorkflowResult::Failed(CanoError::node_execution(
-                                "Task join error",
-                            ));
-                            status.failed += 1;
-                        }
-                    }
+                    let task_result = task.await;
+                    Self::process_task_result(task_result, index, &mut results, &mut status);
                 }
             }
 
@@ -542,24 +555,8 @@ where
                         futures::future::select_all(pending_tasks).await;
                     pending_tasks = remaining;
 
-                    match result {
-                        Ok(workflow_result) => {
-                            match &workflow_result {
-                                WorkflowResult::Success(_) => status.completed += 1,
-                                WorkflowResult::Failed(_) => status.failed += 1,
-                                WorkflowResult::Cancelled => status.cancelled += 1,
-                            }
-                            results[index] = workflow_result;
-                            completed_count += 1;
-                        }
-                        Err(_) => {
-                            results[index] = WorkflowResult::Failed(CanoError::node_execution(
-                                "Task join error",
-                            ));
-                            status.failed += 1;
-                            completed_count += 1;
-                        }
-                    }
+                    Self::process_task_result(result, index, &mut results, &mut status);
+                    completed_count += 1;
                 }
 
                 // Cancel remaining tasks
@@ -590,22 +587,7 @@ where
                     Ok(completed_tasks) => {
                         // All tasks completed within the timeout
                         for (index, result) in completed_tasks {
-                            match result {
-                                Ok(workflow_result) => {
-                                    match &workflow_result {
-                                        WorkflowResult::Success(_) => status.completed += 1,
-                                        WorkflowResult::Failed(_) => status.failed += 1,
-                                        WorkflowResult::Cancelled => status.cancelled += 1,
-                                    }
-                                    results[index] = workflow_result;
-                                }
-                                Err(_) => {
-                                    results[index] = WorkflowResult::Failed(
-                                        CanoError::node_execution("Task join error"),
-                                    );
-                                    status.failed += 1;
-                                }
-                            }
+                            Self::process_task_result(result, index, &mut results, &mut status);
                         }
                     }
                     Err(_) => {
@@ -651,22 +633,7 @@ where
                     Ok(completed_tasks) => {
                         // Quota was reached within the timeout
                         for (index, result) in completed_tasks {
-                            match result {
-                                Ok(workflow_result) => {
-                                    match &workflow_result {
-                                        WorkflowResult::Success(_) => status.completed += 1,
-                                        WorkflowResult::Failed(_) => status.failed += 1,
-                                        WorkflowResult::Cancelled => status.cancelled += 1,
-                                    }
-                                    results[index] = workflow_result;
-                                }
-                                Err(_) => {
-                                    results[index] = WorkflowResult::Failed(
-                                        CanoError::node_execution("Task join error"),
-                                    );
-                                    status.failed += 1;
-                                }
-                            }
+                            Self::process_task_result(result, index, &mut results, &mut status);
                         }
 
                         // Mark uncompleted workflows as cancelled
