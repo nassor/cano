@@ -4,8 +4,14 @@
 //! 1. **GeneratorNode**: Creates a random vector of u32 numbers, filters out odd numbers
 //! 2. **CounterNode**: Counts the filtered numbers and cleans up store
 //!
-//! The workflow showcases the three-phase lifecycle (prep, exec, post) and
-//! inter-node communication through shared store using the Workflow state machine.
+//! The workflow showcases:
+//! - **Node Implementation**: Structured three-phase lifecycle (prep, exec, post)
+//! - **State Machine**: Using enums to control workflow transitions
+//! - **Data Sharing**: Inter-node communication through shared store
+//! - **Registration**: Using the unified `.register()` method for nodes
+//!
+//! This example uses the **Node trait** for structured processing with retry capabilities.
+//! For simpler use cases, see task-based examples that use the **Task trait**.
 //!
 //! Run with:
 //! ```bash

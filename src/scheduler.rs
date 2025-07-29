@@ -1,7 +1,8 @@
 //! # Simplified Scheduler API
 //!
 //! A simplified scheduler that focuses on ease of use while maintaining
-//! the core scheduling functionality.
+//! the core scheduling functionality. Supports both Tasks and Nodes with
+//! unified registration using the `.register()` method.
 //!
 //! ## 🚀 Quick Start
 //!

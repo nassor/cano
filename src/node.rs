@@ -1,7 +1,16 @@
 //! # Node API - The Heart of Cano Workflows
 //!
-//! This module provides the core [`Node`] trait, which defines the interface for workflow processing.
-//! The unified approach offers several advantages:
+//! This module provides the core [`Node`] trait, which defines the interface for structured workflow processing.
+//! Nodes are ideal for production workloads that need retry strategies and structured processing phases.
+//!
+//! ## 🎯 Task vs Node - Choose the Right Tool
+//!
+//! - **Use [`Task`]** for simple processing with maximum flexibility - single `run()` method
+//! - **Use [`Node`]** for structured processing with built-in retry strategies - three-phase lifecycle
+//!
+//! **Every [`Node`] automatically implements [`Task`]**, so you can mix and match in the same workflow.
+//!
+//! ## ✨ Unified API Benefits
 //!
 //! - **Simpler API**: One trait to learn, not a hierarchy of traits
 //! - **Type Safety**: Return enum values instead of strings for workflow control

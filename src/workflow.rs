@@ -1,7 +1,8 @@
 //! # Workflow API - Build Simple Workflows
 //!
 //! This module provides the core [`Workflow`] type for building async workflow systems.
-//! It includes state machine-driven workflow execution with type-safe routing.
+//! It includes state machine-driven workflow execution with type-safe routing and supports
+//! both Tasks and Nodes for maximum flexibility.
 //!
 //! ## 🎯 Core Concepts
 //!
@@ -9,27 +10,34 @@
 //!
 //! The [`Workflow`] API provides a state machine-driven approach to workflow orchestration:
 //! - Define your workflow states using custom enums
-//! - Register nodes for each state
-//! - Set up state transitions based on node outcomes
+//! - Register Tasks or Nodes for each state using the unified `.register()` method
+//! - Set up state transitions based on Task/Node outcomes
 //! - Configure exit states to terminate the workflow
 //!
-//! ### Node Trait - Your Custom Logic
+//! ### Tasks & Nodes - Your Custom Logic
 //!
-//! The node trait is where you implement your custom processing logic.
-//! Every node follows a simple three-phase lifecycle:
+//! Choose the right processing approach for your needs:
 //!
+//! #### Tasks
+//! Simple, flexible interface with a single `run()` method:
+//! - Perfect for prototypes and simple operations
+//! - Maximum flexibility in implementation
+//! - Direct control over execution flow
+//!
+//! #### Nodes
+//! Structured three-phase lifecycle for production workloads:
 //! 1. **Prep**: Load data, validate inputs, setup resources
 //! 2. **Exec**: Core processing logic (with automatic retry support)
 //! 3. **Post**: Store results, cleanup, determine next action
 //!
-//! Your custom nodes implement these three phases with their specific business logic.
+//! **Every Node automatically implements Task**, so you can mix both in the same workflow.
 //!
 //! ## 🚀 Advanced Features
 //!
 //! ### Type-Safe State Routing
 //!
-//! Flows use user-defined enums for state management and routing.
-//! Your nodes return enum values that determine the next state to execute,
+//! Workflows use user-defined enums for state management and routing.
+//! Your Tasks and Nodes return enum values that determine the next state to execute,
 //! providing compile-time safety and clear workflow logic.
 //!
 //! ### Exit State Management
