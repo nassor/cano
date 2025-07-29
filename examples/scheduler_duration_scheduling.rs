@@ -123,17 +123,17 @@ async fn main() -> CanoResult<()> {
     // Create workflows with different durations
     let mut daily_flow = Workflow::new(TaskState::Start);
     daily_flow
-        .register_node(TaskState::Start, DailyTask)
+        .register(TaskState::Start, DailyTask)
         .add_exit_state(TaskState::Complete);
 
     let mut hourly_flow = Workflow::new(TaskState::Start);
     hourly_flow
-        .register_node(TaskState::Start, HourlyTask)
+        .register(TaskState::Start, HourlyTask)
         .add_exit_state(TaskState::Complete);
 
     let mut frequent_flow = Workflow::new(TaskState::Start);
     frequent_flow
-        .register_node(TaskState::Start, FrequentTask)
+        .register(TaskState::Start, FrequentTask)
         .add_exit_state(TaskState::Complete);
 
     // Schedule workflows with different durations

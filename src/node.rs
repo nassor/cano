@@ -1,7 +1,16 @@
 //! # Node API - The Heart of Cano Workflows
 //!
-//! This module provides the core [`Node`] trait, which defines the interface for workflow processing.
-//! The unified approach offers several advantages:
+//! This module provides the core [`Node`] trait, which defines the interface for structured workflow processing.
+//! Nodes are ideal for production workloads that need retry strategies and structured processing phases.
+//!
+//! ## 🎯 Task vs Node - Choose the Right Tool
+//!
+//! - **Use [`Task`]** for simple processing with maximum flexibility - single `run()` method
+//! - **Use [`Node`]** for structured processing with built-in retry strategies - three-phase lifecycle
+//!
+//! **Every [`Node`] automatically implements [`Task`]**, so you can mix and match in the same workflow.
+//!
+//! ## ✨ Unified API Benefits
 //!
 //! - **Simpler API**: One trait to learn, not a hierarchy of traits
 //! - **Type Safety**: Return enum values instead of strings for workflow control
@@ -19,14 +28,13 @@
 //!
 //! - Nodes execute with minimal overhead for maximum throughput
 //! - Use async operations for I/O bound work
-//! - Implement retry logic in NodeConfig for resilience
+//! - Implement retry logic in TaskConfig for resilience
 
 use crate::error::CanoError;
 use crate::store::MemoryStore;
+use crate::task::TaskConfig;
 use async_trait::async_trait;
-use rand::Rng;
 use std::collections::HashMap;
-use std::time::Duration; // Add this to Cargo.toml dependencies
 
 /// Simple key-value parameters for node configuration
 ///
@@ -39,181 +47,6 @@ pub type DefaultParams = HashMap<String, String>;
 /// This type represents the result of a node's execution phase. It uses `Box<dyn Any>`
 /// to allow nodes to return any type while maintaining type erasure for dynamic workflows.
 pub type DefaultNodeResult = Result<Box<dyn std::any::Any + Send + Sync>, CanoError>;
-
-/// Retry modes for node execution
-///
-/// Defines different retry strategies that can be used when node execution fails.
-#[derive(Debug, Clone)]
-pub enum RetryMode {
-    /// No retries - fail immediately on first error
-    None,
-
-    /// Fixed number of retries with constant delay
-    ///
-    /// # Fields
-    /// - `retries`: Number of retry attempts
-    /// - `delay`: Fixed delay between attempts
-    Fixed { retries: usize, delay: Duration },
-
-    /// Exponential backoff with optional jitter
-    ///
-    /// Implements exponential backoff: delay = base_delay * multiplier^attempt + jitter
-    ///
-    /// # Fields
-    /// - `max_retries`: Maximum number of retry attempts
-    /// - `base_delay`: Initial delay duration
-    /// - `multiplier`: Exponential multiplier (typically 2.0)
-    /// - `max_delay`: Maximum delay cap to prevent excessive waits
-    /// - `jitter`: Add randomness to prevent thundering herd (0.0 to 1.0)
-    ExponentialBackoff {
-        max_retries: usize,
-        base_delay: Duration,
-        multiplier: f64,
-        max_delay: Duration,
-        jitter: f64,
-    },
-}
-
-impl RetryMode {
-    /// Create a fixed retry mode with specified retries and delay
-    pub fn fixed(retries: usize, delay: Duration) -> Self {
-        Self::Fixed { retries, delay }
-    }
-
-    /// Create an exponential backoff retry mode with sensible defaults
-    ///
-    /// Uses base_delay=100ms, multiplier=2.0, max_delay=30s, jitter=0.1
-    pub fn exponential(max_retries: usize) -> Self {
-        Self::ExponentialBackoff {
-            max_retries,
-            base_delay: Duration::from_millis(100),
-            multiplier: 2.0,
-            max_delay: Duration::from_secs(30),
-            jitter: 0.1,
-        }
-    }
-
-    /// Create a custom exponential backoff retry mode
-    pub fn exponential_custom(
-        max_retries: usize,
-        base_delay: Duration,
-        multiplier: f64,
-        max_delay: Duration,
-        jitter: f64,
-    ) -> Self {
-        Self::ExponentialBackoff {
-            max_retries,
-            base_delay,
-            multiplier,
-            max_delay,
-            jitter: jitter.clamp(0.0, 1.0), // Ensure jitter is between 0 and 1
-        }
-    }
-
-    /// Get the maximum number of attempts (initial + retries)
-    pub fn max_attempts(&self) -> usize {
-        match self {
-            Self::None => 1,
-            Self::Fixed { retries, .. } => retries + 1,
-            Self::ExponentialBackoff { max_retries, .. } => max_retries + 1,
-        }
-    }
-
-    /// Calculate delay for a specific attempt number (0-based)
-    pub fn delay_for_attempt(&self, attempt: usize) -> Option<Duration> {
-        match self {
-            Self::None => None,
-            Self::Fixed { retries, delay } => {
-                if attempt < *retries {
-                    Some(*delay)
-                } else {
-                    None
-                }
-            }
-            Self::ExponentialBackoff {
-                max_retries,
-                base_delay,
-                multiplier,
-                max_delay,
-                jitter,
-            } => {
-                if attempt < *max_retries {
-                    let base_ms = base_delay.as_millis() as f64;
-                    let exponential_delay = base_ms * multiplier.powi(attempt as i32);
-                    let capped_delay = exponential_delay.min(max_delay.as_millis() as f64);
-
-                    // Add jitter: delay * (1 ± jitter * random_factor)
-                    let jitter_factor = if *jitter > 0.0 {
-                        let mut rng = rand::rng();
-                        let random_factor: f64 = rng.random_range(-1.0..=1.0);
-                        1.0 + (jitter * random_factor)
-                    } else {
-                        1.0
-                    };
-
-                    let final_delay = (capped_delay * jitter_factor).max(0.0) as u64;
-                    Some(Duration::from_millis(final_delay))
-                } else {
-                    None
-                }
-            }
-        }
-    }
-}
-
-impl Default for RetryMode {
-    fn default() -> Self {
-        Self::ExponentialBackoff {
-            max_retries: 3,
-            base_delay: Duration::from_millis(100),
-            multiplier: 2.0,
-            max_delay: Duration::from_secs(30),
-            jitter: 0.1,
-        }
-    }
-}
-
-/// Node configuration for retry behavior and parameters
-///
-/// This struct provides configuration for node execution behavior,
-/// including retry logic and custom parameters.
-#[derive(Clone, Default)]
-pub struct NodeConfig {
-    /// Retry strategy for failed executions
-    pub retry_mode: RetryMode,
-}
-
-impl NodeConfig {
-    /// Create a new NodeConfig with default configuration
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Create a minimal configuration with no retries
-    ///
-    /// Useful for nodes that should fail fast without any retry attempts.
-    pub fn minimal() -> Self {
-        Self {
-            retry_mode: RetryMode::None,
-        }
-    }
-
-    /// Set the retry mode for this configuration
-    pub fn with_retry(mut self, retry_mode: RetryMode) -> Self {
-        self.retry_mode = retry_mode;
-        self
-    }
-
-    /// Convenience method for fixed retry configuration
-    pub fn with_fixed_retry(self, retries: usize, delay: Duration) -> Self {
-        self.with_retry(RetryMode::fixed(retries, delay))
-    }
-
-    /// Convenience method for exponential backoff retry configuration
-    pub fn with_exponential_retry(self, max_retries: usize) -> Self {
-        self.with_retry(RetryMode::exponential(max_retries))
-    }
-}
 
 /// Node trait for workflow processing
 ///
@@ -257,8 +90,8 @@ impl NodeConfig {
 ///     type PrepResult = String;
 ///     type ExecResult = bool;
 ///
-///     fn config(&self) -> NodeConfig {
-///         NodeConfig::minimal()  // Use minimal retries for fast execution
+///     fn config(&self) -> TaskConfig {
+///         TaskConfig::minimal()  // Use minimal retries for fast execution
 ///     }
 ///
 ///     async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
@@ -301,16 +134,16 @@ where
 
     /// Get the node configuration that controls execution behavior
     ///
-    /// Returns the NodeConfig that determines how this node should be executed.
-    /// The default implementation returns `NodeConfig::default()` which configures
+    /// Returns the TaskConfig that determines how this node should be executed.
+    /// The default implementation returns `TaskConfig::default()` which configures
     /// the node with standard retry logic.
     ///
     /// Override this method to customize execution behavior:
-    /// - Use `NodeConfig::minimal()` for fast-failing nodes with minimal retries
-    /// - Use `NodeConfig::new().with_fixed_retry(n, duration)` for custom retry behavior
+    /// - Use `TaskConfig::minimal()` for fast-failing nodes with minimal retries
+    /// - Use `TaskConfig::new().with_fixed_retry(n, duration)` for custom retry behavior
     /// - Return a custom configuration with specific retry/parameter settings
-    fn config(&self) -> NodeConfig {
-        NodeConfig::default()
+    fn config(&self) -> TaskConfig {
+        TaskConfig::default()
     }
 
     /// Preparation phase - load data and setup resources
@@ -367,7 +200,7 @@ where
     async fn run_with_retries(
         &self,
         store: &TStore,
-        config: &NodeConfig,
+        config: &TaskConfig,
     ) -> Result<TState, CanoError> {
         let max_attempts = config.retry_mode.max_attempts();
         let mut attempt = 0;
@@ -446,9 +279,11 @@ pub type NodeObject<TState> = dyn DynNode<TState> + Send + Sync;
 mod tests {
     use super::*;
     use crate::store::{KeyValueStore, MemoryStore};
+    use crate::task::RetryMode;
     use async_trait::async_trait;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
     use tokio;
 
     // Test enum for node return values
@@ -847,32 +682,32 @@ mod tests {
 
     #[test]
     fn test_node_config_creation() {
-        let config = NodeConfig::new();
+        let config = TaskConfig::new();
         assert_eq!(config.retry_mode.max_attempts(), 4);
     }
 
     #[test]
     fn test_node_config_default() {
-        let config = NodeConfig::default();
+        let config = TaskConfig::default();
         assert_eq!(config.retry_mode.max_attempts(), 4);
     }
 
     #[test]
     fn test_node_config_minimal() {
-        let config = NodeConfig::minimal();
+        let config = TaskConfig::minimal();
         assert_eq!(config.retry_mode.max_attempts(), 1);
     }
 
     #[test]
     fn test_node_config_with_fixed_retry() {
-        let config = NodeConfig::new().with_fixed_retry(5, Duration::from_millis(100));
+        let config = TaskConfig::new().with_fixed_retry(5, Duration::from_millis(100));
 
         assert_eq!(config.retry_mode.max_attempts(), 6);
     }
 
     #[test]
     fn test_node_config_builder_pattern() {
-        let config = NodeConfig::new().with_fixed_retry(10, Duration::from_secs(1));
+        let config = TaskConfig::new().with_fixed_retry(10, Duration::from_secs(1));
 
         assert_eq!(config.retry_mode.max_attempts(), 11);
     }
@@ -993,8 +828,8 @@ mod tests {
             type PrepResult = ();
             type ExecResult = ();
 
-            fn config(&self) -> NodeConfig {
-                NodeConfig::new().with_fixed_retry(self.max_retries, Duration::from_millis(1))
+            fn config(&self) -> TaskConfig {
+                TaskConfig::new().with_fixed_retry(self.max_retries, Duration::from_millis(1))
             }
 
             async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
@@ -1048,8 +883,8 @@ mod tests {
             type PrepResult = ();
             type ExecResult = ();
 
-            fn config(&self) -> NodeConfig {
-                NodeConfig::minimal()
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
             }
 
             async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
@@ -1298,8 +1133,8 @@ mod tests {
             type PrepResult = ();
             type ExecResult = ();
 
-            fn config(&self) -> NodeConfig {
-                NodeConfig::new().with_fixed_retry(5, Duration::from_millis(1))
+            fn config(&self) -> TaskConfig {
+                TaskConfig::new().with_fixed_retry(5, Duration::from_millis(1))
             }
 
             async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
@@ -1351,8 +1186,8 @@ mod tests {
             type PrepResult = ();
             type ExecResult = ();
 
-            fn config(&self) -> NodeConfig {
-                NodeConfig::new().with_fixed_retry(2, Duration::from_millis(50))
+            fn config(&self) -> TaskConfig {
+                TaskConfig::new().with_fixed_retry(2, Duration::from_millis(50))
             }
 
             async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {

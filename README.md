@@ -10,15 +10,15 @@
 
 Cano is an async workflow engine for Rust that manages complex processing through composable workflows. It can be used for data processing, AI inference workflows, and background jobs. Cano provides a simple, fast and type-safe API for defining workflows with retry strategies, scheduling capabilities, and shared state management.
 
-The engine is built on three core concepts: **Nodes** to encapsulate business logic, **Workflows** to manage state transitions, and **Schedulers** to run workflows on a schedule.
+The engine is built on three core concepts: **Tasks** and **Nodes** to encapsulate business logic, **Workflows** to manage state transitions, and **Schedulers** to run workflows on a schedule.
 
 *The Node API is inspired by the [PocketFlow](https://github.com/The-Pocket/PocketFlow) project, adapted for Rust's async ecosystem.*
 
 ## Features
 
-- **Node-based API**: Single `Node` trait for implementing processing logic
+- **Task & Node APIs**: Single `Task` trait for simple processing logic, or `Node` trait for structured three-phase lifecycle
 - **State Machines**: Type-safe enum-driven state transitions with compile-time checking
-- **Retry Strategies**: None, fixed delays, and exponential backoff with jitter
+- **Retry Strategies**: None, fixed delays, and exponential backoff with jitter (for both Tasks and Nodes)
 - **Flexible Storage**: Built-in `MemoryStore` or custom struct types for data sharing
 - **Workflow Scheduling**: Built-in scheduler with intervals, cron schedules, and manual triggers
 - **Concurrent Execution**: Execute multiple workflow instances in parallel with timeout strategies
@@ -45,9 +45,29 @@ use cano::prelude::*;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum WorkflowState {
     Start,
+    Process,
     Complete,
 }
 
+// Simple Task implementation - single run method
+struct SimpleTask;
+
+#[async_trait]
+impl Task<WorkflowState> for SimpleTask {
+    fn config(&self) -> TaskConfig {
+        // Configure retry behavior for resilience
+        TaskConfig::new().with_exponential_retry(2)
+    }
+
+    async fn run(&self, store: &MemoryStore) -> Result<WorkflowState, CanoError> {
+        let input: String = store.get("input").unwrap_or_default();
+        println!("Processing: {input}");
+        store.put("result", "task_processed".to_string())?;
+        Ok(WorkflowState::Process)
+    }
+}
+
+// Structured Node implementation - three-phase lifecycle
 struct ProcessorNode;
 
 #[async_trait]
@@ -56,31 +76,32 @@ impl Node<WorkflowState> for ProcessorNode {
     type ExecResult = bool;
 
     async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
-        let input: String = store.get("input").unwrap_or_default();
+        let input: String = store.get("result").unwrap_or_default();
         Ok(input)
     }
 
     async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
-        println!("Processing: {prep_res}");
+        println!("Node processing: {prep_res}");
         true // Success
     }
 
     async fn post(&self, store: &MemoryStore, exec_res: Self::ExecResult) 
         -> Result<WorkflowState, CanoError> {
         if exec_res {
-            store.put("result", "processed".to_string())?;
+            store.put("final_result", "node_processed".to_string())?;
             Ok(WorkflowState::Complete)
         } else {
-            Ok(WorkflowState::Start) // Retry
+            Ok(WorkflowState::Process) // Retry
         }
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    // Create workflow
+    // Create workflow - can mix Tasks and Nodes
     let mut workflow = Workflow::new(WorkflowState::Start);
-    workflow.register_node(WorkflowState::Start, ProcessorNode)
+    workflow.register(WorkflowState::Start, SimpleTask)        // Task
+        .register(WorkflowState::Process, ProcessorNode)       // Node
         .add_exit_state(WorkflowState::Complete);
     
     // Create store and run workflow
@@ -96,9 +117,42 @@ async fn main() -> Result<(), CanoError> {
 
 ## Core Concepts
 
-### 1. Nodes - Processing Units
+### 1. Tasks & Nodes - Processing Units
 
-A `Node` implements the processing logic for your workflow. Each node follows a three-phase lifecycle:
+Cano provides two approaches for implementing processing logic:
+
+#### Tasks - Simple & Flexible
+
+A `Task` provides a simplified interface with a single `run` method. Use tasks when you want simplicity and don't need structured phases or built-in retry logic:
+
+```rust
+struct DataProcessor;
+
+#[async_trait]
+impl Task<String> for DataProcessor {
+    fn config(&self) -> TaskConfig {
+        // Configure retry behavior (optional)
+        TaskConfig::new().with_fixed_retry(3, Duration::from_secs(1))
+    }
+
+    async fn run(&self, store: &MemoryStore) -> Result<String, CanoError> {
+        // Load data
+        let input: String = store.get("input")?;
+        
+        // Process data
+        let result = format!("processed: {input}");
+        
+        // Store result and determine next state
+        store.put("output", result)?;
+        Ok("complete".to_string())
+    }
+}
+```
+
+#### Nodes - Structured & Resilient  
+
+A `Node` implements a structured three-phase lifecycle with built-in retry capabilities. Nodes are a superset of Tasks with additional structure and retry strategies:
+
 1. **Prep**: Load data, validate inputs, setup resources
 2. **Exec**: Core processing logic (with automatic retry support)  
 3. **Post**: Store results, cleanup, determine next action
@@ -133,21 +187,47 @@ impl Node<String> for EmailProcessor {
 }
 ```
 
+#### Compatibility & When to Use Which
+
+- **Every Node automatically implements Task** - you can use any Node wherever Tasks are accepted
+- **Use Task for**: Simple processing, quick prototypes, one-off operations
+- **Use Node for**: Production workloads, complex processing, when you need structured three-phase lifecycle
+
 #### Retry Strategies
 
-Configure retry behavior using `NodeConfig`:
+Both Tasks and Nodes support retry strategies. Configure retry behavior using `TaskConfig`:
 
 ```rust
-impl Node<WorkflowState> for ReliableNode {
-    fn config(&self) -> NodeConfig {
+// Task with retry configuration
+impl Task<WorkflowState> for ReliableTask {
+    fn config(&self) -> TaskConfig {
         // No retries (fail fast)
-        NodeConfig::minimal()
+        TaskConfig::minimal()
         
         // Fixed retries: 3 attempts with 2 second delays
-        // NodeConfig::new().with_fixed_retry(3, Duration::from_secs(2))
+        // TaskConfig::new().with_fixed_retry(3, Duration::from_secs(2))
         
         // Exponential backoff: 5 retries with increasing delays
-        // NodeConfig::new().with_exponential_retry(5)
+        // TaskConfig::new().with_exponential_retry(5)
+    }
+
+    async fn run(&self, store: &MemoryStore) -> Result<WorkflowState, CanoError> {
+        // Your task logic here...
+        Ok(WorkflowState::Complete)
+    }
+}
+
+// Node with retry configuration
+impl Node<WorkflowState> for ReliableNode {
+    fn config(&self) -> TaskConfig {
+        // No retries (fail fast)
+        TaskConfig::minimal()
+        
+        // Fixed retries: 3 attempts with 2 second delays
+        // TaskConfig::new().with_fixed_retry(3, Duration::from_secs(2))
+        
+        // Exponential backoff: 5 retries with increasing delays
+        // TaskConfig::new().with_exponential_retry(5)
     }
     // ... rest of implementation
 }
@@ -209,7 +289,7 @@ impl Node<ProcessingState, RequestCtx> for MetricsNode {
 
 ### 3. Workflows - State Management
 
-Build workflows with state machine semantics:
+Build workflows with state machine semantics. Workflows can register both Tasks and Nodes using the unified `register` method:
 
 ```rust
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -221,8 +301,8 @@ enum WorkflowState {
 }
 
 let mut workflow = Workflow::new(WorkflowState::Validate);
-workflow.register_node(WorkflowState::Validate, validator)
-    .register_node(WorkflowState::Process, processor)
+workflow.register(WorkflowState::Validate, validator_task)  // Task
+    .register(WorkflowState::Process, processor_node)       // Node  
     .add_exit_states(vec![WorkflowState::Complete, WorkflowState::Error]);
 
 let result = workflow.orchestrate(&store).await?;
@@ -343,15 +423,15 @@ impl Node<OrderState> for QualityCheckNode {
 // Build the complete workflow
 let mut workflow = Workflow::new(OrderState::Start);
 workflow
-    .register_node(OrderState::Start, DataLoaderNode)
-    .register_node(OrderState::Validate, ValidationNode)
-    .register_node(OrderState::Sanitize, SanitizeNode)  
-    .register_node(OrderState::Process, ProcessNode)
-    .register_node(OrderState::QualityCheck, QualityCheckNode)
-    .register_node(OrderState::Enrich, EnrichNode)
-    .register_node(OrderState::BasicProcess, CompleteNode)
-    .register_node(OrderState::Retry, ProcessNode)
-    .register_node(OrderState::Error, CleanupNode)
+    .register(OrderState::Start, DataLoaderNode)
+    .register(OrderState::Validate, ValidationNode)
+    .register(OrderState::Sanitize, SanitizeNode)  
+    .register(OrderState::Process, ProcessNode)
+    .register(OrderState::QualityCheck, QualityCheckNode)
+    .register(OrderState::Enrich, EnrichNode)
+    .register(OrderState::BasicProcess, CompleteNode)
+    .register(OrderState::Retry, ProcessNode)
+    .register(OrderState::Error, CleanupNode)
     .add_exit_states(vec![OrderState::Complete, OrderState::Failed]);
 
 let result = workflow.orchestrate(&store).await?;
@@ -366,7 +446,7 @@ use cano::prelude::*;
 
 // Create a concurrent workflow with the same API as regular workflows
 let mut concurrent_workflow = ConcurrentWorkflow::new(ProcessingState::Start);
-concurrent_workflow.register_node(ProcessingState::Start, processing_node);
+concurrent_workflow.register(ProcessingState::Start, processing_node);
 concurrent_workflow.add_exit_state(ProcessingState::Complete);
 
 // Execute with different wait strategies
@@ -434,11 +514,11 @@ async fn main() -> CanoResult<()> {
     
     // Create regular workflows with consistent API
     let mut workflow1 = Workflow::new(MyState::Start);
-    workflow1.register_node(MyState::Start, MyTask);
+    workflow1.register(MyState::Start, MyTask);
     workflow1.add_exit_state(MyState::Complete);
 
     let mut workflow2 = Workflow::new(MyState::Start);
-    workflow2.register_node(MyState::Start, MyTask);
+    workflow2.register(MyState::Start, MyTask);
     workflow2.add_exit_state(MyState::Complete);
     
     // Schedule regular workflows
@@ -449,7 +529,7 @@ async fn main() -> CanoResult<()> {
     
     // Create concurrent workflow with identical API to regular workflows
     let mut concurrent_workflow = ConcurrentWorkflow::new(MyState::Start);
-    concurrent_workflow.register_node(MyState::Start, MyTask);
+    concurrent_workflow.register(MyState::Start, MyTask);
     concurrent_workflow.add_exit_state(MyState::Complete);
     
     // Schedule concurrent workflows (multiple instances in parallel)

@@ -221,7 +221,7 @@ fn bench_node_performance(c: &mut Criterion) {
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let result = node.run(&store).await;
+                        let result = cano::Node::run(&node, &store).await;
                         assert!(result.is_ok());
                     });
             },
@@ -249,7 +249,10 @@ fn bench_concurrent_node_execution(c: &mut Criterion) {
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let tasks: Vec<_> = nodes.iter().map(|node| node.run(&store)).collect();
+                        let tasks: Vec<_> = nodes
+                            .iter()
+                            .map(|node| cano::Node::run(node, &store))
+                            .collect();
 
                         let results = futures::future::join_all(tasks).await;
                         for result in results {
@@ -271,7 +274,7 @@ fn bench_concurrent_node_execution(c: &mut Criterion) {
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
                         for node in &nodes {
-                            let result = node.run(&store).await;
+                            let result = cano::Node::run(node, &store).await;
                             assert!(result.is_ok());
                         }
                     });
@@ -394,7 +397,7 @@ fn bench_io_bound_workflows(c: &mut Criterion) {
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
                             for node in &nodes {
-                                let result = node.run(&store).await;
+                                let result = cano::Node::run(node, &store).await;
                                 assert!(result.is_ok());
                             }
                         });
@@ -422,7 +425,10 @@ fn bench_io_bound_workflows(c: &mut Criterion) {
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
-                            let tasks: Vec<_> = nodes.iter().map(|node| node.run(&store)).collect();
+                            let tasks: Vec<_> = nodes
+                                .iter()
+                                .map(|node| cano::Node::run(node, &store))
+                                .collect();
 
                             let results = futures::future::join_all(tasks).await;
                             for result in results {
@@ -473,7 +479,7 @@ fn bench_cpu_bound_workflows(c: &mut Criterion) {
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
                             for node in &nodes {
-                                let result = node.run(&store).await;
+                                let result = <_ as Node<TestState>>::run(node, &store).await;
                                 assert!(result.is_ok());
                             }
                         });
@@ -501,7 +507,10 @@ fn bench_cpu_bound_workflows(c: &mut Criterion) {
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
-                            let tasks: Vec<_> = nodes.iter().map(|node| node.run(&store)).collect();
+                            let tasks: Vec<_> = nodes
+                                .iter()
+                                .map(|node| <_ as Node<TestState>>::run(node, &store))
+                                .collect();
 
                             let results = futures::future::join_all(tasks).await;
                             for result in results {
@@ -537,10 +546,10 @@ fn bench_mixed_workload_workflows(c: &mut Criterion) {
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let io_result = io_node.run(&store).await;
+                        let io_result = <_ as Node<TestState>>::run(&io_node, &store).await;
                         assert!(io_result.is_ok());
 
-                        let cpu_result = cpu_node.run(&store).await;
+                        let cpu_result = <_ as Node<TestState>>::run(&cpu_node, &store).await;
                         assert!(cpu_result.is_ok());
                     });
             },
@@ -557,8 +566,8 @@ fn bench_mixed_workload_workflows(c: &mut Criterion) {
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let io_task = io_node.run(&store);
-                        let cpu_task = cpu_node.run(&store);
+                        let io_task = <_ as Node<TestState>>::run(&io_node, &store);
+                        let cpu_task = <_ as Node<TestState>>::run(&cpu_node, &store);
 
                         let (io_result, cpu_result) =
                             futures::future::join(io_task, cpu_task).await;

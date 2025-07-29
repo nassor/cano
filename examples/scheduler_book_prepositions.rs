@@ -272,8 +272,8 @@ impl Node<WorkflowPhase> for BookDownloadNode {
     type PrepResult = Option<(u32, String, String)>;
     type ExecResult = Option<Book>;
 
-    fn config(&self) -> NodeConfig {
-        NodeConfig::new().with_fixed_retry(2, Duration::from_secs(1))
+    fn config(&self) -> TaskConfig {
+        TaskConfig::new().with_fixed_retry(2, Duration::from_secs(1))
     }
 
     /// Preparation: Get next book from the download queue
@@ -407,8 +407,8 @@ impl Node<WorkflowPhase> for PrepositionAnalysisNode {
     type PrepResult = Vec<Book>;
     type ExecResult = Vec<BookAnalysis>;
 
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal()
     }
 
     /// Preparation: Load downloaded books from shared store
@@ -490,8 +490,8 @@ impl Node<WorkflowPhase> for BookRankingNode {
     type PrepResult = Vec<BookAnalysis>;
     type ExecResult = Vec<BookRanking>;
 
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal()
     }
 
     /// Preparation: Load book analyses from shared store
@@ -617,7 +617,7 @@ fn create_download_workflow(shared_store: SharedStore) -> ConcurrentWorkflow<Wor
 
     // Register the download node (will be cloned for each instance)
     concurrent_workflow
-        .register_node(WorkflowPhase::Download, BookDownloadNode::new(shared_store))
+        .register(WorkflowPhase::Download, BookDownloadNode::new(shared_store))
         .add_exit_states(vec![
             WorkflowPhase::DownloadComplete,
             WorkflowPhase::DownloadError,
@@ -631,11 +631,11 @@ fn create_analysis_workflow(shared_store: SharedStore) -> Workflow<WorkflowPhase
     let mut workflow = Workflow::new(WorkflowPhase::Analyze);
 
     workflow
-        .register_node(
+        .register(
             WorkflowPhase::Analyze,
             PrepositionAnalysisNode::new(shared_store.clone()),
         )
-        .register_node(WorkflowPhase::Rank, BookRankingNode::new(shared_store))
+        .register(WorkflowPhase::Rank, BookRankingNode::new(shared_store))
         .add_exit_states(vec![WorkflowPhase::Complete, WorkflowPhase::Error]);
 
     workflow

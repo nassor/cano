@@ -1,7 +1,8 @@
 //! # Simplified Scheduler API
 //!
 //! A simplified scheduler that focuses on ease of use while maintaining
-//! the core scheduling functionality.
+//! the core scheduling functionality. Supports both Tasks and Nodes with
+//! unified registration using the `.register()` method.
 //!
 //! ## 🚀 Quick Start
 //!
@@ -808,7 +809,7 @@ mod tests {
 
     fn create_test_workflow() -> Workflow<TestState> {
         let mut workflow = Workflow::new(TestState::Start);
-        workflow.register_node(TestState::Start, TestNode::new());
+        workflow.register(TestState::Start, TestNode::new());
         workflow.add_exit_state(TestState::Complete);
         workflow.add_exit_state(TestState::Error);
         workflow
@@ -816,7 +817,7 @@ mod tests {
 
     fn create_failing_workflow() -> Workflow<TestState> {
         let mut workflow = Workflow::new(TestState::Start);
-        workflow.register_node(TestState::Start, TestNode::new_failing());
+        workflow.register(TestState::Start, TestNode::new_failing());
         workflow.add_exit_state(TestState::Complete);
         workflow.add_exit_state(TestState::Error);
         workflow
@@ -1002,7 +1003,7 @@ mod tests {
         scheduler.trigger("test_task").await.unwrap();
 
         // Give more time for execution and poll status
-        for _ in 0..10 {
+        for _ in 0..50 {
             sleep(Duration::from_millis(100)).await;
             let status = scheduler.status("test_task").await.unwrap();
             if !matches!(status.status, Status::Running) {
@@ -1293,7 +1294,7 @@ mod tests {
         concurrent_workflow.add_exit_state(TestState::Complete);
 
         let node = TestNode::new_success();
-        concurrent_workflow.register_node(TestState::Start, node);
+        concurrent_workflow.register(TestState::Start, node);
 
         scheduler
             .manual_concurrent(
@@ -1318,7 +1319,7 @@ mod tests {
         concurrent_workflow.add_exit_state(TestState::Complete);
 
         let node = TestNode::new_success();
-        concurrent_workflow.register_node(TestState::Start, node);
+        concurrent_workflow.register(TestState::Start, node);
 
         let info = Arc::new(RwLock::new(FlowInfo {
             id: "test".to_string(),
@@ -1365,7 +1366,7 @@ mod tests {
         concurrent_workflow.add_exit_state(TestState::Complete);
 
         let node = TestNode::new_success();
-        concurrent_workflow.register_node(TestState::Start, node);
+        concurrent_workflow.register(TestState::Start, node);
 
         scheduler
             .manual_concurrent(

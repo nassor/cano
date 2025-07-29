@@ -283,8 +283,8 @@ async fn main() -> CanoResult<()> {
     let mut workflow = Workflow::new(ProcessingState::IncomingRequest);
 
     workflow
-        .register_node(ProcessingState::IncomingRequest, MetricsNode)
-        .register_node(ProcessingState::GenerateResponse, ResponseNode)
+        .register(ProcessingState::IncomingRequest, MetricsNode)
+        .register(ProcessingState::GenerateResponse, ResponseNode)
         .add_exit_state(ProcessingState::Complete);
 
     println!("📋 Created processing workflow:");

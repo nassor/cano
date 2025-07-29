@@ -4,8 +4,14 @@
 //! 1. **GeneratorNode**: Creates a random vector of u32 numbers, filters out odd numbers
 //! 2. **CounterNode**: Counts the filtered numbers and cleans up store
 //!
-//! The workflow showcases the three-phase lifecycle (prep, exec, post) and
-//! inter-node communication through shared store using the Workflow state machine.
+//! The workflow showcases:
+//! - **Node Implementation**: Structured three-phase lifecycle (prep, exec, post)
+//! - **State Machine**: Using enums to control workflow transitions
+//! - **Data Sharing**: Inter-node communication through shared store
+//! - **Registration**: Using the unified `.register()` method for nodes
+//!
+//! This example uses the **Node trait** for structured processing with retry capabilities.
+//! For simpler use cases, see task-based examples that use the **Task trait**.
 //!
 //! Run with:
 //! ```bash
@@ -15,7 +21,6 @@
 use async_trait::async_trait;
 use cano::prelude::*;
 use rand::Rng;
-use std::collections::HashMap;
 
 /// Action enum for controlling workflow workflow
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -28,15 +33,11 @@ enum WorkflowAction {
 
 /// First node: Generates random numbers and filters out odd numbers
 #[derive(Clone)]
-struct GeneratorNode {
-    params: HashMap<String, String>,
-}
+struct GeneratorNode;
 
 impl GeneratorNode {
     fn new() -> Self {
-        Self {
-            params: HashMap::new(),
-        }
+        Self
     }
 }
 
@@ -45,12 +46,8 @@ impl Node<WorkflowAction> for GeneratorNode {
     type PrepResult = Vec<u32>;
     type ExecResult = Vec<u32>;
 
-    fn set_params(&mut self, params: HashMap<String, String>) {
-        self.params = params;
-    }
-
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal() // Fast execution with minimal retries
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal() // Fast execution with minimal retries
     }
 
     /// Preparation phase: Generate a random vector of u32 numbers (25 to 150 elements)
@@ -99,15 +96,11 @@ impl Node<WorkflowAction> for GeneratorNode {
 
 /// Second node: Loads data, counts numbers, and cleans up
 #[derive(Clone)]
-struct CounterNode {
-    params: HashMap<String, String>,
-}
+struct CounterNode;
 
 impl CounterNode {
     fn new() -> Self {
-        Self {
-            params: HashMap::new(),
-        }
+        Self
     }
 }
 
@@ -116,12 +109,8 @@ impl Node<WorkflowAction> for CounterNode {
     type PrepResult = Vec<u32>;
     type ExecResult = usize;
 
-    fn set_params(&mut self, params: HashMap<String, String>) {
-        self.params = params;
-    }
-
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal()
     }
 
     /// Preparation phase: Load the filtered numbers from memory
@@ -177,8 +166,8 @@ async fn run_simple_workflow_with_flow() -> Result<(), CanoError> {
 
     // Register different node types - this now works!
     workflow
-        .register_node(WorkflowAction::Generate, GeneratorNode::new())
-        .register_node(WorkflowAction::Count, CounterNode::new())
+        .register(WorkflowAction::Generate, GeneratorNode::new())
+        .register(WorkflowAction::Count, CounterNode::new())
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
     // Execute the workflow using the Workflow orchestrator

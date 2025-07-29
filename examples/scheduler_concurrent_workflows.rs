@@ -48,8 +48,8 @@ impl Node<TaskState> for LongRunningTask {
     type PrepResult = String;
     type ExecResult = String;
 
-    fn config(&self) -> NodeConfig {
-        NodeConfig::minimal()
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal()
     }
 
     async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
@@ -145,19 +145,19 @@ async fn main() -> CanoResult<()> {
     // Create a long-running workflow (5 seconds execution time)
     let mut long_task_flow = Workflow::new(TaskState::Execute);
     long_task_flow
-        .register_node(TaskState::Execute, LongRunningTask::new("LongTask", 7000))
+        .register(TaskState::Execute, LongRunningTask::new("LongTask", 7000))
         .add_exit_states(vec![TaskState::Complete]);
 
     // Create a medium-running workflow (3 seconds execution time)
     let mut medium_task_flow = Workflow::new(TaskState::Execute);
     medium_task_flow
-        .register_node(TaskState::Execute, LongRunningTask::new("MediumTask", 3000))
+        .register(TaskState::Execute, LongRunningTask::new("MediumTask", 3000))
         .add_exit_states(vec![TaskState::Complete]);
 
     // Create a fast-running workflow (500ms execution time)
     let mut fast_task_flow = Workflow::new(TaskState::Execute);
     fast_task_flow
-        .register_node(TaskState::Execute, LongRunningTask::new("FastTask", 500))
+        .register(TaskState::Execute, LongRunningTask::new("FastTask", 500))
         .add_exit_states(vec![TaskState::Complete]);
 
     // Setup scheduler with aggressive scheduling to force overlaps

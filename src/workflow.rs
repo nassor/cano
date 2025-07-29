@@ -1,7 +1,8 @@
 //! # Workflow API - Build Simple Workflows
 //!
 //! This module provides the core [`Workflow`] type for building async workflow systems.
-//! It includes state machine-driven workflow execution with type-safe routing.
+//! It includes state machine-driven workflow execution with type-safe routing and supports
+//! both Tasks and Nodes for maximum flexibility.
 //!
 //! ## 🎯 Core Concepts
 //!
@@ -9,27 +10,34 @@
 //!
 //! The [`Workflow`] API provides a state machine-driven approach to workflow orchestration:
 //! - Define your workflow states using custom enums
-//! - Register nodes for each state
-//! - Set up state transitions based on node outcomes
+//! - Register Tasks or Nodes for each state using the unified `.register()` method
+//! - Set up state transitions based on Task/Node outcomes
 //! - Configure exit states to terminate the workflow
 //!
-//! ### Node Trait - Your Custom Logic
+//! ### Tasks & Nodes - Your Custom Logic
 //!
-//! The node trait is where you implement your custom processing logic.
-//! Every node follows a simple three-phase lifecycle:
+//! Choose the right processing approach for your needs:
 //!
+//! #### Tasks
+//! Simple, flexible interface with a single `run()` method:
+//! - Perfect for prototypes and simple operations
+//! - Maximum flexibility in implementation
+//! - Direct control over execution flow
+//!
+//! #### Nodes
+//! Structured three-phase lifecycle for production workloads:
 //! 1. **Prep**: Load data, validate inputs, setup resources
 //! 2. **Exec**: Core processing logic (with automatic retry support)
 //! 3. **Post**: Store results, cleanup, determine next action
 //!
-//! Your custom nodes implement these three phases with their specific business logic.
+//! **Every Node automatically implements Task**, so you can mix both in the same workflow.
 //!
 //! ## 🚀 Advanced Features
 //!
 //! ### Type-Safe State Routing
 //!
-//! Flows use user-defined enums for state management and routing.
-//! Your nodes return enum values that determine the next state to execute,
+//! Workflows use user-defined enums for state management and routing.
+//! Your Tasks and Nodes return enum values that determine the next state to execute,
 //! providing compile-time safety and clear workflow logic.
 //!
 //! ### Exit State Management
@@ -76,42 +84,51 @@ use std::time::Duration;
 
 use crate::MemoryStore;
 use crate::error::CanoError;
-use crate::node::{DefaultParams, Node};
+use crate::task::{DefaultTaskParams, Task, TaskConfig};
 
-/// Type alias for trait objects that can store different node types
+/// Type alias for trait objects that can store different task types
 ///
-/// This allows the Workflow to accept nodes of different concrete types as long as they
-/// implement the Node trait with compatible associated types. The trait object erases
-/// the specific TParams, PrepResult, and ExecResult types but maintains the essential
-/// functionality needed for workflow execution.
-pub type DynNode<TState, TStore = MemoryStore, TParams = DefaultParams> =
-    Box<dyn DynNodeTrait<TState, TStore, TParams> + Send + Sync>;
+/// This allows the Workflow to accept tasks of different concrete types as long as they
+/// implement the Task trait with compatible associated types. The trait object erases
+/// the specific TParams type but maintains the essential functionality needed for workflow execution.
+pub type DynTask<TState, TStore = MemoryStore, TParams = DefaultTaskParams> =
+    Box<dyn DynTaskTrait<TState, TStore, TParams> + Send + Sync>;
 
-/// Trait object-safe version of the Node trait for dynamic dispatch
+/// Trait object-safe version of the Task trait for dynamic dispatch
 ///
 /// This trait provides the essential functionality needed for workflow execution
 /// while being object-safe (can be used as a trait object).
 #[async_trait::async_trait]
-pub trait DynNodeTrait<TState, TStore = MemoryStore, TParams = DefaultParams>: Send + Sync
+pub trait DynTaskTrait<TState, TStore = MemoryStore, TParams = DefaultTaskParams>:
+    Send + Sync
 where
     TState: Clone + std::fmt::Debug + Send + Sync + 'static,
 {
-    /// Execute the node and return the next state
+    /// Get the task configuration for retry behavior
+    fn config(&self) -> TaskConfig;
+
+    /// Execute the task and return the next state
     async fn run(&self, store: &TStore) -> Result<TState, CanoError>;
 }
 
-/// Blanket implementation of `DynNodeTrait<TState, TStore>` for any `N: Node<TState, P, TStore>`
+/// Blanket implementation of `DynTaskTrait<TState, TStore>` for any `T: Task<TState, TStore, TParams>`
 #[async_trait::async_trait]
-impl<TState, TStore, TParams, N> DynNodeTrait<TState, TStore, TParams> for N
+impl<TState, TStore, TParams, T> DynTaskTrait<TState, TStore, TParams> for T
 where
     TState: Clone + std::fmt::Debug + Send + Sync + 'static,
     TParams: Clone + Send + Sync + 'static,
     TStore: Send + Sync + 'static,
-    N: Node<TState, TStore, TParams> + Send + Sync + 'static,
+    T: Task<TState, TStore, TParams> + Send + Sync + 'static,
 {
+    fn config(&self) -> TaskConfig {
+        Task::config(self)
+    }
+
     async fn run(&self, store: &TStore) -> Result<TState, CanoError> {
-        // just forward to the inherent `Node::run`
-        Node::run(self, store).await
+        use crate::task::run_with_retries;
+
+        let config = self.config();
+        run_with_retries::<TState, TStore, _, _>(&config, || Task::run(self, store)).await
     }
 }
 
@@ -178,37 +195,37 @@ pub enum WorkflowResult<TState> {
     Cancelled,
 }
 
-/// Type alias for cloneable node trait objects for concurrent workflows
+/// Type alias for cloneable task trait objects for concurrent workflows
 ///
-/// This ensures nodes can be cloned for use across multiple concurrent workflow instances.
-pub type CloneableNode<TState, TStore = MemoryStore, TParams = DefaultParams> =
-    Box<dyn CloneableNodeTrait<TState, TStore, TParams> + Send + Sync>;
+/// This ensures tasks can be cloned for use across multiple concurrent workflow instances.
+pub type CloneableTask<TState, TStore = MemoryStore, TParams = DefaultTaskParams> =
+    Box<dyn CloneableTaskTrait<TState, TStore, TParams> + Send + Sync>;
 
-/// Trait for nodes that can be cloned for concurrent workflow execution
-pub trait CloneableNodeTrait<TState, TStore = MemoryStore, TParams = DefaultParams>:
-    DynNodeTrait<TState, TStore, TParams> + Send + Sync
+/// Trait for tasks that can be cloned for concurrent workflow execution
+pub trait CloneableTaskTrait<TState, TStore = MemoryStore, TParams = DefaultTaskParams>:
+    DynTaskTrait<TState, TStore, TParams> + Send + Sync
 where
     TState: Clone + std::fmt::Debug + Send + Sync + 'static,
 {
-    /// Clone the node for concurrent execution
-    fn clone_node(&self) -> CloneableNode<TState, TStore, TParams>;
+    /// Clone the task for concurrent execution
+    fn clone_task(&self) -> CloneableTask<TState, TStore, TParams>;
 }
 
-/// Blanket implementation for any Node that implements Clone
-impl<TState, TStore, TParams, N> CloneableNodeTrait<TState, TStore, TParams> for N
+/// Blanket implementation for any Task that implements Clone
+impl<TState, TStore, TParams, T> CloneableTaskTrait<TState, TStore, TParams> for T
 where
     TState: Clone + std::fmt::Debug + Send + Sync + 'static,
     TParams: Clone + Send + Sync + 'static,
     TStore: Send + Sync + 'static,
-    N: Node<TState, TStore, TParams> + Clone + Send + Sync + 'static,
+    T: Task<TState, TStore, TParams> + Clone + Send + Sync + 'static,
 {
-    fn clone_node(&self) -> CloneableNode<TState, TStore, TParams> {
+    fn clone_task(&self) -> CloneableTask<TState, TStore, TParams> {
         Box::new(self.clone())
     }
 }
 
 /// State machine workflow orchestration
-pub struct Workflow<TState, TStore = MemoryStore, TParams = DefaultParams>
+pub struct Workflow<TState, TStore = MemoryStore, TParams = DefaultTaskParams>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
     TParams: Clone + Send + Sync + 'static,
@@ -216,8 +233,8 @@ where
 {
     /// The starting state of the workflow
     pub start_state: Option<TState>,
-    /// Map of states to their corresponding node trait objects
-    pub state_nodes: HashMap<TState, DynNode<TState, TStore, TParams>>,
+    /// Map of states to their corresponding task trait objects
+    pub state_tasks: HashMap<TState, DynTask<TState, TStore, TParams>>,
     /// Set of states that will terminate the workflow when reached
     pub exit_states: std::collections::HashSet<TState>,
 }
@@ -232,18 +249,46 @@ where
     pub fn new(start_state: TState) -> Self {
         Self {
             start_state: Some(start_state),
-            state_nodes: HashMap::new(),
+            state_tasks: HashMap::new(),
             exit_states: std::collections::HashSet::new(),
         }
     }
 
-    /// Register a node for a specific state (accepts any type implementing `Node<TState>`)
-    pub fn register_node<N>(&mut self, state: TState, node: N) -> &mut Self
+    /// Register a task for a specific state (accepts any type implementing `Task<TState>`)
+    pub fn register<T>(&mut self, state: TState, task: T) -> &mut Self
     where
-        N: Node<TState, TStore, TParams> + Send + Sync + 'static,
+        T: Task<TState, TStore, TParams> + Send + Sync + 'static,
     {
-        self.state_nodes.insert(state, Box::new(node));
+        self.state_tasks.insert(state, Box::new(task));
         self
+    }
+
+    /// Register a node for a specific state
+    ///
+    /// # Deprecated
+    ///
+    /// This method is deprecated. Use [`register`](Self::register) instead.
+    /// The unified `register` method accepts both Tasks and Nodes and provides
+    /// the same functionality with a cleaner API.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Instead of:
+    /// workflow.register_node(state, my_node);
+    ///
+    /// // Use:
+    /// workflow.register(state, my_node);
+    /// ```
+    #[deprecated(
+        since = "0.5.0",
+        note = "Use `register` instead. The unified `register` method accepts both Tasks and Nodes."
+    )]
+    pub fn register_node<T>(&mut self, state: TState, task: T) -> &mut Self
+    where
+        T: Task<TState, TStore, TParams> + Send + Sync + 'static,
+    {
+        self.register(state, task)
     }
 
     /// Register multiple exit states
@@ -267,21 +312,21 @@ where
     /// Execute the typed workflow with state machine orchestration
     ///
     /// This method runs the workflow by starting from the initial state and transitioning
-    /// between states based on node outcomes until an exit state is reached or an error occurs.
+    /// between states based on task outcomes until an exit state is reached or an error occurs.
     ///
     /// ## Workflow Execution
     ///
     /// 1. Start with the configured initial state
-    /// 2. Look up the node registered for the current state
-    /// 3. Execute the node's `run()` method
+    /// 2. Look up the task registered for the current state
+    /// 3. Execute the task's `run()` method
     /// 4. Use the returned value as the next state
     /// 5. Repeat until an exit state is reached
     ///
     /// ## Error Handling
     ///
-    /// - **Missing Node**: Error if no node is registered for a state
-    /// - **Node Execution**: Propagate errors from node execution
-    /// - **Invalid Transitions**: Error if node returns an unregistered state
+    /// - **Missing Task**: Error if no task is registered for a state
+    /// - **Task Execution**: Propagate errors from task execution
+    /// - **Invalid Transitions**: Error if task returns an unregistered state
     ///
     /// ## Return Value
     ///
@@ -298,11 +343,11 @@ where
                 return Ok(current);
             }
 
-            let node = self.state_nodes.get(&current).ok_or_else(|| {
-                CanoError::workflow(format!("No node registered for state: {current:?}"))
+            let task = self.state_tasks.get(&current).ok_or_else(|| {
+                CanoError::workflow(format!("No task registered for state: {current:?}"))
             })?;
 
-            current = node.run(store).await?;
+            current = task.run(store).await?;
         }
     }
 }
@@ -316,7 +361,7 @@ where
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Workflow")
             .field("start_state", &self.start_state)
-            .field("state_nodes", &format!("{} nodes", self.state_nodes.len()))
+            .field("state_tasks", &format!("{} tasks", self.state_tasks.len()))
             .field("exit_states", &self.exit_states)
             .finish()
     }
@@ -325,7 +370,7 @@ where
 /// Builder for creating Workflow instances with a fluent API
 ///
 /// Provides a convenient way to construct flows with method chaining.
-pub struct WorkflowBuilder<TState, TStore = MemoryStore, TParams = DefaultParams>
+pub struct WorkflowBuilder<TState, TStore = MemoryStore, TParams = DefaultTaskParams>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
     TParams: Clone + Send + Sync + 'static,
@@ -347,13 +392,41 @@ where
         }
     }
 
-    /// Register a node for a state (accepts any type implementing `Node<TState>`)
-    pub fn register_node<N>(mut self, state: TState, node: N) -> Self
+    /// Register a task for a state (accepts any type implementing `Task<TState>`)
+    pub fn register<T>(mut self, state: TState, task: T) -> Self
     where
-        N: Node<TState, TStore, TParams> + Send + Sync + 'static,
+        T: Task<TState, TStore, TParams> + Send + Sync + 'static,
     {
-        self.workflow.register_node(state, node);
+        self.workflow.register(state, task);
         self
+    }
+
+    /// Register a node for a state
+    ///
+    /// # Deprecated
+    ///
+    /// This method is deprecated. Use [`register`](Self::register) instead.
+    /// The unified `register` method accepts both Tasks and Nodes and provides
+    /// the same functionality with a cleaner API.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Instead of:
+    /// builder.register_node(state, my_node);
+    ///
+    /// // Use:
+    /// builder.register(state, my_node);
+    /// ```
+    #[deprecated(
+        since = "0.5.0",
+        note = "Use `register` instead. The unified `register` method accepts both Tasks and Nodes."
+    )]
+    pub fn register_node<T>(self, state: TState, task: T) -> Self
+    where
+        T: Task<TState, TStore, TParams> + Send + Sync + 'static,
+    {
+        self.register(state, task)
     }
 
     /// Add an exit state
@@ -377,8 +450,8 @@ where
 /// Concurrent workflow orchestration for executing multiple workflow instances in parallel
 ///
 /// This has the same API as `Workflow` but executes multiple instances concurrently.
-/// Use `register_node()` to add cloneable nodes and `add_exit_state()` to configure exit states.
-pub struct ConcurrentWorkflow<TState, TStore = MemoryStore, TParams = DefaultParams>
+/// Use `register()` to add cloneable tasks and `add_exit_state()` to configure exit states.
+pub struct ConcurrentWorkflow<TState, TStore = MemoryStore, TParams = DefaultTaskParams>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
     TParams: Clone + Send + Sync + 'static,
@@ -386,8 +459,8 @@ where
 {
     /// The starting state of the workflow
     pub start_state: Option<TState>,
-    /// Map of states to their corresponding cloneable node trait objects
-    pub state_nodes: HashMap<TState, CloneableNode<TState, TStore, TParams>>,
+    /// Map of states to their corresponding cloneable task trait objects
+    pub state_tasks: HashMap<TState, CloneableTask<TState, TStore, TParams>>,
     /// Set of states that will terminate the workflow when reached
     pub exit_states: std::collections::HashSet<TState>,
 }
@@ -402,20 +475,48 @@ where
     pub fn new(start_state: TState) -> Self {
         Self {
             start_state: Some(start_state),
-            state_nodes: HashMap::new(),
+            state_tasks: HashMap::new(),
             exit_states: std::collections::HashSet::new(),
         }
     }
 
+    /// Register a cloneable task for a specific state
+    ///
+    /// This method accepts any task that implements Clone for concurrent execution.
+    pub fn register<T>(&mut self, state: TState, task: T) -> &mut Self
+    where
+        T: Task<TState, TStore, TParams> + Clone + Send + Sync + 'static,
+    {
+        self.state_tasks.insert(state, Box::new(task));
+        self
+    }
+
     /// Register a cloneable node for a specific state
     ///
-    /// This method accepts any node that implements Clone for concurrent execution.
-    pub fn register_node<N>(&mut self, state: TState, node: N) -> &mut Self
+    /// # Deprecated
+    ///
+    /// This method is deprecated. Use [`register`](Self::register) instead.
+    /// The unified `register` method accepts both Tasks and Nodes and provides
+    /// the same functionality with a cleaner API.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Instead of:
+    /// concurrent_workflow.register_node(state, my_node);
+    ///
+    /// // Use:
+    /// concurrent_workflow.register(state, my_node);
+    /// ```
+    #[deprecated(
+        since = "0.5.0",
+        note = "Use `register` instead. The unified `register` method accepts both Tasks and Nodes."
+    )]
+    pub fn register_node<T>(&mut self, state: TState, task: T) -> &mut Self
     where
-        N: Node<TState, TStore, TParams> + Clone + Send + Sync + 'static,
+        T: Task<TState, TStore, TParams> + Clone + Send + Sync + 'static,
     {
-        self.state_nodes.insert(state, Box::new(node));
-        self
+        self.register(state, task)
     }
 
     /// Register multiple exit states
@@ -439,18 +540,18 @@ where
     /// Create a workflow instance for concurrent execution
     ///
     /// This method creates a new workflow instance by copying the structure
-    /// and cloning all registered nodes.
+    /// and cloning all registered tasks.
     fn create_workflow_instance(&self) -> Result<Workflow<TState, TStore, TParams>, CanoError> {
         let mut workflow = Workflow {
             start_state: self.start_state.clone(),
-            state_nodes: HashMap::new(),
+            state_tasks: HashMap::new(),
             exit_states: self.exit_states.clone(),
         };
 
-        // Clone all registered nodes for this instance
-        for (state, cloneable_node) in &self.state_nodes {
-            let cloned_node = cloneable_node.clone_node();
-            workflow.state_nodes.insert(state.clone(), cloned_node);
+        // Clone all registered tasks for this instance
+        for (state, cloneable_task) in &self.state_tasks {
+            let cloned_task = cloneable_task.clone_task();
+            workflow.state_tasks.insert(state.clone(), cloned_task);
         }
 
         Ok(workflow)
@@ -667,15 +768,15 @@ where
     TStore: Clone + Send + Sync + 'static,
 {
     fn clone(&self) -> Self {
-        // Clone the cloneable nodes
-        let mut cloned_nodes = HashMap::new();
-        for (state, node) in &self.state_nodes {
-            cloned_nodes.insert(state.clone(), node.clone_node());
+        // Clone the cloneable tasks
+        let mut cloned_tasks = HashMap::new();
+        for (state, task) in &self.state_tasks {
+            cloned_tasks.insert(state.clone(), task.clone_task());
         }
 
         Self {
             start_state: self.start_state.clone(),
-            state_nodes: cloned_nodes,
+            state_tasks: cloned_tasks,
             exit_states: self.exit_states.clone(),
         }
     }
@@ -692,15 +793,15 @@ where
             .field("start_state", &self.start_state)
             .field("exit_states", &self.exit_states)
             .field(
-                "nodes",
-                &format!("{} cloneable nodes", self.state_nodes.len()),
+                "tasks",
+                &format!("{} cloneable tasks", self.state_tasks.len()),
             )
             .finish()
     }
 }
 
 /// Builder for creating ConcurrentWorkflow instances with a fluent API
-pub struct ConcurrentWorkflowBuilder<TState, TStore = MemoryStore, TParams = DefaultParams>
+pub struct ConcurrentWorkflowBuilder<TState, TStore = MemoryStore, TParams = DefaultTaskParams>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
     TParams: Clone + Send + Sync + 'static,
@@ -722,13 +823,41 @@ where
         }
     }
 
-    /// Register a cloneable node for concurrent execution
-    pub fn register_node<N>(mut self, state: TState, node: N) -> Self
+    /// Register a cloneable task for concurrent execution
+    pub fn register<T>(mut self, state: TState, task: T) -> Self
     where
-        N: Node<TState, TStore, TParams> + Clone + Send + Sync + 'static,
+        T: Task<TState, TStore, TParams> + Clone + Send + Sync + 'static,
     {
-        self.concurrent_workflow.register_node(state, node);
+        self.concurrent_workflow.register(state, task);
         self
+    }
+
+    /// Register a cloneable node for concurrent execution
+    ///
+    /// # Deprecated
+    ///
+    /// This method is deprecated. Use [`register`](Self::register) instead.
+    /// The unified `register` method accepts both Tasks and Nodes and provides
+    /// the same functionality with a cleaner API.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // Instead of:
+    /// builder.register_node(state, my_node);
+    ///
+    /// // Use:
+    /// builder.register(state, my_node);
+    /// ```
+    #[deprecated(
+        since = "0.5.0",
+        note = "Use `register` instead. The unified `register` method accepts both Tasks and Nodes."
+    )]
+    pub fn register_node<T>(self, state: TState, task: T) -> Self
+    where
+        T: Task<TState, TStore, TParams> + Clone + Send + Sync + 'static,
+    {
+        self.register(state, task)
     }
 
     /// Add an exit state
@@ -752,6 +881,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::node::Node;
     use crate::store::{KeyValueStore, MemoryStore};
     use async_trait::async_trait;
     use std::sync::Arc;
@@ -959,19 +1089,19 @@ mod tests {
     async fn test_flow_creation() {
         let workflow: Workflow<TestState> = Workflow::new(TestState::Start);
         assert_eq!(workflow.start_state, Some(TestState::Start));
-        assert!(workflow.state_nodes.is_empty());
+        assert!(workflow.state_tasks.is_empty());
         assert!(workflow.exit_states.is_empty());
     }
 
     #[tokio::test]
-    async fn test_flow_register_node() {
+    async fn test_flow_register() {
         let mut workflow: Workflow<TestState> = Workflow::new(TestState::Start);
         let node = SuccessNode::new(TestState::Complete);
 
-        workflow.register_node(TestState::Start, node);
+        workflow.register(TestState::Start, node);
 
-        assert_eq!(workflow.state_nodes.len(), 1);
-        assert!(workflow.state_nodes.contains_key(&TestState::Start));
+        assert_eq!(workflow.state_tasks.len(), 1);
+        assert!(workflow.state_tasks.contains_key(&TestState::Start));
     }
 
     #[tokio::test]
@@ -1010,7 +1140,7 @@ mod tests {
         let node = SuccessNode::new(TestState::Complete);
 
         workflow
-            .register_node(TestState::Start, node)
+            .register(TestState::Start, node)
             .add_exit_state(TestState::Complete);
 
         let store = MemoryStore::new();
@@ -1029,9 +1159,9 @@ mod tests {
         let validate_node = SuccessNode::new(TestState::Complete);
 
         workflow
-            .register_node(TestState::Start, start_node)
-            .register_node(TestState::Process, process_node)
-            .register_node(TestState::Validate, validate_node)
+            .register(TestState::Start, start_node)
+            .register(TestState::Process, process_node)
+            .register(TestState::Validate, validate_node)
             .add_exit_state(TestState::Complete);
 
         let store = MemoryStore::new();
@@ -1050,7 +1180,7 @@ mod tests {
         let mut flow1 = Workflow::new(TestState::Start);
         let data_node = DataStoringNode::new("workflow_data", "test_value", TestState::Process);
         flow1
-            .register_node(TestState::Start, data_node)
+            .register(TestState::Start, data_node)
             .add_exit_state(TestState::Process);
 
         let store = MemoryStore::new();
@@ -1070,7 +1200,7 @@ mod tests {
             TestState::Error,
         );
         flow2
-            .register_node(TestState::Validate, validation_node)
+            .register(TestState::Validate, validation_node)
             .add_exit_states(vec![TestState::Complete, TestState::Error]);
 
         let result2 = flow2.orchestrate(&store).await.unwrap();
@@ -1085,7 +1215,7 @@ mod tests {
         let failing_node = FailureNode::new("Test failure");
 
         workflow
-            .register_node(TestState::Start, failing_node)
+            .register(TestState::Start, failing_node)
             .add_exit_state(TestState::Error);
 
         let store = MemoryStore::new();
@@ -1098,10 +1228,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_unregistered_node_error() {
+    async fn test_unregistered_task_error() {
         let mut workflow: Workflow<TestState> = Workflow::new(TestState::Start);
 
-        // Don't register any nodes
+        // Don't register any tasks
         workflow.add_exit_state(TestState::Complete);
 
         let store = MemoryStore::new();
@@ -1109,7 +1239,7 @@ mod tests {
 
         assert!(result.is_err());
         let error = result.unwrap_err();
-        assert!(error.to_string().contains("No node registered for state"));
+        assert!(error.to_string().contains("No task registered for state"));
     }
 
     #[tokio::test]
@@ -1155,7 +1285,7 @@ mod tests {
         );
 
         workflow
-            .register_node(TestState::Start, conditional_node)
+            .register(TestState::Start, conditional_node)
             .add_exit_states(vec![TestState::Complete, TestState::Error]);
 
         let result = workflow.orchestrate(&store).await.unwrap();
@@ -1177,7 +1307,7 @@ mod tests {
         let mut flow1 = Workflow::new(TestState::Start);
         let start_node = DataStoringNode::new("process_data", "valid", TestState::Process);
         flow1
-            .register_node(TestState::Start, start_node)
+            .register(TestState::Start, start_node)
             .add_exit_state(TestState::Process);
 
         let store = MemoryStore::new();
@@ -1188,7 +1318,7 @@ mod tests {
         let mut flow2 = Workflow::new(TestState::Process);
         let process_node = SuccessNode::new(TestState::Validate);
         flow2
-            .register_node(TestState::Process, process_node)
+            .register(TestState::Process, process_node)
             .add_exit_state(TestState::Validate);
 
         let result2 = flow2.orchestrate(&store).await.unwrap();
@@ -1203,7 +1333,7 @@ mod tests {
             TestState::Retry,
         );
         flow3
-            .register_node(TestState::Validate, validate_node)
+            .register(TestState::Validate, validate_node)
             .add_exit_states(vec![TestState::Complete, TestState::Retry]);
 
         let result3 = flow3.orchestrate(&store).await.unwrap();
@@ -1226,8 +1356,8 @@ mod tests {
         let process_node_ref = process_node.clone();
 
         workflow
-            .register_node(TestState::Start, start_node)
-            .register_node(TestState::Process, process_node)
+            .register(TestState::Start, start_node)
+            .register(TestState::Process, process_node)
             .add_exit_state(TestState::Complete);
 
         let store = MemoryStore::new();
@@ -1244,13 +1374,13 @@ mod tests {
         let process_node = SuccessNode::new(TestState::Complete);
 
         let workflow = WorkflowBuilder::<TestState>::new(TestState::Start)
-            .register_node(TestState::Start, start_node)
-            .register_node(TestState::Process, process_node)
+            .register(TestState::Start, start_node)
+            .register(TestState::Process, process_node)
             .add_exit_state(TestState::Complete)
             .build();
 
         assert_eq!(workflow.start_state, Some(TestState::Start));
-        assert_eq!(workflow.state_nodes.len(), 2);
+        assert_eq!(workflow.state_tasks.len(), 2);
         assert!(workflow.exit_states.contains(&TestState::Complete));
 
         let store = MemoryStore::new();
@@ -1261,7 +1391,7 @@ mod tests {
     #[tokio::test]
     async fn test_flow_builder_with_multiple_exit_states() {
         let workflow: Workflow<TestState> = WorkflowBuilder::<TestState>::new(TestState::Start)
-            .register_node(TestState::Start, SuccessNode::new(TestState::Complete))
+            .register(TestState::Start, SuccessNode::new(TestState::Complete))
             .add_exit_states(vec![
                 TestState::Complete,
                 TestState::Error,
@@ -1285,8 +1415,8 @@ mod tests {
         let data_node2 = DataStoringNode::new("step2", "data2", TestState::Complete);
 
         workflow
-            .register_node(TestState::Start, data_node1)
-            .register_node(TestState::Process, data_node2)
+            .register(TestState::Start, data_node1)
+            .register(TestState::Process, data_node2)
             .add_exit_state(TestState::Complete);
 
         let store = MemoryStore::new();
@@ -1312,7 +1442,7 @@ mod tests {
         );
 
         workflow
-            .register_node(TestState::Start, validation_node)
+            .register(TestState::Start, validation_node)
             .add_exit_states(vec![TestState::Complete, TestState::Error]);
 
         let store = MemoryStore::new();
@@ -1339,9 +1469,9 @@ mod tests {
         );
 
         workflow
-            .register_node(TestState::Start, data_node)
-            .register_node(TestState::Process, success_node)
-            .register_node(TestState::Validate, conditional_node)
+            .register(TestState::Start, data_node)
+            .register(TestState::Process, success_node)
+            .register(TestState::Validate, conditional_node)
             .add_exit_states(vec![TestState::Complete, TestState::Error]);
 
         let store = MemoryStore::new();
@@ -1359,7 +1489,7 @@ mod tests {
         let concurrent_workflow: ConcurrentWorkflow<TestState> =
             ConcurrentWorkflow::new(TestState::Start);
 
-        assert!(concurrent_workflow.state_nodes.is_empty());
+        assert!(concurrent_workflow.state_tasks.is_empty());
         assert_eq!(concurrent_workflow.start_state, Some(TestState::Start));
     }
 
@@ -1368,12 +1498,12 @@ mod tests {
         let mut concurrent_workflow = ConcurrentWorkflow::new(TestState::Start);
 
         let node = SuccessNode::new(TestState::Complete);
-        concurrent_workflow.register_node(TestState::Start, node);
+        concurrent_workflow.register(TestState::Start, node);
 
-        assert_eq!(concurrent_workflow.state_nodes.len(), 1);
+        assert_eq!(concurrent_workflow.state_tasks.len(), 1);
         assert!(
             concurrent_workflow
-                .state_nodes
+                .state_tasks
                 .contains_key(&TestState::Start)
         );
     }
@@ -1384,7 +1514,7 @@ mod tests {
         concurrent_workflow.add_exit_state(TestState::Complete);
 
         let node = SuccessNode::new(TestState::Complete);
-        concurrent_workflow.register_node(TestState::Start, node);
+        concurrent_workflow.register(TestState::Start, node);
 
         // Create multiple stores for concurrent execution
         let stores = vec![MemoryStore::new(), MemoryStore::new(), MemoryStore::new()];
@@ -1417,7 +1547,7 @@ mod tests {
         concurrent_workflow.add_exit_state(TestState::Complete);
 
         let node = SuccessNode::new(TestState::Complete);
-        concurrent_workflow.register_node(TestState::Start, node);
+        concurrent_workflow.register(TestState::Start, node);
 
         // Create multiple stores
         let stores = vec![
@@ -1453,7 +1583,7 @@ mod tests {
         concurrent_workflow.add_exit_state(TestState::Complete);
 
         let node = SuccessNode::new(TestState::Complete);
-        concurrent_workflow.register_node(TestState::Start, node);
+        concurrent_workflow.register(TestState::Start, node);
 
         // Create stores
         let stores = vec![MemoryStore::new(), MemoryStore::new()];
@@ -1481,7 +1611,7 @@ mod tests {
         concurrent_workflow.add_exit_state(TestState::Complete);
 
         let node = SuccessNode::new(TestState::Complete);
-        concurrent_workflow.register_node(TestState::Start, node);
+        concurrent_workflow.register(TestState::Start, node);
 
         // Create stores
         let stores = vec![MemoryStore::new(), MemoryStore::new(), MemoryStore::new()];
@@ -1509,7 +1639,7 @@ mod tests {
         concurrent_workflow.add_exit_states(vec![TestState::Complete, TestState::Error]);
 
         let failing_node = FailureNode::new("Test failure");
-        concurrent_workflow.register_node(TestState::Start, failing_node);
+        concurrent_workflow.register(TestState::Start, failing_node);
 
         // Create stores
         let stores = vec![MemoryStore::new(), MemoryStore::new()];
@@ -1559,12 +1689,12 @@ mod tests {
         let node = SuccessNode::new(TestState::Complete);
 
         let mut concurrent_workflow = ConcurrentWorkflowBuilder::new(TestState::Start).build();
-        concurrent_workflow.register_node(TestState::Start, node);
+        concurrent_workflow.register(TestState::Start, node);
 
-        assert_eq!(concurrent_workflow.state_nodes.len(), 1);
+        assert_eq!(concurrent_workflow.state_tasks.len(), 1);
         assert!(
             concurrent_workflow
-                .state_nodes
+                .state_tasks
                 .contains_key(&TestState::Start)
         );
     }
@@ -1603,7 +1733,7 @@ mod tests {
         concurrent_workflow.add_exit_state(TestState::Process);
 
         let data_node = DataStoringNode::new("concurrent_data", "test_value", TestState::Process);
-        concurrent_workflow.register_node(TestState::Start, data_node);
+        concurrent_workflow.register(TestState::Start, data_node);
 
         // Create stores with different initial data
         let store1 = MemoryStore::new();
@@ -1731,7 +1861,7 @@ mod tests {
         // (we'll create separate workflows for testing)
 
         // First test: all fast workflows with short timeout - should all complete
-        concurrent_workflow.register_node(TestState::Start, InstantNode);
+        concurrent_workflow.register(TestState::Start, InstantNode);
 
         let stores = vec![MemoryStore::new(), MemoryStore::new()];
         let (_results, status) = concurrent_workflow
@@ -1751,7 +1881,7 @@ mod tests {
         // Now test with slow workflows and short timeout
         let mut slow_workflow = ConcurrentWorkflow::new(TestState::Start);
         slow_workflow.add_exit_state(TestState::Complete);
-        slow_workflow.register_node(TestState::Start, SlowNode);
+        slow_workflow.register(TestState::Start, SlowNode);
 
         let stores = vec![MemoryStore::new(), MemoryStore::new()];
         let (results, status) = slow_workflow

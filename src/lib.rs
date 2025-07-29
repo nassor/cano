@@ -5,41 +5,55 @@
 //!
 //! ## 🚀 Quick Start
 //!
-//! Create a node that processes data, create store for sharing data between nodes,
-//! then run your workflow. The basic pattern involves creating a `Node`, setting up
-//! a `MemoryStore`, and calling the `run` method with error handling.
+//! Choose between [`Task`] (simple) or [`Node`] (structured) for your processing logic,
+//! create a [`MemoryStore`] for sharing data, then run your workflow. Every [`Node`] automatically
+//! works as a [`Task`] for maximum flexibility.
 //!
 //! ## 🎯 Core Concepts
 //!
-//! ### Nodes - Your Processing Units
+//! ### Tasks & Nodes - Your Processing Units
 //!
-//! A [`Node`] trait is where your logic lives. Implement it once, and Cano handles the execution.
-//! The design focuses on simplicity and directness for maximum performance.
+//! **Two approaches for implementing processing logic:**
+//! - [`Task`] trait: Simple interface with single `run()` method - perfect for prototypes and simple operations
+//! - [`Node`] trait: Structured three-phase lifecycle with built-in retry strategies - ideal for production workloads
 //!
-//! ### store - Share Data Between Nodes
+//! **Every [`Node`] automatically implements [`Task`]**, providing seamless interoperability and upgrade paths.
+//!
+//! ### Store - Share Data Between Processing Units
 //!
 //! Use [`MemoryStore`] to pass data around your workflow. Store different types of data
 //! using key-value pairs, and retrieve them later with type safety. All values are
 //! wrapped in `std::borrow::Cow` for memory efficiency.
 //!
-//! ### Custom Nodes - Your Business Logic
+//! ### Custom Logic - Your Business Implementation
 //!
-//! Implement the [`Node`] trait to add your own processing logic. Every node follows
-//! a simple three-phase lifecycle: Prep (load data, validate inputs), Exec (core processing),
-//! and Post (store results, determine next action). Your custom nodes define the business
-//! logic for each phase.
+//! **Choose the right approach for your needs:**
+//! - Implement the [`Task`] trait for simple, single-method processing
+//! - Implement the [`Node`] trait for structured processing with three phases:
+//!   Prep (load data, validate inputs), Exec (core processing), and Post (store results, determine next action)
 //!
-//! ## 🏗️ Node Lifecycle
+//! ## 🏗️ Processing Lifecycle
 //!
-//! Every node follows a simple three-phase lifecycle:
+//! **Task**: Single `run()` method with full control over execution flow
+//!
+//! **Node**: Three-phase lifecycle for structured processing:
 //!
 //! 1. **Prep**: Load data, validate inputs, setup resources
 //! 2. **Exec**: Core processing logic (with automatic retry support)
 //! 3. **Post**: Store results, cleanup, determine next action
 //!
-//! This structure makes nodes predictable and easy to reason about.
+//! This structure makes nodes predictable and easy to reason about, while tasks provide maximum flexibility.
 //!
 //! ## 📚 Module Overview
+//!
+//! - **[`task`]**: The [`Task`] trait for simple, flexible processing logic
+//!   - Single `run()` method for maximum simplicity
+//!   - Perfect for prototypes and straightforward operations
+//!
+//! - **[`node`]**: The [`Node`] trait for structured processing logic  
+//!   - Built-in retry logic and error handling
+//!   - Three-phase lifecycle (`prep`, `exec`, `post`)
+//!   - Fluent configuration API via [`TaskConfig`]
 //!
 //! - **[`workflow`]**: Core workflow orchestration
 //!   - [`Workflow`] for state machine-based workflows
@@ -47,10 +61,6 @@
 //! - **[`scheduler`]**: Advanced workflow scheduling
 //!   - [`Scheduler`] for managing multiple flows with cron support
 //!   - Time-based and event-driven scheduling
-//!
-//! - **[`node`]**: The [`Node`] trait for custom processing logic
-//!   - Built-in retry logic and error handling
-//!   - Fluent configuration API via [`NodeConfig`]
 //!
 //! - **[`store`]**: Thread-safe key-value storage helpers for pipeline data sharing
 //!   - [`MemoryStore`] for in-memory data sharing
@@ -79,13 +89,15 @@ pub mod error;
 pub mod node;
 pub mod scheduler;
 pub mod store;
+pub mod task;
 pub mod workflow;
 
 // Core public API - simplified imports
 pub use error::{CanoError, CanoResult};
-pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node, NodeConfig, RetryMode};
+pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node};
 pub use scheduler::{FlowInfo, Scheduler};
 pub use store::{KeyValueStore, MemoryStore};
+pub use task::{DefaultTaskParams, DynTask, RetryMode, Task, TaskConfig, TaskObject};
 pub use workflow::{
     ConcurrentWorkflow, ConcurrentWorkflowBuilder, ConcurrentWorkflowStatus, WaitStrategy,
     Workflow, WorkflowBuilder, WorkflowResult,
@@ -99,9 +111,9 @@ pub mod prelude {
 
     pub use crate::{
         CanoError, CanoResult, ConcurrentWorkflow, ConcurrentWorkflowBuilder,
-        ConcurrentWorkflowStatus, DefaultNodeResult, DefaultParams, FlowInfo, KeyValueStore,
-        MemoryStore, Node, NodeConfig, RetryMode, Scheduler, WaitStrategy, Workflow,
-        WorkflowBuilder, WorkflowResult,
+        ConcurrentWorkflowStatus, DefaultNodeResult, DefaultParams, DefaultTaskParams, FlowInfo,
+        KeyValueStore, MemoryStore, Node, RetryMode, Scheduler, Task, TaskConfig, TaskObject,
+        WaitStrategy, Workflow, WorkflowBuilder, WorkflowResult,
     };
 
     // Re-export async_trait for convenience
