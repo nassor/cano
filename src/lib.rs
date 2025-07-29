@@ -87,8 +87,8 @@ pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node, NodeConfig, Retr
 pub use scheduler::{FlowInfo, Scheduler};
 pub use store::{KeyValueStore, MemoryStore};
 pub use workflow::{
-    ConcurrentWorkflow, ConcurrentWorkflowBuilder, ConcurrentWorkflowStatus, 
-    WaitStrategy, Workflow, WorkflowBuilder, WorkflowResult
+    ConcurrentWorkflow, ConcurrentWorkflowBuilder, ConcurrentWorkflowStatus, WaitStrategy,
+    Workflow, WorkflowBuilder, WorkflowResult,
 };
 
 // Convenience re-exports for common patterns
@@ -98,10 +98,10 @@ pub mod prelude {
     //! Use `use cano::prelude::*;` to import the most commonly used types and traits.
 
     pub use crate::{
-        CanoError, CanoResult, ConcurrentWorkflow, ConcurrentWorkflowBuilder, 
+        CanoError, CanoResult, ConcurrentWorkflow, ConcurrentWorkflowBuilder,
         ConcurrentWorkflowStatus, DefaultNodeResult, DefaultParams, FlowInfo, KeyValueStore,
-        MemoryStore, Node, NodeConfig, RetryMode, Scheduler, WaitStrategy, 
-        Workflow, WorkflowBuilder, WorkflowResult,
+        MemoryStore, Node, NodeConfig, RetryMode, Scheduler, WaitStrategy, Workflow,
+        WorkflowBuilder, WorkflowResult,
     };
 
     // Re-export async_trait for convenience

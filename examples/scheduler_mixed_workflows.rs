@@ -70,18 +70,18 @@ async fn main() -> CanoResult<()> {
     println!("🚀 Enhanced Scheduler with Concurrent Workflows");
     println!("===============================================\n");
 
-    let mut scheduler: Scheduler<TaskState> = Scheduler::new();
+    let mut scheduler = Scheduler::new();
 
     // Example 1: Regular workflows
     println!("📊 Setting up Regular Workflows");
     println!("-------------------------------");
 
     // Create regular workflows
-    let mut regular_workflow1: Workflow<TaskState> = Workflow::new(TaskState::Start);
+    let mut regular_workflow1 = Workflow::new(TaskState::Start);
     regular_workflow1.add_exit_state(TaskState::Complete);
     regular_workflow1.register_node(TaskState::Start, SimpleTask::new("RegularTask1"));
 
-    let mut regular_workflow2: Workflow<TaskState> = Workflow::new(TaskState::Start);
+    let mut regular_workflow2 = Workflow::new(TaskState::Start);
     regular_workflow2.add_exit_state(TaskState::Complete);
     regular_workflow2.register_node(TaskState::Start, SimpleTask::new("RegularTask2"));
 
@@ -95,14 +95,11 @@ async fn main() -> CanoResult<()> {
     println!("\n📊 Setting up Concurrent Workflows");
     println!("----------------------------------");
 
-    // Create template workflow for concurrent execution
-    let mut template_workflow: Workflow<TaskState> = Workflow::new(TaskState::Start);
-    template_workflow.add_exit_state(TaskState::Complete);
+    // Create concurrent workflow directly
+    let mut concurrent_workflow = ConcurrentWorkflow::new(TaskState::Start);
+    concurrent_workflow.add_exit_state(TaskState::Complete);
 
-    // Create concurrent workflow
-    let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
-    concurrent_workflow
-        .register_node(TaskState::Start, SimpleTask::new("ConcurrentTask"));
+    concurrent_workflow.register_node(TaskState::Start, SimpleTask::new("ConcurrentTask"));
 
     // Schedule concurrent workflows with different strategies
     scheduler.manual_concurrent(

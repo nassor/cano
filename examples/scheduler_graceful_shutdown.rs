@@ -91,16 +91,14 @@ impl Node<MyState> for QuickNode {
 
 #[tokio::main]
 async fn main() -> CanoResult<()> {
-    let mut scheduler: Scheduler<MyState> = Scheduler::new();
+    let mut scheduler = Scheduler::new();
 
-    // Create flows with proper nodes
-    let mut long_flow_builder: Workflow<MyState> = Workflow::new(MyState::Start);
+    // Create a long-running flow
+    let mut long_flow_builder = Workflow::new(MyState::Start);
     long_flow_builder.register_node(MyState::Start, LongProcessingNode);
-    long_flow_builder.add_exit_state(MyState::End);
 
-    let mut quick_flow_builder: Workflow<MyState> = Workflow::new(MyState::Start);
+    let mut quick_flow_builder = Workflow::new(MyState::Start);
     quick_flow_builder.register_node(MyState::Start, QuickNode);
-    quick_flow_builder.add_exit_state(MyState::End);
 
     // Add flows to scheduler
     scheduler.every_seconds("long_task", long_flow_builder, 10)?; // Every 10 seconds

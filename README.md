@@ -364,27 +364,27 @@ Execute multiple workflow instances in parallel with different timeout strategie
 ```rust
 use cano::prelude::*;
 
-// Create a concurrent workflow
-let concurrent_workflow = ConcurrentWorkflowBuilder::new()
-    .with_workflow(base_workflow)
-    .build();
+// Create a concurrent workflow with the same API as regular workflows
+let mut concurrent_workflow = ConcurrentWorkflow::new(ProcessingState::Start);
+concurrent_workflow.register_node(ProcessingState::Start, processing_node);
+concurrent_workflow.add_exit_state(ProcessingState::Complete);
 
 // Execute with different wait strategies
 let stores: Vec<MemoryStore> = (0..10).map(|_| MemoryStore::new()).collect();
 
 // Wait for all workflows to complete
-let results = concurrent_workflow
-    .execute_concurrent(&stores, WaitStrategy::WaitForever)
+let (results, status) = concurrent_workflow
+    .execute_concurrent(stores.clone(), WaitStrategy::WaitForever)
     .await?;
 
 // Wait for first 5 to complete, then cancel the rest
-let results = concurrent_workflow
-    .execute_concurrent(&stores, WaitStrategy::WaitForQuota(5))
+let (results, status) = concurrent_workflow
+    .execute_concurrent(stores.clone(), WaitStrategy::WaitForQuota(5))
     .await?;
 
 // Execute within time limit
-let results = concurrent_workflow
-    .execute_concurrent(&stores, WaitStrategy::WaitDuration(Duration::from_secs(30)))
+let (results, status) = concurrent_workflow
+    .execute_concurrent(stores, WaitStrategy::WaitDuration(Duration::from_secs(30)))
     .await?;
 ```
 ## Scheduling Workflows
@@ -430,16 +430,16 @@ impl Node<MyState> for MyTask {
 
 #[tokio::main]
 async fn main() -> CanoResult<()> {
-    let mut scheduler: Scheduler<MyState> = Scheduler::new();
+    let mut scheduler = Scheduler::new();
     
-    // Create regular workflows
+    // Create regular workflows with consistent API
     let mut workflow1 = Workflow::new(MyState::Start);
-    workflow1.add_exit_state(MyState::Complete);
     workflow1.register_node(MyState::Start, MyTask);
+    workflow1.add_exit_state(MyState::Complete);
 
     let mut workflow2 = Workflow::new(MyState::Start);
-    workflow2.add_exit_state(MyState::Complete);
     workflow2.register_node(MyState::Start, MyTask);
+    workflow2.add_exit_state(MyState::Complete);
     
     // Schedule regular workflows
     scheduler.every_seconds("task1", workflow1.clone(), 30)?;          // Every 30 seconds
@@ -447,13 +447,10 @@ async fn main() -> CanoResult<()> {
     scheduler.cron("task3", workflow1.clone(), "0 0 9 * * *")?;        // Daily at 9 AM
     scheduler.manual("task4", workflow1)?;                             // Manual trigger only
     
-    // Create template workflow for concurrent execution
-    let mut template_workflow = Workflow::new(MyState::Start);
-    template_workflow.add_exit_state(MyState::Complete);
-    
-    // Create concurrent workflow
-    let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
+    // Create concurrent workflow with identical API to regular workflows
+    let mut concurrent_workflow = ConcurrentWorkflow::new(MyState::Start);
     concurrent_workflow.register_node(MyState::Start, MyTask);
+    concurrent_workflow.add_exit_state(MyState::Complete);
     
     // Schedule concurrent workflows (multiple instances in parallel)
     scheduler.manual_concurrent("concurrent1", concurrent_workflow.clone(), 

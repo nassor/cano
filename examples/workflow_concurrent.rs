@@ -1,20 +1,18 @@
 //! # Concurrent Workflow Example
 //!
-//! This example demonstrates the new simplified concurrent workflow API in Cano.
+//! This example demonstrates the concurrent workflow API in Cano.
 //! It shows how to execute multiple workflow instances in parallel with different
 //! wait strategies for flexible execution control.
 //!
-//! ## New Simplified API
+//! ## Concurrent Workflow API
 //!
-//! The new API eliminates the need for `register_cloneable_node()` and makes it easier
-//! to build concurrent workflows:
+//! The concurrent workflow API provides a simple way to execute multiple workflow
+//! instances in parallel:
 //!
 //! ```rust,ignore
-//! // Old API (deprecated)
-//! concurrent_workflow.register_cloneable_node(state, node);
-//!
-//! // New API (recommended)
+//! let mut concurrent_workflow = ConcurrentWorkflow::new(start_state);
 //! concurrent_workflow.register_node(state, node);
+//! concurrent_workflow.add_exit_state(exit_state);
 //! ```
 
 use cano::prelude::*;
@@ -92,12 +90,9 @@ async fn main() -> CanoResult<()> {
     println!("🚀 Concurrent Workflow Example");
     println!("================================\n");
 
-    // Create a template workflow
-    let mut template_workflow: Workflow<ProcessingState> = Workflow::new(ProcessingState::Start);
-    template_workflow.add_exit_state(ProcessingState::Complete);
-
-    // Create a concurrent workflow
-    let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
+    // Create a concurrent workflow directly
+    let mut concurrent_workflow = ConcurrentWorkflow::new(ProcessingState::Start);
+    concurrent_workflow.add_exit_state(ProcessingState::Complete);
 
     // Register a processing node directly - much simpler!
     let processing_node = ProcessingNode::new("DataProcessor");
@@ -229,13 +224,14 @@ async fn main() -> CanoResult<()> {
     println!("📊 Example 5: Concurrent Workflow Builder Pattern");
     println!("-------------------------------------------------");
 
-    // Demonstrate the builder pattern
-    let _built_concurrent_workflow: ConcurrentWorkflow<ProcessingState> =
-        ConcurrentWorkflowBuilder::new(Workflow::new(ProcessingState::Start)).build();
+    // Demonstrate the builder pattern for concurrent workflows
+    let mut concurrent_workflow = ConcurrentWorkflowBuilder::new(ProcessingState::Start).build();
+
+    // Register nodes on the built workflow
+    concurrent_workflow.register_node(ProcessingState::Start, ProcessingNode::new("Builder"));
+    concurrent_workflow.add_exit_state(ProcessingState::Complete);
 
     let stores = vec![MemoryStore::new(), MemoryStore::new()];
-    // Note: This example needs to be updated to register nodes properly
-    // For now, let's reuse the existing concurrent_workflow
     let (results, status) = concurrent_workflow
         .execute_concurrent(stores, WaitStrategy::WaitForever)
         .await?;

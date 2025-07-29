@@ -17,15 +17,15 @@
 //!
 //! #[tokio::main]
 //! async fn main() -> CanoResult<()> {
-//!     let mut scheduler: Scheduler<MyState> = Scheduler::new();
+//!     let mut scheduler = Scheduler::<MyState>::new();
 //!     
 //!     // Create separate workflows for each scheduled task
-//!     let workflow1: Workflow<MyState> = Workflow::new(MyState::Start);
-//!     let workflow2: Workflow<MyState> = Workflow::new(MyState::Start);
-//!     let workflow3: Workflow<MyState> = Workflow::new(MyState::Start);
-//!     let workflow4: Workflow<MyState> = Workflow::new(MyState::Start);
-//!     let workflow5: Workflow<MyState> = Workflow::new(MyState::Start);
-//!     let workflow6: Workflow<MyState> = Workflow::new(MyState::Start);
+//!     let workflow1 = Workflow::new(MyState::Start);
+//!     let workflow2 = Workflow::new(MyState::Start);
+//!     let workflow3 = Workflow::new(MyState::Start);
+//!     let workflow4 = Workflow::new(MyState::Start);
+//!     let workflow5 = Workflow::new(MyState::Start);
+//!     let workflow6 = Workflow::new(MyState::Start);
 //!     
 //!     // Multiple ways to schedule workflows:
 //!     scheduler.every_seconds("task1", workflow1, 30)?;                    // Every 30 seconds
@@ -824,7 +824,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_scheduler_creation() {
-        let scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
+        let scheduler: Scheduler<TestState> = Scheduler::new();
         assert!(!scheduler.has_running_flows().await);
         assert_eq!(scheduler.running_count().await, 0);
         assert!(scheduler.list().await.is_empty());
@@ -1288,12 +1288,10 @@ mod tests {
     async fn test_concurrent_workflow_scheduling() {
         let mut scheduler: Scheduler<TestState> = Scheduler::new();
 
-        // Create a template workflow for concurrent execution
-        let mut template_workflow = Workflow::new(TestState::Start);
-        template_workflow.add_exit_state(TestState::Complete);
-
         // Create a concurrent workflow
-        let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
+        let mut concurrent_workflow = ConcurrentWorkflow::new(TestState::Start);
+        concurrent_workflow.add_exit_state(TestState::Complete);
+
         let node = TestNode::new_success();
         concurrent_workflow.register_node(TestState::Start, node);
 
@@ -1315,12 +1313,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_workflow_status_tracking() {
-        // Create a template workflow
-        let mut template_workflow = Workflow::new(TestState::Start);
-        template_workflow.add_exit_state(TestState::Complete);
-
         // Create a concurrent workflow
-        let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
+        let mut concurrent_workflow = ConcurrentWorkflow::new(TestState::Start);
+        concurrent_workflow.add_exit_state(TestState::Complete);
+
         let node = TestNode::new_success();
         concurrent_workflow.register_node(TestState::Start, node);
 
@@ -1365,9 +1361,9 @@ mod tests {
             .unwrap();
 
         // Add a concurrent workflow
-        let mut template_workflow = Workflow::new(TestState::Start);
-        template_workflow.add_exit_state(TestState::Complete);
-        let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
+        let mut concurrent_workflow = ConcurrentWorkflow::new(TestState::Start);
+        concurrent_workflow.add_exit_state(TestState::Complete);
+
         let node = TestNode::new_success();
         concurrent_workflow.register_node(TestState::Start, node);
 

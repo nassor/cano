@@ -142,26 +142,26 @@ async fn main() -> CanoResult<()> {
     println!("This demo shows multiple instances of the same workflow running concurrently.");
     println!("Watch for overlapping execution messages and active instance counts!\n");
 
-    // Create a long-running workflow (5 seconds execution time)
-    let mut long_task_flow: Workflow<TaskState> = Workflow::new(TaskState::Execute);
+        // Create a long-running workflow (5 seconds execution time)
+    let mut long_task_flow = Workflow::new(TaskState::Execute);
     long_task_flow
         .register_node(TaskState::Execute, LongRunningTask::new("LongTask", 7000))
         .add_exit_states(vec![TaskState::Complete]);
 
     // Create a medium-running workflow (3 seconds execution time)
-    let mut medium_task_flow: Workflow<TaskState> = Workflow::new(TaskState::Execute);
+    let mut medium_task_flow = Workflow::new(TaskState::Execute);
     medium_task_flow
         .register_node(TaskState::Execute, LongRunningTask::new("MediumTask", 3000))
         .add_exit_states(vec![TaskState::Complete]);
 
     // Create a fast-running workflow (500ms execution time)
-    let mut fast_task_flow: Workflow<TaskState> = Workflow::new(TaskState::Execute);
+    let mut fast_task_flow = Workflow::new(TaskState::Execute);
     fast_task_flow
         .register_node(TaskState::Execute, LongRunningTask::new("FastTask", 500))
         .add_exit_states(vec![TaskState::Complete]);
 
     // Setup scheduler with aggressive scheduling to force overlaps
-    let mut scheduler: Scheduler<TaskState> = Scheduler::new();
+    let mut scheduler = Scheduler::new();
 
     // Long task every 2 seconds (7s execution, 2s interval = lots of overlap)
     scheduler.every_seconds("long_task", long_task_flow, 2)?;

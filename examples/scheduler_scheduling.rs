@@ -233,28 +233,28 @@ async fn main() -> CanoResult<()> {
     println!("=====================================");
 
     // Create flows
-    let mut hourly_report_flow: Workflow<WorkflowAction> = Workflow::new(WorkflowAction::Start);
+    let mut hourly_report_flow = Workflow::new(WorkflowAction::Start);
     hourly_report_flow
         .register_node(WorkflowAction::Start, ReportNode::new("Hourly"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
-    let mut cleanup_flow: Workflow<WorkflowAction> = Workflow::new(WorkflowAction::Start);
+    let mut cleanup_flow = Workflow::new(WorkflowAction::Start);
     cleanup_flow
         .register_node(WorkflowAction::Start, CleanupNode::new("Temporary"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
-    let mut manual_flow: Workflow<WorkflowAction> = Workflow::new(WorkflowAction::Start);
+    let mut manual_flow = Workflow::new(WorkflowAction::Start);
     manual_flow
         .register_node(WorkflowAction::Start, ManualTaskNode::new("Data Migration"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
-    let mut setup_flow: Workflow<WorkflowAction> = Workflow::new(WorkflowAction::Start);
+    let mut setup_flow = Workflow::new(WorkflowAction::Start);
     setup_flow
         .register_node(WorkflowAction::Start, SetupNode::new("System"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
     // Create scheduler with multiple flows
-    let mut scheduler: Scheduler<WorkflowAction> = Scheduler::new();
+    let mut scheduler = Scheduler::new();
 
     // Run hourly report every 5 seconds for demo to see concurrent executions
     scheduler.every_seconds("hourly_report", hourly_report_flow, 5)?;

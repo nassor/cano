@@ -376,18 +376,20 @@ where
 
 /// Concurrent workflow orchestration for executing multiple workflow instances in parallel
 ///
-/// Use the `register_node()` method to add cloneable nodes, or configure a template workflow
-/// and use the builder pattern for more complex setups.
+/// This has the same API as `Workflow` but executes multiple instances concurrently.
+/// Use `register_node()` to add cloneable nodes and `add_exit_state()` to configure exit states.
 pub struct ConcurrentWorkflow<TState, TStore = MemoryStore, TParams = DefaultParams>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
     TParams: Clone + Send + Sync + 'static,
     TStore: Clone + Send + Sync + 'static,
 {
-    /// Template workflow that contains the structure (start state, exit states)
-    template_workflow: Workflow<TState, TStore, TParams>,
-    /// Cloneable nodes that will be used for concurrent execution
-    cloneable_nodes: HashMap<TState, CloneableNode<TState, TStore, TParams>>,
+    /// The starting state of the workflow
+    pub start_state: Option<TState>,
+    /// Map of states to their corresponding cloneable node trait objects
+    pub state_nodes: HashMap<TState, CloneableNode<TState, TStore, TParams>>,
+    /// Set of states that will terminate the workflow when reached
+    pub exit_states: std::collections::HashSet<TState>,
 }
 
 impl<TState, TStore, TParams> ConcurrentWorkflow<TState, TStore, TParams>
@@ -396,39 +398,57 @@ where
     TParams: Clone + Send + Sync + 'static,
     TStore: Clone + Send + Sync + 'static,
 {
-    /// Create a new ConcurrentWorkflow from a template workflow
-    pub fn new(template_workflow: Workflow<TState, TStore, TParams>) -> Self {
+    /// Create a new ConcurrentWorkflow with a starting state
+    pub fn new(start_state: TState) -> Self {
         Self {
-            template_workflow,
-            cloneable_nodes: HashMap::new(),
+            start_state: Some(start_state),
+            state_nodes: HashMap::new(),
+            exit_states: std::collections::HashSet::new(),
         }
     }
 
-    /// Register a cloneable node for concurrent execution
+    /// Register a cloneable node for a specific state
     ///
-    /// This is the new, simplified API. Just call this method to add nodes that will be
-    /// automatically cloned for each concurrent workflow instance.
+    /// This method accepts any node that implements Clone for concurrent execution.
     pub fn register_node<N>(&mut self, state: TState, node: N) -> &mut Self
     where
         N: Node<TState, TStore, TParams> + Clone + Send + Sync + 'static,
     {
-        self.cloneable_nodes.insert(state, Box::new(node));
+        self.state_nodes.insert(state, Box::new(node));
+        self
+    }
+
+    /// Register multiple exit states
+    pub fn add_exit_states(&mut self, states: Vec<TState>) -> &mut Self {
+        self.exit_states.extend(states);
+        self
+    }
+
+    /// Register a single exit state
+    pub fn add_exit_state(&mut self, state: TState) -> &mut Self {
+        self.exit_states.insert(state);
+        self
+    }
+
+    /// Set the starting state
+    pub fn start(&mut self, state: TState) -> &mut Self {
+        self.start_state = Some(state);
         self
     }
 
     /// Create a workflow instance for concurrent execution
     ///
-    /// This method creates a new workflow instance by copying the template workflow's structure
+    /// This method creates a new workflow instance by copying the structure
     /// and cloning all registered nodes.
     fn create_workflow_instance(&self) -> Result<Workflow<TState, TStore, TParams>, CanoError> {
         let mut workflow = Workflow {
-            start_state: self.template_workflow.start_state.clone(),
+            start_state: self.start_state.clone(),
             state_nodes: HashMap::new(),
-            exit_states: self.template_workflow.exit_states.clone(),
+            exit_states: self.exit_states.clone(),
         };
 
         // Clone all registered nodes for this instance
-        for (state, cloneable_node) in &self.cloneable_nodes {
+        for (state, cloneable_node) in &self.state_nodes {
             let cloned_node = cloneable_node.clone_node();
             workflow.state_nodes.insert(state.clone(), cloned_node);
         }
@@ -669,15 +689,14 @@ where
     fn clone(&self) -> Self {
         // Clone the cloneable nodes
         let mut cloned_nodes = HashMap::new();
-        for (state, node) in &self.cloneable_nodes {
+        for (state, node) in &self.state_nodes {
             cloned_nodes.insert(state.clone(), node.clone_node());
         }
 
         Self {
-            template_workflow: Workflow::new(
-                self.template_workflow.start_state.as_ref().unwrap().clone(),
-            ),
-            cloneable_nodes: cloned_nodes,
+            start_state: self.start_state.clone(),
+            state_nodes: cloned_nodes,
+            exit_states: self.exit_states.clone(),
         }
     }
 }
@@ -690,10 +709,11 @@ where
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ConcurrentWorkflow")
-            .field("template_workflow", &self.template_workflow)
+            .field("start_state", &self.start_state)
+            .field("exit_states", &self.exit_states)
             .field(
-                "cloneable_nodes",
-                &format!("{} cloneable nodes", self.cloneable_nodes.len()),
+                "nodes",
+                &format!("{} cloneable nodes", self.state_nodes.len()),
             )
             .finish()
     }
@@ -715,25 +735,31 @@ where
     TParams: Clone + Send + Sync + 'static,
     TStore: Clone + Send + Sync + 'static,
 {
-    /// Create a new ConcurrentWorkflowBuilder from a template workflow
-    pub fn new(template_workflow: Workflow<TState, TStore, TParams>) -> Self {
+    /// Create a new ConcurrentWorkflowBuilder with a starting state
+    pub fn new(start_state: TState) -> Self {
         Self {
-            concurrent_workflow: ConcurrentWorkflow::new(template_workflow),
+            concurrent_workflow: ConcurrentWorkflow::new(start_state),
         }
     }
 
     /// Register a cloneable node for concurrent execution
-    ///
-    /// **DEPRECATED**: Use the ConcurrentWorkflow directly instead.
-    #[deprecated(
-        note = "Use ConcurrentWorkflow.register_node() directly instead of the builder pattern."
-    )]
-    pub fn register_cloneable_node<N>(mut self, state: TState, node: N) -> Self
+    pub fn register_node<N>(mut self, state: TState, node: N) -> Self
     where
         N: Node<TState, TStore, TParams> + Clone + Send + Sync + 'static,
     {
-        // Add the node to the concurrent workflow directly
         self.concurrent_workflow.register_node(state, node);
+        self
+    }
+
+    /// Add an exit state
+    pub fn add_exit_state(mut self, state: TState) -> Self {
+        self.concurrent_workflow.add_exit_state(state);
+        self
+    }
+
+    /// Add multiple exit states
+    pub fn add_exit_states(mut self, states: Vec<TState>) -> Self {
+        self.concurrent_workflow.add_exit_states(states);
         self
     }
 
@@ -1350,35 +1376,33 @@ mod tests {
     // Tests for Concurrent Workflows
     #[tokio::test]
     async fn test_concurrent_workflow_creation() {
-        let template_workflow: Workflow<TestState> = Workflow::new(TestState::Start);
         let concurrent_workflow: ConcurrentWorkflow<TestState> =
-            ConcurrentWorkflow::new(template_workflow);
+            ConcurrentWorkflow::new(TestState::Start);
 
-        assert!(concurrent_workflow.cloneable_nodes.is_empty());
+        assert!(concurrent_workflow.state_nodes.is_empty());
+        assert_eq!(concurrent_workflow.start_state, Some(TestState::Start));
     }
 
     #[tokio::test]
     async fn test_concurrent_workflow_register_node() {
-        let template_workflow: Workflow<TestState> = Workflow::new(TestState::Start);
-        let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
+        let mut concurrent_workflow = ConcurrentWorkflow::new(TestState::Start);
 
         let node = SuccessNode::new(TestState::Complete);
         concurrent_workflow.register_node(TestState::Start, node);
 
-        assert_eq!(concurrent_workflow.cloneable_nodes.len(), 1);
+        assert_eq!(concurrent_workflow.state_nodes.len(), 1);
         assert!(
             concurrent_workflow
-                .cloneable_nodes
+                .state_nodes
                 .contains_key(&TestState::Start)
         );
     }
 
     #[tokio::test]
     async fn test_concurrent_workflow_wait_forever() {
-        let mut template_workflow = Workflow::new(TestState::Start);
-        template_workflow.add_exit_state(TestState::Complete);
+        let mut concurrent_workflow = ConcurrentWorkflow::new(TestState::Start);
+        concurrent_workflow.add_exit_state(TestState::Complete);
 
-        let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
         let node = SuccessNode::new(TestState::Complete);
         concurrent_workflow.register_node(TestState::Start, node);
 
@@ -1409,10 +1433,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_workflow_wait_for_quota() {
-        let mut template_workflow = Workflow::new(TestState::Start);
-        template_workflow.add_exit_state(TestState::Complete);
+        let mut concurrent_workflow = ConcurrentWorkflow::new(TestState::Start);
+        concurrent_workflow.add_exit_state(TestState::Complete);
 
-        let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
         let node = SuccessNode::new(TestState::Complete);
         concurrent_workflow.register_node(TestState::Start, node);
 
@@ -1446,10 +1469,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_workflow_wait_duration() {
-        let mut template_workflow = Workflow::new(TestState::Start);
-        template_workflow.add_exit_state(TestState::Complete);
+        let mut concurrent_workflow = ConcurrentWorkflow::new(TestState::Start);
+        concurrent_workflow.add_exit_state(TestState::Complete);
 
-        let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
         let node = SuccessNode::new(TestState::Complete);
         concurrent_workflow.register_node(TestState::Start, node);
 
@@ -1475,10 +1497,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_workflow_wait_quota_or_duration() {
-        let mut template_workflow = Workflow::new(TestState::Start);
-        template_workflow.add_exit_state(TestState::Complete);
+        let mut concurrent_workflow = ConcurrentWorkflow::new(TestState::Start);
+        concurrent_workflow.add_exit_state(TestState::Complete);
 
-        let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
         let node = SuccessNode::new(TestState::Complete);
         concurrent_workflow.register_node(TestState::Start, node);
 
@@ -1504,10 +1525,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_workflow_with_errors() {
-        let mut template_workflow = Workflow::new(TestState::Start);
-        template_workflow.add_exit_states(vec![TestState::Complete, TestState::Error]);
+        let mut concurrent_workflow = ConcurrentWorkflow::new(TestState::Start);
+        concurrent_workflow.add_exit_states(vec![TestState::Complete, TestState::Error]);
 
-        let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
         let failing_node = FailureNode::new("Test failure");
         concurrent_workflow.register_node(TestState::Start, failing_node);
 
@@ -1538,8 +1558,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_workflow_empty_stores() {
-        let template_workflow: Workflow<TestState> = Workflow::new(TestState::Start);
-        let concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
+        let concurrent_workflow: ConcurrentWorkflow<TestState> =
+            ConcurrentWorkflow::new(TestState::Start);
 
         let (results, status) = concurrent_workflow
             .execute_concurrent(Vec::new(), WaitStrategy::WaitForever)
@@ -1556,16 +1576,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_workflow_builder() {
-        let template_workflow: Workflow<TestState> = Workflow::new(TestState::Start);
         let node = SuccessNode::new(TestState::Complete);
 
-        let mut concurrent_workflow = ConcurrentWorkflowBuilder::new(template_workflow).build();
+        let mut concurrent_workflow = ConcurrentWorkflowBuilder::new(TestState::Start).build();
         concurrent_workflow.register_node(TestState::Start, node);
 
-        assert_eq!(concurrent_workflow.cloneable_nodes.len(), 1);
+        assert_eq!(concurrent_workflow.state_nodes.len(), 1);
         assert!(
             concurrent_workflow
-                .cloneable_nodes
+                .state_nodes
                 .contains_key(&TestState::Start)
         );
     }
@@ -1600,10 +1619,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_workflow_with_data_sharing() {
-        let mut template_workflow = Workflow::new(TestState::Start);
-        template_workflow.add_exit_state(TestState::Process);
+        let mut concurrent_workflow = ConcurrentWorkflow::new(TestState::Start);
+        concurrent_workflow.add_exit_state(TestState::Process);
 
-        let mut concurrent_workflow = ConcurrentWorkflow::new(template_workflow);
         let data_node = DataStoringNode::new("concurrent_data", "test_value", TestState::Process);
         concurrent_workflow.register_node(TestState::Start, data_node);
 
