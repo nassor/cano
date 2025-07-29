@@ -36,11 +36,6 @@ use crate::task::TaskConfig;
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-#[cfg(test)]
-use crate::task::RetryMode;
-#[cfg(test)]
-use std::time::Duration;
-
 /// Simple key-value parameters for node configuration
 ///
 /// This is a convenience type alias for the most common parameter format used in workflows.
@@ -284,9 +279,11 @@ pub type NodeObject<TState> = dyn DynNode<TState> + Send + Sync;
 mod tests {
     use super::*;
     use crate::store::{KeyValueStore, MemoryStore};
+    use crate::task::RetryMode;
     use async_trait::async_trait;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
     use tokio;
 
     // Test enum for node return values
