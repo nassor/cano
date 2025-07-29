@@ -53,7 +53,7 @@
 //! - **[`node`]**: The [`Node`] trait for structured processing logic  
 //!   - Built-in retry logic and error handling
 //!   - Three-phase lifecycle (`prep`, `exec`, `post`)
-//!   - Fluent configuration API via [`NodeConfig`]
+//!   - Fluent configuration API via [`TaskConfig`]
 //!
 //! - **[`workflow`]**: Core workflow orchestration
 //!   - [`Workflow`] for state machine-based workflows

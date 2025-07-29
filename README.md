@@ -18,7 +18,7 @@ The engine is built on three core concepts: **Tasks** and **Nodes** to encapsula
 
 - **Task & Node APIs**: Single `Task` trait for simple processing logic, or `Node` trait for structured three-phase lifecycle
 - **State Machines**: Type-safe enum-driven state transitions with compile-time checking
-- **Retry Strategies**: None, fixed delays, and exponential backoff with jitter (for Nodes)
+- **Retry Strategies**: None, fixed delays, and exponential backoff with jitter (for both Tasks and Nodes)
 - **Flexible Storage**: Built-in `MemoryStore` or custom struct types for data sharing
 - **Workflow Scheduling**: Built-in scheduler with intervals, cron schedules, and manual triggers
 - **Concurrent Execution**: Execute multiple workflow instances in parallel with timeout strategies
@@ -54,6 +54,11 @@ struct SimpleTask;
 
 #[async_trait]
 impl Task<WorkflowState> for SimpleTask {
+    fn config(&self) -> TaskConfig {
+        // Configure retry behavior for resilience
+        TaskConfig::new().with_exponential_retry(2)
+    }
+
     async fn run(&self, store: &MemoryStore) -> Result<WorkflowState, CanoError> {
         let input: String = store.get("input").unwrap_or_default();
         println!("Processing: {input}");
@@ -125,6 +130,11 @@ struct DataProcessor;
 
 #[async_trait]
 impl Task<String> for DataProcessor {
+    fn config(&self) -> TaskConfig {
+        // Configure retry behavior (optional)
+        TaskConfig::new().with_fixed_retry(3, Duration::from_secs(1))
+    }
+
     async fn run(&self, store: &MemoryStore) -> Result<String, CanoError> {
         // Load data
         let input: String = store.get("input")?;
@@ -180,24 +190,44 @@ impl Node<String> for EmailProcessor {
 #### Compatibility & When to Use Which
 
 - **Every Node automatically implements Task** - you can use any Node wherever Tasks are accepted
-- **Use Task for**: Simple processing, quick prototypes, one-off operations, when you don't need retry logic
-- **Use Node for**: Production workloads, complex processing, when you need built-in retry strategies, structured error handling
+- **Use Task for**: Simple processing, quick prototypes, one-off operations
+- **Use Node for**: Production workloads, complex processing, when you need structured three-phase lifecycle
 
-#### Retry Strategies (Nodes Only)
+#### Retry Strategies
 
-Configure retry behavior using `NodeConfig`:
+Both Tasks and Nodes support retry strategies. Configure retry behavior using `TaskConfig`:
 
 ```rust
-impl Node<WorkflowState> for ReliableNode {
-    fn config(&self) -> NodeConfig {
+// Task with retry configuration
+impl Task<WorkflowState> for ReliableTask {
+    fn config(&self) -> TaskConfig {
         // No retries (fail fast)
-        NodeConfig::minimal()
+        TaskConfig::minimal()
         
         // Fixed retries: 3 attempts with 2 second delays
-        // NodeConfig::new().with_fixed_retry(3, Duration::from_secs(2))
+        // TaskConfig::new().with_fixed_retry(3, Duration::from_secs(2))
         
         // Exponential backoff: 5 retries with increasing delays
-        // NodeConfig::new().with_exponential_retry(5)
+        // TaskConfig::new().with_exponential_retry(5)
+    }
+
+    async fn run(&self, store: &MemoryStore) -> Result<WorkflowState, CanoError> {
+        // Your task logic here...
+        Ok(WorkflowState::Complete)
+    }
+}
+
+// Node with retry configuration
+impl Node<WorkflowState> for ReliableNode {
+    fn config(&self) -> TaskConfig {
+        // No retries (fail fast)
+        TaskConfig::minimal()
+        
+        // Fixed retries: 3 attempts with 2 second delays
+        // TaskConfig::new().with_fixed_retry(3, Duration::from_secs(2))
+        
+        // Exponential backoff: 5 retries with increasing delays
+        // TaskConfig::new().with_exponential_retry(5)
     }
     // ... rest of implementation
 }
@@ -277,8 +307,6 @@ workflow.register(WorkflowState::Validate, validator_task)  // Task
 
 let result = workflow.orchestrate(&store).await?;
 ```
-
-> **Note**: The `register` method accepts both Tasks and Nodes. For backward compatibility, `register_node` is also available but `register` is the preferred unified approach.
 
 #### Complex Workflows
 
