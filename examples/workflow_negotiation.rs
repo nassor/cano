@@ -301,8 +301,8 @@ async fn run_negotiation_workflow() -> Result<(), CanoError> {
     let mut workflow = Workflow::new(NegotiationAction::StartSelling);
 
     workflow
-        .register_node(NegotiationAction::StartSelling, SellerNode::new())
-        .register_node(NegotiationAction::BuyerEvaluate, BuyerNode::new())
+        .register(NegotiationAction::StartSelling, SellerNode::new())
+        .register(NegotiationAction::BuyerEvaluate, BuyerNode::new())
         .add_exit_states(vec![
             NegotiationAction::Deal,
             NegotiationAction::NoDeal,

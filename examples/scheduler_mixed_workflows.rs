@@ -79,11 +79,11 @@ async fn main() -> CanoResult<()> {
     // Create regular workflows
     let mut regular_workflow1 = Workflow::new(TaskState::Start);
     regular_workflow1.add_exit_state(TaskState::Complete);
-    regular_workflow1.register_node(TaskState::Start, SimpleTask::new("RegularTask1"));
+    regular_workflow1.register(TaskState::Start, SimpleTask::new("RegularTask1"));
 
     let mut regular_workflow2 = Workflow::new(TaskState::Start);
     regular_workflow2.add_exit_state(TaskState::Complete);
-    regular_workflow2.register_node(TaskState::Start, SimpleTask::new("RegularTask2"));
+    regular_workflow2.register(TaskState::Start, SimpleTask::new("RegularTask2"));
 
     // Schedule regular workflows
     scheduler.manual("regular_task_1", regular_workflow1)?;
@@ -99,7 +99,7 @@ async fn main() -> CanoResult<()> {
     let mut concurrent_workflow = ConcurrentWorkflow::new(TaskState::Start);
     concurrent_workflow.add_exit_state(TaskState::Complete);
 
-    concurrent_workflow.register_node(TaskState::Start, SimpleTask::new("ConcurrentTask"));
+    concurrent_workflow.register(TaskState::Start, SimpleTask::new("ConcurrentTask"));
 
     // Schedule concurrent workflows with different strategies
     scheduler.manual_concurrent(

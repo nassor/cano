@@ -95,10 +95,10 @@ async fn main() -> CanoResult<()> {
 
     // Create a long-running flow
     let mut long_flow_builder = Workflow::new(MyState::Start);
-    long_flow_builder.register_node(MyState::Start, LongProcessingNode);
+    long_flow_builder.register(MyState::Start, LongProcessingNode);
 
     let mut quick_flow_builder = Workflow::new(MyState::Start);
-    quick_flow_builder.register_node(MyState::Start, QuickNode);
+    quick_flow_builder.register(MyState::Start, QuickNode);
 
     // Add flows to scheduler
     scheduler.every_seconds("long_task", long_flow_builder, 10)?; // Every 10 seconds

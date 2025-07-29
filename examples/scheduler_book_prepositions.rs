@@ -617,7 +617,7 @@ fn create_download_workflow(shared_store: SharedStore) -> ConcurrentWorkflow<Wor
 
     // Register the download node (will be cloned for each instance)
     concurrent_workflow
-        .register_node(WorkflowPhase::Download, BookDownloadNode::new(shared_store))
+        .register(WorkflowPhase::Download, BookDownloadNode::new(shared_store))
         .add_exit_states(vec![
             WorkflowPhase::DownloadComplete,
             WorkflowPhase::DownloadError,
@@ -631,11 +631,11 @@ fn create_analysis_workflow(shared_store: SharedStore) -> Workflow<WorkflowPhase
     let mut workflow = Workflow::new(WorkflowPhase::Analyze);
 
     workflow
-        .register_node(
+        .register(
             WorkflowPhase::Analyze,
             PrepositionAnalysisNode::new(shared_store.clone()),
         )
-        .register_node(WorkflowPhase::Rank, BookRankingNode::new(shared_store))
+        .register(WorkflowPhase::Rank, BookRankingNode::new(shared_store))
         .add_exit_states(vec![WorkflowPhase::Complete, WorkflowPhase::Error]);
 
     workflow

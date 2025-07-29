@@ -318,9 +318,9 @@ async fn main() -> Result<(), CanoError> {
     // Setup workflow
     let mut workflow = Workflow::new(ConversationState::Start);
     workflow
-        .register_node(ConversationState::Start, actor1.clone())
-        .register_node(ConversationState::Actor1Turn, actor1)
-        .register_node(ConversationState::Actor2Turn, actor2)
+        .register(ConversationState::Start, actor1.clone())
+        .register(ConversationState::Actor1Turn, actor1)
+        .register(ConversationState::Actor2Turn, actor2)
         .add_exit_states(vec![ConversationState::End, ConversationState::Error]);
 
     let store = MemoryStore::new();

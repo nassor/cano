@@ -622,9 +622,9 @@ async fn run_workflow() -> Result<(), CanoError> {
 
     // Register different node types for each phase
     workflow
-        .register_node(BookPrepositionAction::Download, BookDownloaderNode::new())
-        .register_node(BookPrepositionAction::Analyze, PrepositionNode::new())
-        .register_node(
+        .register(BookPrepositionAction::Download, BookDownloaderNode::new())
+        .register(BookPrepositionAction::Analyze, PrepositionNode::new())
+        .register(
             BookPrepositionAction::Rank,
             BookRankingByPrepositionNode::new(),
         )

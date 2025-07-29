@@ -808,7 +808,7 @@ mod tests {
 
     fn create_test_workflow() -> Workflow<TestState> {
         let mut workflow = Workflow::new(TestState::Start);
-        workflow.register_node(TestState::Start, TestNode::new());
+        workflow.register(TestState::Start, TestNode::new());
         workflow.add_exit_state(TestState::Complete);
         workflow.add_exit_state(TestState::Error);
         workflow
@@ -816,7 +816,7 @@ mod tests {
 
     fn create_failing_workflow() -> Workflow<TestState> {
         let mut workflow = Workflow::new(TestState::Start);
-        workflow.register_node(TestState::Start, TestNode::new_failing());
+        workflow.register(TestState::Start, TestNode::new_failing());
         workflow.add_exit_state(TestState::Complete);
         workflow.add_exit_state(TestState::Error);
         workflow
@@ -1293,7 +1293,7 @@ mod tests {
         concurrent_workflow.add_exit_state(TestState::Complete);
 
         let node = TestNode::new_success();
-        concurrent_workflow.register_node(TestState::Start, node);
+        concurrent_workflow.register(TestState::Start, node);
 
         scheduler
             .manual_concurrent(
@@ -1318,7 +1318,7 @@ mod tests {
         concurrent_workflow.add_exit_state(TestState::Complete);
 
         let node = TestNode::new_success();
-        concurrent_workflow.register_node(TestState::Start, node);
+        concurrent_workflow.register(TestState::Start, node);
 
         let info = Arc::new(RwLock::new(FlowInfo {
             id: "test".to_string(),
@@ -1365,7 +1365,7 @@ mod tests {
         concurrent_workflow.add_exit_state(TestState::Complete);
 
         let node = TestNode::new_success();
-        concurrent_workflow.register_node(TestState::Start, node);
+        concurrent_workflow.register(TestState::Start, node);
 
         scheduler
             .manual_concurrent(

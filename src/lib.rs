@@ -79,6 +79,7 @@ pub mod error;
 pub mod node;
 pub mod scheduler;
 pub mod store;
+pub mod task;
 pub mod workflow;
 
 // Core public API - simplified imports
@@ -86,6 +87,7 @@ pub use error::{CanoError, CanoResult};
 pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node, NodeConfig, RetryMode};
 pub use scheduler::{FlowInfo, Scheduler};
 pub use store::{KeyValueStore, MemoryStore};
+pub use task::{DefaultTaskParams, DynTask, Task, TaskObject};
 pub use workflow::{
     ConcurrentWorkflow, ConcurrentWorkflowBuilder, ConcurrentWorkflowStatus, WaitStrategy,
     Workflow, WorkflowBuilder, WorkflowResult,
@@ -99,9 +101,9 @@ pub mod prelude {
 
     pub use crate::{
         CanoError, CanoResult, ConcurrentWorkflow, ConcurrentWorkflowBuilder,
-        ConcurrentWorkflowStatus, DefaultNodeResult, DefaultParams, FlowInfo, KeyValueStore,
-        MemoryStore, Node, NodeConfig, RetryMode, Scheduler, WaitStrategy, Workflow,
-        WorkflowBuilder, WorkflowResult,
+        ConcurrentWorkflowStatus, DefaultNodeResult, DefaultParams, DefaultTaskParams, FlowInfo, 
+        KeyValueStore, MemoryStore, Node, NodeConfig, RetryMode, Scheduler, Task, TaskObject, 
+        WaitStrategy, Workflow, WorkflowBuilder, WorkflowResult,
     };
 
     // Re-export async_trait for convenience

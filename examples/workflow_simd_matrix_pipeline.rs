@@ -529,15 +529,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Register all pipeline nodes
     workflow
-        .register_node(PipelineState::Generate, MatrixGenerator::new(64, 20)) // 64x64 matrices, 20 of them
-        .register_node(PipelineState::Multiply, SimdMatrixMultiplier)
-        .register_node(PipelineState::Transform, SimdMatrixTransformer::new(1.5))
-        .register_node(PipelineState::Statistics, SimdStatisticsCalculator)
+        .register(PipelineState::Generate, MatrixGenerator::new(64, 20)) // 64x64 matrices, 20 of them
+        .register(PipelineState::Multiply, SimdMatrixMultiplier)
+        .register(PipelineState::Transform, SimdMatrixTransformer::new(1.5))
+        .register(PipelineState::Statistics, SimdStatisticsCalculator)
         .add_exit_states(vec![PipelineState::Complete, PipelineState::Error]);
 
     println!(
         "🔧 Pipeline configured with {} nodes",
-        workflow.state_nodes.len()
+        workflow.state_tasks.len()
     );
     println!("Pipeline: Generate → Multiply → Transform → Statistics → Complete\n");
 

@@ -177,8 +177,8 @@ async fn run_simple_workflow_with_flow() -> Result<(), CanoError> {
 
     // Register different node types - this now works!
     workflow
-        .register_node(WorkflowAction::Generate, GeneratorNode::new())
-        .register_node(WorkflowAction::Count, CounterNode::new())
+        .register(WorkflowAction::Generate, GeneratorNode::new())
+        .register(WorkflowAction::Count, CounterNode::new())
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
     // Execute the workflow using the Workflow orchestrator

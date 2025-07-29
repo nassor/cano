@@ -11,7 +11,7 @@
 //!
 //! ```rust,ignore
 //! let mut concurrent_workflow = ConcurrentWorkflow::new(start_state);
-//! concurrent_workflow.register_node(state, node);
+//! concurrent_workflow.register(state, node);
 //! concurrent_workflow.add_exit_state(exit_state);
 //! ```
 
@@ -96,7 +96,7 @@ async fn main() -> CanoResult<()> {
 
     // Register a processing node directly - much simpler!
     let processing_node = ProcessingNode::new("DataProcessor");
-    concurrent_workflow.register_node(ProcessingState::Start, processing_node.clone());
+    concurrent_workflow.register(ProcessingState::Start, processing_node.clone());
 
     println!("📊 Example 1: WaitForever Strategy");
     println!("----------------------------------");
@@ -228,7 +228,7 @@ async fn main() -> CanoResult<()> {
     let mut concurrent_workflow = ConcurrentWorkflowBuilder::new(ProcessingState::Start).build();
 
     // Register nodes on the built workflow
-    concurrent_workflow.register_node(ProcessingState::Start, ProcessingNode::new("Builder"));
+    concurrent_workflow.register(ProcessingState::Start, ProcessingNode::new("Builder"));
     concurrent_workflow.add_exit_state(ProcessingState::Complete);
 
     let stores = vec![MemoryStore::new(), MemoryStore::new()];
