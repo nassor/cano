@@ -223,8 +223,6 @@ where
         );
 
         loop {
-            attempt += 1;
-
             #[cfg(feature = "tracing")]
             tracing::debug!(attempt = attempt, "Starting node execution attempt");
 
@@ -275,6 +273,8 @@ where
                             return Ok(result);
                         }
                         Err(e) => {
+                            attempt += 1;
+
                             #[cfg(feature = "tracing")]
                             tracing::warn!(attempt = attempt, error = ?e, max_attempts = max_attempts, "Post phase failed");
 
@@ -297,6 +297,8 @@ where
                     }
                 }
                 Err(e) => {
+                    attempt += 1;
+
                     #[cfg(feature = "tracing")]
                     tracing::warn!(attempt = attempt, error = ?e, max_attempts = max_attempts, "Prep phase failed");
 
