@@ -370,6 +370,8 @@ dependencies = [
  "reqwest",
  "rig-core",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "wide",
 ]
 

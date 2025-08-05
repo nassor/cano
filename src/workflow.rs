@@ -86,6 +86,9 @@ use crate::MemoryStore;
 use crate::error::CanoError;
 use crate::task::{DefaultTaskParams, Task, TaskConfig};
 
+#[cfg(feature = "tracing")]
+use tracing::{Instrument, Span};
+
 /// Type alias for trait objects that can store different task types
 ///
 /// This allows the Workflow to accept tasks of different concrete types as long as they
@@ -237,6 +240,9 @@ where
     pub state_tasks: HashMap<TState, DynTask<TState, TStore, TParams>>,
     /// Set of states that will terminate the workflow when reached
     pub exit_states: std::collections::HashSet<TState>,
+    /// Optional tracing span for the workflow
+    #[cfg(feature = "tracing")]
+    pub tracing_span: Option<Span>,
 }
 
 impl<TState, TStore, TParams> Workflow<TState, TStore, TParams>
@@ -251,6 +257,8 @@ where
             start_state: Some(start_state),
             state_tasks: HashMap::new(),
             exit_states: std::collections::HashSet::new(),
+            #[cfg(feature = "tracing")]
+            tracing_span: None,
         }
     }
 
@@ -309,6 +317,13 @@ where
         self
     }
 
+    /// Set a tracing span for this workflow (requires "tracing" feature)
+    #[cfg(feature = "tracing")]
+    pub fn with_tracing_span(mut self, span: Span) -> Self {
+        self.tracing_span = Some(span);
+        self
+    }
+
     /// Execute the typed workflow with state machine orchestration
     ///
     /// This method runs the workflow by starting from the initial state and transitioning
@@ -332,6 +347,19 @@ where
     ///
     /// Returns the final state that terminated the workflow (always an exit state).
     pub async fn orchestrate(&self, store: &TStore) -> Result<TState, CanoError> {
+        #[cfg(feature = "tracing")]
+        let workflow_span = self
+            .tracing_span
+            .as_ref()
+            .map(|span| span.clone())
+            .unwrap_or_else(|| tracing::info_span!("workflow_orchestrate"));
+
+        #[cfg(feature = "tracing")]
+        let _enter = workflow_span.enter();
+
+        #[cfg(feature = "tracing")]
+        tracing::info!("Starting workflow orchestration");
+
         let mut current = self
             .start_state
             .as_ref()
@@ -340,6 +368,8 @@ where
 
         loop {
             if self.exit_states.contains(&current) {
+                #[cfg(feature = "tracing")]
+                tracing::info!(final_state = ?current, "Workflow completed successfully");
                 return Ok(current);
             }
 
@@ -347,7 +377,22 @@ where
                 CanoError::workflow(format!("No task registered for state: {current:?}"))
             })?;
 
-            current = task.run(store).await?;
+            #[cfg(feature = "tracing")]
+            tracing::debug!(current_state = ?current, "Executing task for state");
+
+            #[cfg(feature = "tracing")]
+            let task_span = tracing::info_span!("task_execution", state = ?current);
+
+            #[cfg(feature = "tracing")]
+            let next_state = task.run(store).instrument(task_span).await?;
+
+            #[cfg(not(feature = "tracing"))]
+            let next_state = task.run(store).await?;
+
+            #[cfg(feature = "tracing")]
+            tracing::debug!(current_state = ?current, next_state = ?next_state, "Task completed, transitioning to next state");
+
+            current = next_state;
         }
     }
 }
@@ -463,6 +508,9 @@ where
     pub state_tasks: HashMap<TState, CloneableTask<TState, TStore, TParams>>,
     /// Set of states that will terminate the workflow when reached
     pub exit_states: std::collections::HashSet<TState>,
+    /// Optional tracing span for the workflow
+    #[cfg(feature = "tracing")]
+    pub tracing_span: Option<Span>,
 }
 
 impl<TState, TStore, TParams> ConcurrentWorkflow<TState, TStore, TParams>
@@ -477,6 +525,8 @@ where
             start_state: Some(start_state),
             state_tasks: HashMap::new(),
             exit_states: std::collections::HashSet::new(),
+            #[cfg(feature = "tracing")]
+            tracing_span: None,
         }
     }
 
@@ -537,6 +587,13 @@ where
         self
     }
 
+    /// Set a tracing span for this concurrent workflow (requires "tracing" feature)
+    #[cfg(feature = "tracing")]
+    pub fn with_tracing_span(mut self, span: Span) -> Self {
+        self.tracing_span = Some(span);
+        self
+    }
+
     /// Create a workflow instance for concurrent execution
     ///
     /// This method creates a new workflow instance by copying the structure
@@ -546,6 +603,8 @@ where
             start_state: self.start_state.clone(),
             state_tasks: HashMap::new(),
             exit_states: self.exit_states.clone(),
+            #[cfg(feature = "tracing")]
+            tracing_span: self.tracing_span.clone(),
         };
 
         // Clone all registered tasks for this instance
@@ -613,9 +672,22 @@ where
     ) -> Result<(Vec<WorkflowResult<TState>>, ConcurrentWorkflowStatus), CanoError> {
         use tokio::time::{Instant, timeout};
 
+        #[cfg(feature = "tracing")]
+        let concurrent_span = self
+            .tracing_span
+            .as_ref()
+            .map(|span| span.clone())
+            .unwrap_or_else(|| tracing::info_span!("concurrent_workflow_execute"));
+
+        #[cfg(feature = "tracing")]
+        let _enter = concurrent_span.enter();
+
         let start_time = Instant::now();
         let workflow_count = stores.len();
         let mut status = ConcurrentWorkflowStatus::new(workflow_count);
+
+        #[cfg(feature = "tracing")]
+        tracing::info!(workflow_count = workflow_count, wait_strategy = ?wait_strategy, "Starting concurrent workflow execution");
 
         if workflow_count == 0 {
             status.duration = start_time.elapsed();
@@ -624,12 +696,31 @@ where
 
         // Create workflow instances and spawn tasks
         let mut tasks = Vec::new();
-        for store in stores {
+        #[allow(unused_variables)] // idx is only used with tracing feature
+        for (idx, store) in stores.into_iter().enumerate() {
             let workflow = self.create_workflow_instance()?;
+
+            #[cfg(feature = "tracing")]
+            let instance_span = tracing::info_span!("workflow_instance", instance_id = idx);
+
             let task = tokio::spawn(async move {
+                #[cfg(feature = "tracing")]
+                let _instance_enter = instance_span.enter();
+
+                #[cfg(feature = "tracing")]
+                tracing::debug!(instance_id = idx, "Starting workflow instance");
+
                 match workflow.orchestrate(&store).await {
-                    Ok(final_state) => WorkflowResult::Success(final_state),
-                    Err(error) => WorkflowResult::Failed(error),
+                    Ok(final_state) => {
+                        #[cfg(feature = "tracing")]
+                        tracing::info!(instance_id = idx, final_state = ?final_state, "Workflow instance completed successfully");
+                        WorkflowResult::Success(final_state)
+                    }
+                    Err(error) => {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(instance_id = idx, error = ?error, "Workflow instance failed");
+                        WorkflowResult::Failed(error)
+                    }
                 }
             });
             tasks.push(task);
@@ -757,6 +848,17 @@ where
         }
 
         status.duration = start_time.elapsed();
+
+        #[cfg(feature = "tracing")]
+        tracing::info!(
+            total_workflows = status.total_workflows,
+            completed = status.completed,
+            failed = status.failed,
+            cancelled = status.cancelled,
+            duration_ms = status.duration.as_millis(),
+            "Concurrent workflow execution completed"
+        );
+
         Ok((results, status))
     }
 }
@@ -778,6 +880,8 @@ where
             start_state: self.start_state.clone(),
             state_tasks: cloned_tasks,
             exit_states: self.exit_states.clone(),
+            #[cfg(feature = "tracing")]
+            tracing_span: self.tracing_span.clone(),
         }
     }
 }

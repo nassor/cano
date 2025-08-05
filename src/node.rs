@@ -38,6 +38,9 @@ use crate::task::TaskConfig;
 use async_trait::async_trait;
 use std::collections::HashMap;
 
+#[cfg(feature = "tracing")]
+use tracing::Instrument;
+
 /// Simple key-value parameters for node configuration
 ///
 /// This is a convenience type alias for the most common parameter format used in workflows.
@@ -204,35 +207,112 @@ where
         store: &TStore,
         config: &TaskConfig,
     ) -> Result<TState, CanoError> {
+        #[cfg(feature = "tracing")]
+        let node_span = tracing::info_span!("node_execution");
+
+        #[cfg(feature = "tracing")]
+        let _enter = node_span.enter();
+
         let max_attempts = config.retry_mode.max_attempts();
         let mut attempt = 0;
 
+        #[cfg(feature = "tracing")]
+        tracing::debug!(
+            max_attempts = max_attempts,
+            "Starting node execution with retry logic"
+        );
+
         loop {
-            // Execute the three phases
-            match self.prep(store).await {
+            attempt += 1;
+
+            #[cfg(feature = "tracing")]
+            tracing::debug!(attempt = attempt, "Starting node execution attempt");
+
+            // Execute the prep phase
+            #[cfg(feature = "tracing")]
+            let prep_result = {
+                let prep_span = tracing::debug_span!("node_prep", attempt = attempt);
+                self.prep(store).instrument(prep_span).await
+            };
+
+            #[cfg(not(feature = "tracing"))]
+            let prep_result = self.prep(store).await;
+
+            match prep_result {
                 Ok(prep_res) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!(attempt = attempt, "Prep phase completed successfully");
+
+                    // Execute the exec phase
+                    #[cfg(feature = "tracing")]
+                    let exec_res = {
+                        let exec_span = tracing::debug_span!("node_exec", attempt = attempt);
+                        async { self.exec(prep_res).await }
+                            .instrument(exec_span)
+                            .await
+                    };
+
+                    #[cfg(not(feature = "tracing"))]
                     let exec_res = self.exec(prep_res).await;
-                    match self.post(store, exec_res).await {
-                        Ok(result) => return Ok(result),
+
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!(attempt = attempt, "Exec phase completed");
+
+                    // Execute the post phase
+                    #[cfg(feature = "tracing")]
+                    let post_result = {
+                        let post_span = tracing::debug_span!("node_post", attempt = attempt);
+                        self.post(store, exec_res).instrument(post_span).await
+                    };
+
+                    #[cfg(not(feature = "tracing"))]
+                    let post_result = self.post(store, exec_res).await;
+
+                    match post_result {
+                        Ok(result) => {
+                            #[cfg(feature = "tracing")]
+                            tracing::info!(attempt = attempt, final_result = ?result, "Node execution completed successfully");
+                            return Ok(result);
+                        }
                         Err(e) => {
-                            attempt += 1;
+                            #[cfg(feature = "tracing")]
+                            tracing::warn!(attempt = attempt, error = ?e, max_attempts = max_attempts, "Post phase failed");
+
                             if attempt >= max_attempts {
+                                #[cfg(feature = "tracing")]
+                                tracing::error!(attempt = attempt, error = ?e, "Node execution failed after maximum attempts");
                                 return Err(e);
                             }
 
                             if let Some(delay) = config.retry_mode.delay_for_attempt(attempt - 1) {
+                                #[cfg(feature = "tracing")]
+                                tracing::debug!(
+                                    attempt = attempt,
+                                    delay_ms = delay.as_millis(),
+                                    "Retrying after delay"
+                                );
                                 tokio::time::sleep(delay).await;
                             }
                         }
                     }
                 }
                 Err(e) => {
-                    attempt += 1;
+                    #[cfg(feature = "tracing")]
+                    tracing::warn!(attempt = attempt, error = ?e, max_attempts = max_attempts, "Prep phase failed");
+
                     if attempt >= max_attempts {
+                        #[cfg(feature = "tracing")]
+                        tracing::error!(attempt = attempt, error = ?e, "Node execution failed after maximum attempts");
                         return Err(e);
                     }
 
                     if let Some(delay) = config.retry_mode.delay_for_attempt(attempt - 1) {
+                        #[cfg(feature = "tracing")]
+                        tracing::debug!(
+                            attempt = attempt,
+                            delay_ms = delay.as_millis(),
+                            "Retrying after delay"
+                        );
                         tokio::time::sleep(delay).await;
                     }
                 }

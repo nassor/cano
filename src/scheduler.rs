@@ -63,6 +63,9 @@ use std::time::Instant;
 use tokio::sync::{RwLock, mpsc};
 use tokio::time::{Duration, sleep};
 
+#[cfg(feature = "tracing")]
+use tracing::Instrument;
+
 /// Simplified scheduling options
 #[derive(Debug, Clone)]
 pub enum Schedule {
@@ -680,6 +683,22 @@ async fn execute_regular_flow<TState, TStore, TParams>(
     TParams: Clone + Send + Sync + 'static,
     TStore: Clone + Default + Send + Sync + 'static,
 {
+    #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
+    let workflow_id = {
+        let info_guard = info.read().await;
+        info_guard.id.clone()
+    };
+
+    #[cfg(feature = "tracing")]
+    let scheduler_span =
+        tracing::info_span!("scheduler_workflow_execution", workflow_id = %workflow_id);
+
+    #[cfg(feature = "tracing")]
+    let _enter = scheduler_span.enter();
+
+    #[cfg(feature = "tracing")]
+    tracing::info!(workflow_id = %workflow_id, "Starting scheduled workflow execution");
+
     // Update status to running
     {
         let mut info_guard = info.write().await;
@@ -688,17 +707,31 @@ async fn execute_regular_flow<TState, TStore, TParams>(
     }
 
     // Execute workflow
+    #[cfg(feature = "tracing")]
+    let result = workflow
+        .orchestrate(&store)
+        .instrument(tracing::info_span!("workflow_orchestrate"))
+        .await;
+
+    #[cfg(not(feature = "tracing"))]
     let result = workflow.orchestrate(&store).await;
 
     // Update final status
     {
         let mut info_guard = info.write().await;
         match result {
-            Ok(_) => {
+            #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
+            Ok(final_state) => {
+                #[cfg(feature = "tracing")]
+                tracing::info!(workflow_id = %workflow_id, final_state = ?final_state, run_count = info_guard.run_count + 1, "Workflow execution completed successfully");
+
                 info_guard.status = Status::Idle;
                 info_guard.run_count += 1;
             }
-            Err(e) => {
+            Err(ref e) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(workflow_id = %workflow_id, error = ?e, "Workflow execution failed");
+
                 info_guard.status = Status::Failed(e.to_string());
             }
         }
@@ -716,6 +749,21 @@ async fn execute_concurrent_flow<TState, TStore, TParams>(
     TParams: Clone + Send + Sync + 'static,
     TStore: Clone + Default + Send + Sync + 'static,
 {
+    #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
+    let workflow_id = {
+        let info_guard = info.read().await;
+        info_guard.id.clone()
+    };
+
+    #[cfg(feature = "tracing")]
+    let scheduler_concurrent_span = tracing::info_span!("scheduler_concurrent_workflow_execution", workflow_id = %workflow_id, instances = instances);
+
+    #[cfg(feature = "tracing")]
+    let _enter = scheduler_concurrent_span.enter();
+
+    #[cfg(feature = "tracing")]
+    tracing::info!(workflow_id = %workflow_id, instances = instances, wait_strategy = ?wait_strategy, "Starting scheduled concurrent workflow execution");
+
     // Create stores for each instance
     let stores: Vec<TStore> = (0..instances).map(|_| TStore::default()).collect();
 
@@ -728,6 +776,13 @@ async fn execute_concurrent_flow<TState, TStore, TParams>(
     }
 
     // Execute concurrent workflow
+    #[cfg(feature = "tracing")]
+    let result = concurrent_workflow
+        .execute_concurrent(stores, wait_strategy)
+        .instrument(tracing::info_span!("concurrent_workflow_orchestrate"))
+        .await;
+
+    #[cfg(not(feature = "tracing"))]
     let result = concurrent_workflow
         .execute_concurrent(stores, wait_strategy)
         .await;
@@ -736,11 +791,26 @@ async fn execute_concurrent_flow<TState, TStore, TParams>(
     {
         let mut info_guard = info.write().await;
         match result {
-            Ok((_, final_status)) => {
-                info_guard.status = Status::ConcurrentCompleted(final_status);
+            Ok((_, ref final_status)) => {
+                #[cfg(feature = "tracing")]
+                tracing::info!(
+                    workflow_id = %workflow_id,
+                    total_workflows = final_status.total_workflows,
+                    completed = final_status.completed,
+                    failed = final_status.failed,
+                    cancelled = final_status.cancelled,
+                    duration_ms = final_status.duration.as_millis(),
+                    run_count = info_guard.run_count + 1,
+                    "Concurrent workflow execution completed"
+                );
+
+                info_guard.status = Status::ConcurrentCompleted(final_status.clone());
                 info_guard.run_count += 1;
             }
-            Err(e) => {
+            Err(ref e) => {
+                #[cfg(feature = "tracing")]
+                tracing::error!(workflow_id = %workflow_id, error = ?e, "Concurrent workflow execution failed");
+
                 info_guard.status = Status::Failed(e.to_string());
             }
         }

@@ -94,6 +94,9 @@ pub mod workflow;
 #[cfg(feature = "scheduler")]
 pub mod scheduler;
 
+#[cfg(all(test, feature = "tracing"))]
+mod tracing_tests;
+
 // Core public API - simplified imports
 pub use error::{CanoError, CanoResult};
 pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node};
