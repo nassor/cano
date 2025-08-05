@@ -1,6 +1,6 @@
 [package]
 name = "cano"
-version = "0.5.0"
+version = "0.5.1"
 homepage = "https://github.com/nassor/cano"
 edition = "2024"
 description = "Simple & Fast Async Workflows in Rust - Build data processing pipelines with Tasks and Nodes"
@@ -13,7 +13,7 @@ authors = ["Nassor Frazier-Silva"]
 
 [dependencies]
 async-trait = "0.1"
-tokio = { version = "1.47", features = ["full"] }
+tokio = { version = "1.47.1", features = ["full"] }
 rand = "0.9"
 cron = "0.15"
 chrono = { version = "0.4", features = ["serde"] }
@@ -23,7 +23,7 @@ futures = "0.3"
 cargo-audit = "0.21.2"
 criterion = { version = "0.7", features = ["html_reports", "async_tokio"] }
 reqwest = { version = "0.12", features = ["json"] }
-rig-core = "0.15"
+rig-core = "0.16"
 wide = "0.7"
 
 [[example]]
