@@ -50,7 +50,6 @@ For observability and tracing:
 [dependencies]
 cano = { version = "0.5", features = ["tracing"] }
 tracing = "0.1"
-tracing-subscriber = "0.3"
 ```
 
 Or use the `all` feature for convenience:
@@ -59,7 +58,6 @@ Or use the `all` feature for convenience:
 [dependencies]
 cano = { version = "0.5", features = ["all"] }
 tracing = "0.1"
-tracing-subscriber = "0.3"
 ```
 
 ### Basic Example
