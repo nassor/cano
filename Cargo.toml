@@ -1,6 +1,6 @@
 [package]
 name = "cano"
-version = "0.5.1"
+version = "0.6.0"
 homepage = "https://github.com/nassor/cano"
 edition = "2024"
 description = "Simple & Fast Async Workflows in Rust - Build data processing pipelines with Tasks and Nodes"
@@ -13,11 +13,17 @@ authors = ["Nassor Frazier-Silva"]
 
 [dependencies]
 async-trait = "0.1"
-tokio = { version = "1.47.1", features = ["full"] }
+tokio = { version = "1.47.1", features = ["macros", "sync", "time", "rt-multi-thread"] }
 rand = "0.9"
-cron = "0.15"
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", features = ["serde"], optional = true }
+cron = { version = "0.15", optional = true }
 futures = "0.3"
+tracing = { version = "0.1", optional = true }
+
+[features]
+scheduler = ["dep:chrono", "dep:cron"]
+tracing = ["dep:tracing"]
+all = ["scheduler", "tracing"]
 
 [dev-dependencies]
 cargo-audit = "0.21.2"
@@ -25,6 +31,8 @@ criterion = { version = "0.7", features = ["html_reports", "async_tokio"] }
 reqwest = { version = "0.12", features = ["json"] }
 rig-core = "0.16"
 wide = "0.7"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+chrono = { version = "0.4", features = ["serde"] }
 
 [[example]]
 name = "ai_workflow_yes_and"
@@ -33,10 +41,6 @@ path = "examples/ai_workflow_yes_and.rs"
 [[example]]
 name = "workflow_concurrent"
 path = "examples/workflow_concurrent.rs"
-
-[[example]]
-name = "scheduler_mixed_workflows"
-path = "examples/scheduler_mixed_workflows.rs"
 
 [[example]]
 name = "workflow_simple"
@@ -59,20 +63,39 @@ name = "workflow_stack_store"
 path = "examples/workflow_stack_store.rs"
 
 [[example]]
+name = "scheduler_mixed_workflows"
+path = "examples/scheduler_mixed_workflows.rs"
+required-features = ["scheduler"]
+
+[[example]]
 name = "scheduler_scheduling"
 path = "examples/scheduler_scheduling.rs"
+required-features = ["scheduler"]
 
 [[example]]
 name = "scheduler_concurrent_workflows"
 path = "examples/scheduler_concurrent_workflows.rs"
+required-features = ["scheduler"]
 
 [[example]]
 name = "scheduler_duration_scheduling"
 path = "examples/scheduler_duration_scheduling.rs"
+required-features = ["scheduler"]
 
 [[example]]
 name = "scheduler_graceful_shutdown"
 path = "examples/scheduler_graceful_shutdown.rs"
+required-features = ["scheduler"]
+
+[[example]]
+name = "scheduler_book_prepositions"
+path = "examples/scheduler_book_prepositions.rs"
+required-features = ["scheduler"]
+
+[[example]]
+name = "tracing_demo"
+path = "examples/tracing_demo.rs"
+required-features = ["tracing", "scheduler"]
 
 [[bench]]
 name = "workflow_performance"

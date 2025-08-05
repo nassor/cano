@@ -20,8 +20,10 @@ The engine is built on three core concepts: **Tasks** and **Nodes** to encapsula
 - **State Machines**: Type-safe enum-driven state transitions with compile-time checking
 - **Retry Strategies**: None, fixed delays, and exponential backoff with jitter (for both Tasks and Nodes)
 - **Flexible Storage**: Built-in `MemoryStore` or custom struct types for data sharing
-- **Workflow Scheduling**: Built-in scheduler with intervals, cron schedules, and manual triggers
+- **Workflow Scheduling** (optional `scheduler` feature): Built-in scheduler with intervals, cron schedules, and manual triggers
 - **Concurrent Execution**: Execute multiple workflow instances in parallel with timeout strategies
+- **Observability** (optional `tracing` feature): Comprehensive tracing and observability for workflow execution
+- **All Features** (optional `all` feature): Convenience feature that enables both `scheduler` and `tracing`
 - **Performance**: Minimal overhead with direct execution and zero-cost abstractions
 
 ## Getting Started
@@ -30,9 +32,32 @@ Add Cano to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-cano = "0.5"
+cano = "0.6"
 async-trait = "0.1"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["macros", "sync", "time", "rt-multi-thread"] }
+```
+
+For scheduler support:
+
+```toml
+[dependencies]
+cano = { version = "0.6", features = ["scheduler"] }
+```
+
+For observability and tracing:
+
+```toml
+[dependencies]
+cano = { version = "0.6", features = ["tracing"] }
+tracing = "0.1"
+```
+
+Or use the `all` feature for convenience:
+
+```toml
+[dependencies]
+cano = { version = "0.6", features = ["all"] }
+tracing = "0.1"
 ```
 
 ### Basic Example
@@ -544,6 +569,115 @@ async fn main() -> CanoResult<()> {
 - **Status Monitoring**: Check workflow status, run counts, and execution times
 - **Graceful Shutdown**: Stop with timeout for running flows to complete
 - **Concurrent Execution**: Multiple flows can run simultaneously
+
+## Workflow Observability & Tracing
+
+Cano provides comprehensive observability through the optional `tracing` feature using the [tracing](https://docs.rs/tracing/latest/tracing/) library.
+
+### Enable Tracing
+
+```toml
+[dependencies]
+cano = { version = "0.6", features = ["tracing"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+```
+
+### What Gets Traced
+
+- **Workflow Level**: Orchestration start/completion, state transitions, final states
+- **Task Level**: Task execution with retry logic, attempts, delays, success/failure outcomes
+- **Node Level**: Three-phase lifecycle (prep, exec, post), retry attempts with detailed context
+- **Scheduler Level**: Workflow scheduling, concurrent execution, run counts, durations
+- **Concurrent Workflows**: Individual instance tracking and aggregate statistics
+
+### Basic Usage
+
+```rust
+use cano::prelude::*;
+use tracing::{info_span, info};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    // Set up tracing subscriber
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+
+    // Create workflow with custom tracing span
+    let workflow_span = info_span!(
+        "user_data_processing", 
+        user_id = "12345", 
+        batch_id = "batch_001"
+    );
+    
+    let mut workflow = Workflow::new(MyState::Start)
+        .with_tracing_span(workflow_span);
+    
+    workflow.register(MyState::Start, MyProcessingNode);
+    
+    // All execution will be traced under your custom span
+    let result = workflow.orchestrate(&store).await?;
+    
+    Ok(())
+}
+```
+
+### Advanced Tracing
+
+```rust
+// Custom spans for concurrent workflows
+let concurrent_span = info_span!("batch_processing", batch_size = 5);
+let mut concurrent_workflow = ConcurrentWorkflow::new(MyState::Start)
+    .with_tracing_span(concurrent_span);
+
+// Custom tracing in nodes
+#[async_trait]
+impl Node<MyState> for TracedNode {
+    async fn prep(&self, store: &MemoryStore) -> Result<String, CanoError> {
+        info!(node_id = %self.id, "Starting data preparation");
+        // Your prep logic - automatically traced
+        Ok("prepared".to_string())
+    }
+    
+    async fn exec(&self, prep_result: String) -> bool {
+        info!("Processing data: {}", prep_result);
+        true
+    }
+    
+    async fn post(&self, store: &MemoryStore, success: bool) -> Result<MyState, CanoError> {
+        info!(success, "Node execution completed");
+        Ok(MyState::Complete)
+    }
+}
+```
+
+### Tracing Output
+
+With `RUST_LOG=info cargo run`, you'll see structured output like:
+
+```
+INFO user_data_processing{user_id="12345" batch_id="batch_001"}: Starting workflow orchestration
+  INFO user_data_processing{user_id="12345" batch_id="batch_001"}:task_execution{state=Start}:run_with_retries{max_attempts=4}: Starting task execution with retry logic
+    INFO user_data_processing{user_id="12345" batch_id="batch_001"}:task_execution{state=Start}:run_with_retries{max_attempts=4}:task_attempt{attempt=1}: Starting data preparation node_id=processor_1
+    INFO user_data_processing{user_id="12345" batch_id="batch_001"}:task_execution{state=Start}:run_with_retries{max_attempts=4}:task_attempt{attempt=1}: Node execution completed success=true
+  INFO user_data_processing{user_id="12345" batch_id="batch_001"}:task_execution{state=Start}:run_with_retries{max_attempts=4}: Task execution successful attempt=1
+INFO user_data_processing{user_id="12345" batch_id="batch_001"}: Workflow completed successfully final_state=Complete
+```
+
+### Performance
+
+- **Zero-cost when disabled**: No overhead when tracing feature is not enabled
+- **Minimal impact when enabled**: Structured logging with efficient processing
+- **Conditional compilation**: Tracing code only compiled when feature is enabled
+
+Run the tracing demo:
+
+```bash
+RUST_LOG=info cargo run --example tracing_demo --features tracing,scheduler
+```
 
 ## Examples and Testing
 

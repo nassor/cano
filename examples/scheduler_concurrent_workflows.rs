@@ -1,3 +1,4 @@
+#![cfg(feature = "scheduler")]
 //! # Concurrent Workflow Execution Demo
 //!
 //! This example specifically demonstrates how the Scheduler scheduler can run

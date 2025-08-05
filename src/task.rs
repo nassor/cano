@@ -54,6 +54,9 @@ use rand::Rng;
 use std::collections::HashMap;
 use std::time::Duration;
 
+#[cfg(feature = "tracing")]
+use tracing::{debug, error, info, info_span, instrument, warn};
+
 /// Retry modes for task execution
 ///
 /// Defines different retry strategies that can be used when task execution fails.
@@ -233,6 +236,10 @@ impl TaskConfig {
 ///
 /// This function provides a standard retry mechanism that can be used by any task
 /// that implements a simple run function.
+#[cfg_attr(feature = "tracing", instrument(
+    skip(config, run_fn),
+    fields(max_attempts = config.retry_mode.max_attempts())
+))]
 pub async fn run_with_retries<TState, TStore, F, Fut>(
     config: &TaskConfig,
     run_fn: F,
@@ -246,16 +253,53 @@ where
     let max_attempts = config.retry_mode.max_attempts();
     let mut attempt = 0;
 
+    #[cfg(feature = "tracing")]
+    info!(max_attempts, "Starting task execution with retry logic");
+
     loop {
+        #[cfg(feature = "tracing")]
+        let attempt_span = info_span!("task_attempt", attempt = attempt + 1, max_attempts);
+
+        #[cfg(feature = "tracing")]
+        let _span_guard = attempt_span.enter();
+
+        #[cfg(feature = "tracing")]
+        debug!(attempt = attempt + 1, "Executing task attempt");
+
         match run_fn().await {
-            Ok(result) => return Ok(result),
+            Ok(result) => {
+                #[cfg(feature = "tracing")]
+                info!(attempt = attempt + 1, "Task execution successful");
+                return Ok(result);
+            }
             Err(e) => {
                 attempt += 1;
+
+                #[cfg(feature = "tracing")]
+                if attempt >= max_attempts {
+                    error!(
+                        error = %e,
+                        final_attempt = attempt,
+                        max_attempts,
+                        "Task execution failed after all retry attempts"
+                    );
+                } else {
+                    warn!(
+                        error = %e,
+                        attempt,
+                        max_attempts,
+                        "Task execution failed, will retry"
+                    );
+                }
+
                 if attempt >= max_attempts {
                     return Err(e);
                 }
 
                 if let Some(delay) = config.retry_mode.delay_for_attempt(attempt - 1) {
+                    #[cfg(feature = "tracing")]
+                    debug!(delay_ms = delay.as_millis(), "Waiting before retry");
+
                     tokio::time::sleep(delay).await;
                 }
             }
@@ -404,8 +448,23 @@ where
         }
     }
 
+    #[cfg_attr(
+        feature = "tracing",
+        instrument(skip(self, store), fields(task_type = "node_adapter"))
+    )]
     async fn run(&self, store: &TStore) -> Result<TState, CanoError> {
-        crate::node::Node::run(self, store).await
+        #[cfg(feature = "tracing")]
+        debug!("Executing task through Node adapter");
+
+        let result = crate::node::Node::run(self, store).await;
+
+        #[cfg(feature = "tracing")]
+        match &result {
+            Ok(state) => info!(next_state = ?state, "Task execution completed successfully"),
+            Err(error) => error!(error = %error, "Task execution failed"),
+        }
+
+        result
     }
 }
 
