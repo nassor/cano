@@ -1,3 +1,4 @@
+#![cfg(feature = "scheduler")]
 //! # Book Preposition Analysis with Scheduler: Concurrent Downloads + Sequential Analysis
 //!
 //! This example demonstrates a sophisticated book analysis system that combines:

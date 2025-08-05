@@ -58,7 +58,7 @@
 //! - **[`workflow`]**: Core workflow orchestration
 //!   - [`Workflow`] for state machine-based workflows
 //!
-//! - **[`scheduler`]**: Advanced workflow scheduling
+//! - **[`scheduler`]** (optional `scheduler` feature): Advanced workflow scheduling
 //!   - [`Scheduler`] for managing multiple flows with cron support
 //!   - Time-based and event-driven scheduling
 //!
@@ -87,21 +87,25 @@
 
 pub mod error;
 pub mod node;
-pub mod scheduler;
 pub mod store;
 pub mod task;
 pub mod workflow;
 
+#[cfg(feature = "scheduler")]
+pub mod scheduler;
+
 // Core public API - simplified imports
 pub use error::{CanoError, CanoResult};
 pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node};
-pub use scheduler::{FlowInfo, Scheduler};
 pub use store::{KeyValueStore, MemoryStore};
 pub use task::{DefaultTaskParams, DynTask, RetryMode, Task, TaskConfig, TaskObject};
 pub use workflow::{
     ConcurrentWorkflow, ConcurrentWorkflowBuilder, ConcurrentWorkflowStatus, WaitStrategy,
     Workflow, WorkflowBuilder, WorkflowResult,
 };
+
+#[cfg(feature = "scheduler")]
+pub use scheduler::{FlowInfo, Scheduler};
 
 // Convenience re-exports for common patterns
 pub mod prelude {
@@ -111,10 +115,13 @@ pub mod prelude {
 
     pub use crate::{
         CanoError, CanoResult, ConcurrentWorkflow, ConcurrentWorkflowBuilder,
-        ConcurrentWorkflowStatus, DefaultNodeResult, DefaultParams, DefaultTaskParams, FlowInfo,
-        KeyValueStore, MemoryStore, Node, RetryMode, Scheduler, Task, TaskConfig, TaskObject,
-        WaitStrategy, Workflow, WorkflowBuilder, WorkflowResult,
+        ConcurrentWorkflowStatus, DefaultNodeResult, DefaultParams, DefaultTaskParams,
+        KeyValueStore, MemoryStore, Node, RetryMode, Task, TaskConfig, TaskObject, WaitStrategy,
+        Workflow, WorkflowBuilder, WorkflowResult,
     };
+
+    #[cfg(feature = "scheduler")]
+    pub use crate::{FlowInfo, Scheduler};
 
     // Re-export async_trait for convenience
     pub use async_trait::async_trait;

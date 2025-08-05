@@ -20,7 +20,7 @@ The engine is built on three core concepts: **Tasks** and **Nodes** to encapsula
 - **State Machines**: Type-safe enum-driven state transitions with compile-time checking
 - **Retry Strategies**: None, fixed delays, and exponential backoff with jitter (for both Tasks and Nodes)
 - **Flexible Storage**: Built-in `MemoryStore` or custom struct types for data sharing
-- **Workflow Scheduling**: Built-in scheduler with intervals, cron schedules, and manual triggers
+- **Workflow Scheduling** (optional `scheduler` feature): Built-in scheduler with intervals, cron schedules, and manual triggers
 - **Concurrent Execution**: Execute multiple workflow instances in parallel with timeout strategies
 - **Performance**: Minimal overhead with direct execution and zero-cost abstractions
 
@@ -30,7 +30,7 @@ Add Cano to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-cano = "0.5"
+cano = { version = "0.5", features = ["scheduler"] }
 async-trait = "0.1"
 tokio = { version = "1", features = ["full"] }
 ```

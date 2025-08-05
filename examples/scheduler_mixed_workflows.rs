@@ -1,3 +1,4 @@
+#![cfg(feature = "scheduler")]
 //! # Enhanced Scheduler with Concurrent Workflows Example
 //!
 //! This example demonstrates the enhanced scheduler that supports both regular

@@ -1,3 +1,4 @@
+#![cfg(feature = "scheduler")]
 //! # Simplified Scheduler API
 //!
 //! A simplified scheduler that focuses on ease of use while maintaining
@@ -5,6 +6,14 @@
 //! unified registration using the `.register()` method.
 //!
 //! ## 🚀 Quick Start
+//!
+//! > **Note:** The scheduler is an optional feature. To use it, you must enable
+//! > the `"scheduler"` feature in your `Cargo.toml`.
+//!
+//! ```toml
+//! [dependencies]
+//! cano = { version = "0.5", features = ["scheduler"] }
+//! ```
 //!
 //! ```rust
 //! use cano::prelude::*;

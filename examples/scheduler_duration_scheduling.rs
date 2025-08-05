@@ -1,3 +1,4 @@
+#![cfg(feature = "scheduler")]
 //! # Duration-based Scheduling Example
 //!
 //! This example demonstrates how to use the Scheduler with custom Duration intervals:

@@ -1,3 +1,4 @@
+#![cfg(feature = "scheduler")]
 //! # Scheduler Scheduling Example
 //!
 //! This example demonstrates the Scheduler scheduler with multiple flows:

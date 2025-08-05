@@ -1,3 +1,4 @@
+#![cfg(feature = "scheduler")]
 //! # Graceful Shutdown with Timeout Example
 //!
 //! This example demonstrates how to implement graceful shutdown handling in the Scheduler:
