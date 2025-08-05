@@ -123,7 +123,7 @@ Cano provides two approaches for implementing processing logic:
 
 #### Tasks - Simple & Flexible
 
-A `Task` provides a simplified interface with a single `run` method. Use tasks when you want simplicity and don't need structured phases or built-in retry logic:
+A `Task` provides a simplified interface with a single `run` method. Use tasks when you want simplicity and direct control over the execution logic. Both `Task` and `Node` support retry strategies.
 
 ```rust
 struct DataProcessor;
@@ -136,14 +136,7 @@ impl Task<String> for DataProcessor {
     }
 
     async fn run(&self, store: &MemoryStore) -> Result<String, CanoError> {
-        // Load data
-        let input: String = store.get("input")?;
-        
-        // Process data
-        let result = format!("processed: {input}");
-        
-        // Store result and determine next state
-        store.put("output", result)?;
+        // Load data, process, and store results in one place
         Ok("complete".to_string())
     }
 }
@@ -151,7 +144,7 @@ impl Task<String> for DataProcessor {
 
 #### Nodes - Structured & Resilient  
 
-A `Node` implements a structured three-phase lifecycle with built-in retry capabilities. Nodes are a superset of Tasks with additional structure and retry strategies:
+A `Node` implements a structured three-phase lifecycle with built-in retry capabilities. Nodes are ideal for complex operations where separating data loading, execution, and result handling improves clarity and maintainability.
 
 1. **Prep**: Load data, validate inputs, setup resources
 2. **Exec**: Core processing logic (with automatic retry support)  
@@ -178,10 +171,9 @@ impl Node<String> for EmailProcessor {
     async fn post(&self, store: &MemoryStore, success: Self::ExecResult) 
         -> Result<String, CanoError> {
         if success {
-            store.put("result", "sent".to_string())?;
             Ok("complete".to_string())
         } else {
-            Ok("retry".to_string())
+            Ok("failed".to_string())
         }
     }
 }
@@ -189,9 +181,9 @@ impl Node<String> for EmailProcessor {
 
 #### Compatibility & When to Use Which
 
-- **Every Node automatically implements Task** - you can use any Node wherever Tasks are accepted
-- **Use Task for**: Simple processing, quick prototypes, one-off operations
-- **Use Node for**: Production workloads, complex processing, when you need structured three-phase lifecycle
+- **Every Node automatically implements Task** - you can use any Node wherever Tasks are accepted.
+- **Use Task for**: Simple processing, quick prototypes, or when you prefer a single method for all logic.
+- **Use Node for**: Complex processing that benefits from a structured three-phase lifecycle (prep, exec, post).
 
 #### Retry Strategies
 
@@ -201,14 +193,8 @@ Both Tasks and Nodes support retry strategies. Configure retry behavior using `T
 // Task with retry configuration
 impl Task<WorkflowState> for ReliableTask {
     fn config(&self) -> TaskConfig {
-        // No retries (fail fast)
-        TaskConfig::minimal()
-        
-        // Fixed retries: 3 attempts with 2 second delays
-        // TaskConfig::new().with_fixed_retry(3, Duration::from_secs(2))
-        
-        // Exponential backoff: 5 retries with increasing delays
-        // TaskConfig::new().with_exponential_retry(5)
+        // Exponential backoff with 5 retries
+        TaskConfig::new().with_exponential_retry(5)
     }
 
     async fn run(&self, store: &MemoryStore) -> Result<WorkflowState, CanoError> {
@@ -222,16 +208,11 @@ impl Node<WorkflowState> for ReliableNode {
     fn config(&self) -> TaskConfig {
         // No retries (fail fast)
         TaskConfig::minimal()
-        
-        // Fixed retries: 3 attempts with 2 second delays
-        // TaskConfig::new().with_fixed_retry(3, Duration::from_secs(2))
-        
-        // Exponential backoff: 5 retries with increasing delays
-        // TaskConfig::new().with_exponential_retry(5)
     }
     // ... rest of implementation
 }
 ```
+
 ### 2. Store - Data Sharing
 
 Cano supports flexible data sharing between workflow nodes through stores.

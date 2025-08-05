@@ -1,25 +1,26 @@
 //! # Task API - Simplified Workflow Interface
 //!
 //! This module provides the [`Task`] trait, which offers a simplified interface for workflow processing.
-//! While [`crate::node::Node`] requires implementing three phases (`prep`, `exec`, `post`) with built-in retry logic,
-//! [`Task`] only requires implementing a single `run` method.
+//! A [`Task`] only requires implementing a single `run` method, giving you direct control over the execution flow.
 //!
 //! ## Key Differences
 //!
-//! - **[`Task`]**: Simple interface with just a `run` method - perfect for quick prototypes and simple operations
-//! - **[`crate::node::Node`]**: Structured three-phase lifecycle with built-in retry strategies - ideal for production workloads
+//! - **[`Task`]**: Simple interface with a single `run` method. It's great for straightforward operations and quick prototyping.
+//! - **[`crate::node::Node`]**: A more structured interface with a three-phase lifecycle (`prep`, `exec`, `post`). It's ideal for complex operations where separating concerns is beneficial.
+//!
+//! Both `Task` and `Node` support retry strategies.
 //!
 //! ## Relationship & Compatibility
 //!
 //! **Every [`crate::node::Node`] automatically implements [`Task`]** through a blanket implementation. This means:
-//! - You can use any existing Node wherever Tasks are expected
-//! - Workflows can register both Tasks and Nodes using the same `register()` method
-//! - Seamless migration path from simple Tasks to full-featured Nodes
+//! - You can use any existing `Node` wherever a `Task` is expected.
+//! - Workflows can register both `Task`s and `Node`s using the same `register()` method.
+//! - This provides a seamless migration path from a simple `Task` to a more structured `Node` if complexity increases.
 //!
 //! ## When to Use Which
 //!
-//! - Use **[`Task`]** when you want simplicity, don't need retry logic, or are prototyping
-//! - Use **[`crate::node::Node`]** when you need structured error handling, built-in retry strategies, or production-grade resilience
+//! - Use **[`Task`]** for simplicity and direct control.
+//! - Use **[`crate::node::Node`]** for complex logic that benefits from a structured, multi-phase approach.
 //!
 //! ## Example
 //!

@@ -1,12 +1,14 @@
-//! # Node API - The Heart of Cano Workflows
+//! # Node API - Structured Workflow Processing
 //!
 //! This module provides the core [`Node`] trait, which defines the interface for structured workflow processing.
-//! Nodes are ideal for production workloads that need retry strategies and structured processing phases.
+//! Nodes are ideal for complex operations that benefit from a clear separation of concerns into three phases: `prep`, `exec`, and `post`.
 //!
 //! ## 🎯 Task vs Node - Choose the Right Tool
 //!
-//! - **Use [`Task`]** for simple processing with maximum flexibility - single `run()` method
-//! - **Use [`Node`]** for structured processing with built-in retry strategies - three-phase lifecycle
+//! - **Use [`Task`]** for simple processing with a single `run()` method.
+//! - **Use [`Node`]** for structured processing with a three-phase lifecycle.
+//!
+//! Both `Task` and `Node` support retry strategies.
 //!
 //! **Every [`Node`] automatically implements [`Task`]**, so you can mix and match in the same workflow.
 //!

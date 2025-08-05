@@ -1799,56 +1799,26 @@ mod tests {
         // counts workflows that completed before the timeout rather than
         // marking all workflows as cancelled
 
-        // Create a node that completes instantly
+        // Create a task that completes instantly
         #[derive(Clone)]
-        struct InstantNode;
+        struct InstantTask;
 
         #[async_trait]
-        impl Node<TestState> for InstantNode {
-            type PrepResult = ();
-            type ExecResult = ();
-
-            async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
-                Ok(())
-            }
-
-            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
-                ()
-            }
-
-            async fn post(
-                &self,
-                _store: &MemoryStore,
-                _exec_res: Self::ExecResult,
-            ) -> Result<TestState, CanoError> {
+        impl Task<TestState> for InstantTask {
+            async fn run(&self, _store: &MemoryStore) -> Result<TestState, CanoError> {
                 Ok(TestState::Complete)
             }
         }
 
-        // Create a node that takes longer than our timeout
+        // Create a task that takes longer than our timeout
         #[derive(Clone)]
-        struct SlowNode;
+        struct SlowTask;
 
         #[async_trait]
-        impl Node<TestState> for SlowNode {
-            type PrepResult = ();
-            type ExecResult = ();
-
-            async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        impl Task<TestState> for SlowTask {
+            async fn run(&self, _store: &MemoryStore) -> Result<TestState, CanoError> {
                 // Sleep longer than our timeout
                 tokio::time::sleep(Duration::from_millis(200)).await;
-                Ok(())
-            }
-
-            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
-                ()
-            }
-
-            async fn post(
-                &self,
-                _store: &MemoryStore,
-                _exec_res: Self::ExecResult,
-            ) -> Result<TestState, CanoError> {
                 Ok(TestState::Complete)
             }
         }
@@ -1857,11 +1827,11 @@ mod tests {
         let mut concurrent_workflow = ConcurrentWorkflow::new(TestState::Start);
         concurrent_workflow.add_exit_state(TestState::Complete);
 
-        // Register both types of nodes for the same state
+        // Register both types of tasks for the same state
         // (we'll create separate workflows for testing)
 
         // First test: all fast workflows with short timeout - should all complete
-        concurrent_workflow.register(TestState::Start, InstantNode);
+        concurrent_workflow.register(TestState::Start, InstantTask);
 
         let stores = vec![MemoryStore::new(), MemoryStore::new()];
         let (_results, status) = concurrent_workflow
@@ -1881,7 +1851,7 @@ mod tests {
         // Now test with slow workflows and short timeout
         let mut slow_workflow = ConcurrentWorkflow::new(TestState::Start);
         slow_workflow.add_exit_state(TestState::Complete);
-        slow_workflow.register(TestState::Start, SlowNode);
+        slow_workflow.register(TestState::Start, SlowTask);
 
         let stores = vec![MemoryStore::new(), MemoryStore::new()];
         let (results, status) = slow_workflow
