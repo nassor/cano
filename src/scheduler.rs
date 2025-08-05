@@ -1,4 +1,3 @@
-#![cfg(feature = "scheduler")]
 //! # Simplified Scheduler API
 //!
 //! A simplified scheduler that focuses on ease of use while maintaining

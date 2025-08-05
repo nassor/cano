@@ -88,7 +88,7 @@ impl Node<WorkflowState> for TracedDataProcessor {
 
             prep_result
                 .into_iter()
-                .map(|item| format!("processed_{}", item))
+                .map(|item| format!("processed_{item}"))
                 .collect::<Vec<_>>()
         }
         .instrument(processing_span)
@@ -262,7 +262,7 @@ async fn main() -> CanoResult<()> {
         let result = workflow.orchestrate(&store).await?;
         info!(final_state = ?result, "Workflow completed");
 
-        println!("✅ Basic workflow completed with state: {:?}\n", result);
+        println!("✅ Basic workflow completed with state: {result:?}\n");
     }
 
     // Example 2: Concurrent workflow with tracing
@@ -338,9 +338,9 @@ async fn main() -> CanoResult<()> {
         );
 
         println!("✅ Task-based workflow completed:");
-        println!("   - Final state: {:?}", result);
-        println!("   - Math result: {}", math_result);
-        println!("   - Completed by: {}\n", completed_by);
+        println!("   - Final state: {result:?}");
+        println!("   - Math result: {math_result}");
+        println!("   - Completed by: {completed_by}\n");
     }
 
     // Example 4: Scheduler with tracing
@@ -418,7 +418,7 @@ async fn main() -> CanoResult<()> {
         info!("Starting workflow that will encounter validation failure...");
         let result = error_workflow.orchestrate(&store).await?;
 
-        println!("✅ Error workflow completed with state: {:?}", result);
+        println!("✅ Error workflow completed with state: {result:?}");
 
         match result {
             WorkflowState::Error => {

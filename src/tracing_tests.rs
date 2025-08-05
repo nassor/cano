@@ -1,5 +1,5 @@
 #[cfg(feature = "tracing")]
-mod tracing_tests {
+mod tests {
     use crate::prelude::*;
     use async_trait::async_trait;
     use tracing::info_span;

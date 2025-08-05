@@ -350,8 +350,7 @@ where
         #[cfg(feature = "tracing")]
         let workflow_span = self
             .tracing_span
-            .as_ref()
-            .map(|span| span.clone())
+            .clone()
             .unwrap_or_else(|| tracing::info_span!("workflow_orchestrate"));
 
         #[cfg(feature = "tracing")]
@@ -675,8 +674,7 @@ where
         #[cfg(feature = "tracing")]
         let concurrent_span = self
             .tracing_span
-            .as_ref()
-            .map(|span| span.clone())
+            .clone()
             .unwrap_or_else(|| tracing::info_span!("concurrent_workflow_execute"));
 
         #[cfg(feature = "tracing")]
