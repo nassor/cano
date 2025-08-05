@@ -1,6 +1,6 @@
 [package]
 name = "cano"
-version = "0.5.1"
+version = "0.6.0"
 homepage = "https://github.com/nassor/cano"
 edition = "2024"
 description = "Simple & Fast Async Workflows in Rust - Build data processing pipelines with Tasks and Nodes"

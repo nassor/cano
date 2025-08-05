@@ -32,7 +32,7 @@ Add Cano to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-cano = "0.5"
+cano = "0.6"
 async-trait = "0.1"
 tokio = { version = "1", features = ["macros", "sync", "time", "rt-multi-thread"] }
 ```
@@ -41,14 +41,14 @@ For scheduler support:
 
 ```toml
 [dependencies]
-cano = { version = "0.5", features = ["scheduler"] }
+cano = { version = "0.6", features = ["scheduler"] }
 ```
 
 For observability and tracing:
 
 ```toml
 [dependencies]
-cano = { version = "0.5", features = ["tracing"] }
+cano = { version = "0.6", features = ["tracing"] }
 tracing = "0.1"
 ```
 
@@ -56,7 +56,7 @@ Or use the `all` feature for convenience:
 
 ```toml
 [dependencies]
-cano = { version = "0.5", features = ["all"] }
+cano = { version = "0.6", features = ["all"] }
 tracing = "0.1"
 ```
 
@@ -578,7 +578,7 @@ Cano provides comprehensive observability through the optional `tracing` feature
 
 ```toml
 [dependencies]
-cano = { version = "0.5", features = ["tracing"] }
+cano = { version = "0.6", features = ["tracing"] }
 tracing = "0.1"
 tracing-subscriber = "0.3"
 ```

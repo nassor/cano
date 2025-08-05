@@ -11,7 +11,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! cano = { version = "0.5", features = ["scheduler"] }
+//! cano = { version = "0.6", features = ["scheduler"] }
 //! ```
 //!
 //! ```rust
