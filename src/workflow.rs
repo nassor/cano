@@ -694,7 +694,8 @@ where
 
         // Create workflow instances and spawn tasks
         let mut tasks = Vec::new();
-        #[cfg_attr(not(feature = "tracing"), allow(unused_variables))] // idx is only used with tracing feature
+        #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
+        // idx is only used with tracing feature
         for (idx, store) in stores.into_iter().enumerate() {
             let workflow = self.create_workflow_instance()?;
 
