@@ -25,12 +25,9 @@ use tracing::{Instrument, info, info_span, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[allow(dead_code)] // Some variants used for demonstration purposes
 enum WorkflowState {
     Start,
-    DataValidation,
     Processing,
-    PostProcessing,
     Complete,
     Error,
 }
