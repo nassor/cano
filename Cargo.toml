@@ -13,7 +13,7 @@ authors = ["Nassor Frazier-Silva"]
 
 [dependencies]
 async-trait = "0.1"
-tokio = { version = "1.47.1", features = ["full"] }
+tokio = { version = "1.47.1", features = ["macros", "sync", "time", "rt-multi-thread"] }
 rand = "0.9"
 chrono = { version = "0.4", features = ["serde"], optional = true }
 cron = { version = "0.15", optional = true }

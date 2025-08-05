@@ -34,7 +34,7 @@ Add Cano to your `Cargo.toml`:
 [dependencies]
 cano = "0.5"
 async-trait = "0.1"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["macros", "sync", "time", "rt-multi-thread"] }
 ```
 
 For scheduler support:
