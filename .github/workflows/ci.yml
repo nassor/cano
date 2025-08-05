@@ -54,16 +54,16 @@ jobs:
     - name: Build
       run: cargo build
 
-    - name: Run benchmarks checks
-      run: cargo bench --no-run
+    - name: Check benchmarks
+      run: cargo check --benches
+      if: matrix.rust == 'stable'
+
+    - name: Check examples
+      run: cargo check --examples
       if: matrix.rust == 'stable'
     
     - name: Run tests
       run: cargo test --lib
-    
-    - name: Check examples
-      run: cargo check --examples
-      if: matrix.rust == 'stable'
     
     - name: Run doctests
       run: cargo test --doc
