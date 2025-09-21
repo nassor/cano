@@ -52,7 +52,6 @@ impl Node<MyState> for LongProcessingNode {
     async fn exec(&self, _data: Self::PrepResult) -> Self::ExecResult {
         // Simulate long-running work
         tokio::time::sleep(Duration::from_secs(5)).await;
-        ()
     }
 
     async fn post(
@@ -77,9 +76,7 @@ impl Node<MyState> for QuickNode {
         Ok(())
     }
 
-    async fn exec(&self, _data: Self::PrepResult) -> Self::ExecResult {
-        ()
-    }
+    async fn exec(&self, _data: Self::PrepResult) -> Self::ExecResult {}
 
     async fn post(
         &self,

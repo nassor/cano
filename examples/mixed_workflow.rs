@@ -232,8 +232,6 @@ impl Node<WorkflowState> for ReportNode {
 
         // Simulate report generation
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        ()
     }
 
     async fn post(

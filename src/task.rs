@@ -555,10 +555,10 @@ mod tests {
     impl Task<TestAction> for ParameterizedTask {
         fn set_params(&mut self, params: DefaultTaskParams) {
             self.params = params;
-            if let Some(multiplier_str) = self.params.get("multiplier") {
-                if let Ok(multiplier) = multiplier_str.parse::<i32>() {
-                    self.multiplier = multiplier;
-                }
+            if let Some(multiplier_str) = self.params.get("multiplier")
+                && let Ok(multiplier) = multiplier_str.parse::<i32>()
+            {
+                self.multiplier = multiplier;
             }
         }
 

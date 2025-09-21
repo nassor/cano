@@ -36,7 +36,6 @@ impl Node<TestState> for DoNothingNode {
 
     async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
         // Do nothing - minimal overhead
-        ()
     }
 
     async fn post(

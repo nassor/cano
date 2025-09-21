@@ -528,10 +528,10 @@ mod tests {
 
         fn set_params(&mut self, params: DefaultParams) {
             self.params = params;
-            if let Some(multiplier_str) = self.params.get("multiplier") {
-                if let Ok(multiplier) = multiplier_str.parse::<i32>() {
-                    self.multiplier = multiplier;
-                }
+            if let Some(multiplier_str) = self.params.get("multiplier")
+                && let Ok(multiplier) = multiplier_str.parse::<i32>()
+            {
+                self.multiplier = multiplier;
             }
         }
 
@@ -570,9 +570,7 @@ mod tests {
             Ok(())
         }
 
-        async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
-            ()
-        }
+        async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {}
 
         async fn post(
             &self,
@@ -927,9 +925,7 @@ mod tests {
                 }
             }
 
-            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
-                ()
-            }
+            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {}
 
             async fn post(
                 &self,
@@ -975,9 +971,7 @@ mod tests {
                 Ok(())
             }
 
-            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
-                ()
-            }
+            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {}
 
             async fn post(
                 &self,
@@ -1231,9 +1225,7 @@ mod tests {
                 }
             }
 
-            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
-                ()
-            }
+            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {}
 
             async fn post(
                 &self,
@@ -1278,9 +1270,7 @@ mod tests {
                 Err(CanoError::preparation("Always fails"))
             }
 
-            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
-                ()
-            }
+            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {}
 
             async fn post(
                 &self,
