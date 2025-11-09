@@ -128,7 +128,9 @@ fn update_interaction_count(store: &MemoryStore) -> Result<u32, CanoError> {
 }
 
 /// Create an AI agent with standard configuration
-fn create_agent(client: &Client) -> rig::agent::Agent<rig::providers::ollama::CompletionModel> {
+fn create_agent(
+    client: &Client,
+) -> rig::agent::Agent<rig::providers::ollama::CompletionModel<reqwest::Client>> {
     client
         .agent(MODEL)
         .preamble(CONTEXT)
@@ -270,7 +272,7 @@ impl Node<ConversationState> for Actor2Node {
     async fn exec(&self, prep_result: Self::PrepResult) -> Self::ExecResult {
         let agent = create_agent(&self.client);
 
-        match agent.prompt(prep_result).await {
+        match agent.prompt(&prep_result).await {
             Ok(response) => self.ensure_yes_and_format(&response),
             Err(e) => {
                 eprintln!("Actor2Node AI error: {e:?}");
