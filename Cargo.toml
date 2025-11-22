@@ -74,6 +74,25 @@ name = "scheduler_graceful_shutdown"
 path = "examples/scheduler_graceful_shutdown.rs"
 required-features = ["scheduler"]
 
+[[example]]
+name = "scheduler_mixed_workflows"
+path = "examples/scheduler_mixed_workflows.rs"
+required-features = ["scheduler"]
+
+[[example]]
+name = "scheduler_book_prepositions"
+path = "examples/scheduler_book_prepositions.rs"
+required-features = ["scheduler"]
+
+[[example]]
+name = "tracing_demo"
+path = "examples/tracing_demo.rs"
+required-features = ["tracing", "scheduler"]
+
+[[example]]
+name = "workflow_stack_store"
+path = "examples/workflow_stack_store.rs"
+
 [[bench]]
 name = "workflow_performance"
 harness = false
