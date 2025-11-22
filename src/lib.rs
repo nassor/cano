@@ -102,7 +102,7 @@ pub use error::{CanoError, CanoResult};
 pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node};
 pub use store::{KeyValueStore, MemoryStore};
 pub use task::{DefaultTaskParams, DynTask, RetryMode, Task, TaskConfig, TaskObject, TaskResult};
-pub use workflow::{JoinConfig, JoinStrategy, StateEntry, Workflow};
+pub use workflow::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult, StateEntry, Workflow};
 
 #[cfg(feature = "scheduler")]
 pub use scheduler::{FlowInfo, Scheduler};
@@ -115,8 +115,8 @@ pub mod prelude {
 
     pub use crate::{
         CanoError, CanoResult, DefaultNodeResult, DefaultParams, DefaultTaskParams, JoinConfig,
-        JoinStrategy, KeyValueStore, MemoryStore, Node, RetryMode, StateEntry, Task, TaskConfig,
-        TaskObject, TaskResult, Workflow,
+        JoinStrategy, KeyValueStore, MemoryStore, Node, RetryMode, SplitResult, SplitTaskResult,
+        StateEntry, Task, TaskConfig, TaskObject, TaskResult, Workflow,
     };
 
     #[cfg(feature = "scheduler")]

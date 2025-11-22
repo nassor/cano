@@ -16,17 +16,69 @@
 //!
 //! ### Join Strategies
 //!
-//! - **All**: Wait for all tasks to complete
+//! - **All**: Wait for all tasks to complete successfully
 //! - **Any**: Continue after any single task completes
-//! - **Quorum**: Wait for a specific number of tasks
-//! - **Percentage**: Wait for a percentage of tasks to complete
+//! - **Quorum**: Wait for a specific number of tasks to complete successfully
+//! - **Percentage**: Wait for a percentage of tasks to complete successfully
+//! - **PartialResults**: Accept partial results after minimum tasks complete (success or failure),
+//!   cancel remaining tasks, and track both successes and errors
+//! - **PartialTimeout**: Accept whatever completes before timeout, cancel incomplete tasks,
+//!   and proceed with completed tasks (requires timeout configuration)
+//!
+//! ## 📊 Partial Results Strategy
+//!
+//! The `PartialResults` strategy is designed for scenarios where you want to:
+//! - Optimize for latency by cancelling slow tasks
+//! - Handle both successes and failures gracefully
+//! - Implement fault-tolerant systems with redundancy
+//! - Get results as soon as a minimum threshold is met
+//!
+//! ### Key Features
+//!
+//! - **Early Cancellation**: Once the minimum number of tasks complete (success or failure),
+//!   remaining tasks are cancelled
+//! - **Result Tracking**: Tracks successful, failed, and cancelled tasks separately
+//! - **Store Integration**: Optionally stores result summaries in the workflow store
+//! - **Flexible Thresholds**: Configure minimum number of completions needed
+//!
+//! ### Example
+//!
+//! ```rust
+//! use cano::prelude::*;
+//!
+//! # #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+//! # enum State { Start, Process, Complete }
+//! # #[derive(Clone)]
+//! # struct MyTask;
+//! # #[async_trait]
+//! # impl Task<State> for MyTask {
+//! #     async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+//! #         Ok(TaskResult::Single(State::Complete))
+//! #     }
+//! # }
+//! # async fn example() -> Result<(), CanoError> {
+//! let store = MemoryStore::new();
+//! let tasks = vec![MyTask, MyTask, MyTask, MyTask];
+//!
+//! // Wait for 2 tasks to complete, then cancel the rest
+//! let join_config = JoinConfig::new(
+//!     JoinStrategy::PartialResults(2),
+//!     State::Process
+//! ).with_store_partial_results(true);
+//!
+//! let workflow = Workflow::new(store)
+//!     .register_split(State::Start, tasks, join_config)
+//!     .add_exit_state(State::Complete);
+//! # Ok(())
+//! # }
+//! ```
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::CanoError;
-use crate::store::MemoryStore;
+use crate::store::{KeyValueStore, MemoryStore};
 use crate::task::{DefaultTaskParams, Task, TaskResult};
 
 #[cfg(feature = "tracing")]
@@ -43,6 +95,14 @@ pub enum JoinStrategy {
     Quorum(usize),
     /// Percentage of tasks must complete (0.0 to 1.0)
     Percentage(f64),
+    /// Accept partial results - continues after minimum tasks complete,
+    /// cancels remaining tasks, and returns both successes and errors
+    /// Parameter is the minimum number of tasks that must complete (success or failure)
+    PartialResults(usize),
+    /// Accept whatever completes before timeout - cancels tasks that haven't completed
+    /// when timeout expires, and proceeds with completed tasks (successes and failures)
+    /// Requires timeout to be set in JoinConfig
+    PartialTimeout,
 }
 
 impl JoinStrategy {
@@ -56,7 +116,56 @@ impl JoinStrategy {
                 let required = (total as f64 * p).ceil() as usize;
                 completed >= required
             }
+            JoinStrategy::PartialResults(min) => completed >= *min,
+            JoinStrategy::PartialTimeout => completed >= 1, // At least one task must complete
         }
+    }
+}
+
+/// Result of a single split task execution
+#[derive(Clone, Debug)]
+pub struct SplitTaskResult<TState> {
+    /// Index of the task in the split tasks vector
+    pub task_index: usize,
+    /// Result of the task execution
+    pub result: Result<TaskResult<TState>, CanoError>,
+}
+
+/// Collection of split task results with both successes and errors
+#[derive(Clone, Debug)]
+pub struct SplitResult<TState> {
+    /// Successfully completed tasks
+    pub successes: Vec<SplitTaskResult<TState>>,
+    /// Failed tasks
+    pub errors: Vec<SplitTaskResult<TState>>,
+    /// Tasks that were cancelled (not started or aborted)
+    pub cancelled: Vec<usize>,
+}
+
+impl<TState> SplitResult<TState> {
+    /// Create a new empty split result
+    pub fn new() -> Self {
+        Self {
+            successes: Vec::new(),
+            errors: Vec::new(),
+            cancelled: Vec::new(),
+        }
+    }
+
+    /// Total number of tasks that completed (success or error)
+    pub fn completed_count(&self) -> usize {
+        self.successes.len() + self.errors.len()
+    }
+
+    /// Total number of tasks including cancelled
+    pub fn total_count(&self) -> usize {
+        self.successes.len() + self.errors.len() + self.cancelled.len()
+    }
+}
+
+impl<TState> Default for SplitResult<TState> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -69,6 +178,9 @@ pub struct JoinConfig<TState> {
     pub timeout: Option<Duration>,
     /// State to transition to after join condition is met
     pub join_state: TState,
+    /// Whether to store partial results in the store (for PartialResults strategy)
+    /// Results will be stored under the key "split_results"
+    pub store_partial_results: bool,
 }
 
 impl<TState> JoinConfig<TState>
@@ -81,12 +193,20 @@ where
             strategy,
             timeout: None,
             join_state,
+            store_partial_results: false,
         }
     }
 
     /// Set timeout for the split execution
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// Enable storing partial results in the store (default: false)
+    /// Results will be stored under the key "split_results"
+    pub fn with_store_partial_results(mut self, store: bool) -> Self {
+        self.store_partial_results = store;
         self
     }
 }
@@ -359,10 +479,20 @@ where
             handles.push(handle);
         }
 
-        // Apply timeout if configured
-        let results_future = self.collect_results(handles, &join_config.strategy, total_tasks);
+        // Apply timeout if configured or required by strategy
+        let split_result = if matches!(join_config.strategy, JoinStrategy::PartialTimeout) {
+            // PartialTimeout requires a timeout
+            let timeout_duration = join_config.timeout.ok_or_else(|| {
+                CanoError::configuration(
+                    "PartialTimeout strategy requires a timeout to be configured",
+                )
+            })?;
 
-        let results = if let Some(timeout_duration) = join_config.timeout {
+            self.collect_results_with_timeout(handles, timeout_duration, total_tasks)
+                .await?
+        } else if let Some(timeout_duration) = join_config.timeout {
+            // Other strategies with timeout
+            let results_future = self.collect_results(handles, &join_config.strategy, total_tasks);
             match tokio::time::timeout(timeout_duration, results_future).await {
                 Ok(results) => results?,
                 Err(_) => {
@@ -372,70 +502,336 @@ where
                 }
             }
         } else {
-            results_future.await?
+            // No timeout
+            self.collect_results(handles, &join_config.strategy, total_tasks)
+                .await?
         };
 
-        // Check if join condition is met
-        let successful = results.iter().filter(|r| r.is_ok()).count();
+        let successful = split_result.successes.len();
+        let failed = split_result.errors.len();
+        let cancelled = split_result.cancelled.len();
 
         #[cfg(feature = "tracing")]
         info!(
             successful = successful,
+            failed = failed,
+            cancelled = cancelled,
             total = total_tasks,
             "Split execution completed"
         );
 
-        if join_config.strategy.is_satisfied(successful, total_tasks) {
-            Ok(join_config.join_state.clone())
-        } else {
-            Err(CanoError::workflow(format!(
-                "Join condition not met: {} of {} tasks completed, strategy: {:?}",
-                successful, total_tasks, join_config.strategy
-            )))
+        // Store partial results if requested
+        if join_config.store_partial_results {
+            // Store the split result for later access
+            let summary = format!(
+                "Split results: {} succeeded, {} failed, {} cancelled",
+                successful, failed, cancelled
+            );
+            self.store.put("split_results_summary", summary)?;
+
+            // Store individual results
+            self.store.put("split_successes_count", successful)?;
+            self.store.put("split_errors_count", failed)?;
+            self.store.put("split_cancelled_count", cancelled)?;
+        }
+
+        // Check if join condition is met
+        match &join_config.strategy {
+            JoinStrategy::PartialResults(_) => {
+                // For PartialResults, we always continue if minimum tasks completed
+                // We've already collected the required minimum
+                if join_config
+                    .strategy
+                    .is_satisfied(split_result.completed_count(), total_tasks)
+                {
+                    Ok(join_config.join_state.clone())
+                } else {
+                    Err(CanoError::workflow(format!(
+                        "Partial results condition not met: {} completed, {} required",
+                        split_result.completed_count(),
+                        match &join_config.strategy {
+                            JoinStrategy::PartialResults(min) => *min,
+                            _ => 0,
+                        }
+                    )))
+                }
+            }
+            JoinStrategy::PartialTimeout => {
+                // For PartialTimeout, proceed with whatever completed before timeout
+                if split_result.completed_count() >= 1 {
+                    Ok(join_config.join_state.clone())
+                } else {
+                    Err(CanoError::workflow(
+                        "PartialTimeout: No tasks completed before timeout",
+                    ))
+                }
+            }
+            _ => {
+                // For other strategies, check successful tasks only
+                if join_config.strategy.is_satisfied(successful, total_tasks) {
+                    Ok(join_config.join_state.clone())
+                } else {
+                    Err(CanoError::workflow(format!(
+                        "Join condition not met: {} of {} tasks completed successfully, strategy: {:?}",
+                        successful, total_tasks, join_config.strategy
+                    )))
+                }
+            }
         }
     }
 
     async fn collect_results(
         &self,
-        handles: Vec<tokio::task::JoinHandle<Result<TaskResult<TState>, CanoError>>>,
+        mut handles: Vec<tokio::task::JoinHandle<Result<TaskResult<TState>, CanoError>>>,
         strategy: &JoinStrategy,
-        _total_tasks: usize,
-    ) -> Result<Vec<Result<TaskResult<TState>, CanoError>>, CanoError> {
+        total_tasks: usize,
+    ) -> Result<SplitResult<TState>, CanoError> {
         match strategy {
             JoinStrategy::Any => {
                 // Use select_all to return as soon as any task completes successfully
-                let (result, _index, remaining) = futures::future::select_all(handles).await;
+                let (result, index, remaining) = futures::future::select_all(handles).await;
+
+                let mut split_result = SplitResult::new();
 
                 // Cancel remaining tasks
-                for handle in remaining {
+                for (idx, handle) in remaining.into_iter().enumerate() {
                     handle.abort();
+                    // Calculate actual index (accounting for the completed task)
+                    let actual_idx = if idx < index { idx } else { idx + 1 };
+                    split_result.cancelled.push(actual_idx);
                 }
 
                 // Process the result
                 match result {
                     Ok(task_result) => {
                         if task_result.is_ok() {
-                            Ok(vec![task_result])
+                            split_result.successes.push(SplitTaskResult {
+                                task_index: index,
+                                result: task_result,
+                            });
+                            Ok(split_result)
                         } else {
+                            split_result.errors.push(SplitTaskResult {
+                                task_index: index,
+                                result: task_result,
+                            });
                             Err(CanoError::workflow("First completed task failed"))
                         }
                     }
-                    Err(_) => Err(CanoError::workflow("Task join error")),
+                    Err(e) => {
+                        split_result.errors.push(SplitTaskResult {
+                            task_index: index,
+                            result: Err(CanoError::workflow(format!("Task panic: {:?}", e))),
+                        });
+                        Err(CanoError::workflow("Task join error"))
+                    }
                 }
+            }
+            JoinStrategy::PartialResults(min_tasks) => {
+                // Poll tasks until minimum number complete, then cancel rest
+                let mut split_result = SplitResult::new();
+                let mut completed_indices = std::collections::HashSet::new();
+
+                while split_result.completed_count() < *min_tasks && !handles.is_empty() {
+                    let (result, index, remaining) = futures::future::select_all(handles).await;
+
+                    completed_indices.insert(index);
+
+                    // Process the completed task
+                    match result {
+                        Ok(task_result) => {
+                            if task_result.is_ok() {
+                                split_result.successes.push(SplitTaskResult {
+                                    task_index: index,
+                                    result: task_result,
+                                });
+                            } else {
+                                split_result.errors.push(SplitTaskResult {
+                                    task_index: index,
+                                    result: task_result,
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            split_result.errors.push(SplitTaskResult {
+                                task_index: index,
+                                result: Err(CanoError::workflow(format!("Task panic: {:?}", e))),
+                            });
+                        }
+                    }
+
+                    handles = remaining;
+                }
+
+                // Cancel all remaining tasks
+                for handle in handles {
+                    handle.abort();
+                }
+
+                // Mark cancelled tasks
+                for idx in 0..total_tasks {
+                    if !completed_indices.contains(&idx) {
+                        split_result.cancelled.push(idx);
+                    }
+                }
+
+                Ok(split_result)
+            }
+            JoinStrategy::PartialTimeout => {
+                // Wait for all tasks to complete or be cancelled by outer timeout
+                // This strategy relies on the timeout wrapper in execute_split_join
+                // When timeout occurs, tokio will drop the future and we won't reach here
+                // This branch handles the case where all tasks complete before timeout
+                let results = futures::future::join_all(handles).await;
+                let mut split_result = SplitResult::new();
+
+                for (idx, result) in results.into_iter().enumerate() {
+                    match result {
+                        Ok(task_result) => {
+                            if task_result.is_ok() {
+                                split_result.successes.push(SplitTaskResult {
+                                    task_index: idx,
+                                    result: task_result,
+                                });
+                            } else {
+                                split_result.errors.push(SplitTaskResult {
+                                    task_index: idx,
+                                    result: task_result,
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            split_result.errors.push(SplitTaskResult {
+                                task_index: idx,
+                                result: Err(CanoError::workflow(format!("Task panic: {:?}", e))),
+                            });
+                        }
+                    }
+                }
+
+                Ok(split_result)
             }
             _ => {
                 // Wait for all tasks and collect results
                 let results = futures::future::join_all(handles).await;
-                Ok(results
-                    .into_iter()
-                    .map(|r| {
-                        r.unwrap_or_else(|e| {
-                            Err(CanoError::workflow(format!("Task panic: {:?}", e)))
-                        })
-                    })
-                    .collect())
+                let mut split_result = SplitResult::new();
+
+                for (idx, result) in results.into_iter().enumerate() {
+                    match result {
+                        Ok(task_result) => {
+                            if task_result.is_ok() {
+                                split_result.successes.push(SplitTaskResult {
+                                    task_index: idx,
+                                    result: task_result,
+                                });
+                            } else {
+                                split_result.errors.push(SplitTaskResult {
+                                    task_index: idx,
+                                    result: task_result,
+                                });
+                            }
+                        }
+                        Err(e) => {
+                            split_result.errors.push(SplitTaskResult {
+                                task_index: idx,
+                                result: Err(CanoError::workflow(format!("Task panic: {:?}", e))),
+                            });
+                        }
+                    }
+                }
+
+                Ok(split_result)
             }
         }
+    }
+
+    async fn collect_results_with_timeout(
+        &self,
+        handles: Vec<tokio::task::JoinHandle<Result<TaskResult<TState>, CanoError>>>,
+        timeout: Duration,
+        total_tasks: usize,
+    ) -> Result<SplitResult<TState>, CanoError> {
+        use futures::stream::StreamExt;
+        use tokio::time::sleep;
+
+        let mut split_result = SplitResult::new();
+        let mut completed_indices = std::collections::HashSet::new();
+
+        // Convert handles to futures with their indices
+        let mut futures = futures::stream::FuturesUnordered::new();
+        for (idx, handle) in handles.into_iter().enumerate() {
+            futures.push(async move {
+                let result = handle.await;
+                (idx, result)
+            });
+        }
+
+        // Set up timeout
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        while !futures.is_empty() {
+            let remaining_time = deadline.saturating_duration_since(tokio::time::Instant::now());
+
+            if remaining_time.is_zero() {
+                // Timeout reached - all remaining tasks are considered cancelled
+                #[cfg(feature = "tracing")]
+                debug!(
+                    "PartialTimeout: timeout reached, {} tasks incomplete",
+                    futures.len()
+                );
+
+                // Mark remaining tasks as cancelled
+                for idx in 0..total_tasks {
+                    if !completed_indices.contains(&idx) {
+                        split_result.cancelled.push(idx);
+                    }
+                }
+                break;
+            }
+
+            // Race between timeout and next task completion
+            tokio::select! {
+                _ = sleep(remaining_time) => {
+                    // Timeout reached
+                    #[cfg(feature = "tracing")]
+                    debug!("PartialTimeout: timeout reached during select");
+
+                    for idx in 0..total_tasks {
+                        if !completed_indices.contains(&idx) {
+                            split_result.cancelled.push(idx);
+                        }
+                    }
+                    break;
+                }
+                Some((task_idx, task_result)) = futures.next() => {
+                    completed_indices.insert(task_idx);
+
+                    // Process the completed task
+                    match task_result {
+                        Ok(Ok(task_result)) => {
+                            split_result.successes.push(SplitTaskResult {
+                                task_index: task_idx,
+                                result: Ok(task_result),
+                            });
+                        }
+                        Ok(Err(e)) => {
+                            split_result.errors.push(SplitTaskResult {
+                                task_index: task_idx,
+                                result: Err(e),
+                            });
+                        }
+                        Err(e) => {
+                            split_result.errors.push(SplitTaskResult {
+                                task_index: task_idx,
+                                result: Err(CanoError::workflow(format!("Task panic: {:?}", e))),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(split_result)
     }
 }
 
@@ -873,6 +1269,367 @@ mod tests {
         assert!(JoinStrategy::Percentage(0.5).is_satisfied(2, 4));
         assert!(JoinStrategy::Percentage(0.75).is_satisfied(3, 4));
         assert!(!JoinStrategy::Percentage(0.75).is_satisfied(2, 4));
+
+        assert!(JoinStrategy::PartialResults(2).is_satisfied(2, 4));
+        assert!(JoinStrategy::PartialResults(2).is_satisfied(3, 4));
+        assert!(!JoinStrategy::PartialResults(2).is_satisfied(1, 4));
+
+        assert!(JoinStrategy::PartialTimeout.is_satisfied(1, 4));
+        assert!(JoinStrategy::PartialTimeout.is_satisfied(3, 4));
+        assert!(!JoinStrategy::PartialTimeout.is_satisfied(0, 4));
+    }
+
+    #[tokio::test]
+    async fn test_partial_results_strategy() {
+        let store = MemoryStore::new();
+
+        // Create tasks with varying delays - some will be cancelled
+        #[derive(Clone)]
+        struct DelayedTask {
+            delay_ms: u64,
+            #[allow(dead_code)]
+            task_id: usize,
+        }
+
+        #[async_trait]
+        impl Task<TestState> for DelayedTask {
+            async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+                tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+                Ok(TaskResult::Single(TestState::Complete))
+            }
+        }
+
+        let tasks = vec![
+            DelayedTask {
+                delay_ms: 50,
+                task_id: 1,
+            },
+            DelayedTask {
+                delay_ms: 100,
+                task_id: 2,
+            },
+            DelayedTask {
+                delay_ms: 500,
+                task_id: 3,
+            }, // This should be cancelled
+            DelayedTask {
+                delay_ms: 600,
+                task_id: 4,
+            }, // This should be cancelled
+        ];
+
+        // Wait for 2 tasks to complete, then cancel the rest
+        let join_config = JoinConfig::new(JoinStrategy::PartialResults(2), TestState::Complete)
+            .with_store_partial_results(true);
+
+        let workflow = Workflow::new(store.clone())
+            .register_split(TestState::Start, tasks, join_config)
+            .add_exit_state(TestState::Complete);
+
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        assert_eq!(result, TestState::Complete);
+
+        // Check stored results
+        let successes: usize = store.get("split_successes_count").unwrap();
+        let cancelled: usize = store.get("split_cancelled_count").unwrap();
+
+        assert_eq!(successes, 2);
+        assert_eq!(cancelled, 2);
+    }
+
+    #[tokio::test]
+    async fn test_partial_results_with_failures() {
+        let store = MemoryStore::new();
+
+        // Mix of fast success, fast failure, and slow tasks
+        #[derive(Clone)]
+        struct MixedTask {
+            delay_ms: u64,
+            should_fail: bool,
+        }
+
+        #[async_trait]
+        impl Task<TestState> for MixedTask {
+            async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+                tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+                if self.should_fail {
+                    Err(CanoError::task_execution("Task failed"))
+                } else {
+                    Ok(TaskResult::Single(TestState::Complete))
+                }
+            }
+        }
+
+        let tasks = vec![
+            MixedTask {
+                delay_ms: 50,
+                should_fail: false,
+            }, // Success
+            MixedTask {
+                delay_ms: 100,
+                should_fail: true,
+            }, // Failure
+            MixedTask {
+                delay_ms: 500,
+                should_fail: false,
+            }, // Should be cancelled
+            MixedTask {
+                delay_ms: 600,
+                should_fail: false,
+            }, // Should be cancelled
+        ];
+
+        // Wait for 2 tasks to complete (success or failure), then cancel rest
+        let join_config = JoinConfig::new(JoinStrategy::PartialResults(2), TestState::Complete)
+            .with_store_partial_results(true);
+
+        let workflow = Workflow::new(store.clone())
+            .register_split(TestState::Start, tasks, join_config)
+            .add_exit_state(TestState::Complete);
+
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        assert_eq!(result, TestState::Complete);
+
+        // Check stored results
+        let successes: usize = store.get("split_successes_count").unwrap();
+        let errors: usize = store.get("split_errors_count").unwrap();
+        let cancelled: usize = store.get("split_cancelled_count").unwrap();
+
+        // Should have 1 success, 1 error, and 2 cancelled
+        assert_eq!(successes, 1);
+        assert_eq!(errors, 1);
+        assert_eq!(cancelled, 2);
+    }
+
+    #[tokio::test]
+    async fn test_partial_results_minimum_not_met() {
+        let store = MemoryStore::new();
+
+        // All tasks will timeout before minimum is reached
+        #[derive(Clone)]
+        struct SlowTask;
+
+        #[async_trait]
+        impl Task<TestState> for SlowTask {
+            async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                Ok(TaskResult::Single(TestState::Complete))
+            }
+        }
+
+        let tasks = vec![SlowTask, SlowTask, SlowTask];
+
+        // Require 3 tasks but timeout after 100ms
+        let join_config = JoinConfig::new(JoinStrategy::PartialResults(3), TestState::Complete)
+            .with_timeout(Duration::from_millis(100));
+
+        let workflow = Workflow::new(store)
+            .register_split(TestState::Start, tasks, join_config)
+            .add_exit_state(TestState::Complete);
+
+        let result = workflow.orchestrate(TestState::Start).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("timeout"));
+    }
+
+    #[tokio::test]
+    async fn test_partial_timeout_strategy() {
+        let store = MemoryStore::new();
+
+        // Create tasks with varying delays
+        #[derive(Clone)]
+        struct DelayedTask {
+            delay_ms: u64,
+            #[allow(dead_code)]
+            task_id: usize,
+        }
+
+        #[async_trait]
+        impl Task<TestState> for DelayedTask {
+            async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+                tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+                Ok(TaskResult::Single(TestState::Complete))
+            }
+        }
+
+        let tasks = vec![
+            DelayedTask {
+                delay_ms: 50,
+                task_id: 1,
+            },
+            DelayedTask {
+                delay_ms: 100,
+                task_id: 2,
+            },
+            DelayedTask {
+                delay_ms: 500,
+                task_id: 3,
+            }, // Won't complete in time
+            DelayedTask {
+                delay_ms: 600,
+                task_id: 4,
+            }, // Won't complete in time
+        ];
+
+        // Timeout after 200ms - should get 2 completions
+        let join_config = JoinConfig::new(JoinStrategy::PartialTimeout, TestState::Complete)
+            .with_timeout(Duration::from_millis(200))
+            .with_store_partial_results(true);
+
+        let workflow = Workflow::new(store.clone())
+            .register_split(TestState::Start, tasks, join_config)
+            .add_exit_state(TestState::Complete);
+
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        assert_eq!(result, TestState::Complete);
+
+        // Check stored results
+        let successes: usize = store.get("split_successes_count").unwrap();
+        let cancelled: usize = store.get("split_cancelled_count").unwrap();
+
+        assert_eq!(successes, 2);
+        assert_eq!(cancelled, 2);
+    }
+
+    #[tokio::test]
+    async fn test_partial_timeout_with_failures() {
+        let store = MemoryStore::new();
+
+        // Mix of fast success, fast failure, and slow tasks
+        #[derive(Clone)]
+        struct MixedTask {
+            delay_ms: u64,
+            should_fail: bool,
+        }
+
+        #[async_trait]
+        impl Task<TestState> for MixedTask {
+            async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+                tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+                if self.should_fail {
+                    Err(CanoError::task_execution("Task failed"))
+                } else {
+                    Ok(TaskResult::Single(TestState::Complete))
+                }
+            }
+        }
+
+        let tasks = vec![
+            MixedTask {
+                delay_ms: 50,
+                should_fail: false,
+            }, // Success
+            MixedTask {
+                delay_ms: 100,
+                should_fail: true,
+            }, // Failure
+            MixedTask {
+                delay_ms: 150,
+                should_fail: false,
+            }, // Success
+            MixedTask {
+                delay_ms: 500,
+                should_fail: false,
+            }, // Won't complete
+        ];
+
+        // Timeout after 200ms
+        let join_config = JoinConfig::new(JoinStrategy::PartialTimeout, TestState::Complete)
+            .with_timeout(Duration::from_millis(200))
+            .with_store_partial_results(true);
+
+        let workflow = Workflow::new(store.clone())
+            .register_split(TestState::Start, tasks, join_config)
+            .add_exit_state(TestState::Complete);
+
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        assert_eq!(result, TestState::Complete);
+
+        // Check stored results
+        let successes: usize = store.get("split_successes_count").unwrap();
+        let errors: usize = store.get("split_errors_count").unwrap();
+        let cancelled: usize = store.get("split_cancelled_count").unwrap();
+
+        assert_eq!(successes, 2);
+        assert_eq!(errors, 1);
+        assert_eq!(cancelled, 1);
+    }
+
+    #[tokio::test]
+    async fn test_partial_timeout_all_complete() {
+        let store = MemoryStore::new();
+
+        // All tasks complete before timeout
+        #[derive(Clone)]
+        struct FastTask {
+            delay_ms: u64,
+        }
+
+        #[async_trait]
+        impl Task<TestState> for FastTask {
+            async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+                tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
+                Ok(TaskResult::Single(TestState::Complete))
+            }
+        }
+
+        let tasks = vec![
+            FastTask { delay_ms: 20 },
+            FastTask { delay_ms: 30 },
+            FastTask { delay_ms: 40 },
+        ];
+
+        // Generous timeout
+        let join_config = JoinConfig::new(JoinStrategy::PartialTimeout, TestState::Complete)
+            .with_timeout(Duration::from_millis(500))
+            .with_store_partial_results(true);
+
+        let workflow = Workflow::new(store.clone())
+            .register_split(TestState::Start, tasks, join_config)
+            .add_exit_state(TestState::Complete);
+
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        assert_eq!(result, TestState::Complete);
+
+        // All should complete
+        let successes: usize = store.get("split_successes_count").unwrap();
+        let cancelled: usize = store.get("split_cancelled_count").unwrap();
+
+        assert_eq!(successes, 3);
+        assert_eq!(cancelled, 0);
+    }
+
+    #[tokio::test]
+    async fn test_partial_timeout_no_timeout_configured() {
+        let store = MemoryStore::new();
+
+        #[derive(Clone)]
+        struct SimpleTask;
+
+        #[async_trait]
+        impl Task<TestState> for SimpleTask {
+            async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+                Ok(TaskResult::Single(TestState::Complete))
+            }
+        }
+
+        let tasks = vec![SimpleTask, SimpleTask];
+
+        // PartialTimeout without timeout should fail
+        let join_config = JoinConfig::new(JoinStrategy::PartialTimeout, TestState::Complete);
+
+        let workflow = Workflow::new(store)
+            .register_split(TestState::Start, tasks, join_config)
+            .add_exit_state(TestState::Complete);
+
+        let result = workflow.orchestrate(TestState::Start).await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("requires a timeout")
+        );
     }
 
     #[tokio::test]
