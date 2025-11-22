@@ -101,11 +101,8 @@ mod tracing_tests;
 pub use error::{CanoError, CanoResult};
 pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node};
 pub use store::{KeyValueStore, MemoryStore};
-pub use task::{DefaultTaskParams, DynTask, RetryMode, Task, TaskConfig, TaskObject};
-pub use workflow::{
-    ConcurrentWorkflow, ConcurrentWorkflowBuilder, ConcurrentWorkflowStatus, WaitStrategy,
-    Workflow, WorkflowBuilder, WorkflowResult,
-};
+pub use task::{DefaultTaskParams, DynTask, RetryMode, Task, TaskConfig, TaskObject, TaskResult};
+pub use workflow::{JoinConfig, JoinStrategy, StateEntry, Workflow};
 
 #[cfg(feature = "scheduler")]
 pub use scheduler::{FlowInfo, Scheduler};
@@ -117,10 +114,9 @@ pub mod prelude {
     //! Use `use cano::prelude::*;` to import the most commonly used types and traits.
 
     pub use crate::{
-        CanoError, CanoResult, ConcurrentWorkflow, ConcurrentWorkflowBuilder,
-        ConcurrentWorkflowStatus, DefaultNodeResult, DefaultParams, DefaultTaskParams,
-        KeyValueStore, MemoryStore, Node, RetryMode, Task, TaskConfig, TaskObject, WaitStrategy,
-        Workflow, WorkflowBuilder, WorkflowResult,
+        CanoError, CanoResult, DefaultNodeResult, DefaultParams, DefaultTaskParams, JoinConfig,
+        JoinStrategy, KeyValueStore, MemoryStore, Node, RetryMode, StateEntry, Task, TaskConfig,
+        TaskObject, TaskResult, Workflow,
     };
 
     #[cfg(feature = "scheduler")]

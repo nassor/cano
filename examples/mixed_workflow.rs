@@ -50,7 +50,7 @@ impl DataGeneratorTask {
 
 #[async_trait]
 impl Task<WorkflowState> for DataGeneratorTask {
-    async fn run(&self, store: &MemoryStore) -> CanoResult<WorkflowState> {
+    async fn run(&self, store: &MemoryStore) -> CanoResult<TaskResult<WorkflowState>> {
         println!(
             "📊 DataGeneratorTask: Generating {} data points...",
             self.size
@@ -70,7 +70,7 @@ impl Task<WorkflowState> for DataGeneratorTask {
         store.put("raw_data", data)?;
         store.put("generation_time", std::time::SystemTime::now())?;
 
-        Ok(WorkflowState::ProcessData)
+        Ok(TaskResult::Single(WorkflowState::ProcessData))
     }
 }
 
@@ -167,7 +167,7 @@ struct ValidatorTask;
 
 #[async_trait]
 impl Task<WorkflowState> for ValidatorTask {
-    async fn run(&self, store: &MemoryStore) -> CanoResult<WorkflowState> {
+    async fn run(&self, store: &MemoryStore) -> CanoResult<TaskResult<WorkflowState>> {
         println!("✅ ValidatorTask: Running validation checks...");
 
         let stats: DataStats = store.get("stats")?;
@@ -205,7 +205,7 @@ impl Task<WorkflowState> for ValidatorTask {
             }
         }
 
-        Ok(WorkflowState::GenerateReport)
+        Ok(TaskResult::Single(WorkflowState::GenerateReport))
     }
 }
 
@@ -284,31 +284,27 @@ struct DataStats {
 async fn main() -> CanoResult<()> {
     println!("🚀 Starting Mixed Task/Node workflow example\n");
 
+    let store = MemoryStore::new();
+
     // Create workflow
-    let mut workflow = Workflow::new(WorkflowState::GenerateData);
+    let workflow = Workflow::new(store.clone())
+        .register(WorkflowState::GenerateData, DataGeneratorTask::new(20))
+        .register(WorkflowState::ProcessData, ProcessorNode::new(25.0))
+        .register(WorkflowState::ValidateResults, ValidatorTask)
+        .register(WorkflowState::GenerateReport, ReportNode)
+        .add_exit_states(vec![WorkflowState::Complete]);
 
     // Register mix of Tasks and Nodes using the unified .register() method
-    println!("🔧 Registering workflow components:");
+    println!("🔧 Registered workflow components:");
     println!("   📊 DataGeneratorTask (Task) -> Generate");
-    workflow.register(WorkflowState::GenerateData, DataGeneratorTask::new(20));
-
     println!("   ⚙️  ProcessorNode (Node) -> Process");
-    workflow.register(WorkflowState::ProcessData, ProcessorNode::new(25.0));
-
     println!("   ✅ ValidatorTask (Task) -> Validate");
-    workflow.register(WorkflowState::ValidateResults, ValidatorTask);
-
     println!("   📊 ReportNode (Node) -> Report");
-    workflow.register(WorkflowState::GenerateReport, ReportNode);
-
-    // Set exit state
-    workflow.add_exit_states(vec![WorkflowState::Complete]);
 
     println!("\n🎯 Running mixed Task/Node workflow...\n");
 
     // Run the workflow
-    let store = MemoryStore::new();
-    match workflow.orchestrate(&store).await {
+    match workflow.orchestrate(WorkflowState::GenerateData).await {
         Ok(_final_state) => {
             println!("\n🎉 Mixed workflow completed successfully!");
 

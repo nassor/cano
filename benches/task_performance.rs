@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use cano::store::KeyValueStore;
-use cano::task::{DefaultTaskParams, TaskConfig};
+use cano::task::{DefaultTaskParams, TaskConfig, TaskResult};
 use cano::{CanoError, MemoryStore, Task};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
@@ -27,9 +27,9 @@ enum TestState {
 
 #[async_trait]
 impl Task<TestState> for DoNothingTask {
-    async fn run(&self, _store: &MemoryStore) -> Result<TestState, CanoError> {
+    async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
         // Do nothing - minimal overhead
-        Ok(self.next_state.clone())
+        Ok(TaskResult::Single(self.next_state.clone()))
     }
 }
 
@@ -51,7 +51,7 @@ impl CpuIntensiveTask {
 
 #[async_trait]
 impl Task<TestState> for CpuIntensiveTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TestState, CanoError> {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
         // Generate some data to process
         let data: Vec<u64> = (0..self.iterations as u64).collect();
 
@@ -60,7 +60,7 @@ impl Task<TestState> for CpuIntensiveTask {
 
         // Store the result
         store.put("cpu_result", result)?;
-        Ok(self.next_state.clone())
+        Ok(TaskResult::Single(self.next_state.clone()))
     }
 }
 
@@ -82,7 +82,7 @@ impl IoSimulationTask {
 
 #[async_trait]
 impl Task<TestState> for IoSimulationTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TestState, CanoError> {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
         // Simulate I/O preparation delay
         tokio::time::sleep(tokio::time::Duration::from_millis(self.delay_ms)).await;
         let prepared_data = "prepared_data".to_string();
@@ -95,7 +95,7 @@ impl Task<TestState> for IoSimulationTask {
         tokio::time::sleep(tokio::time::Duration::from_millis(self.delay_ms)).await;
         store.put("io_result", processed_data)?;
 
-        Ok(self.next_state.clone())
+        Ok(TaskResult::Single(self.next_state.clone()))
     }
 }
 
@@ -123,11 +123,11 @@ impl Task<TestState> for ConfigurableTask {
         self.config.clone()
     }
 
-    async fn run(&self, _store: &MemoryStore) -> Result<TestState, CanoError> {
+    async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
         if self.should_fail {
             Err(CanoError::TaskExecution("Intentional failure".to_string()))
         } else {
-            Ok(self.next_state.clone())
+            Ok(TaskResult::Single(self.next_state.clone()))
         }
     }
 }

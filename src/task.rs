@@ -32,12 +32,12 @@
 //!
 //! #[async_trait]
 //! impl Task<String> for SimpleTask {
-//!     async fn run(&self, store: &MemoryStore) -> Result<String, CanoError> {
+//!     async fn run(&self, store: &MemoryStore) -> Result<TaskResult<String>, CanoError> {
 //!         // Do all your work here - load, process, store
 //!         let input: String = store.get("input")?;
 //!         let result = format!("processed: {input}");
 //!         store.put("result", result)?;
-//!         Ok("next_state".to_string())
+//!         Ok(TaskResult::Single("next_state".to_string()))
 //!     }
 //! }
 //! ```
@@ -312,6 +312,15 @@ where
 /// This is a convenience type alias for the most common parameter format used in workflows.
 pub type DefaultTaskParams = HashMap<String, String>;
 
+/// Result type for task execution that supports both single and split transitions
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskResult<TState> {
+    /// Transition to a single next state
+    Single(TState),
+    /// Split into multiple parallel states for concurrent execution
+    Split(Vec<TState>),
+}
+
 /// Task trait for simplified workflow processing
 ///
 /// This trait provides a simplified interface for workflow processing compared to [`crate::node::Node`].
@@ -350,7 +359,7 @@ pub type DefaultTaskParams = HashMap<String, String>;
 ///
 /// #[async_trait]
 /// impl Task<String> for DataProcessor {
-///     async fn run(&self, store: &MemoryStore) -> Result<String, CanoError> {
+///     async fn run(&self, store: &MemoryStore) -> Result<TaskResult<String>, CanoError> {
 ///         // Load data
 ///         let input: i32 = store.get("input").unwrap_or(1);
 ///         
@@ -362,9 +371,9 @@ pub type DefaultTaskParams = HashMap<String, String>;
 ///         
 ///         // Determine next state
 ///         if result > 100 {
-///             Ok("large_result".to_string())
+///             Ok(TaskResult::Single("large_result".to_string()))
 ///         } else {
-///             Ok("small_result".to_string())
+///             Ok(TaskResult::Single("small_result".to_string()))
 ///         }
 ///     }
 /// }
@@ -410,8 +419,8 @@ where
     ///
     /// # Returns
     ///
-    /// A result containing the next state to transition to, or an error if the task failed.
-    async fn run(&self, store: &TStore) -> Result<TState, CanoError>;
+    /// A result containing either a single state or multiple states for parallel execution.
+    async fn run(&self, store: &TStore) -> Result<TaskResult<TState>, CanoError>;
 }
 
 /// Blanket implementation: Every Node is automatically a Task
@@ -452,19 +461,16 @@ where
         feature = "tracing",
         instrument(skip(self, store), fields(task_type = "node_adapter"))
     )]
-    async fn run(&self, store: &TStore) -> Result<TState, CanoError> {
+    async fn run(&self, store: &TStore) -> Result<TaskResult<TState>, CanoError> {
         #[cfg(feature = "tracing")]
         debug!("Executing task through Node adapter");
 
-        let result = crate::node::Node::run(self, store).await;
+        let state = crate::node::Node::run(self, store).await?;
 
         #[cfg(feature = "tracing")]
-        match &result {
-            Ok(state) => info!(next_state = ?state, "Task execution completed successfully"),
-            Err(error) => error!(error = %error, "Task execution failed"),
-        }
+        info!(next_state = ?state, "Task execution completed successfully");
 
-        result
+        Ok(TaskResult::Single(state))
     }
 }
 
@@ -529,10 +535,10 @@ mod tests {
 
     #[async_trait]
     impl Task<TestAction> for SimpleTask {
-        async fn run(&self, store: &MemoryStore) -> Result<TestAction, CanoError> {
+        async fn run(&self, store: &MemoryStore) -> Result<TaskResult<TestAction>, CanoError> {
             self.execution_count.fetch_add(1, Ordering::SeqCst);
             store.put("simple_task_executed", true)?;
-            Ok(TestAction::Complete)
+            Ok(TaskResult::Single(TestAction::Complete))
         }
     }
 
@@ -562,7 +568,7 @@ mod tests {
             }
         }
 
-        async fn run(&self, store: &MemoryStore) -> Result<TestAction, CanoError> {
+        async fn run(&self, store: &MemoryStore) -> Result<TaskResult<TestAction>, CanoError> {
             let base_value = self
                 .params
                 .get("base_value")
@@ -571,7 +577,7 @@ mod tests {
 
             let result = base_value * self.multiplier;
             store.put("result", result)?;
-            Ok(TestAction::Complete)
+            Ok(TaskResult::Single(TestAction::Complete))
         }
     }
 
@@ -588,12 +594,12 @@ mod tests {
 
     #[async_trait]
     impl Task<TestAction> for FailingTask {
-        async fn run(&self, store: &MemoryStore) -> Result<TestAction, CanoError> {
+        async fn run(&self, store: &MemoryStore) -> Result<TaskResult<TestAction>, CanoError> {
             if self.should_fail {
                 Err(CanoError::task_execution("Task intentionally failed"))
             } else {
                 store.put("failing_task_executed", true)?;
-                Ok(TestAction::Complete)
+                Ok(TaskResult::Single(TestAction::Complete))
             }
         }
     }
@@ -615,7 +621,7 @@ mod tests {
 
     #[async_trait]
     impl Task<TestAction> for DataProcessingTask {
-        async fn run(&self, store: &MemoryStore) -> Result<TestAction, CanoError> {
+        async fn run(&self, store: &MemoryStore) -> Result<TaskResult<TestAction>, CanoError> {
             // Read input data
             let input_data: String = store
                 .get(&self.input_key)
@@ -627,7 +633,7 @@ mod tests {
             // Write output data
             store.put(&self.output_key, processed_data)?;
 
-            Ok(TestAction::Complete)
+            Ok(TaskResult::Single(TestAction::Complete))
         }
     }
 
@@ -637,7 +643,7 @@ mod tests {
         let store = MemoryStore::new();
 
         let result = task.run(&store).await.unwrap();
-        assert_eq!(result, TestAction::Complete);
+        assert_eq!(result, TaskResult::Single(TestAction::Complete));
         assert_eq!(task.execution_count(), 1);
 
         let executed: bool = store.get("simple_task_executed").unwrap();
@@ -651,7 +657,7 @@ mod tests {
 
         // Test with default parameters
         let result = task.run(&store).await.unwrap();
-        assert_eq!(result, TestAction::Complete);
+        assert_eq!(result, TaskResult::Single(TestAction::Complete));
 
         let stored_result: i32 = store.get("result").unwrap();
         assert_eq!(stored_result, 10); // base_value (10) * multiplier (1)
@@ -663,7 +669,7 @@ mod tests {
 
         task.set_params(params);
         let result2 = task.run(&store).await.unwrap();
-        assert_eq!(result2, TestAction::Complete);
+        assert_eq!(result2, TaskResult::Single(TestAction::Complete));
 
         let stored_result2: i32 = store.get("result").unwrap();
         assert_eq!(stored_result2, 15); // base_value (5) * multiplier (3)
@@ -676,7 +682,7 @@ mod tests {
         // Test successful task
         let success_task = FailingTask::new(false);
         let result = success_task.run(&store).await.unwrap();
-        assert_eq!(result, TestAction::Complete);
+        assert_eq!(result, TaskResult::Single(TestAction::Complete));
 
         let executed: bool = store.get("failing_task_executed").unwrap();
         assert!(executed);
@@ -700,7 +706,7 @@ mod tests {
 
         // Run task
         let result = task.run(&store).await.unwrap();
-        assert_eq!(result, TestAction::Complete);
+        assert_eq!(result, TaskResult::Single(TestAction::Complete));
 
         // Verify output
         let output: String = store.get("output_data").unwrap();
@@ -742,7 +748,7 @@ mod tests {
         let mut success_count = 0;
         for handle in handles {
             let result = handle.await.unwrap();
-            if result.is_ok() && result.unwrap() == TestAction::Complete {
+            if let Ok(TaskResult::Single(TestAction::Complete)) = result {
                 success_count += 1;
             }
         }
@@ -777,7 +783,7 @@ mod tests {
         // Run the task multiple times
         for i in 1..=5 {
             let result = task.run(&store).await.unwrap();
-            assert_eq!(result, TestAction::Complete);
+            assert_eq!(result, TaskResult::Single(TestAction::Complete));
             assert_eq!(task.execution_count(), i);
         }
     }
@@ -849,10 +855,10 @@ mod tests {
         let store = MemoryStore::new();
 
         // Use the node as a task - this should work due to the blanket implementation
-        let result: Result<TestAction, CanoError> = Task::run(&node, &store).await;
+        let result = Task::run(&node, &store).await;
 
         assert!(result.is_ok());
-        assert_eq!(result.unwrap(), TestAction::Complete);
+        assert_eq!(result.unwrap(), TaskResult::Single(TestAction::Complete));
 
         let executed: bool = store.get("node_executed").unwrap();
         assert!(executed);
@@ -953,17 +959,17 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = Arc::clone(&counter);
 
-        let result = run_with_retries::<String, (), _, _>(&config, || {
+        let result = run_with_retries::<TaskResult<String>, (), _, _>(&config, || {
             let counter = Arc::clone(&counter_clone);
             async move {
                 counter.fetch_add(1, Ordering::SeqCst);
-                Ok::<String, CanoError>("success".to_string())
+                Ok::<TaskResult<String>, CanoError>(TaskResult::Single("success".to_string()))
             }
         })
         .await
         .unwrap();
 
-        assert_eq!(result, "success");
+        assert_eq!(result, TaskResult::Single("success".to_string()));
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
@@ -976,21 +982,21 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = Arc::clone(&counter);
 
-        let result = run_with_retries::<String, (), _, _>(&config, || {
+        let result = run_with_retries::<TaskResult<String>, (), _, _>(&config, || {
             let counter = Arc::clone(&counter_clone);
             async move {
                 let count = counter.fetch_add(1, Ordering::SeqCst);
                 if count < 2 {
                     Err(CanoError::task_execution("failure"))
                 } else {
-                    Ok::<String, CanoError>("success".to_string())
+                    Ok::<TaskResult<String>, CanoError>(TaskResult::Single("success".to_string()))
                 }
             }
         })
         .await
         .unwrap();
 
-        assert_eq!(result, "success");
+        assert_eq!(result, TaskResult::Single("success".to_string()));
         assert_eq!(counter.load(Ordering::SeqCst), 3); // 1 initial + 2 retries
     }
 
@@ -1003,11 +1009,11 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = Arc::clone(&counter);
 
-        let result = run_with_retries::<String, (), _, _>(&config, || {
+        let result = run_with_retries::<TaskResult<String>, (), _, _>(&config, || {
             let counter = Arc::clone(&counter_clone);
             async move {
                 counter.fetch_add(1, Ordering::SeqCst);
-                Err::<String, CanoError>(CanoError::task_execution("always fails"))
+                Err::<TaskResult<String>, CanoError>(CanoError::task_execution("always fails"))
             }
         })
         .await;

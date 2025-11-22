@@ -162,16 +162,13 @@ async fn run_simple_workflow_with_flow() -> Result<(), CanoError> {
     let store = MemoryStore::new();
 
     // Create a Workflow that can handle different node types
-    let mut workflow = Workflow::new(WorkflowAction::Generate);
-
-    // Register different node types - this now works!
-    workflow
+    let workflow = Workflow::new(store.clone())
         .register(WorkflowAction::Generate, GeneratorNode::new())
         .register(WorkflowAction::Count, CounterNode::new())
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
     // Execute the workflow using the Workflow orchestrator
-    match workflow.orchestrate(&store).await {
+    match workflow.orchestrate(WorkflowAction::Generate).await {
         Ok(final_state) => {
             match final_state {
                 WorkflowAction::Complete => {

@@ -120,27 +120,40 @@ async fn main() -> CanoResult<()> {
     println!("====================================");
 
     let mut scheduler = Scheduler::new();
+    let store = MemoryStore::new();
 
     // Create workflows with different durations
-    let mut daily_flow = Workflow::new(TaskState::Start);
-    daily_flow
+    let daily_flow = Workflow::new(store.clone())
         .register(TaskState::Start, DailyTask)
         .add_exit_state(TaskState::Complete);
 
-    let mut hourly_flow = Workflow::new(TaskState::Start);
-    hourly_flow
+    let hourly_flow = Workflow::new(store.clone())
         .register(TaskState::Start, HourlyTask)
         .add_exit_state(TaskState::Complete);
 
-    let mut frequent_flow = Workflow::new(TaskState::Start);
-    frequent_flow
+    let frequent_flow = Workflow::new(store.clone())
         .register(TaskState::Start, FrequentTask)
         .add_exit_state(TaskState::Complete);
 
     // Schedule workflows with different durations
-    scheduler.every("daily_task", daily_flow, Duration::from_secs(86400))?; // 24 hours
-    scheduler.every("hourly_task", hourly_flow, Duration::from_secs(3600))?; // 1 hour
-    scheduler.every("frequent_task", frequent_flow, Duration::from_secs(2))?; // 2 seconds for demo
+    scheduler.every(
+        "daily_task",
+        daily_flow,
+        TaskState::Start,
+        Duration::from_secs(86400),
+    )?; // 24 hours
+    scheduler.every(
+        "hourly_task",
+        hourly_flow,
+        TaskState::Start,
+        Duration::from_secs(3600),
+    )?; // 1 hour
+    scheduler.every(
+        "frequent_task",
+        frequent_flow,
+        TaskState::Start,
+        Duration::from_secs(2),
+    )?; // 2 seconds for demo
 
     println!("📅 Scheduled workflows:");
     println!("  • Daily task: Every 24 hours");

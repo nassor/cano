@@ -84,7 +84,7 @@ impl ProcessingTask {
 
 #[async_trait]
 impl Task<TaskState> for ProcessingTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskState, CanoError> {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<TaskState>, CanoError> {
         println!(
             "🚀 Task '{}' - Single run method: doing everything",
             self.name
@@ -103,7 +103,7 @@ impl Task<TaskState> for ProcessingTask {
         store.put("final_result", processed.clone())?;
         println!("   📤 Stored final result: {}", processed);
 
-        Ok(TaskState::Complete)
+        Ok(TaskResult::Single(TaskState::Complete))
     }
 }
 
@@ -113,11 +113,11 @@ struct InitializerTask;
 
 #[async_trait]
 impl Task<TaskState> for InitializerTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskState, CanoError> {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<TaskState>, CanoError> {
         println!("🎯 Initializer Task - Setting up workflow data");
         store.put("workflow_id", "demo_123".to_string())?;
         store.put("start_time", std::time::SystemTime::now())?;
-        Ok(TaskState::ProcessWithNode)
+        Ok(TaskResult::Single(TaskState::ProcessWithNode))
     }
 }
 
@@ -136,9 +136,7 @@ async fn main() -> Result<(), CanoError> {
     let store = MemoryStore::new();
 
     // Create workflow with mixed Node and Task implementations
-    let mut workflow = Workflow::new(TaskState::Start);
-
-    workflow
+    let workflow = Workflow::new(store.clone())
         .register(TaskState::Start, InitializerTask) // Task implementation
         .register(
             TaskState::ProcessWithNode,
@@ -160,7 +158,7 @@ async fn main() -> Result<(), CanoError> {
     println!("🏃 Executing workflow...");
     println!();
 
-    match workflow.orchestrate(&store).await {
+    match workflow.orchestrate(TaskState::Start).await {
         Ok(final_state) => {
             println!();
             println!("✅ Workflow completed successfully!");
