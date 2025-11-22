@@ -443,35 +443,64 @@ workflow
 let result = workflow.orchestrate(&store).await?;
 ```
 
-### Concurrent Workflows
+### 4. Split/Join Workflows - Parallel Execution
 
-Execute multiple workflow instances in parallel with different timeout strategies:
+Execute multiple tasks in parallel and control how they proceed using flexible join strategies. This is essential for scatter-gather patterns, redundant API calls, and performance optimization.
 
 ```rust
-use cano::prelude::*;
+// 1. Define tasks to run in parallel
+let tasks = vec![
+    ProcessorTask::new(1),
+    ProcessorTask::new(2),
+    ProcessorTask::new(3),
+];
 
-// Create a concurrent workflow with the same API as regular workflows
-let mut concurrent_workflow = ConcurrentWorkflow::new(ProcessingState::Start);
-concurrent_workflow.register(ProcessingState::Start, processing_node);
-concurrent_workflow.add_exit_state(ProcessingState::Complete);
+// 2. Configure how to join the results
+let join_config = JoinConfig::new(
+    JoinStrategy::All,           // Wait for all tasks to succeed
+    WorkflowState::Aggregate
+).with_timeout(Duration::from_secs(5));
 
-// Execute with different wait strategies
-let stores: Vec<MemoryStore> = (0..10).map(|_| MemoryStore::new()).collect();
+// 3. Register split in workflow
+workflow.register_split(
+    WorkflowState::Process,      // State that triggers the split
+    tasks,                       // Tasks to run in parallel
+    join_config                  // Join configuration
+);
+```
 
-// Wait for all workflows to complete
-let (results, status) = concurrent_workflow
-    .execute_concurrent(stores.clone(), WaitStrategy::WaitForever)
-    .await?;
+#### Join Strategies
 
-// Wait for first 5 to complete, then cancel the rest
-let (results, status) = concurrent_workflow
-    .execute_concurrent(stores.clone(), WaitStrategy::WaitForQuota(5))
-    .await?;
+Cano supports various strategies for joining parallel tasks:
 
-// Execute within time limit
-let (results, status) = concurrent_workflow
-    .execute_concurrent(stores, WaitStrategy::WaitDuration(Duration::from_secs(30)))
-    .await?;
+| Strategy | Description | Use Case |
+|----------|-------------|----------|
+| `All` | Wait for **all** tasks to complete successfully. | Batch processing where every item matters. |
+| `Any` | Proceed after the **first** task completes successfully. | Redundant systems, "fastest wins" scenarios. |
+| `Quorum(n)` | Wait for **n** tasks to complete successfully. | Consensus algorithms, high availability. |
+| `Percentage(p)` | Wait for **p%** of tasks to complete successfully. | Approximate computing, large scale aggregation. |
+| `PartialResults(n)` | Proceed after **n** tasks complete (success OR failure). Cancels remaining tasks. | Fault tolerance, latency optimization where failures are acceptable. |
+| `PartialTimeout` | Proceed with whatever completes before the timeout. | Strict SLAs where partial data is better than no data. |
+
+#### Partial Results Feature
+
+The `PartialResults` strategy is particularly powerful for latency-sensitive applications. It allows you to:
+1.  **Accept Partial Completions**: Proceed as soon as a minimum number of tasks finish, regardless of success or failure.
+2.  **Cancel Stragglers**: Automatically cancel remaining tasks to save resources.
+3.  **Track Outcomes**: Access counts of successful, failed, and cancelled tasks from the store.
+
+```rust
+// Example: Redundant API calls with Partial Results
+let join_config = JoinConfig::new(
+    JoinStrategy::PartialResults(2), // Proceed after 2 responses (success or fail)
+    ApiState::Process
+).with_store_partial_results(true);  // Store result statistics
+
+// ... execute workflow ...
+
+// Access result statistics
+let successes: usize = store.get("split_successes_count")?;
+let cancelled: usize = store.get("split_cancelled_count")?;
 ```
 ## Scheduling Workflows
 
