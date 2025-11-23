@@ -82,7 +82,29 @@ use crate::store::{KeyValueStore, MemoryStore};
 use crate::task::{DefaultTaskParams, Task, TaskResult};
 
 #[cfg(feature = "tracing")]
-use tracing::{Span, debug, error, info, info_span, warn};
+use tracing::{Span, debug, info, info_span, warn};
+
+use futures::stream::{FuturesUnordered, StreamExt};
+
+/// Helper to abort task on drop to ensure proper cancellation
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+impl<T> std::future::Future for AbortOnDrop<T> {
+    type Output = Result<T, tokio::task::JoinError>;
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        std::pin::Pin::new(&mut self.0).poll(cx)
+    }
+}
 
 /// Strategy for joining parallel tasks
 #[derive(Clone, Debug, PartialEq)]
@@ -479,33 +501,20 @@ where
             handles.push(handle);
         }
 
-        // Apply timeout if configured or required by strategy
-        let split_result = if matches!(join_config.strategy, JoinStrategy::PartialTimeout) {
-            // PartialTimeout requires a timeout
-            let timeout_duration = join_config.timeout.ok_or_else(|| {
-                CanoError::configuration(
-                    "PartialTimeout strategy requires a timeout to be configured",
-                )
-            })?;
+        // Validate PartialTimeout configuration
+        if matches!(join_config.strategy, JoinStrategy::PartialTimeout)
+            && join_config.timeout.is_none()
+        {
+            return Err(CanoError::configuration(
+                "PartialTimeout strategy requires a timeout to be configured",
+            ));
+        }
 
-            self.collect_results_with_timeout(handles, timeout_duration, total_tasks)
-                .await?
-        } else if let Some(timeout_duration) = join_config.timeout {
-            // Other strategies with timeout
-            let results_future = self.collect_results(handles, &join_config.strategy, total_tasks);
-            match tokio::time::timeout(timeout_duration, results_future).await {
-                Ok(results) => results?,
-                Err(_) => {
-                    #[cfg(feature = "tracing")]
-                    error!("Split task timeout exceeded");
-                    return Err(CanoError::workflow("Split task timeout exceeded"));
-                }
-            }
-        } else {
-            // No timeout
-            self.collect_results(handles, &join_config.strategy, total_tasks)
-                .await?
-        };
+        // Collect results using the unified strategy handler
+        // This handles timeouts, cancellation, and strategy logic
+        let split_result = self
+            .collect_results(handles, &join_config, total_tasks)
+            .await?;
 
         let successful = split_result.successes.len();
         let failed = split_result.errors.len();
@@ -582,252 +591,96 @@ where
 
     async fn collect_results(
         &self,
-        mut handles: Vec<tokio::task::JoinHandle<Result<TaskResult<TState>, CanoError>>>,
-        strategy: &JoinStrategy,
-        total_tasks: usize,
-    ) -> Result<SplitResult<TState>, CanoError> {
-        match strategy {
-            JoinStrategy::Any => {
-                // Use select_all to return as soon as any task completes successfully
-                let (result, index, remaining) = futures::future::select_all(handles).await;
-
-                let mut split_result = SplitResult::new();
-
-                // Cancel remaining tasks
-                for (idx, handle) in remaining.into_iter().enumerate() {
-                    handle.abort();
-                    // Calculate actual index (accounting for the completed task)
-                    let actual_idx = if idx < index { idx } else { idx + 1 };
-                    split_result.cancelled.push(actual_idx);
-                }
-
-                // Process the result
-                match result {
-                    Ok(task_result) => {
-                        if task_result.is_ok() {
-                            split_result.successes.push(SplitTaskResult {
-                                task_index: index,
-                                result: task_result,
-                            });
-                            Ok(split_result)
-                        } else {
-                            split_result.errors.push(SplitTaskResult {
-                                task_index: index,
-                                result: task_result,
-                            });
-                            Err(CanoError::workflow("First completed task failed"))
-                        }
-                    }
-                    Err(e) => {
-                        split_result.errors.push(SplitTaskResult {
-                            task_index: index,
-                            result: Err(CanoError::workflow(format!("Task panic: {:?}", e))),
-                        });
-                        Err(CanoError::workflow("Task join error"))
-                    }
-                }
-            }
-            JoinStrategy::PartialResults(min_tasks) => {
-                // Poll tasks until minimum number complete, then cancel rest
-                let mut split_result = SplitResult::new();
-                let mut completed_indices = std::collections::HashSet::new();
-
-                while split_result.completed_count() < *min_tasks && !handles.is_empty() {
-                    let (result, index, remaining) = futures::future::select_all(handles).await;
-
-                    completed_indices.insert(index);
-
-                    // Process the completed task
-                    match result {
-                        Ok(task_result) => {
-                            if task_result.is_ok() {
-                                split_result.successes.push(SplitTaskResult {
-                                    task_index: index,
-                                    result: task_result,
-                                });
-                            } else {
-                                split_result.errors.push(SplitTaskResult {
-                                    task_index: index,
-                                    result: task_result,
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            split_result.errors.push(SplitTaskResult {
-                                task_index: index,
-                                result: Err(CanoError::workflow(format!("Task panic: {:?}", e))),
-                            });
-                        }
-                    }
-
-                    handles = remaining;
-                }
-
-                // Cancel all remaining tasks
-                for handle in handles {
-                    handle.abort();
-                }
-
-                // Mark cancelled tasks
-                for idx in 0..total_tasks {
-                    if !completed_indices.contains(&idx) {
-                        split_result.cancelled.push(idx);
-                    }
-                }
-
-                Ok(split_result)
-            }
-            JoinStrategy::PartialTimeout => {
-                // Wait for all tasks to complete or be cancelled by outer timeout
-                // This strategy relies on the timeout wrapper in execute_split_join
-                // When timeout occurs, tokio will drop the future and we won't reach here
-                // This branch handles the case where all tasks complete before timeout
-                let results = futures::future::join_all(handles).await;
-                let mut split_result = SplitResult::new();
-
-                for (idx, result) in results.into_iter().enumerate() {
-                    match result {
-                        Ok(task_result) => {
-                            if task_result.is_ok() {
-                                split_result.successes.push(SplitTaskResult {
-                                    task_index: idx,
-                                    result: task_result,
-                                });
-                            } else {
-                                split_result.errors.push(SplitTaskResult {
-                                    task_index: idx,
-                                    result: task_result,
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            split_result.errors.push(SplitTaskResult {
-                                task_index: idx,
-                                result: Err(CanoError::workflow(format!("Task panic: {:?}", e))),
-                            });
-                        }
-                    }
-                }
-
-                Ok(split_result)
-            }
-            _ => {
-                // Wait for all tasks and collect results
-                let results = futures::future::join_all(handles).await;
-                let mut split_result = SplitResult::new();
-
-                for (idx, result) in results.into_iter().enumerate() {
-                    match result {
-                        Ok(task_result) => {
-                            if task_result.is_ok() {
-                                split_result.successes.push(SplitTaskResult {
-                                    task_index: idx,
-                                    result: task_result,
-                                });
-                            } else {
-                                split_result.errors.push(SplitTaskResult {
-                                    task_index: idx,
-                                    result: task_result,
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            split_result.errors.push(SplitTaskResult {
-                                task_index: idx,
-                                result: Err(CanoError::workflow(format!("Task panic: {:?}", e))),
-                            });
-                        }
-                    }
-                }
-
-                Ok(split_result)
-            }
-        }
-    }
-
-    async fn collect_results_with_timeout(
-        &self,
         handles: Vec<tokio::task::JoinHandle<Result<TaskResult<TState>, CanoError>>>,
-        timeout: Duration,
+        join_config: &JoinConfig<TState>,
         total_tasks: usize,
     ) -> Result<SplitResult<TState>, CanoError> {
-        use futures::stream::StreamExt;
-        use tokio::time::sleep;
-
         let mut split_result = SplitResult::new();
         let mut completed_indices = std::collections::HashSet::new();
 
-        // Convert handles to futures with their indices
-        let mut futures = futures::stream::FuturesUnordered::new();
+        // Convert handles to futures with their indices, wrapped in AbortOnDrop for cancellation
+        let mut futures = FuturesUnordered::new();
         for (idx, handle) in handles.into_iter().enumerate() {
             futures.push(async move {
+                let handle = AbortOnDrop(handle);
                 let result = handle.await;
                 (idx, result)
             });
         }
 
-        // Set up timeout
-        let deadline = tokio::time::Instant::now() + timeout;
+        // Determine deadline if timeout is configured
+        let deadline = join_config.timeout.map(|d| tokio::time::Instant::now() + d);
 
-        while !futures.is_empty() {
-            let remaining_time = deadline.saturating_duration_since(tokio::time::Instant::now());
-
-            if remaining_time.is_zero() {
-                // Timeout reached - all remaining tasks are considered cancelled
-                #[cfg(feature = "tracing")]
-                debug!(
-                    "PartialTimeout: timeout reached, {} tasks incomplete",
-                    futures.len()
-                );
-
-                // Mark remaining tasks as cancelled
-                for idx in 0..total_tasks {
-                    if !completed_indices.contains(&idx) {
-                        split_result.cancelled.push(idx);
-                    }
-                }
-                break;
-            }
-
-            // Race between timeout and next task completion
-            tokio::select! {
-                _ = sleep(remaining_time) => {
-                    // Timeout reached
-                    #[cfg(feature = "tracing")]
-                    debug!("PartialTimeout: timeout reached during select");
-
-                    for idx in 0..total_tasks {
-                        if !completed_indices.contains(&idx) {
-                            split_result.cancelled.push(idx);
+        loop {
+            // Wait for next completion or timeout
+            let next_result = if let Some(d) = deadline {
+                match tokio::time::timeout_at(d, futures.next()).await {
+                    Ok(res) => res,
+                    Err(_) => {
+                        // Timeout reached
+                        if matches!(join_config.strategy, JoinStrategy::PartialTimeout) {
+                            // For PartialTimeout, we stop and return what we have
+                            break;
+                        } else {
+                            // For other strategies, timeout is an error
+                            return Err(CanoError::workflow("Split task timeout exceeded"));
                         }
                     }
-                    break;
                 }
-                Some((task_idx, task_result)) = futures.next() => {
-                    completed_indices.insert(task_idx);
+            } else {
+                futures.next().await
+            };
+
+            match next_result {
+                Some((index, result)) => {
+                    completed_indices.insert(index);
 
                     // Process the completed task
-                    match task_result {
+                    match result {
                         Ok(Ok(task_result)) => {
                             split_result.successes.push(SplitTaskResult {
-                                task_index: task_idx,
+                                task_index: index,
                                 result: Ok(task_result),
                             });
                         }
                         Ok(Err(e)) => {
                             split_result.errors.push(SplitTaskResult {
-                                task_index: task_idx,
+                                task_index: index,
                                 result: Err(e),
                             });
                         }
                         Err(e) => {
                             split_result.errors.push(SplitTaskResult {
-                                task_index: task_idx,
+                                task_index: index,
                                 result: Err(CanoError::workflow(format!("Task panic: {:?}", e))),
                             });
                         }
                     }
+
+                    // Check if we can return early based on strategy
+                    match &join_config.strategy {
+                        JoinStrategy::Any => {
+                            if !split_result.successes.is_empty() {
+                                break;
+                            }
+                        }
+                        JoinStrategy::PartialResults(min) => {
+                            if split_result.completed_count() >= *min {
+                                break;
+                            }
+                        }
+                        _ => {} // Continue for other strategies
+                    }
                 }
+                None => break, // All tasks completed
+            }
+        }
+
+        // Identify cancelled tasks (those that didn't complete)
+        // When loop breaks, futures is dropped, and AbortOnDrop aborts remaining tasks
+        for idx in 0..total_tasks {
+            if !completed_indices.contains(&idx) {
+                split_result.cancelled.push(idx);
             }
         }
 
