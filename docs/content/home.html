@@ -1,13 +1,24 @@
-<h1>Cano</h1>
-<p class="subtitle">Type-safe async workflow engine with built-in scheduling, retry logic, and state machine semantics.</p>
-
-<div class="badges" style="margin: 2rem 0; display: flex; gap: 0.5rem;">
-    <img src="https://img.shields.io/crates/v/cano.svg" alt="Crates.io">
-    <img src="https://docs.rs/cano/badge.svg" alt="Documentation">
-    <img src="https://img.shields.io/crates/d/cano.svg" alt="Downloads">
-    <img src="https://img.shields.io/crates/l/cano.svg" alt="License">
+<div style="text-align: left; margin-bottom: 1rem;">
+    <img src="logo.png" alt="Cano Logo" style="width: 200px; margin-bottom: 2rem;">
+    <h1>Cano</h1>
+    <p class="subtitle" style="font-size: 1.3rem; margin-bottom: 2rem;">Type-safe async workflow engine with built-in scheduling, retry logic, and state machine semantics.</p>
+    
+    <div class="badges" style="margin: 2rem auto; display: flex; gap: 0.5rem; flex-wrap: wrap; justify-content: left;">
+        <a href="https://crates.io/crates/cano" target="_blank"><img src="https://img.shields.io/crates/v/cano.svg" alt="Crates.io"></a>
+        <a href="https://docs.rs/cano" target="_blank"><img src="https://docs.rs/cano/badge.svg" alt="Documentation"></a>
+        <a href="https://nassor.github.io/cano/" target="_blank"><img src="https://img.shields.io/badge/website-nassor.github.io%2Fcano-blue" alt="Website"></a>
+        <a href="https://crates.io/crates/cano" target="_blank"><img src="https://img.shields.io/crates/d/cano.svg" alt="Downloads"></a>
+        <a href="https://github.com/nassor/cano/blob/main/LICENSE" target="_blank"><img src="https://img.shields.io/crates/l/cano.svg" alt="License"></a>
+        <a href="https://github.com/nassor/cano/actions" target="_blank"><img src="https://github.com/nassor/cano/workflows/CI/badge.svg" alt="CI"></a>
+        <img src="https://img.shields.io/badge/rust-1.89%2B-blue.svg" alt="Rust Version">
+    </div>
+    
+    <p style="font-style: italic; font-size: 1.2rem;">
+        Orchestrate complex async processes with finite state machines, parallel execution, and built-in scheduling.
+    </p>
 </div>
 
+<h2>Overview</h2>
 <p>
     Cano is a high-performance orchestration engine designed for building resilient, self-healing systems in Rust. 
     Unlike simple task queues, Cano uses <strong>Finite State Machines (FSM)</strong> to define strict, type-safe transitions between processing steps.
@@ -22,10 +33,14 @@
     <li><strong>Background Systems</strong>: Scheduled maintenance, periodic reporting, and distributed cron jobs.</li>
 </ul>
 
+<p style="margin-top: 2rem; padding: 1rem; background: rgba(56, 189, 248, 0.1); border-left: 3px solid var(--primary-color); border-radius: 0.5rem;">
+    <strong>Core Concepts:</strong> The engine is built on three foundational concepts: <strong><a href="#task">Tasks</a>/<a href="#nodes">Nodes</a></strong> for processing logic, <strong><a href="#workflows">Workflows</a></strong> for state transitions, and <strong><a href="#scheduler">Schedulers</a></strong> for timing and automation.
+</p>
+
 <h2>Features</h2>
 <div class="card-grid">
     <div class="card">
-        <h3>Tasks & Nodes</h3>
+        <h3><a href="#task" style="color: inherit; text-decoration: none;">Tasks</a> & <a href="#nodes" style="color: inherit; text-decoration: none;">Nodes</a></h3>
         <p>Single <code>Task</code> trait for simple logic, or <code>Node</code> trait for structured three-phase lifecycle.</p>
     </div>
     <div class="card">
@@ -37,16 +52,16 @@
         <p>Fixed delays, exponential backoff with jitter, and custom strategies.</p>
     </div>
     <div class="card">
-        <h3>Scheduling</h3>
-        <p>Built-in scheduler with intervals, cron schedules, and manual triggers.</p>
+        <h3><a href="#scheduler" style="color: inherit; text-decoration: none;">Scheduling</a></h3>
+        <p>Built-in <a href="#scheduler">scheduler</a> with intervals, cron schedules, and manual triggers.</p>
     </div>
     <div class="card">
         <h3>Concurrency</h3>
-        <p>Execute multiple workflow instances in parallel with timeout strategies.</p>
+        <p>Execute multiple <a href="#workflows">workflow</a> instances in parallel with timeout strategies.</p>
     </div>
     <div class="card">
-        <h3>Observability</h3>
-        <p>Comprehensive tracing and observability for workflow execution.</p>
+        <h3><a href="#tracing" style="color: inherit; text-decoration: none;">Observability</a></h3>
+        <p>Comprehensive <a href="#tracing">tracing</a> and observability for workflow execution.</p>
     </div>
 </div>
 
