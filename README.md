@@ -1,4 +1,6 @@
-# Cano: Async Data & AI Workflows in Rust
+<div align="center">
+  <img src="docs/logo.png" alt="Cano Logo" width="200">
+  <h1>Cano: Async Data & AI Workflows in Rust</h1>
 
 [![Crates.io](https://img.shields.io/crates/v/cano.svg)](https://crates.io/crates/cano)
 [![Documentation](https://docs.rs/cano/badge.svg)](https://docs.rs/cano)
@@ -6,7 +8,10 @@
 [![License](https://img.shields.io/crates/l/cano.svg)](https://github.com/nassor/cano/blob/main/LICENSE)
 [![CI](https://github.com/nassor/cano/workflows/CI/badge.svg)](https://github.com/nassor/cano/actions)
 
-**Async workflow engine with built-in scheduling, retry logic, and state machine semantics.**
+<em>**Async workflow engine with built-in scheduling, retry logic, and state machine semantics.**</em>
+</div>
+
+
 
 Cano is an async workflow engine for Rust that manages complex processing through composable workflows. It can be used for data processing, AI inference workflows, and background jobs. Cano provides a simple, fast and type-safe API for defining workflows with retry strategies, scheduling capabilities, and shared state management.
 
