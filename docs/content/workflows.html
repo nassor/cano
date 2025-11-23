@@ -572,4 +572,1144 @@ let workflow = Workflow::new(store.clone())
                 </tr>
             </tbody>
         </table>
+
+        <h2>Common Parallel Processing Patterns</h2>
+        <p>
+            Split/Join is powerful for handling complex parallel processing scenarios. Here are real-world patterns 
+            you can implement to replace the need for concurrent workflows.
+        </p>
+
+        <h3>Pattern 1: Queue Consumer with Batch Processing</h3>
+        <p>
+            Process items from a queue in parallel batches. Instead of running multiple workflow instances concurrently,
+            use a single workflow that pulls batches and processes them in parallel.
+        </p>
+
+        <pre><code class="language-rust">use cano::prelude::*;
+use async_trait::async_trait;
+use std::collections::VecDeque;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum QueueState {
+    PullBatch,
+    ProcessBatch,
+    Complete,
+    Idle,
+}
+
+// Simulated queue (in production, use actual queue like Redis, SQS, etc.)
+type SharedQueue = Arc<Mutex<VecDeque<String>>>;
+
+#[derive(Clone)]
+struct QueuePuller {
+    queue: SharedQueue,
+    batch_size: usize,
+}
+
+#[async_trait]
+impl Task<QueueState> for QueuePuller {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<QueueState>, CanoError> {
+        let mut queue = self.queue.lock().await;
+        
+        // Pull batch from queue
+        let mut batch = Vec::new();
+        for _ in 0..self.batch_size {
+            if let Some(item) = queue.pop_front() {
+                batch.push(item);
+            } else {
+                break;
+            }
+        }
+        
+        if batch.is_empty() {
+            println!("Queue empty, waiting...");
+            // Wait and retry
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            return Ok(TaskResult::Single(QueueState::PullBatch));
+        }
+        
+        println!("Pulled {} items from queue", batch.len());
+        store.put("current_batch", batch)?;
+        
+        // Split into parallel processing
+        Ok(TaskResult::Single(QueueState::ProcessBatch))
+    }
+}
+
+#[derive(Clone)]
+struct ItemProcessor {
+    item_id: String,
+}
+
+#[async_trait]
+impl Task<QueueState> for ItemProcessor {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<QueueState>, CanoError> {
+        println!("Processing item: {}", self.item_id);
+        
+        // Simulate processing
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        
+        // Store result
+        store.put(&format!("result_{}", self.item_id), "completed")?;
+        
+        Ok(TaskResult::Single(QueueState::Complete))
+    }
+}
+
+#[derive(Clone)]
+struct BatchSplitter {
+    queue: SharedQueue,
+    batch_size: usize,
+}
+
+#[async_trait]
+impl Task<QueueState> for BatchSplitter {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<QueueState>, CanoError> {
+        let batch: Vec<String> = store.get("current_batch")?;
+        
+        if batch.is_empty() {
+            return Ok(TaskResult::Single(QueueState::PullBatch));
+        }
+        
+        // Create processors for each item in parallel
+        let processors: Vec<Box<dyn Task<QueueState>>> = batch
+            .into_iter()
+            .map(|item| Box::new(ItemProcessor { item_id: item }) as Box<dyn Task<QueueState>>)
+            .collect();
+        
+        println!("Splitting into {} parallel processors", processors.len());
+        
+        // Return split to process all items in parallel
+        Ok(TaskResult::Split(
+            processors.into_iter()
+                .map(|_| QueueState::Complete)
+                .collect()
+        ))
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    let store = MemoryStore::new();
+    let queue = Arc::new(Mutex::new(VecDeque::from(vec![
+        "order1".to_string(),
+        "order2".to_string(),
+        "order3".to_string(),
+        "order4".to_string(),
+        "order5".to_string(),
+    ])));
+    
+    let workflow = Workflow::new(store.clone())
+        .register(QueueState::PullBatch, QueuePuller { 
+            queue: queue.clone(), 
+            batch_size: 10 
+        })
+        .register(QueueState::ProcessBatch, BatchSplitter {
+            queue: queue.clone(),
+            batch_size: 10,
+        })
+        .add_exit_state(QueueState::Complete);
+    
+    // Process batches continuously until queue empty
+    loop {
+        let result = workflow.orchestrate(QueueState::PullBatch).await?;
+        if result == QueueState::Complete {
+            let q = queue.lock().await;
+            if q.is_empty() {
+                break;
+            }
+        }
+    }
+    
+    println!("✅ All items processed!");
+    Ok(())
+}</code></pre>
+
+        <h3>Pattern 2: Dynamic Task Generation</h3>
+        <p>
+            Generate parallel tasks dynamically based on runtime data. Perfect for processing variable-size datasets
+            or handling events that arrive over time.
+        </p>
+
+        <pre><code class="language-rust">use cano::prelude::*;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum DataState {
+    LoadRecords,
+    ProcessRecords(usize),  // Track batch number
+    Aggregate,
+    Complete,
+}
+
+#[derive(Clone)]
+struct RecordLoader;
+
+#[async_trait]
+impl Task<DataState> for RecordLoader {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<DataState>, CanoError> {
+        // Fetch records from database/API (simulated)
+        let records: Vec<i32> = (1..=100).collect();
+        let record_count = records.len();
+        
+        store.put("records", records)?;
+        store.put("total_records", record_count)?;
+        
+        println!("Loaded {} records", record_count);
+        
+        // Split into parallel processing states
+        Ok(TaskResult::Split(
+            (0..record_count)
+                .map(|i| DataState::ProcessRecords(i))
+                .collect()
+        ))
+    }
+}
+
+#[derive(Clone)]
+struct RecordProcessor;
+
+#[async_trait]
+impl Task<DataState> for RecordProcessor {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<DataState>, CanoError> {
+        // Get the current state to extract record index
+        // In real implementation, extract from state parameter
+        let records: Vec<i32> = store.get("records")?;
+        
+        // Process record
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        
+        Ok(TaskResult::Single(DataState::Aggregate))
+    }
+}
+
+// Use with appropriate join strategy for your needs
+let workflow = Workflow::new(store.clone())
+    .register(DataState::LoadRecords, RecordLoader)
+    .register_pattern(
+        |state| matches!(state, DataState::ProcessRecords(_)),
+        RecordProcessor
+    )
+    .register(DataState::Aggregate, AggregatorTask)
+    .add_exit_state(DataState::Complete);
+</code></pre>
+
+        <h3>Pattern 3: Resource-Limited Parallel Processing</h3>
+        <p>
+            Control parallelism when you have limited resources (API keys, connections, etc.). 
+            Use semaphores to limit concurrent executions within a single workflow.
+        </p>
+
+        <pre><code class="language-rust">use tokio::sync::Semaphore;
+use std::sync::Arc;
+
+#[derive(Clone)]
+struct RateLimitedApiTask {
+    api_id: usize,
+    semaphore: Arc<Semaphore>,  // Limit concurrent API calls
+}
+
+#[async_trait]
+impl Task<ApiState> for RateLimitedApiTask {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<ApiState>, CanoError> {
+        // Acquire permit (blocks if limit reached)
+        let _permit = self.semaphore.acquire().await
+            .map_err(|e| CanoError::Execution(e.to_string()))?;
+        
+        println!("API call {} starting (within rate limit)", self.api_id);
+        
+        // Make API call
+        let result = make_api_call(self.api_id).await?;
+        store.put(&format!("api_result_{}", self.api_id), result)?;
+        
+        println!("API call {} completed", self.api_id);
+        
+        Ok(TaskResult::Single(ApiState::Complete))
+    }
+}
+
+// Example: Limit to 5 concurrent API calls
+let semaphore = Arc::new(Semaphore::new(5));
+
+let mut tasks = Vec::new();
+for i in 0..20 {
+    tasks.push(RateLimitedApiTask {
+        api_id: i,
+        semaphore: semaphore.clone(),
+    });
+}
+
+// All 20 tasks will run, but only 5 at a time
+let join_config = JoinConfig::new(JoinStrategy::All, ApiState::Complete);
+
+let workflow = Workflow::new(store.clone())
+    .register_split(ApiState::Start, tasks, join_config)
+    .add_exit_state(ApiState::Complete);
+</code></pre>
+
+        <h3>Pattern 4: Continuous Workflow with Split/Join</h3>
+        <p>
+            Combine scheduling with split/join for continuous parallel processing. 
+            This replaces the need for concurrent workflow scheduling.
+        </p>
+
+        <pre><code class="language-rust">use cano::prelude::*;
+
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    let mut scheduler = Scheduler::new();
+    let store = MemoryStore::new();
+    
+    // Single workflow that handles parallel processing internally
+    let batch_workflow = Workflow::new(store.clone())
+        .register(ProcessState::Start, |store: &MemoryStore| async move {
+            // Pull work items (from queue, database, etc.)
+            let items = fetch_pending_work().await?;
+            
+            if items.is_empty() {
+                println!("No work available");
+                return Ok(TaskResult::Single(ProcessState::Complete));
+            }
+            
+            store.put("work_items", items.clone())?;
+            
+            // Split into parallel processing
+            Ok(TaskResult::Split(
+                items.into_iter()
+                    .map(|id| ProcessState::Process(id))
+                    .collect()
+            ))
+        })
+        .register_pattern(
+            |state| matches!(state, ProcessState::Process(_)),
+            WorkProcessor  // Process each item
+        )
+        .add_exit_state(ProcessState::Complete);
+    
+    // Schedule to run every 10 seconds
+    scheduler.every_seconds(
+        "batch_processor",
+        batch_workflow,
+        ProcessState::Start,
+        10
+    )?;
+    
+    scheduler.start().await?;
+    Ok(())
+}</code></pre>
+
+        <h3>When to Use These Patterns</h3>
+        <ul>
+            <li><strong>Queue Consumer Pattern</strong>: When processing items from external queues (SQS, Redis, Kafka)</li>
+            <li><strong>Dynamic Task Generation</strong>: When the number of parallel tasks depends on runtime data</li>
+            <li><strong>Resource-Limited Processing</strong>: When you need to limit concurrent operations (API rate limits, database connections)</li>
+            <li><strong>Continuous Workflow</strong>: When you need scheduled parallel processing without multiple workflow instances</li>
+        </ul>
+
+        <p style="margin-top: 2rem; padding: 1rem; background: rgba(56, 189, 248, 0.1); border-left: 3px solid var(--primary-color); border-radius: 0.5rem;">
+            <strong>💡 Key Insight:</strong> These patterns leverage Split/Join within a single workflow to achieve 
+            the same parallelism as running multiple concurrent workflow instances, but with simpler mental model, 
+            better resource control, and type-safe state management.
+        </p>
+
+        <h2>Advanced Example: Real-Time Ad Exchange Workflow</h2>
+        <p>
+            This comprehensive example demonstrates a production-grade ad exchange system with multiple split/join points,
+            diverse join strategies, complex state management, and real-world constraints like timeouts and partial results.
+        </p>
+
+        <h3>System Architecture</h3>
+        <div class="mermaid">
+            graph TB
+                Start[Ad Request Received] --> Validate[Validate Request]
+                Validate -->|Valid| Split1[SPLIT: Context Gathering]
+                Validate -->|Invalid| Split5[SPLIT: Error Tracking]
+                
+                subgraph "Split 1: Context Gathering - All Strategy"
+                    Split1 --> User[Fetch User Profile]
+                    Split1 --> Geo[Fetch Geo Data]
+                    Split1 --> Device[Device Detection]
+                end
+                
+                User --> Join1[JOIN: All Required 100ms timeout]
+                Geo --> Join1
+                Device --> Join1
+                
+                Join1 -->|Success| Split2[SPLIT: Bid Requests]
+                Join1 -.->|Timeout/Error| NoFill[No Fill Response]
+                
+                subgraph "Split 2: Bid Requests - PartialTimeout Strategy"
+                    Split2 --> DSP1[DSP-FastBidder 45ms]
+                    Split2 --> DSP2[DSP-Premium 80ms]
+                    Split2 --> DSP3[DSP-Global 120ms]
+                    Split2 --> DSP4[DSP-Slow 190ms]
+                    Split2 --> DSP5[DSP-TooSlow 250ms]
+                end
+                
+                DSP1 --> Join2[JOIN: PartialTimeout 200ms]
+                DSP2 --> Join2
+                DSP3 --> Join2
+                DSP4 --> Join2
+                DSP5 --> Join2
+                
+                Join2 --> Split3[SPLIT: Bid Scoring]
+                
+                subgraph "Split 3: Bid Scoring - All Strategy"
+                    Split3 --> Score1[Score Bid 0]
+                    Split3 --> Score2[Score Bid 1]
+                    Split3 --> Score3[Score Bid 2]
+                end
+                
+                Score1 --> Join3[JOIN: All 50ms timeout]
+                Score2 --> Join3
+                Score3 --> Join3
+                
+                Join3 -->|Success| Auction[Run Auction]
+                Join3 -.->|Timeout/Error| NoFill
+                
+                Auction --> Winner{Has Winner?}
+                
+                Winner -->|Yes| Split4[SPLIT: Tracking]
+                Winner -->|No| NoFill
+                
+                subgraph "Split 4: Tracking - All Strategy"
+                    Split4 --> Track1[Log Analytics]
+                    Split4 --> Track2[Update Metrics]
+                    Split4 --> Track3[Notify Winner]
+                    Split4 --> Track4[Store Auction]
+                end
+                
+                Track1 --> Join4[JOIN: All 100ms timeout]
+                Track2 --> Join4
+                Track3 --> Join4
+                Track4 --> Join4
+                
+                Join4 -->|Success| Response[Build Response]
+                Join4 -.->|Timeout/Error| NoFill
+                
+                Response --> Complete[Complete]
+                NoFill --> Split5
+                
+                subgraph "Split 5: Error Tracking - All Strategy"
+                    Split5 --> ErrLog[Log Error]
+                    Split5 --> ErrMetrics[Update Error Metrics]
+                end
+                
+                ErrLog --> Join5[JOIN: All 50ms timeout]
+                ErrMetrics --> Join5
+                
+                Join5 --> Complete
+                
+                style Start fill:#4CAF50
+                style Complete fill:#2196F3
+                style NoFill fill:#FF5722
+                style Split1 fill:#FF9800
+                style Split2 fill:#FF9800
+                style Split3 fill:#FF9800
+                style Split4 fill:#FF9800
+                style Split5 fill:#F59E0B
+                style Join1 fill:#9C27B0
+                style Join2 fill:#9C27B0
+                style Join3 fill:#9C27B0
+                style Join4 fill:#9C27B0
+                style Join5 fill:#F59E0B
+        </div>
+
+        <h3>Complete Implementation</h3>
+        <pre><code class="language-rust">use cano::prelude::*;
+use async_trait::async_trait;
+use std::time::Duration;
+
+// ============================================================================
+// State Definitions
+// ============================================================================
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum AdExchangeState {
+    // Entry and validation
+    Start,
+    
+    // Context gathering (Split 1)
+    GatherContext,
+    
+    // Bid request phase (Split 2)
+    RequestBids,
+    
+    // Auction phase (Split 3)
+    ScoreBids,
+    RunAuction,
+    
+    // Tracking phase (Split 4)
+    TrackResults,
+    
+    // Error tracking phase (Split 5)
+    ErrorTracking,
+    
+    // Terminal states
+    BuildResponse,
+    Complete,
+    Rejected,
+    NoFill,
+}
+
+// ============================================================================
+// Data Models
+// ============================================================================
+
+#[derive(Debug, Clone)]
+struct AdRequest {
+    request_id: String,
+    placement_id: String,
+    floor_price: f64,
+}
+
+#[derive(Debug, Clone)]
+struct UserContext {}
+
+#[derive(Debug, Clone)]
+struct GeoContext {}
+
+#[derive(Debug, Clone)]
+struct DeviceContext {}
+
+#[derive(Debug, Clone)]
+struct BidResponse {
+    partner_id: String,
+    price: f64,
+    creative_id: String,
+    response_time_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct ScoredBid {
+    bid: BidResponse,
+    score: f64,  // Adjusted price after quality scoring
+    rank: usize,
+}
+
+#[derive(Debug, Clone)]
+struct AuctionResult {
+    winner: Option<ScoredBid>,
+    total_bids: usize,
+    auction_time_ms: u64,
+}
+
+// ============================================================================
+// Phase 1: Request Validation
+// ============================================================================
+
+#[derive(Clone)]
+struct ValidateRequestTask;
+
+#[async_trait]
+impl Task<AdExchangeState> for ValidateRequestTask {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<AdExchangeState>, CanoError> {
+        let request: AdRequest = store.get("ad_request")?;
+        
+        println!("🔍 Validating request {}", request.request_id);
+        
+        // Validation logic
+        if request.placement_id.is_empty() {
+            println!("❌ Invalid placement ID");
+            return Ok(TaskResult::Single(AdExchangeState::ErrorTracking));
+        }
+        
+        if request.floor_price < 0.01 {
+            println!("❌ Floor price too low");
+            return Ok(TaskResult::Single(AdExchangeState::ErrorTracking));
+        }
+        
+        println!("✅ Request validated");
+        Ok(TaskResult::Single(AdExchangeState::GatherContext))
+    }
+}
+
+// ============================================================================
+// Phase 2: Context Gathering (Split 1 - All Strategy)
+// ============================================================================
+
+// Wrapper enum for heterogeneous context gathering tasks
+#[derive(Clone)]
+enum ContextTask {
+    FetchUser,
+    FetchGeo,
+    DetectDevice,
+}
+
+#[async_trait]
+impl Task<AdExchangeState> for ContextTask {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<AdExchangeState>, CanoError> {
+        match self {
+            ContextTask::FetchUser => {
+                println!("  👤 Fetching user profile...");
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                
+                let user = UserContext {};
+                
+                store.put("user_context", user)?;
+                println!("  ✅ User profile loaded");
+                Ok(TaskResult::Single(AdExchangeState::RequestBids))
+            }
+            ContextTask::FetchGeo => {
+                println!("  🌍 Fetching geo data...");
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                
+                let geo = GeoContext {};
+                
+                store.put("geo_context", geo)?;
+                println!("  ✅ Geo data loaded");
+                Ok(TaskResult::Single(AdExchangeState::RequestBids))
+            }
+            ContextTask::DetectDevice => {
+                println!("  📱 Detecting device...");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                
+                let device = DeviceContext {};
+                
+                store.put("device_context", device)?;
+                println!("  ✅ Device detected");
+                Ok(TaskResult::Single(AdExchangeState::RequestBids))
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Phase 3: Bid Requests (Split 2 - PartialTimeout Strategy)
+// ============================================================================
+
+#[derive(Clone)]
+struct ContactDSPTask {
+    partner_id: String,
+    response_delay_ms: u64,  // Simulated network latency
+}
+
+#[async_trait]
+impl Task<AdExchangeState> for ContactDSPTask {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<AdExchangeState>, CanoError> {
+        println!("  📡 Requesting bid from {}...", self.partner_id);
+        
+        // Simulate DSP bid request with varying latency
+        tokio::time::sleep(Duration::from_millis(self.response_delay_ms)).await;
+        
+        // Some DSPs might not respond in time or may not bid
+        if self.response_delay_ms > 180 {
+            // Will timeout
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        
+        let bid = BidResponse {
+            partner_id: self.partner_id.clone(),
+            price: 2.50 + (self.response_delay_ms as f64 / 100.0),
+            creative_id: format!("creative_{}", self.partner_id),
+            response_time_ms: self.response_delay_ms,
+        };
+        
+        // Store bid
+        let mut bids: Vec<BidResponse> = store.get("bids").unwrap_or_default();
+        bids.push(bid.clone());
+        store.put("bids", bids)?;
+        
+        println!("  ✅ {} bid: ${:.2}", self.partner_id, bid.price);
+        Ok(TaskResult::Single(AdExchangeState::ScoreBids))
+    }
+}
+
+// ============================================================================
+// Phase 4: Bid Scoring (Split 3 - All Strategy)
+// ============================================================================
+
+#[derive(Clone)]
+struct ScoreBidTask {
+    bid_index: usize,
+}
+
+#[async_trait]
+impl Task<AdExchangeState> for ScoreBidTask {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<AdExchangeState>, CanoError> {
+        let bids: Vec<BidResponse> = store.get("bids")?;
+        
+        if self.bid_index >= bids.len() {
+            return Err(CanoError::task_execution("Bid index out of range"));
+        }
+        
+        let bid = &bids[self.bid_index];
+        
+        println!("  📊 Scoring bid from {}...", bid.partner_id);
+        
+        // Simulate scoring computation
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        
+        // Quality score based on partner history and response time
+        let quality_multiplier = match bid.response_time_ms {
+            0..=50 => 1.1,    // Fast response bonus
+            51..=100 => 1.0,  // Normal
+            101..=150 => 0.95, // Slight penalty
+            _ => 0.9,         // Slow response penalty
+        };
+        
+        let scored_bid = ScoredBid {
+            bid: bid.clone(),
+            score: bid.price * quality_multiplier,
+            rank: 0,  // Will be set during auction
+        };
+        
+        let score_value = scored_bid.score;
+        
+        // Store scored bid
+        let mut scored_bids: Vec<ScoredBid> = store.get("scored_bids").unwrap_or_default();
+        scored_bids.push(scored_bid);
+        store.put("scored_bids", scored_bids)?;
+        
+        println!("  ✅ Bid scored: ${:.2}", score_value);
+        Ok(TaskResult::Single(AdExchangeState::RunAuction))
+    }
+}
+
+// ============================================================================
+// Phase 5: Auction
+// ============================================================================
+
+#[derive(Clone)]
+struct RunAuctionTask;
+
+#[async_trait]
+impl Task<AdExchangeState> for RunAuctionTask {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<AdExchangeState>, CanoError> {
+        println!("\n  🎯 Running auction...");
+        
+        let start = tokio::time::Instant::now();
+        let mut scored_bids: Vec<ScoredBid> = store.get("scored_bids")?;
+        let request: AdRequest = store.get("ad_request")?;
+        
+        // Filter bids above floor price
+        scored_bids.retain(|b| b.score >= request.floor_price);
+        
+        if scored_bids.is_empty() {
+            println!("  ❌ No valid bids above floor price");
+            let result = AuctionResult {
+                winner: None,
+                total_bids: 0,
+                auction_time_ms: start.elapsed().as_millis() as u64,
+            };
+            store.put("auction_result", result)?;
+            return Ok(TaskResult::Single(AdExchangeState::NoFill));
+        }
+        
+        // Sort by score (descending)
+        scored_bids.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        
+        // Set ranks
+        for (i, bid) in scored_bids.iter_mut().enumerate() {
+            bid.rank = i + 1;
+        }
+        
+        let winner = scored_bids[0].clone();
+        println!("  🏆 Winner: {} at ${:.2}", winner.bid.partner_id, winner.score);
+        
+        let result = AuctionResult {
+            winner: Some(winner),
+            total_bids: scored_bids.len(),
+            auction_time_ms: start.elapsed().as_millis() as u64,
+        };
+        
+        store.put("auction_result", result)?;
+        Ok(TaskResult::Single(AdExchangeState::TrackResults))
+    }
+}
+
+// ============================================================================
+// Phase 6: Tracking (Split 4 - All Strategy)
+// ============================================================================
+
+// Wrapper enum for heterogeneous tracking tasks
+#[derive(Clone)]
+enum TrackingTask {
+    LogAnalytics,
+    UpdateMetrics,
+    NotifyWinner,
+    StoreAuction,
+}
+
+#[async_trait]
+impl Task<AdExchangeState> for TrackingTask {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<AdExchangeState>, CanoError> {
+        match self {
+            TrackingTask::LogAnalytics => {
+                println!("  📈 Logging to analytics...");
+                tokio::time::sleep(Duration::from_millis(30)).await;
+                
+                let result: AuctionResult = store.get("auction_result")?;
+                println!("  ✅ Analytics logged: {} bids", result.total_bids);
+                Ok(TaskResult::Single(AdExchangeState::BuildResponse))
+            }
+            TrackingTask::UpdateMetrics => {
+                println!("  📊 Updating metrics...");
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                
+                println!("  ✅ Metrics updated");
+                Ok(TaskResult::Single(AdExchangeState::BuildResponse))
+            }
+            TrackingTask::NotifyWinner => {
+                println!("  📬 Notifying winner...");
+                
+                let result: AuctionResult = store.get("auction_result")?;
+                if let Some(winner) = result.winner {
+                    tokio::time::sleep(Duration::from_millis(40)).await;
+                    println!("  ✅ Winner {} notified", winner.bid.partner_id);
+                }
+                
+                Ok(TaskResult::Single(AdExchangeState::BuildResponse))
+            }
+            TrackingTask::StoreAuction => {
+                println!("  💾 Storing auction data...");
+                tokio::time::sleep(Duration::from_millis(35)).await;
+                
+                println!("  ✅ Auction data stored");
+                Ok(TaskResult::Single(AdExchangeState::BuildResponse))
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Phase 7: Response Building
+// ============================================================================
+
+#[derive(Clone)]
+struct BuildResponseTask;
+
+#[async_trait]
+impl Task<AdExchangeState> for BuildResponseTask {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<AdExchangeState>, CanoError> {
+        println!("\n  📦 Building response...");
+        
+        let request: AdRequest = store.get("ad_request")?;
+        let result: AuctionResult = store.get("auction_result")?;
+        
+        println!("\n🎯 Ad Exchange Response Summary:");
+        println!("  Request ID: {}", request.request_id);
+        println!("  Total Bids: {}", result.total_bids);
+        println!("  Auction Time: {}ms", result.auction_time_ms);
+        
+        if let Some(winner) = result.winner {
+            println!("  Winner: {}", winner.bid.partner_id);
+            println!("  Winning Price: ${:.2}", winner.score);
+            println!("  Creative: {}", winner.bid.creative_id);
+        } else {
+            println!("  Result: No Fill");
+        }
+        
+        Ok(TaskResult::Single(AdExchangeState::Complete))
+    }
+}
+
+// ============================================================================
+// NoFill Handler
+// ============================================================================
+
+#[derive(Clone)]
+struct NoFillTask;
+
+#[async_trait]
+impl Task<AdExchangeState> for NoFillTask {
+    async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<AdExchangeState>, CanoError> {
+        println!("\n⚠️  No Fill Response");
+        println!("Unable to complete ad request due to timeout or insufficient data.\n");
+        Ok(TaskResult::Single(AdExchangeState::ErrorTracking))
+    }
+}
+
+// ============================================================================
+// Phase 8: Error Tracking (Split 5 - All Strategy)
+// ============================================================================
+
+// Wrapper enum for error tracking tasks
+#[derive(Clone)]
+enum ErrorTrackingTask {
+    LogError,
+    UpdateErrorMetrics,
+}
+
+#[async_trait]
+impl Task<AdExchangeState> for ErrorTrackingTask {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<AdExchangeState>, CanoError> {
+        match self {
+            ErrorTrackingTask::LogError => {
+                println!("  📝 Logging error...");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                
+                // Determine error type from store or state
+                let error_type = if store.get::<AuctionResult>("auction_result").is_ok() {
+                    "NoFill"
+                } else {
+                    "Rejected"
+                };
+                
+                println!("  ✅ Error logged: {}", error_type);
+                Ok(TaskResult::Single(AdExchangeState::Complete))
+            }
+            ErrorTrackingTask::UpdateErrorMetrics => {
+                println!("  📊 Updating error metrics...");
+                tokio::time::sleep(Duration::from_millis(25)).await;
+                
+                println!("  ✅ Error metrics updated");
+                Ok(TaskResult::Single(AdExchangeState::Complete))
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Main Workflow Construction
+// ============================================================================
+
+fn create_ad_exchange_workflow(store: MemoryStore) -> Workflow<AdExchangeState> {
+    Workflow::new(store.clone())
+        // Phase 1: Validation
+        .register(AdExchangeState::Start, ValidateRequestTask)
+        
+        // Phase 2: Context Gathering - SPLIT 1 (All Strategy)
+        // All three must succeed to proceed within 100ms timeout
+        // If any task fails or timeout is exceeded, workflow will error and transition to NoFill
+        .register_split(
+            AdExchangeState::GatherContext,
+            vec![
+                ContextTask::FetchUser,
+                ContextTask::FetchGeo,
+                ContextTask::DetectDevice,
+            ],
+            JoinConfig::new(
+                JoinStrategy::All,
+                AdExchangeState::RequestBids,
+            )
+            .with_timeout(Duration::from_millis(100)),
+        )
+        
+        // Phase 3: Bid Requests - SPLIT 2 (PartialTimeout Strategy)
+        // Accept whatever bids come back within 200ms
+        .register_split(
+            AdExchangeState::RequestBids,
+            vec![
+                ContactDSPTask { partner_id: "DSP-FastBidder".to_string(), response_delay_ms: 45 },
+                ContactDSPTask { partner_id: "DSP-Premium".to_string(), response_delay_ms: 80 },
+                ContactDSPTask { partner_id: "DSP-Global".to_string(), response_delay_ms: 120 },
+                ContactDSPTask { partner_id: "DSP-Slow".to_string(), response_delay_ms: 190 },
+                ContactDSPTask { partner_id: "DSP-TooSlow".to_string(), response_delay_ms: 250 },
+            ],
+            JoinConfig::new(
+                JoinStrategy::PartialTimeout,
+                AdExchangeState::ScoreBids,
+            )
+            .with_timeout(Duration::from_millis(200))
+            .with_store_partial_results(true),
+        )
+        
+        // Phase 4: Bid Scoring - SPLIT 3 (All Strategy)
+        // Score all received bids within 50ms timeout
+        // If timeout or any scoring fails, workflow will error and transition to NoFill
+        .register_split(
+            AdExchangeState::ScoreBids,
+            vec![
+                ScoreBidTask { bid_index: 0 },
+                ScoreBidTask { bid_index: 1 },
+                ScoreBidTask { bid_index: 2 },
+            ],
+            JoinConfig::new(
+                JoinStrategy::All,
+                AdExchangeState::RunAuction,
+            )
+            .with_timeout(Duration::from_millis(50)),
+        )
+        
+        // Phase 5: Auction
+        .register(AdExchangeState::RunAuction, RunAuctionTask)
+        
+        // Phase 6: Tracking - SPLIT 4 (All Strategy)
+        // All tracking tasks must complete within 100ms timeout
+        // If timeout or any task fails, workflow will error and transition to NoFill
+        .register_split(
+            AdExchangeState::TrackResults,
+            vec![
+                TrackingTask::LogAnalytics,
+                TrackingTask::UpdateMetrics,
+                TrackingTask::NotifyWinner,
+                TrackingTask::StoreAuction,
+            ],
+            JoinConfig::new(
+                JoinStrategy::All,
+                AdExchangeState::BuildResponse,
+            )
+            .with_timeout(Duration::from_millis(100)),
+        )
+        
+        // Phase 7: Response
+        .register(AdExchangeState::BuildResponse, BuildResponseTask)
+        
+        // NoFill handler (used when splits timeout or fail)
+        .register(AdExchangeState::NoFill, NoFillTask)
+        
+        // Phase 8: Error Tracking - SPLIT 5 (All Strategy)
+        // Both error logging and metrics must complete within 50ms timeout
+        .register_split(
+            AdExchangeState::ErrorTracking,
+            vec![
+                ErrorTrackingTask::LogError,
+                ErrorTrackingTask::UpdateErrorMetrics,
+            ],
+            JoinConfig::new(
+                JoinStrategy::All,
+                AdExchangeState::Complete,
+            )
+            .with_timeout(Duration::from_millis(50)),
+        )
+        
+        // Terminal states
+        .add_exit_states(vec![
+            AdExchangeState::Complete,
+            AdExchangeState::Rejected,
+        ])
+}
+
+// ============================================================================
+// Example Usage
+// ============================================================================
+
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    println!("🚀 Real-Time Ad Exchange Workflow\n");
+    println!("{}", "=".repeat(60));
+    
+    let store = MemoryStore::new();
+    
+    // Create ad request
+    let request = AdRequest {
+        request_id: "req_abc123".to_string(),
+        placement_id: "placement_728x90_top".to_string(),
+        floor_price: 1.50,
+    };
+    
+    store.put("ad_request", request)?;
+    
+    // Build and execute workflow
+    let workflow = create_ad_exchange_workflow(store.clone());
+    
+    println!("\n🎬 Starting ad exchange workflow...\n");
+    let start = tokio::time::Instant::now();
+    
+    // Execute workflow - if splits timeout or fail, transition to NoFill
+    let result = match workflow.orchestrate(AdExchangeState::Start).await {
+        Ok(state) => state,
+        Err(e) => {
+            // If workflow fails due to split timeout/error, handle as NoFill
+            eprintln!("❌ Workflow error: {}", e);
+            println!("\n⚠️  Handling as No Fill due to error\n");
+            
+            // Execute NoFill state explicitly
+            workflow.orchestrate(AdExchangeState::NoFill).await?
+        }
+    };
+    
+    let total_time = start.elapsed();
+    
+    println!("\n{}", "=".repeat(60));
+    println!("✅ Workflow completed in {:?}", total_time);
+    println!("   Final State: {:?}", result);
+    
+    Ok(())
+}</code></pre>
+
+        <h3>Key Features Demonstrated</h3>
+        <div class="card-stack">
+            <div class="card">
+                <h3>Multiple Split Points</h3>
+                <p><strong>Split 1:</strong> Context gathering with <code>All</code> strategy - all 3 data sources required (100ms timeout)</p>
+                <p><strong>Split 2:</strong> Bid requests with <code>PartialTimeout</code> - accept responses within 200ms (3-4 of 5 DSPs)</p>
+                <p><strong>Split 3:</strong> Bid scoring with <code>All</code> strategy - score all received bids (50ms timeout)</p>
+                <p><strong>Split 4:</strong> Tracking with <code>All</code> strategy - all 4 tracking tasks must complete (100ms timeout)</p>
+                <p><strong>Split 5:</strong> Error tracking with <code>All</code> strategy - log errors and update metrics (50ms timeout)</p>
+                <p><strong>Error Handling:</strong> If any <code>All</code> strategy split times out or fails, workflow gracefully transitions to NoFill, which then tracks errors before completing</p>
+            </div>
+            <div class="card">
+                <h3>Real-World Constraints</h3>
+                <p>• 200ms timeout for bid requests (industry standard)</p>
+                <p>• Floor price enforcement</p>
+                <p>• Quality scoring with latency penalties</p>
+                <p>• Strict tracking requirements (all systems must update)</p>
+                <p>• Graceful NoFill handling with error tracking when timeouts occur</p>
+                <p>• Comprehensive error logging and metrics on failures</p>
+            </div>
+            <div class="card">
+                <h3>Production Patterns</h3>
+                <p>• Parallel external service calls</p>
+                <p>• Graceful degradation (partial results)</p>
+                <p>• Time-based optimization (fastest wins)</p>
+                <p>• Complex state management across phases</p>
+            </div>
+        </div>
+
+        <h3>Example Output</h3>
+        <pre><code>🚀 Real-Time Ad Exchange Workflow
+
+============================================================
+
+🎬 Starting ad exchange workflow...
+
+🔍 Validating request req_abc123
+✅ Request validated
+  👤 Fetching user profile...
+  📱 Detecting device...
+  🌍 Fetching geo data...
+  ✅ Device detected
+  ✅ Geo data loaded
+  ✅ User profile loaded
+  📡 Requesting bid from DSP-FastBidder...
+  📡 Requesting bid from DSP-Premium...
+  📡 Requesting bid from DSP-Global...
+  📡 Requesting bid from DSP-TooSlow...
+  📡 Requesting bid from DSP-Slow...
+  ✅ DSP-FastBidder bid: $2.95
+  ✅ DSP-Premium bid: $3.30
+  ✅ DSP-Global bid: $3.70
+  📊 Scoring bid from DSP-FastBidder...
+  📊 Scoring bid from DSP-Premium...
+  📊 Scoring bid from DSP-Global...
+  ✅ Bid scored: $3.52
+  ✅ Bid scored: $3.25
+  ✅ Bid scored: $3.30
+
+  🎯 Running auction...
+  🏆 Winner: DSP-Global at $3.52
+  📈 Logging to analytics...
+  📊 Updating metrics...
+  📬 Notifying winner...
+  💾 Storing auction data...
+  ✅ Metrics updated
+  ✅ Analytics logged: 3 bids
+  ✅ Auction data stored
+  ✅ Winner DSP-Global notified
+
+  📦 Building response...
+
+🎯 Ad Exchange Response Summary:
+  Request ID: req_abc123
+  Total Bids: 3
+  Auction Time: 0ms
+  Winner: DSP-Global
+  Winning Price: $3.52
+  Creative: creative_DSP-Global
+
+============================================================
+✅ Workflow completed in 307.716975ms
+   Final State: Complete</code></pre>
+
+        <p style="margin-top: 2rem; padding: 1rem; background: rgba(56, 189, 248, 0.1); border-left: 3px solid var(--primary-color); border-radius: 0.5rem;">
+            <strong>💡 Production Insight:</strong> This ad exchange workflow demonstrates how to build real-time 
+            bidding systems that handle 1000s of requests per second. The combination of <code>All</code> and 
+            <code>PartialTimeout</code> strategies ensures optimal performance while maintaining quality and reliability. 
+            The ~308ms total time includes 4 parallel split/join operations, showing how split/join can meet the strict 
+            latency requirements of programmatic advertising (typically &lt;300ms). Note how slow DSPs (DSP-TooSlow and 
+            DSP-Slow) are automatically cancelled when they exceed the 200ms timeout, preventing them from delaying the auction.
+        </p>
     

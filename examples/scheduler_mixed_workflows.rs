@@ -7,8 +7,8 @@
 //! 3. Multiple workflows running concurrently
 //! 4. Status monitoring and workflow management
 //!
-//! For concurrent task execution within a workflow, see the workflow_concurrent.rs example
-//! which demonstrates the split/join pattern for parallel processing.
+//! For parallel task execution within a workflow, see examples like workflow_split_join.rs
+//! which demonstrate split/join patterns.
 //!
 //! Run with:
 //! ```bash
@@ -174,8 +174,8 @@ async fn main() -> CanoResult<()> {
     println!("✅ Scheduler stopped successfully");
 
     println!("\n✅ Scheduler example completed successfully!");
-    println!("\n💡 Tip: For concurrent task execution within a workflow,");
-    println!("   see examples/workflow_concurrent.rs for split/join patterns");
+    println!("\n💡 Tip: For parallel task execution within a workflow,");
+    println!("   see examples/workflow_split_join.rs for split/join patterns");
 
     Ok(())
 }

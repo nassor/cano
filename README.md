@@ -30,7 +30,6 @@ The engine is built on three core concepts: **Tasks/Nodes** for logic, **Workflo
 - **Parallel Execution (Split/Join)**: Run tasks concurrently and join results with strategies like `All`, `Any`, `Quorum`, or `PartialResults`.
 - **Robust Retry Logic**: Configurable strategies including exponential backoff with jitter.
 - **Built-in Scheduling**: Cron-based, interval, and manual triggers for background jobs.
-- **Concurrent Workflows**: Run multiple instances of the same workflow with quota management.
 - **Observability**: Integrated `tracing` support for deep insights into workflow execution.
 - **Performance-Focused**: Minimizes heap allocations by leveraging stack-based objects wherever possible, giving you control over where allocations occur.
 

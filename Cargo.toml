@@ -60,11 +60,6 @@ path = "examples/scheduler_scheduling.rs"
 required-features = ["scheduler"]
 
 [[example]]
-name = "scheduler_concurrent_workflows"
-path = "examples/scheduler_concurrent_workflows.rs"
-required-features = ["scheduler"]
-
-[[example]]
 name = "scheduler_duration_scheduling"
 path = "examples/scheduler_duration_scheduling.rs"
 required-features = ["scheduler"]
@@ -82,6 +77,11 @@ required-features = ["scheduler"]
 [[example]]
 name = "scheduler_book_prepositions"
 path = "examples/scheduler_book_prepositions.rs"
+required-features = ["scheduler"]
+
+[[example]]
+name = "scheduler_mapreduce_books"
+path = "examples/scheduler_mapreduce_books.rs"
 required-features = ["scheduler"]
 
 [[example]]
