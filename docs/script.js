@@ -106,7 +106,11 @@ class ContentComponent extends LitElement {
   async loadContent(page) {
     this.page = page;
     try {
-      const response = await fetch(`content/${page}.html`);
+      // Support both local development and GitHub Pages paths
+      const basePath = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' 
+        ? '' 
+        : '/cano';
+      const response = await fetch(`${basePath}/content/${page}.html`);
       if (response.ok) {
         this.content = await response.text();
         // After content is loaded, re-initialize Prism and Mermaid
