@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tracing - Cano Documentation</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;700&family=Fira+Code&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.6.1/mermaid.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-rust.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-toml.min.js"></script>
+    <script src="script.js" defer></script>
+</head>
+<body>
+    <button id="menu-toggle" class="menu-toggle">☰</button>
+    
+    <nav class="sidebar">
+        <a href="index.html" class="logo">
+            <img src="logo.png" alt="Cano" style="height: 24px; vertical-align: middle; margin-right: 8px;">
+            Cano
+        </a>
+        <ul class="nav-links">
+            <li><a href="index.html">Home</a></li>
+            <li><a href="task.html">Tasks</a></li>
+            <li><a href="nodes.html">Nodes</a></li>
+            <li><a href="workflows.html">Workflows</a></li>
+            <li><a href="scheduler.html">Scheduler</a></li>
+            <li><a href="tracing.html" class="active">Tracing</a></li>
+        </ul>
+    </nav>
+
+    <main class="main-content">
+        <h1>Tracing</h1>
+        <p class="subtitle">Comprehensive observability for your workflows.</p>
+
+        <p>
+            Cano provides comprehensive observability through the optional <code>tracing</code> feature using the 
+            <a href="https://docs.rs/tracing/latest/tracing/" target="_blank">tracing</a> library.
+        </p>
+
+        <h2>Setup</h2>
+        <p>To enable tracing, add the feature to your <code>Cargo.toml</code> and initialize a subscriber in your code.</p>
+        <pre><code class="language-toml">[dependencies]
+cano = { version = "0.7", features = ["tracing"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }</code></pre>
+
+        <h3>Initialization</h3>
+        <pre><code class="language-rust">use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+// Initialize tracing with environment filter
+tracing_subscriber::registry()
+    .with(tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "info".into()))
+    .with(tracing_subscriber::fmt::layer())
+    .init();</code></pre>
+
+        <h2>What Gets Traced</h2>
+        <div class="card-grid">
+            <div class="card">
+                <h3>Workflow Level</h3>
+                <p>Orchestration start/completion, state transitions, final states.</p>
+            </div>
+            <div class="card">
+                <h3>Task/Node Level</h3>
+                <p>Execution attempts, retry logic, delays, success/failure outcomes.</p>
+            </div>
+            <div class="card">
+                <h3>Scheduler Level</h3>
+                <p>Workflow scheduling, concurrent execution, run counts, durations.</p>
+            </div>
+        </div>
+
+        <h2>Custom Spans</h2>
+        <p>You can attach custom tracing spans to your workflows to include business-specific context.</p>
+
+        <pre><code class="language-rust">// Create workflow with custom tracing span
+let workflow_span = info_span!(
+    "user_data_processing", 
+    user_id = "12345", 
+    batch_id = "batch_001"
+);
+
+let mut workflow = Workflow::new(MyState::Start)
+    .with_tracing_span(workflow_span);</code></pre>
+
+        <h2>Example Output</h2>
+        <p>Running with <code>RUST_LOG=info</code> produces structured logs:</p>
+        <pre><code class="language-bash">INFO user_data_processing{user_id="12345"}: Starting workflow orchestration
+  INFO user_data_processing{user_id="12345"}:task_execution: Starting task execution
+    INFO user_data_processing{user_id="12345"}:task_attempt{attempt=1}: Node execution completed success=true
+    INFO user_data_processing{user_id="12345"}:task_attempt{attempt=1}: processor_id=basic_processor input_records=3: Data processing completed
+  INFO user_data_processing{user_id="12345"}: Workflow completed successfully</code></pre>
+
+        <h2>Full Example</h2>
+        <pre><code class="language-rust">use cano::prelude::*;
+use async_trait::async_trait;
+use tracing::{info, info_span};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum State {
+    Start,
+    Complete,
+}
+
+#[derive(Clone)]
+struct ProcessOrderNode;
+
+#[async_trait]
+impl Task<State> for ProcessOrderNode {
+    async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+        info!("Processing order...");
+        Ok(TaskResult::Single(State::Complete))
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    // 1. Setup Subscriber
+    tracing_subscriber::fmt::init();
+
+    let store = MemoryStore::new();
+
+    // 2. Create Workflow with Custom Span
+    // This span will wrap all logs generated by this workflow
+    let workflow_span = info_span!(
+        "order_processing", 
+        order_id = "ORD-2025-001", 
+        customer = "Acme Corp"
+    );
+
+    let workflow = Workflow::new(store.clone())
+        .register(State::Start, ProcessOrderNode)
+        .add_exit_state(State::Complete)
+        .with_tracing_span(workflow_span); // Attach span
+
+    // 3. Run
+    info!("Submitting order...");
+    workflow.orchestrate(State::Start).await?;
+    
+    Ok(())
+}</code></pre>
+    </main>
+</body>
+</html>

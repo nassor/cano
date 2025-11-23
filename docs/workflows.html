@@ -1,0 +1,609 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Workflows - Cano Documentation</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;700&family=Fira+Code&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.6.1/mermaid.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-rust.min.js"></script>
+    <script src="script.js" defer></script>
+</head>
+<body>
+    <button id="menu-toggle" class="menu-toggle">☰</button>
+    
+    <nav class="sidebar">
+        <a href="index.html" class="logo">
+            <img src="logo.png" alt="Cano" style="height: 24px; vertical-align: middle; margin-right: 8px;">
+            Cano
+        </a>
+        <ul class="nav-links">
+            <li><a href="index.html">Home</a></li>
+            <li><a href="task.html">Tasks</a></li>
+            <li><a href="nodes.html">Nodes</a></li>
+            <li><a href="workflows.html" class="active">Workflows</a></li>
+            <li><a href="scheduler.html">Scheduler</a></li>
+            <li><a href="tracing.html">Tracing</a></li>
+        </ul>
+    </nav>
+
+    <main class="main-content">
+        <h1>Workflows</h1>
+        <p class="subtitle">Orchestrate complex processes with state machine semantics.</p>
+
+        <p>
+            Workflows in Cano are state machines. You define a set of states (usually an enum) and register a <code>Task</code> or <code>Node</code> for each state. 
+            The workflow engine manages the transitions between these states until an exit state is reached.
+        </p>
+
+        <h2>Defining States</h2>
+        <pre><code class="language-rust">#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum OrderState {
+    Start,
+    Validate,
+    Process,
+    Complete,
+    Failed,
+}</code></pre>
+
+        <h2>Building a Workflow</h2>
+        <div class="mermaid">
+            graph TD
+                A[Start] --> B[Validate]
+                B -->|Valid| C[Process]
+                B -->|Invalid| D[Failed]
+                C --> E[Complete]
+        </div>
+
+        <h3>Linear Workflow Example</h3>
+        <pre><code class="language-rust">use cano::prelude::*;
+use async_trait::async_trait;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum OrderState {
+    Start,
+    Validate,
+    Process,
+    Complete,
+    Failed,
+}
+
+// Define simple tasks (omitted for brevity, see Tasks page)
+struct ValidateTask; 
+struct ProcessTask;
+
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    let store = MemoryStore::new();
+
+    // Create Workflow
+    let mut workflow = Workflow::new(store.clone());
+    
+    workflow
+        // 1. Register Tasks for each state
+        .register(OrderState::Start, |_: &MemoryStore| async {
+            Ok(TaskResult::Single(OrderState::Validate))
+        })
+        .register(OrderState::Validate, ValidateTask)
+        .register(OrderState::Process, ProcessTask)
+        
+        // 2. Define Exit States (Workflow stops here)
+        .add_exit_states(vec![OrderState::Complete, OrderState::Failed]);
+
+    // 3. Execute
+    let result = workflow.orchestrate(OrderState::Start).await?;
+    
+    println!("Final State: {:?}", result);
+    Ok(())
+}</code></pre>
+
+        <h2>Split/Join Workflows</h2>
+        <p>
+            Execute multiple tasks in parallel and control how they proceed using flexible join strategies. 
+            This is essential for scatter-gather patterns, redundant API calls, and performance optimization.
+        </p>
+
+        <div class="mermaid">
+            graph TD
+                A[Process State] -->|Split| B[Task 1]
+                A -->|Split| C[Task 2]
+                A -->|Split| D[Task 3]
+                B --> E{Join Strategy}
+                C --> E
+                D --> E
+                E -->|Satisfied| F[Aggregate State]
+                E -->|Failed/Timeout| G[Error State]
+        </div>
+
+        <h3>Join Strategies</h3>
+        <p>Cano provides several strategies to control how parallel tasks are aggregated.</p>
+
+        <div class="card-stack">
+            <div class="card">
+                <h3>All</h3>
+                <p>Wait for <strong>all</strong> tasks to complete successfully.</p>
+                <pre><code class="language-rust">JoinStrategy::All</code></pre>
+            </div>
+            <div class="card">
+                <h3>Any</h3>
+                <p>Proceed after the <strong>first</strong> task completes successfully.</p>
+                <pre><code class="language-rust">JoinStrategy::Any</code></pre>
+            </div>
+            <div class="card">
+                <h3>Quorum(n)</h3>
+                <p>Wait for <strong>n</strong> tasks to complete successfully.</p>
+                <pre><code class="language-rust">JoinStrategy::Quorum(2)</code></pre>
+            </div>
+            <div class="card">
+                <h3>Percentage(p)</h3>
+                <p>Wait for <strong>p%</strong> of tasks to complete successfully.</p>
+                <pre><code class="language-rust">JoinStrategy::Percentage(0.5)</code></pre>
+            </div>
+            <div class="card">
+                <h3>PartialResults(n)</h3>
+                <p>Proceed after <strong>n</strong> tasks complete successfully.</p>
+                <pre><code class="language-rust">JoinStrategy::PartialResults(3)</code></pre>
+            </div>
+        </div>
+
+        <h3>Complete Example</h3>
+        <p>Here is a complete, runnable example demonstrating how to use Split/Join with different strategies.</p>
+
+        <pre><code class="language-rust">use cano::prelude::*;
+use async_trait::async_trait;
+use std::time::Duration;
+
+// 1. Define Workflow State
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum DataState {
+    Start,
+    LoadData,
+    ParallelProcessing,
+    Aggregate,
+    Complete,
+}
+
+// 2. Task to load initial data
+#[derive(Clone)]
+struct DataLoader;
+
+#[async_trait]
+impl Task<DataState> for DataLoader {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<DataState>, CanoError> {
+        println!("Loading initial data...");
+        
+        // Load some data to process
+        let data = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+        store.put("input_data", data)?;
+        
+        println!("Data loaded: 10 numbers");
+        Ok(TaskResult::Single(DataState::ParallelProcessing))
+    }
+}
+
+// 3. Parallel processing task
+#[derive(Clone)]
+struct ProcessorTask {
+    task_id: usize,
+}
+
+impl ProcessorTask {
+    fn new(task_id: usize) -> Self {
+        Self { task_id }
+    }
+}
+
+#[async_trait]
+impl Task<DataState> for ProcessorTask {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<DataState>, CanoError> {
+        println!("Processor {} starting...", self.task_id);
+        
+        // Get input data
+        let data: Vec<i32> = store.get("input_data")?;
+        
+        // Simulate processing time
+        tokio::time::sleep(Duration::from_millis(100 * self.task_id as u64)).await;
+        
+        // Process data (simple example: multiply by task_id)
+        let result: i32 = data.iter().map(|&x| x * self.task_id as i32).sum();
+        
+        // Store individual result
+        store.put(&format!("result_{}", self.task_id), result)?;
+        
+        println!("Processor {} completed with result: {}", self.task_id, result);
+        Ok(TaskResult::Single(DataState::Aggregate))
+    }
+}
+
+// 4. Aggregator task
+#[derive(Clone)]
+struct Aggregator;
+
+#[async_trait]
+impl Task<DataState> for Aggregator {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<DataState>, CanoError> {
+        println!("Aggregating results...");
+        
+        // Collect all results
+        let mut total = 0;
+        let mut count = 0;
+        
+        for i in 1..=3 {
+            if let Ok(result) = store.get::<i32>(&format!("result_{}", i)) {
+                total += result;
+                count += 1;
+            }
+        }
+        
+        store.put("final_result", total)?;
+        store.put("processor_count", count)?;
+        
+        println!("Aggregation complete: {} processors, total: {}", count, total);
+        Ok(TaskResult::Single(DataState::Complete))
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    let store = MemoryStore::new();
+    
+    // Define tasks to run in parallel
+    let processors = vec![
+        ProcessorTask::new(1),
+        ProcessorTask::new(2),
+        ProcessorTask::new(3),
+    ];
+
+    // Configure Join Strategy: Wait for ALL tasks
+    let join_config = JoinConfig::new(
+        JoinStrategy::All,
+        DataState::Aggregate
+    ).with_timeout(Duration::from_secs(5));
+
+    // Build Workflow
+    let workflow = Workflow::new(store.clone())
+        .register(DataState::Start, DataLoader)
+        .register_split(
+            DataState::ParallelProcessing,
+            processors,
+            join_config
+        )
+        .register(DataState::Aggregate, Aggregator)
+        .add_exit_state(DataState::Complete);
+
+    // Run Workflow
+    let result = workflow.orchestrate(DataState::Start).await?;
+    
+    let final_result: i32 = store.get("final_result")?;
+    println!("Workflow completed: {:?}", result);
+    println!("Final result: {}", final_result);
+    
+    Ok(())
+}</code></pre>
+
+        <h2>Join Strategy Examples</h2>
+        <p>Each strategy handles parallel task completion differently. Here are detailed examples for each strategy.</p>
+
+        <h3>1. All Strategy - Wait for All Tasks</h3>
+        <p>Waits for all tasks to complete successfully. Fails if any task fails.</p>
+        
+        <div class="mermaid">
+            sequenceDiagram
+                participant W as Workflow
+                participant T1 as Task 1
+                participant T2 as Task 2
+                participant T3 as Task 3
+                W->>T1: Start
+                W->>T2: Start
+                W->>T3: Start
+                T1-->>W: Complete ✓
+                T2-->>W: Complete ✓
+                T3-->>W: Complete ✓
+                Note over W: All Complete → Proceed
+        </div>
+
+        <pre><code class="language-rust">// All Strategy: Best for workflows requiring complete data
+let join_config = JoinConfig::new(
+    JoinStrategy::All, 
+    DataState::Aggregate
+).with_timeout(Duration::from_secs(10));
+
+let workflow = Workflow::new(store.clone())
+    .register(DataState::Start, DataLoader)
+    .register_split(
+        DataState::ParallelProcessing,
+        vec![ProcessorTask::new(1), ProcessorTask::new(2), ProcessorTask::new(3)],
+        join_config
+    )
+    .register(DataState::Aggregate, Aggregator)
+    .add_exit_state(DataState::Complete);
+</code></pre>
+
+        <h3>2. Any Strategy - First to Complete</h3>
+        <p>Proceeds as soon as the first task completes successfully. Other tasks are cancelled.</p>
+        
+        <div class="mermaid">
+            sequenceDiagram
+                participant W as Workflow
+                participant T1 as Task 1 (slow)
+                participant T2 as Task 2 (fast)
+                participant T3 as Task 3 (slow)
+                W->>T1: Start
+                W->>T2: Start
+                W->>T3: Start
+                T2-->>W: Complete ✓
+                Note over W: First Complete → Proceed
+                W->>T1: Cancel
+                W->>T3: Cancel
+        </div>
+
+        <pre><code class="language-rust">// Any Strategy: Best for redundant API calls or fastest-wins scenarios
+let join_config = JoinConfig::new(
+    JoinStrategy::Any, 
+    DataState::Complete  // Skip aggregation, proceed directly
+);
+
+// Example: Call 3 different data sources, use whoever responds first
+let workflow = Workflow::new(store.clone())
+    .register(DataState::Start, DataLoader)
+    .register_split(
+        DataState::ParallelProcessing,
+        vec![
+            ApiCallTask::new("provider1"),
+            ApiCallTask::new("provider2"),
+            ApiCallTask::new("provider3"),
+        ],
+        join_config
+    )
+    .add_exit_state(DataState::Complete);
+</code></pre>
+
+        <h3>3. Quorum Strategy - Wait for N Tasks</h3>
+        <p>Proceeds after a specific number of tasks complete successfully. Useful for consensus systems.</p>
+        
+        <div class="mermaid">
+            sequenceDiagram
+                participant W as Workflow
+                participant T1 as Task 1
+                participant T2 as Task 2
+                participant T3 as Task 3
+                participant T4 as Task 4
+                W->>T1: Start
+                W->>T2: Start
+                W->>T3: Start
+                W->>T4: Start
+                T1-->>W: Complete ✓
+                T3-->>W: Complete ✓
+                T2-->>W: Complete ✓
+                Note over W: Quorum (3/4) Met → Proceed
+                W->>T4: Cancel
+        </div>
+
+        <pre><code class="language-rust">// Quorum Strategy: Best for distributed consensus or majority voting
+let join_config = JoinConfig::new(
+    JoinStrategy::Quorum(3),  // Need 3 out of 5 to succeed
+    DataState::Aggregate
+).with_timeout(Duration::from_secs(5));
+
+// Example: Write to 5 replicas, succeed when 3 confirm
+let workflow = Workflow::new(store.clone())
+    .register(DataState::Start, PrepareData)
+    .register_split(
+        DataState::ParallelProcessing,
+        vec![
+            WriteReplica::new(1),
+            WriteReplica::new(2),
+            WriteReplica::new(3),
+            WriteReplica::new(4),
+            WriteReplica::new(5),
+        ],
+        join_config
+    )
+    .register(DataState::Aggregate, ConfirmWrite)
+    .add_exit_state(DataState::Complete);
+</code></pre>
+
+        <h3>4. Percentage Strategy - Wait for % of Tasks</h3>
+        <p>Proceeds after a percentage of tasks complete successfully. Flexible for varying batch sizes.</p>
+        
+        <div class="mermaid">
+            sequenceDiagram
+                participant W as Workflow
+                participant T1 as Task 1
+                participant T2 as Task 2
+                participant T3 as Task 3
+                participant T4 as Task 4
+                W->>T1: Start
+                W->>T2: Start
+                W->>T3: Start
+                W->>T4: Start
+                T1-->>W: Complete ✓
+                T2-->>W: Complete ✓
+                T4-->>W: Complete ✓
+                Note over W: 75% (3/4) Met → Proceed
+                W->>T3: Cancel
+        </div>
+
+        <pre><code class="language-rust">// Percentage Strategy: Best for batch processing with acceptable partial results
+let join_config = JoinConfig::new(
+    JoinStrategy::Percentage(0.75),  // Need 75% to succeed
+    DataState::Aggregate
+).with_timeout(Duration::from_secs(10));
+
+// Example: Process 100 records, proceed when 75 complete
+let mut tasks = Vec::new();
+for i in 0..100 {
+    tasks.push(RecordProcessor::new(i));
+}
+
+let workflow = Workflow::new(store.clone())
+    .register(DataState::Start, LoadRecords)
+    .register_split(
+        DataState::ParallelProcessing,
+        tasks,
+        join_config
+    )
+    .register(DataState::Aggregate, SummarizeResults)
+    .add_exit_state(DataState::Complete);
+</code></pre>
+
+        <h3>5. PartialResults Strategy - Accept Partial Completion</h3>
+        <p>Proceeds after N tasks complete successfully, cancels remaining tasks. Tracks all outcomes.</p>
+        
+        <div class="mermaid">
+            sequenceDiagram
+                participant W as Workflow
+                participant T1 as Task 1
+                participant T2 as Task 2
+                participant T3 as Task 3
+                participant T4 as Task 4
+                W->>T1: Start
+                W->>T2: Start
+                W->>T3: Start
+                W->>T4: Start
+                T1-->>W: Complete ✓
+                T2-->>W: Failed ✗
+                T3-->>W: Complete ✓
+                Note over W: 2 Successes → Proceed
+                W->>T4: Cancel
+                Note over W: Track: 2 success, 1 error, 1 cancelled
+        </div>
+
+        <pre><code class="language-rust">// PartialResults Strategy: Best for fault-tolerant systems with latency optimization
+let join_config = JoinConfig::new(
+    JoinStrategy::PartialResults(2),  // Proceed after any 2 succeed
+    DataState::Aggregate
+)
+.with_timeout(Duration::from_secs(5))
+.with_store_partial_results(true);  // Store detailed results
+
+// Example: Call multiple services, use fastest 3 responses
+let workflow = Workflow::new(store.clone())
+    .register(DataState::Start, PrepareRequest)
+    .register_split(
+        DataState::ParallelProcessing,
+        vec![
+            ServiceCall::new("fast-service"),
+            ServiceCall::new("medium-service"),
+            ServiceCall::new("slow-service"),
+            ServiceCall::new("backup-service"),
+        ],
+        join_config
+    )
+    .register(DataState::Aggregate, MergePartialResults)
+    .add_exit_state(DataState::Complete);
+
+// After execution, check stored results
+let split_result: SplitResult<DataState> = store.get("split_results")?;
+println!("Successes: {}", split_result.successes.len());
+println!("Errors: {}", split_result.errors.len());
+println!("Cancelled: {}", split_result.cancelled.len());
+</code></pre>
+
+        <h3>6. PartialTimeout Strategy - Deadline-Based Completion</h3>
+        <p>Accepts whatever completes before timeout expires. Proceeds with available results.</p>
+        
+        <div class="mermaid">
+            sequenceDiagram
+                participant W as Workflow
+                participant T1 as Task 1
+                participant T2 as Task 2
+                participant T3 as Task 3
+                participant T4 as Task 4
+                W->>T1: Start
+                W->>T2: Start
+                W->>T3: Start
+                W->>T4: Start
+                T1-->>W: Complete ✓
+                T3-->>W: Complete ✓
+                Note over W: Timeout Reached
+                W->>T2: Cancel
+                W->>T4: Cancel
+                Note over W: Proceed with 2 results
+        </div>
+
+        <pre><code class="language-rust">// PartialTimeout Strategy: Best for real-time systems with strict SLAs
+let join_config = JoinConfig::new(
+    JoinStrategy::PartialTimeout,  // Must specify timeout
+    DataState::Aggregate
+)
+.with_timeout(Duration::from_millis(500))  // 500ms deadline
+.with_store_partial_results(true);
+
+// Example: Real-time recommendation system with 500ms SLA
+let workflow = Workflow::new(store.clone())
+    .register(DataState::Start, LoadUserContext)
+    .register_split(
+        DataState::ParallelProcessing,
+        vec![
+            RecommendationEngine::new("collaborative"),
+            RecommendationEngine::new("content-based"),
+            RecommendationEngine::new("trending"),
+            RecommendationEngine::new("personalized"),
+        ],
+        join_config
+    )
+    .register(DataState::Aggregate, |store: &MemoryStore| async move {
+        // Aggregate whatever results we got within deadline
+        let split_result: SplitResult<DataState> = store.get("split_results")?;
+        println!("Got {} recommendations within SLA", split_result.successes.len());
+        Ok(TaskResult::Single(DataState::Complete))
+    })
+    .add_exit_state(DataState::Complete);
+</code></pre>
+
+        <h2>Comparison Table</h2>
+        <table style="width: 100%; border-collapse: collapse; margin: 2rem 0; background: var(--card-bg); border-radius: 1rem; overflow: hidden;">
+            <thead>
+                <tr style="background: rgba(255,255,255,0.05); text-align: left;">
+                    <th style="padding: 1rem;">Strategy</th>
+                    <th style="padding: 1rem;">Trigger Condition</th>
+                    <th style="padding: 1rem;">Cancels Others</th>
+                    <th style="padding: 1rem;">Best Use Case</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>All</code></td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">All tasks succeed</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">No</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Complete data required</td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>Any</code></td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">First success</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Yes</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Redundant API calls</td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>Quorum(n)</code></td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">N tasks succeed</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Yes</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Distributed consensus</td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>Percentage(p)</code></td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">P% succeed</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Yes</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Batch processing</td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>PartialResults(n)</code></td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">N tasks succeed</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Yes</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Latency optimization</td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>PartialTimeout</code></td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Timeout reached</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Yes</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Strict SLA requirements</td>
+                </tr>
+            </tbody>
+        </table>
+    </main>
+</body>
+</html>

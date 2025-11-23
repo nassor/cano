@@ -281,9 +281,7 @@ async fn run_negotiation_workflow() -> Result<(), CanoError> {
     let store = MemoryStore::new();
 
     // Create a Workflow that handles the negotiation process
-    let mut workflow = Workflow::new(NegotiationAction::StartSelling);
-
-    workflow
+    let workflow = Workflow::new(store.clone())
         .register(NegotiationAction::StartSelling, SellerNode::new())
         .register(NegotiationAction::BuyerEvaluate, BuyerNode::new())
         .add_exit_states(vec![
@@ -293,7 +291,7 @@ async fn run_negotiation_workflow() -> Result<(), CanoError> {
         ]);
 
     // Execute the negotiation workflow
-    match workflow.orchestrate(&store).await {
+    match workflow.orchestrate(NegotiationAction::StartSelling).await {
         Ok(final_state) => {
             println!("{}", "=".repeat(50));
 

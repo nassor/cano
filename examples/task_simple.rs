@@ -35,7 +35,7 @@ struct GeneratorTask;
 
 #[async_trait]
 impl Task<Action> for GeneratorTask {
-    async fn run(&self, store: &MemoryStore) -> CanoResult<Action> {
+    async fn run(&self, store: &MemoryStore) -> CanoResult<TaskResult<Action>> {
         println!("🎲 GeneratorTask: Creating random numbers...");
 
         // Generate random numbers (combining what would be prep + exec in a Node)
@@ -51,7 +51,7 @@ impl Task<Action> for GeneratorTask {
         store.put("even_numbers", even_numbers)?;
         println!("✅ GeneratorTask: Stored even numbers, moving to Count\n");
 
-        Ok(Action::Count)
+        Ok(TaskResult::Single(Action::Count))
     }
 }
 
@@ -60,7 +60,7 @@ struct CounterTask;
 
 #[async_trait]
 impl Task<Action> for CounterTask {
-    async fn run(&self, store: &MemoryStore) -> CanoResult<Action> {
+    async fn run(&self, store: &MemoryStore) -> CanoResult<TaskResult<Action>> {
         println!("🔢 CounterTask: Counting numbers...");
 
         // Get the numbers and count them (all in one method)
@@ -75,7 +75,7 @@ impl Task<Action> for CounterTask {
         store.put("sum", sum)?;
         println!("✅ CounterTask: Processing complete!\n");
 
-        Ok(Action::Complete)
+        Ok(TaskResult::Single(Action::Complete))
     }
 }
 
@@ -83,20 +83,16 @@ impl Task<Action> for CounterTask {
 async fn main() -> CanoResult<()> {
     println!("🚀 Starting Task-based workflow example\n");
 
-    // Create workflow with initial state
-    let mut workflow = Workflow::new(Action::Generate);
+    let store = MemoryStore::new();
 
-    // Register tasks using the unified .register() method
-    // (Same method works for both Tasks and Nodes!)
-    workflow.register(Action::Generate, GeneratorTask);
-    workflow.register(Action::Count, CounterTask);
-
-    // Set exit state
-    workflow.add_exit_states(vec![Action::Complete]);
+    // Create workflow with store
+    let workflow = Workflow::new(store.clone())
+        .register(Action::Generate, GeneratorTask)
+        .register(Action::Count, CounterTask)
+        .add_exit_states(vec![Action::Complete]);
 
     // Run the workflow
-    let store = MemoryStore::new();
-    match workflow.orchestrate(&store).await {
+    match workflow.orchestrate(Action::Generate).await {
         Ok(_final_state) => {
             println!("🎉 Workflow completed!");
             println!("📊 Final Results:");

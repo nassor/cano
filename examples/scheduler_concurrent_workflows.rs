@@ -142,22 +142,20 @@ async fn main() -> CanoResult<()> {
     println!("=================================");
     println!("This demo shows multiple instances of the same workflow running concurrently.");
     println!("Watch for overlapping execution messages and active instance counts!\n");
+    let store = MemoryStore::new();
 
     // Create a long-running workflow (5 seconds execution time)
-    let mut long_task_flow = Workflow::new(TaskState::Execute);
-    long_task_flow
+    let long_task_flow = Workflow::new(store.clone())
         .register(TaskState::Execute, LongRunningTask::new("LongTask", 7000))
         .add_exit_states(vec![TaskState::Complete]);
 
     // Create a medium-running workflow (3 seconds execution time)
-    let mut medium_task_flow = Workflow::new(TaskState::Execute);
-    medium_task_flow
+    let medium_task_flow = Workflow::new(store.clone())
         .register(TaskState::Execute, LongRunningTask::new("MediumTask", 3000))
         .add_exit_states(vec![TaskState::Complete]);
 
     // Create a fast-running workflow (500ms execution time)
-    let mut fast_task_flow = Workflow::new(TaskState::Execute);
-    fast_task_flow
+    let fast_task_flow = Workflow::new(store.clone())
         .register(TaskState::Execute, LongRunningTask::new("FastTask", 500))
         .add_exit_states(vec![TaskState::Complete]);
 
@@ -165,11 +163,16 @@ async fn main() -> CanoResult<()> {
     let mut scheduler = Scheduler::new();
 
     // Long task every 2 seconds (7s execution, 2s interval = lots of overlap)
-    scheduler.every_seconds("long_task", long_task_flow, 2)?;
+    scheduler.every_seconds("long_task", long_task_flow, TaskState::Execute, 2)?;
     // Medium task every 1 second (3s execution, 1s interval = massive overlap)
-    scheduler.every_seconds("medium_task", medium_task_flow, 1)?;
+    scheduler.every_seconds("medium_task", medium_task_flow, TaskState::Execute, 1)?;
     // Fast task every 100ms (500ms execution, 100ms interval = extreme overlap)
-    scheduler.every("fast_task", fast_task_flow, Duration::from_millis(100))?;
+    scheduler.every(
+        "fast_task",
+        fast_task_flow,
+        TaskState::Execute,
+        Duration::from_millis(100),
+    )?;
 
     println!("📅 Scheduled flows:");
     println!("  • Long Task: Every 2 seconds (7 second execution time)");
@@ -177,8 +180,9 @@ async fn main() -> CanoResult<()> {
     println!("  • Fast Task: Every 100ms (500ms execution time)");
     println!("  → This creates intentional overlapping executions!\n");
 
-    // Start the scheduler
-    scheduler.start().await?;
+    // Start the scheduler in background
+    let mut scheduler_handle = scheduler.clone();
+    let scheduler_task = tokio::spawn(async move { scheduler_handle.start().await });
 
     // Run for 10 seconds to let tasks start, then stop scheduling new tasks
     println!("🏃 Running for 10 seconds to start tasks...\n");
@@ -224,6 +228,11 @@ async fn main() -> CanoResult<()> {
     println!("   • No blocking occurred between instances");
     println!("   • Each instance had independent execution context");
     println!("   • Demo waited for ALL tasks to complete before finishing");
+
+    // Wait for scheduler task to finish
+    let _ = scheduler_task
+        .await
+        .map_err(|e| CanoError::task_execution(format!("Scheduler task failed: {}", e)))?;
 
     Ok(())
 }

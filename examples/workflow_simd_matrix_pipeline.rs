@@ -37,7 +37,7 @@
 //! ## Usage
 //!
 //! ```bash
-//! cargo run --example simd_matrix_pipeline
+//! cargo run --example workflow_simd_matrix_pipeline
 //! ```
 //!
 //! The example generates 20 matrices of size 64x64, processes them through the pipeline,
@@ -524,26 +524,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let start_time = Instant::now();
 
-    // Create the workflow with SIMD-accelerated nodes
-    let mut workflow = Workflow::new(PipelineState::Generate);
+    let store = MemoryStore::default();
 
-    // Register all pipeline nodes
-    workflow
+    // Create the workflow with SIMD-accelerated nodes using new API
+    let workflow = Workflow::new(store.clone())
         .register(PipelineState::Generate, MatrixGenerator::new(64, 20)) // 64x64 matrices, 20 of them
         .register(PipelineState::Multiply, SimdMatrixMultiplier)
         .register(PipelineState::Transform, SimdMatrixTransformer::new(1.5))
         .register(PipelineState::Statistics, SimdStatisticsCalculator)
         .add_exit_states(vec![PipelineState::Complete, PipelineState::Error]);
 
-    println!(
-        "🔧 Pipeline configured with {} nodes",
-        workflow.state_tasks.len()
-    );
+    println!("🔧 Pipeline configured with nodes");
     println!("Pipeline: Generate → Multiply → Transform → Statistics → Complete\n");
 
     // Execute the workflow
-    let store = MemoryStore::default();
-    let _final_state = workflow.orchestrate(&store).await?;
+    let _final_state = workflow.orchestrate(PipelineState::Generate).await?;
 
     let total_duration = start_time.elapsed();
     println!("\n🎉 SIMD Matrix Processing Pipeline completed!");

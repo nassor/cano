@@ -1,11 +1,21 @@
 #![cfg(feature = "scheduler")]
-//! # Enhanced Scheduler with Concurrent Workflows Example
+//! # Scheduler with Mixed Workflows Example
 //!
-//! This example demonstrates the enhanced scheduler that supports both regular
-//! and concurrent workflows with various scheduling strategies.
+//! This example demonstrates the scheduler with various scheduling strategies:
+//! 1. Manual trigger workflows
+//! 2. Time-based recurring workflows (every N seconds)
+//! 3. Multiple workflows running concurrently
+//! 4. Status monitoring and workflow management
+//!
+//! For concurrent task execution within a workflow, see the workflow_concurrent.rs example
+//! which demonstrates the split/join pattern for parallel processing.
+//!
+//! Run with:
+//! ```bash
+//! cargo run --example scheduler_mixed_workflows --features scheduler
+//! ```
 
 use cano::prelude::*;
-use cano::scheduler::Status;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -14,8 +24,6 @@ use std::time::Duration;
 enum TaskState {
     Start,
     Complete,
-    #[allow(dead_code)]
-    Error,
 }
 
 #[derive(Clone)]
@@ -32,7 +40,6 @@ impl SimpleTask {
         }
     }
 
-    #[allow(dead_code)]
     fn get_execution_count(&self) -> u32 {
         self.execution_count.load(Ordering::SeqCst)
     }
@@ -68,64 +75,48 @@ impl Node<TaskState> for SimpleTask {
 
 #[tokio::main]
 async fn main() -> CanoResult<()> {
-    println!("🚀 Enhanced Scheduler with Concurrent Workflows");
-    println!("===============================================\n");
+    println!("🚀 Scheduler with Mixed Workflows");
+    println!("==================================\n");
 
     let mut scheduler = Scheduler::new();
+    let store = MemoryStore::new();
 
-    // Example 1: Regular workflows
-    println!("📊 Setting up Regular Workflows");
+    // Example 1: Manual workflows
+    println!("📊 Setting up Manual Workflows");
     println!("-------------------------------");
 
-    // Create regular workflows
-    let mut regular_workflow1 = Workflow::new(TaskState::Start);
-    regular_workflow1.add_exit_state(TaskState::Complete);
-    regular_workflow1.register(TaskState::Start, SimpleTask::new("RegularTask1"));
+    let task1 = SimpleTask::new("ManualTask1");
+    let task1_clone = task1.clone();
 
-    let mut regular_workflow2 = Workflow::new(TaskState::Start);
-    regular_workflow2.add_exit_state(TaskState::Complete);
-    regular_workflow2.register(TaskState::Start, SimpleTask::new("RegularTask2"));
+    let workflow1 = Workflow::new(store.clone())
+        .register(TaskState::Start, task1)
+        .add_exit_state(TaskState::Complete);
 
-    // Schedule regular workflows
-    scheduler.manual("regular_task_1", regular_workflow1)?;
-    scheduler.every_seconds("regular_task_2", regular_workflow2, 2)?;
+    scheduler.manual("manual_task_1", workflow1, TaskState::Start)?;
+    println!("✅ Added manual workflow");
 
-    println!("✅ Added 2 regular workflows");
-
-    // Example 2: Concurrent workflows
-    println!("\n📊 Setting up Concurrent Workflows");
+    // Example 2: Scheduled workflows
+    println!("\n📊 Setting up Scheduled Workflows");
     println!("----------------------------------");
 
-    // Create concurrent workflow directly
-    let mut concurrent_workflow = ConcurrentWorkflow::new(TaskState::Start);
-    concurrent_workflow.add_exit_state(TaskState::Complete);
+    let task2 = SimpleTask::new("ScheduledTask2");
+    let task2_clone = task2.clone();
 
-    concurrent_workflow.register(TaskState::Start, SimpleTask::new("ConcurrentTask"));
+    let workflow2 = Workflow::new(store.clone())
+        .register(TaskState::Start, task2)
+        .add_exit_state(TaskState::Complete);
 
-    // Schedule concurrent workflows with different strategies
-    scheduler.manual_concurrent(
-        "concurrent_batch_1",
-        concurrent_workflow.clone(),
-        3, // 3 instances
-        WaitStrategy::WaitForever,
-    )?;
+    scheduler.every_seconds("scheduled_task_2", workflow2, TaskState::Start, 2)?;
 
-    scheduler.every_seconds_concurrent(
-        "concurrent_batch_2",
-        concurrent_workflow.clone(),
-        5,                             // every 5 seconds
-        5,                             // 5 instances
-        WaitStrategy::WaitForQuota(3), // wait for 3 to complete
-    )?;
+    let task3 = SimpleTask::new("ScheduledTask3");
+    let task3_clone = task3.clone();
 
-    scheduler.manual_concurrent(
-        "concurrent_batch_3",
-        concurrent_workflow,
-        4,                                                      // 4 instances
-        WaitStrategy::WaitDuration(Duration::from_millis(200)), // 200ms timeout
-    )?;
+    let workflow3 = Workflow::new(store.clone())
+        .register(TaskState::Start, task3)
+        .add_exit_state(TaskState::Complete);
 
-    println!("✅ Added 3 concurrent workflows");
+    scheduler.every_seconds("scheduled_task_3", workflow3, TaskState::Start, 3)?;
+    println!("✅ Added 2 scheduled workflows");
 
     // Example 3: List all workflows
     println!("\n📊 Workflow Summary");
@@ -136,92 +127,55 @@ async fn main() -> CanoResult<()> {
         println!("ID: {}", workflow.id);
         println!("  Status: {:?}", workflow.status);
         println!("  Run count: {}", workflow.run_count);
-        if let Some(instances) = workflow.concurrent_instances {
-            println!("  Concurrent instances: {instances}");
-        }
         println!("  Last run: {:?}", workflow.last_run);
         println!();
     }
 
-    // Example 4: Start scheduler and trigger manual workflows
-    println!("📊 Starting Scheduler and Triggering Manual Workflows");
-    println!("-----------------------------------------------------");
+    // Example 4: Start scheduler
+    println!("📊 Starting Scheduler");
+    println!("---------------------");
 
-    scheduler.start().await?;
-
-    // Trigger manual workflows
-    println!("🔄 Triggering regular manual workflow...");
-    scheduler.trigger("regular_task_1").await?;
+    let scheduler_clone = scheduler.clone();
+    tokio::spawn(async move {
+        scheduler.start().await.expect("Scheduler failed");
+    });
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    println!("🔄 Triggering concurrent manual workflow (WaitForever)...");
-    scheduler.trigger("concurrent_batch_1").await?;
+    // Example 5: Trigger manual workflow
+    println!("🔄 Triggering manual workflow...");
+    scheduler_clone.trigger("manual_task_1").await?;
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
-    println!("🔄 Triggering concurrent manual workflow (WaitDuration)...");
-    scheduler.trigger("concurrent_batch_3").await?;
-
-    tokio::time::sleep(Duration::from_millis(300)).await;
-
-    // Example 5: Check status of workflows
-    println!("\n📊 Workflow Status After Execution");
-    println!("----------------------------------");
-
-    for workflow_id in ["regular_task_1", "concurrent_batch_1", "concurrent_batch_3"] {
-        if let Some(info) = scheduler.status(workflow_id).await {
-            println!("Workflow: {}", info.id);
-            println!("  Status: {:?}", info.status);
-            println!("  Run count: {}", info.run_count);
-            if let Status::ConcurrentCompleted(status) = &info.status {
-                println!("  Total workflows: {}", status.total_workflows);
-                println!("  Completed: {}", status.completed);
-                println!("  Failed: {}", status.failed);
-                println!("  Cancelled: {}", status.cancelled);
-                println!("  Duration: {:?}", status.duration);
-            }
-            println!();
-        }
-    }
-
-    // Example 6: Running workflows tracking
-    println!("📊 Scheduler Monitoring");
-    println!("----------------------");
-
-    println!(
-        "Has running workflows: {}",
-        scheduler.has_running_flows().await
-    );
-    println!(
-        "Running workflow count: {}",
-        scheduler.running_count().await
-    );
-
-    // Wait a bit for any scheduled workflows
+    // Example 6: Wait for scheduled workflows to run
     println!("\n⏳ Waiting for scheduled workflows to run...");
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
 
-    // Example 7: Stop scheduler gracefully
-    println!("\n📊 Stopping Scheduler");
+    // Example 7: Check execution counts
+    println!("\n📊 Execution Summary");
     println!("--------------------");
+    println!(
+        "ManualTask1 executed: {} times",
+        task1_clone.get_execution_count()
+    );
+    println!(
+        "ScheduledTask2 executed: {} times (every 2s)",
+        task2_clone.get_execution_count()
+    );
+    println!(
+        "ScheduledTask3 executed: {} times (every 3s)",
+        task3_clone.get_execution_count()
+    );
 
-    scheduler.stop().await?;
-    println!("✅ Scheduler stopped gracefully");
+    // Example 8: Stop scheduler gracefully
+    println!("\n🛑 Stopping scheduler...");
+    scheduler_clone.stop().await?;
+    println!("✅ Scheduler stopped successfully");
 
-    // Final status
-    let final_workflows = scheduler.list().await;
-    println!("\n📊 Final Workflow Summary");
-    println!("-------------------------");
-
-    for workflow in &final_workflows {
-        println!(
-            "ID: {} - Runs: {} - Status: {:?}",
-            workflow.id, workflow.run_count, workflow.status
-        );
-    }
-
-    println!("\n✅ Enhanced Scheduler example completed successfully!");
+    println!("\n✅ Scheduler example completed successfully!");
+    println!("\n💡 Tip: For concurrent task execution within a workflow,");
+    println!("   see examples/workflow_concurrent.rs for split/join patterns");
 
     Ok(())
 }

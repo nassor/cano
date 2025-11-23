@@ -317,19 +317,18 @@ async fn main() -> Result<(), CanoError> {
     let actor1 = Actor1Node::new().await?;
     let actor2 = Actor2Node::new().await?;
 
-    // Setup workflow
-    let mut workflow = Workflow::new(ConversationState::Start);
-    workflow
+    let store = MemoryStore::new();
+
+    // Setup workflow with new API
+    let workflow = Workflow::new(store.clone())
         .register(ConversationState::Start, actor1.clone())
         .register(ConversationState::Actor1Turn, actor1)
         .register(ConversationState::Actor2Turn, actor2)
         .add_exit_states(vec![ConversationState::End, ConversationState::Error]);
 
-    let store = MemoryStore::new();
-
     println!("🚀 Starting improvised story...\n");
 
-    let final_state = workflow.orchestrate(&store).await?;
+    let final_state = workflow.orchestrate(ConversationState::Start).await?;
 
     println!("\n🎯 Story completed with state: {final_state:?}");
 

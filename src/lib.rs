@@ -1,7 +1,12 @@
-//! # Cano: Simple & Fast Async Workflows in Rust
+//! # Cano: Type-Safe Async Workflow Engine
 //!
-//! Cano is an async workflow engine that makes complex data processing simple. Whether you need
-//! to process one item or millions, Cano provides a clean API with minimal overhead for maximum performance.
+//! Cano is a high-performance orchestration engine designed for building resilient, self-healing systems in Rust.
+//! Unlike simple task queues, Cano uses **Finite State Machines (FSM)** to define strict, type-safe transitions between processing steps.
+//!
+//! It excels at managing complex lifecycles where state transitions matter:
+//! *   **Data Pipelines**: ETL jobs with parallel processing (Split/Join) and aggregation.
+//! *   **AI Agents**: Multi-step inference chains with shared context and memory.
+//! *   **Background Systems**: Scheduled maintenance, periodic reporting, and distributed cron jobs.
 //!
 //! ## 🚀 Quick Start
 //!
@@ -11,6 +16,12 @@
 //!
 //! ## 🎯 Core Concepts
 //!
+//! ### Finite State Machines (FSM)
+//!
+//! Workflows in Cano are state machines. You define your states as an `enum`, and register
+//! handlers ([`Task`] or [`Node`]) for each state. The engine ensures type safety and
+//! manages transitions between states.
+//!
 //! ### Tasks & Nodes - Your Processing Units
 //!
 //! **Two approaches for implementing processing logic:**
@@ -19,18 +30,16 @@
 //!
 //! **Every [`Node`] automatically implements [`Task`]**, providing seamless interoperability and upgrade paths.
 //!
+//! ### Parallel Execution (Split/Join)
+//!
+//! Run tasks concurrently and join results with strategies like `All`, `Any`, `Quorum`, or `PartialResults`.
+//! This allows for powerful patterns like scatter-gather, redundant execution, and latency optimization.
+//!
 //! ### Store - Share Data Between Processing Units
 //!
 //! Use [`MemoryStore`] to pass data around your workflow. Store different types of data
 //! using key-value pairs, and retrieve them later with type safety. All values are
 //! wrapped in `std::borrow::Cow` for memory efficiency.
-//!
-//! ### Custom Logic - Your Business Implementation
-//!
-//! **Choose the right approach for your needs:**
-//! - Implement the [`Task`] trait for simple, single-method processing
-//! - Implement the [`Node`] trait for structured processing with three phases:
-//!   Prep (load data, validate inputs), Exec (core processing), and Post (store results, determine next action)
 //!
 //! ## 🏗️ Processing Lifecycle
 //!
@@ -56,7 +65,7 @@
 //!   - Fluent configuration API via [`TaskConfig`]
 //!
 //! - **[`workflow`]**: Core workflow orchestration
-//!   - [`Workflow`] for state machine-based workflows
+//!   - [`Workflow`] for state machine-based workflows with Split/Join support
 //!
 //! - **[`scheduler`]** (optional `scheduler` feature): Advanced workflow scheduling
 //!   - [`Scheduler`] for managing multiple flows with cron support
@@ -101,11 +110,8 @@ mod tracing_tests;
 pub use error::{CanoError, CanoResult};
 pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node};
 pub use store::{KeyValueStore, MemoryStore};
-pub use task::{DefaultTaskParams, DynTask, RetryMode, Task, TaskConfig, TaskObject};
-pub use workflow::{
-    ConcurrentWorkflow, ConcurrentWorkflowBuilder, ConcurrentWorkflowStatus, WaitStrategy,
-    Workflow, WorkflowBuilder, WorkflowResult,
-};
+pub use task::{DefaultTaskParams, DynTask, RetryMode, Task, TaskConfig, TaskObject, TaskResult};
+pub use workflow::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult, StateEntry, Workflow};
 
 #[cfg(feature = "scheduler")]
 pub use scheduler::{FlowInfo, Scheduler};
@@ -117,10 +123,9 @@ pub mod prelude {
     //! Use `use cano::prelude::*;` to import the most commonly used types and traits.
 
     pub use crate::{
-        CanoError, CanoResult, ConcurrentWorkflow, ConcurrentWorkflowBuilder,
-        ConcurrentWorkflowStatus, DefaultNodeResult, DefaultParams, DefaultTaskParams,
-        KeyValueStore, MemoryStore, Node, RetryMode, Task, TaskConfig, TaskObject, WaitStrategy,
-        Workflow, WorkflowBuilder, WorkflowResult,
+        CanoError, CanoResult, DefaultNodeResult, DefaultParams, DefaultTaskParams, JoinConfig,
+        JoinStrategy, KeyValueStore, MemoryStore, Node, RetryMode, SplitResult, SplitTaskResult,
+        StateEntry, Task, TaskConfig, TaskObject, TaskResult, Workflow,
     };
 
     #[cfg(feature = "scheduler")]

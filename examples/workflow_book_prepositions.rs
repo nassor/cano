@@ -594,10 +594,7 @@ async fn run_workflow() -> Result<(), CanoError> {
     let store = MemoryStore::new();
 
     // Create a Workflow that handles all three different node types
-    let mut workflow = Workflow::new(BookPrepositionAction::Download);
-
-    // Register different node types for each phase
-    workflow
+    let workflow = Workflow::new(store.clone())
         .register(BookPrepositionAction::Download, BookDownloaderNode::new())
         .register(BookPrepositionAction::Analyze, PrepositionNode::new())
         .register(
@@ -615,7 +612,7 @@ async fn run_workflow() -> Result<(), CanoError> {
     println!("  • BookRankingByPrepositionNode (Ranking phase)");
 
     // Execute the entire workflow using Workflow orchestration
-    match workflow.orchestrate(&store).await {
+    match workflow.orchestrate(BookPrepositionAction::Download).await {
         Ok(final_state) => {
             match final_state {
                 BookPrepositionAction::Complete => {

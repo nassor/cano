@@ -233,24 +233,22 @@ async fn main() -> CanoResult<()> {
     println!("🚀 Starting Scheduler Scheduling Example");
     println!("=====================================");
 
+    let store = MemoryStore::new();
+
     // Create flows
-    let mut hourly_report_flow = Workflow::new(WorkflowAction::Start);
-    hourly_report_flow
+    let hourly_report_flow = Workflow::new(store.clone())
         .register(WorkflowAction::Start, ReportNode::new("Hourly"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
-    let mut cleanup_flow = Workflow::new(WorkflowAction::Start);
-    cleanup_flow
+    let cleanup_flow = Workflow::new(store.clone())
         .register(WorkflowAction::Start, CleanupNode::new("Temporary"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
-    let mut manual_flow = Workflow::new(WorkflowAction::Start);
-    manual_flow
+    let manual_flow = Workflow::new(store.clone())
         .register(WorkflowAction::Start, ManualTaskNode::new("Data Migration"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
-    let mut setup_flow = Workflow::new(WorkflowAction::Start);
-    setup_flow
+    let setup_flow = Workflow::new(store.clone())
         .register(WorkflowAction::Start, SetupNode::new("System"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
@@ -258,13 +256,18 @@ async fn main() -> CanoResult<()> {
     let mut scheduler = Scheduler::new();
 
     // Run hourly report every 5 seconds for demo to see concurrent executions
-    scheduler.every_seconds("hourly_report", hourly_report_flow, 5)?;
+    scheduler.every_seconds(
+        "hourly_report",
+        hourly_report_flow,
+        WorkflowAction::Start,
+        5,
+    )?;
     // Run cleanup every 3 seconds for concurrent demo
-    scheduler.every_seconds("data_cleanup", cleanup_flow, 3)?;
+    scheduler.every_seconds("data_cleanup", cleanup_flow, WorkflowAction::Start, 3)?;
     // Manual trigger only
-    scheduler.manual("manual_migration", manual_flow)?;
+    scheduler.manual("manual_migration", manual_flow, WorkflowAction::Start)?;
     // System setup
-    scheduler.manual("system_setup", setup_flow)?;
+    scheduler.manual("system_setup", setup_flow, WorkflowAction::Start)?;
 
     println!("📅 Configured flows:");
     println!("  • Hourly Report: Every 5 seconds");
@@ -273,9 +276,10 @@ async fn main() -> CanoResult<()> {
     println!("  • System Setup: Manual trigger only");
     println!();
 
-    // Start the scheduler
+    // Start the scheduler in the background
     println!("▶️  Starting scheduler system...");
-    scheduler.start().await?;
+    let mut scheduler_handle = scheduler.clone();
+    let scheduler_task = tokio::spawn(async move { scheduler_handle.start().await });
 
     // Wait a bit and check workflow status
     sleep(Duration::from_secs(2)).await;
@@ -319,6 +323,11 @@ async fn main() -> CanoResult<()> {
     // Stop the scheduler
     println!("\n⏹️  Stopping scheduler...");
     scheduler.stop().await?;
+
+    // Wait for scheduler task to finish
+    let _ = scheduler_task
+        .await
+        .map_err(|e| CanoError::task_execution(format!("Scheduler task failed: {}", e)))?;
 
     println!("✅ Scheduler scheduling example completed!");
     Ok(())

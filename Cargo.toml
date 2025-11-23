@@ -1,9 +1,9 @@
 [package]
 name = "cano"
-version = "0.6.3"
+version = "0.7.0"
 homepage = "https://github.com/nassor/cano"
 edition = "2024"
-description = "Simple & Fast Async Workflows in Rust - Build data processing pipelines with Tasks and Nodes"
+description = "High-performance orchestration engine for building resilient, self-healing systems in Rust. Uses Finite State Machines (FSM) for strict, type-safe transitions."
 license = "MIT"
 repository = "https://github.com/nassor/cano"
 readme = "README.md"
@@ -13,7 +13,7 @@ authors = ["Nassor Frazier-Silva"]
 
 [dependencies]
 async-trait = "0.1"
-tokio = { version = "1.48.0", features = ["macros", "sync", "time", "rt-multi-thread"] }
+tokio = { version = "1.48.0", features = ["macros", "sync", "time", "rt-multi-thread", "signal"] }
 rand = "0.9"
 chrono = { version = "0.4", features = ["serde"], optional = true }
 cron = { version = "0.15", optional = true }
@@ -29,18 +29,14 @@ all = ["scheduler", "tracing"]
 cargo-audit = "0.22.0"
 criterion = { version = "0.7", features = ["html_reports", "async_tokio"] }
 reqwest = { version = "0.12.24", features = ["json"] }
-rig-core = "0.23.1"
-wide = "0.8.2"
+rig-core = "0.24.0"
+wide = "0.8.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 [[example]]
 name = "ai_workflow_yes_and"
 path = "examples/ai_workflow_yes_and.rs"
-
-[[example]]
-name = "workflow_concurrent"
-path = "examples/workflow_concurrent.rs"
 
 [[example]]
 name = "workflow_simple"
@@ -57,15 +53,6 @@ path = "examples/workflow_negotiation.rs"
 [[example]]
 name = "workflow_simd_matrix_pipeline"
 path = "examples/workflow_simd_matrix_pipeline.rs"
-
-[[example]]
-name = "workflow_stack_store"
-path = "examples/workflow_stack_store.rs"
-
-[[example]]
-name = "scheduler_mixed_workflows"
-path = "examples/scheduler_mixed_workflows.rs"
-required-features = ["scheduler"]
 
 [[example]]
 name = "scheduler_scheduling"
@@ -88,6 +75,11 @@ path = "examples/scheduler_graceful_shutdown.rs"
 required-features = ["scheduler"]
 
 [[example]]
+name = "scheduler_mixed_workflows"
+path = "examples/scheduler_mixed_workflows.rs"
+required-features = ["scheduler"]
+
+[[example]]
 name = "scheduler_book_prepositions"
 path = "examples/scheduler_book_prepositions.rs"
 required-features = ["scheduler"]
@@ -96,6 +88,10 @@ required-features = ["scheduler"]
 name = "tracing_demo"
 path = "examples/tracing_demo.rs"
 required-features = ["tracing", "scheduler"]
+
+[[example]]
+name = "workflow_stack_store"
+path = "examples/workflow_stack_store.rs"
 
 [[bench]]
 name = "workflow_performance"
