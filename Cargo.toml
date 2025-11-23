@@ -108,3 +108,7 @@ harness = false
 [[bench]]
 name = "task_performance"
 harness = false
+
+[[bench]]
+name = "cow_performance"
+harness = false

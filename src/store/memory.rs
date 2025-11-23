@@ -22,7 +22,7 @@ use std::sync::{Arc, RwLock};
 #[derive(Default, Clone)]
 pub struct MemoryStore {
     /// Internal HashMap storing the key-value pairs, wrapped in Arc<RwLock<_>> for thread safety
-    data: Arc<RwLock<HashMap<String, Box<dyn std::any::Any + Send + Sync>>>>,
+    data: Arc<RwLock<HashMap<String, Arc<dyn std::any::Any + Send + Sync>>>>,
 }
 
 impl MemoryStore {
@@ -36,6 +36,37 @@ impl MemoryStore {
     pub fn new() -> Self {
         Self {
             data: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Get a shared reference to a value in the store (Zero-Copy)
+    ///
+    /// This method returns an `Arc<T>` pointing to the data in the store.
+    /// This avoids cloning the data, making it much more efficient for large objects.
+    ///
+    /// # Type Parameters
+    /// - `TState`: The expected type of the value
+    ///
+    /// # Arguments
+    /// - `key`: The key to look up
+    ///
+    /// # Returns
+    /// - `Ok(Arc<TState>)` if the key exists and the type matches
+    /// - `Err(StoreError::KeyNotFound)` if the key doesn't exist
+    /// - `Err(StoreError::TypeMismatch)` if the value is not of type `TState`
+    pub fn get_shared<TState: 'static + Send + Sync>(&self, key: &str) -> StoreResult<Arc<TState>> {
+        let data = self
+            .data
+            .read()
+            .map_err(|_| StoreError::lock_error("Failed to acquire read lock on store"))?;
+
+        match data.get(key) {
+            Some(value) => value.clone().downcast::<TState>().map_err(|_| {
+                StoreError::type_mismatch(format!(
+                    "Cannot downcast value for key '{key}' to requested type"
+                ))
+            }),
+            None => Err(StoreError::key_not_found(key)),
         }
     }
 }
@@ -67,7 +98,7 @@ impl KeyValueStore for MemoryStore {
             .write()
             .map_err(|_| StoreError::lock_error("Failed to acquire write lock on store"))?;
 
-        data.insert(key.to_string(), Box::new(value));
+        data.insert(key.to_string(), Arc::new(value));
         Ok(())
     }
 
@@ -92,10 +123,14 @@ impl KeyValueStore for MemoryStore {
             .write()
             .map_err(|_| StoreError::lock_error("Failed to acquire write lock on store"))?;
 
-        if let Some(existing) = data.get_mut(key) {
-            // Try to downcast to Vec<TState> and append
-            if let Some(vec) = existing.downcast_mut::<Vec<TState>>() {
-                vec.push(item);
+        if let Some(existing) = data.get(key) {
+            // Try to downcast to Vec<TState>
+            if let Some(vec) = existing.downcast_ref::<Vec<TState>>() {
+                // Create a new vector with the existing elements + new item
+                // This is "Copy-on-Write" behavior - we create a new version
+                let mut new_vec = vec.clone();
+                new_vec.push(item);
+                data.insert(key.to_string(), Arc::new(new_vec));
                 Ok(())
             } else {
                 // Key exists but is not a Vec<TState>
@@ -103,7 +138,7 @@ impl KeyValueStore for MemoryStore {
             }
         } else {
             // Key doesn't exist, create new Vec<TState> with the item
-            data.insert(key.to_string(), Box::new(vec![item]));
+            data.insert(key.to_string(), Arc::new(vec![item]));
             Ok(())
         }
     }
