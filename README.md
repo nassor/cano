@@ -712,9 +712,39 @@ RUST_LOG=info cargo run --example tracing_demo --features tracing,scheduler
 
 ### Run Examples
 
+The `examples/` directory contains various ready-to-run examples demonstrating Cano's features.
+
+**Core Workflow Patterns:**
+
+| Example | Description |
+|---------|-------------|
+| [`workflow_simple.rs`](examples/workflow_simple.rs) | Basic workflow combining `Task` and `Node` implementations. |
+| [`workflow_split_join.rs`](examples/workflow_split_join.rs) | **Parallel execution** using Split/Join with various strategies (All, Any, Quorum). |
+| [`workflow_partial_results.rs`](examples/workflow_partial_results.rs) | Advanced Split/Join using **Partial Results** to proceed when a threshold is met. |
+| [`workflow_negotiation.rs`](examples/workflow_negotiation.rs) | Complex control flow with inter-node communication and negotiation. |
+| [`workflow_stack_store.rs`](examples/workflow_stack_store.rs) | Demonstrates data sharing using the `MemoryStore`. |
+| [`workflow_book_prepositions.rs`](examples/workflow_book_prepositions.rs) | Real-world text analysis pipeline processing a book. |
+
+**Scheduling & Concurrency:**
+
+| Example | Description | Command |
+|---------|-------------|---------|
+| [`scheduler_scheduling.rs`](examples/scheduler_scheduling.rs) | Basic scheduling patterns (Interval, Cron, Manual). | `cargo run --example scheduler_scheduling --features scheduler` |
+| [`scheduler_concurrent_workflows.rs`](examples/scheduler_concurrent_workflows.rs) | Running **multiple instances** of the same workflow concurrently. | `cargo run --example scheduler_concurrent_workflows --features scheduler` |
+| [`scheduler_mixed_workflows.rs`](examples/scheduler_mixed_workflows.rs) | Mixing different scheduling strategies and workflow types. | `cargo run --example scheduler_mixed_workflows --features scheduler` |
+| [`scheduler_graceful_shutdown.rs`](examples/scheduler_graceful_shutdown.rs) | Handling system signals for **graceful shutdown** of running workflows. | `cargo run --example scheduler_graceful_shutdown --features scheduler` |
+
+**Observability:**
+
+| Example | Description | Command |
+|---------|-------------|---------|
+| [`tracing_demo.rs`](examples/tracing_demo.rs) | Comprehensive **tracing** setup for monitoring workflow execution. | `cargo run --example tracing_demo --features tracing` |
+
+To run any example:
 ```bash
-# Examples directory contains various workflow implementations
 cargo run --example [example_name]
+# Don't forget features if needed:
+cargo run --example scheduler_scheduling --features scheduler
 ```
 
 ### Run Tests and Benchmarks
