@@ -96,7 +96,25 @@ let mut workflow = Workflow::new(MyState::Start)
 
         <h2>Full Example</h2>
         <pre><code class="language-rust">use cano::prelude::*;
-use tracing::{info, info_span, Instrument};
+use async_trait::async_trait;
+use tracing::{info, info_span};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum State {
+    Start,
+    Complete,
+}
+
+#[derive(Clone)]
+struct ProcessOrderNode;
+
+#[async_trait]
+impl Task<State> for ProcessOrderNode {
+    async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+        info!("Processing order...");
+        Ok(TaskResult::Single(State::Complete))
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {

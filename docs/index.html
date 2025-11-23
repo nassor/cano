@@ -104,6 +104,7 @@ enum WorkflowState {
 }
 
 // Simple Task implementation
+#[derive(Clone)]
 struct SimpleTask;
 
 #[async_trait]
@@ -120,14 +121,13 @@ async fn main() -> Result<(), CanoError> {
     let store = MemoryStore::new();
 
     // Create workflow with initial store
-    let mut workflow = Workflow::new(store.clone());
-    
-    workflow.register(WorkflowState::Start, SimpleTask)
-            .register(WorkflowState::Process, |_: &MemoryStore| async {
-                println!("Done!");
-                Ok(TaskResult::Single(WorkflowState::Complete))
-            })
-            .add_exit_state(WorkflowState::Complete);
+    let workflow = Workflow::new(store.clone())
+        .register(WorkflowState::Start, SimpleTask)
+        .register(WorkflowState::Process, |_: &MemoryStore| async {
+            println!("Done!");
+            Ok(TaskResult::Single(WorkflowState::Complete))
+        })
+        .add_exit_state(WorkflowState::Complete);
     
     // Run workflow starting at 'Start' state
     workflow.orchestrate(WorkflowState::Start).await?;

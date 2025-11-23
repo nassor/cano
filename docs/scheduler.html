@@ -92,7 +92,7 @@ impl Task<State> for HealthCheckTask {
         println!("Running health check...");
         
         // Check system health
-        let status = check_system_health().await?;
+        let status = "healthy".to_string();
         store.put("last_health_check", status)?;
         
         Ok(TaskResult::Single(State::Complete))
@@ -148,7 +148,7 @@ impl Node<State> for DailyReportNode {
         println!("📊 Preparing {} report...", self.report_type);
         
         // Load data for report
-        let data = load_daily_metrics().await?;
+        let data = vec!["metric1".to_string(), "metric2".to_string(), "metric3".to_string()];
         store.put("report_start", Utc::now().to_rfc3339())?;
         
         Ok(data)
@@ -223,7 +223,7 @@ impl Task<State> for DataExportTask {
         println!("Starting data export...");
         
         // Export data to CSV
-        let export_path = export_to_csv().await?;
+        let export_path = "/tmp/export.csv".to_string();
         store.put("export_path", export_path)?;
         
         println!("Export completed");
@@ -285,6 +285,50 @@ async fn main() -> Result<(), CanoError> {
     let mut scheduler = Scheduler::new();
     let store = MemoryStore::new();
 
+    // Define simple tasks
+    #[derive(Clone)]
+    struct DataSyncTask;
+
+    #[async_trait]
+    impl Task<State> for DataSyncTask {
+        async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+            println!("Syncing data...");
+            Ok(TaskResult::Single(State::Complete))
+        }
+    }
+    
+    #[derive(Clone)]
+    struct BackupTask;
+    #[async_trait]
+    impl Task<State> for BackupTask {
+        async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+            println!("Running backup...");
+            Ok(TaskResult::Single(State::Complete))
+        }
+    }
+    
+    #[derive(Clone)]
+    struct WeeklyReportTask;
+
+    #[async_trait]
+    impl Task<State> for WeeklyReportTask {
+        async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+            println!("Generating weekly report...");
+            Ok(TaskResult::Single(State::Complete))
+        }
+    }
+    
+    #[derive(Clone)]
+    struct EmergencyExportTask;
+    
+    #[async_trait]
+    impl Task<State> for EmergencyExportTask {
+        async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+            println!("Emergency export...");
+            Ok(TaskResult::Single(State::Complete))
+        }
+    }
+
     // 1. Interval: Data sync every 5 minutes
     let sync_workflow = Workflow::new(store.clone())
         .register(State::Start, DataSyncTask)
@@ -329,10 +373,8 @@ async fn main() -> Result<(), CanoError> {
             println!("{}: {:?} (runs: {})", info.id, info.status, info.run_count);
         }
         
-        // Trigger emergency export if needed
-        if emergency_condition() {
-            scheduler.trigger("emergency_export").await?;
-        }
+        // Example: Trigger emergency export if needed based on some condition
+        // scheduler.trigger("emergency_export").await?;
     }
 }</code></pre>
 
