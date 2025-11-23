@@ -68,6 +68,7 @@ struct Book {
 /// Book analysis result
 #[derive(Debug, Clone)]
 struct BookAnalysis {
+    #[allow(dead_code)]
     book_id: u32,
     title: String,
     batch_name: String,
@@ -112,10 +113,10 @@ impl GlobalResults {
 
 /// Common English prepositions
 const PREPOSITIONS: &[&str] = &[
-    "about", "above", "across", "after", "against", "along", "among", "around",
-    "at", "before", "behind", "below", "beneath", "beside", "between", "beyond",
-    "by", "down", "during", "for", "from", "in", "into", "near", "of", "off",
-    "on", "over", "through", "to", "toward", "under", "up", "with", "within",
+    "about", "above", "across", "after", "against", "along", "among", "around", "at", "before",
+    "behind", "below", "beneath", "beside", "between", "beyond", "by", "down", "during", "for",
+    "from", "in", "into", "near", "of", "off", "on", "over", "through", "to", "toward", "under",
+    "up", "with", "within",
 ];
 
 /// Book metadata (id, title, url)
@@ -334,44 +335,6 @@ impl Task<BookAnalysisState> for DownloadTask {
     }
 }
 
-/// Task: Split downloads across batch books
-#[derive(Clone)]
-struct SplitDownloadTask;
-
-#[async_trait]
-impl Task<BookAnalysisState> for SplitDownloadTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<BookAnalysisState>, CanoError> {
-        let batch_name: String = store.get("batch_name")?;
-        let books: Vec<BookMetadata> = store.get("book_metadata")?;
-
-        println!(
-            "  📤 [{batch_name}] Splitting downloads for {} books",
-            books.len()
-        );
-
-        // Return Split with all download states
-        let states: Vec<BookAnalysisState> = books
-            .iter()
-            .map(|_| BookAnalysisState::AnalyzeBatch)
-            .collect();
-
-        // Store download tasks to be executed
-        let download_tasks: Vec<_> = books
-            .into_iter()
-            .map(|(id, title, url)| DownloadTask {
-                book_id: id,
-                title,
-                url,
-                batch_name: batch_name.clone(),
-            })
-            .collect();
-
-        store.put("download_tasks", download_tasks)?;
-
-        Ok(TaskResult::Split(states))
-    }
-}
-
 /// Task: Analyze a single book (used after split)
 #[derive(Clone)]
 struct AnalyzeTask {
@@ -485,11 +448,8 @@ fn create_batch_workflow(
                     batch_name: batch_name.clone(),
                 })
                 .collect::<Vec<_>>(),
-            JoinConfig::new(
-                JoinStrategy::All,
-                BookAnalysisState::AnalyzeBatch,
-            )
-            .with_timeout(Duration::from_secs(120)),
+            JoinConfig::new(JoinStrategy::All, BookAnalysisState::AnalyzeBatch)
+                .with_timeout(Duration::from_secs(120)),
         )
         // Split: Analyze all books in parallel
         .register_split(
@@ -521,7 +481,9 @@ async fn reduce_global_results(global_results: &GlobalResults) -> Result<(), Can
     let batches = global_results.get_all_batches().await;
 
     if batches.is_empty() {
-        return Err(CanoError::task_execution("No batches completed successfully"));
+        return Err(CanoError::task_execution(
+            "No batches completed successfully",
+        ));
     }
 
     // Collect all book analyses
@@ -539,10 +501,7 @@ async fn reduce_global_results(global_results: &GlobalResults) -> Result<(), Can
     for batch in &batches {
         println!("  Batch: {}", batch.batch_name);
         println!("    • Books processed: {}", batch.total_books);
-        println!(
-            "    • Avg prepositions: {:.1}",
-            batch.avg_prepositions
-        );
+        println!("    • Avg prepositions: {:.1}", batch.avg_prepositions);
         println!(
             "    • Total unique prepositions: {}",
             batch.total_unique_prepositions
@@ -553,12 +512,7 @@ async fn reduce_global_results(global_results: &GlobalResults) -> Result<(), Can
     println!("\n🏆 Global Book Rankings (Top 10):");
     println!("{}", "-".repeat(60));
     for (rank, book) in all_books.iter().take(10).enumerate() {
-        println!(
-            "  #{}: {} [{}]",
-            rank + 1,
-            book.title,
-            book.batch_name
-        );
+        println!("  #{}: {} [{}]", rank + 1, book.title, book.batch_name);
         println!(
             "      {} unique prepositions | {} total words",
             book.preposition_count, book.total_words
@@ -589,8 +543,14 @@ async fn reduce_global_results(global_results: &GlobalResults) -> Result<(), Can
     );
 
     if let (Some(top), Some(bottom)) = (all_books.first(), all_books.last()) {
-        println!("\n🥇 Most diverse: {} ({} prepositions)", top.title, top.preposition_count);
-        println!("🥉 Least diverse: {} ({} prepositions)", bottom.title, bottom.preposition_count);
+        println!(
+            "\n🥇 Most diverse: {} ({} prepositions)",
+            top.title, top.preposition_count
+        );
+        println!(
+            "🥉 Least diverse: {} ({} prepositions)",
+            bottom.title, bottom.preposition_count
+        );
     }
 
     Ok(())
@@ -634,9 +594,7 @@ async fn main() -> Result<(), CanoError> {
 
     // Start scheduler in background
     let mut scheduler_clone = scheduler.clone();
-    let scheduler_handle = tokio::spawn(async move {
-        scheduler_clone.start().await
-    });
+    let scheduler_handle = tokio::spawn(async move { scheduler_clone.start().await });
 
     // Give scheduler time to initialize
     tokio::time::sleep(Duration::from_millis(500)).await;
