@@ -1,7 +1,7 @@
 [package]
 name = "cano"
-version = "0.7.0"
-homepage = "https://github.com/nassor/cano"
+version = "0.7.2"
+homepage = "https://nassor.github.io/cano/"
 edition = "2024"
 description = "High-performance orchestration engine for building resilient, self-healing systems in Rust. Uses Finite State Machines (FSM) for strict, type-safe transitions."
 license = "MIT"

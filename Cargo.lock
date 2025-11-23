@@ -340,7 +340,7 @@ checksum = "276a59bf2b2c967788139340c9f0c5b12d7fd6630315c15c217e559de85d2609"
 
 [[package]]
 name = "cano"
-version = "0.7.0"
+version = "0.7.2"
 dependencies = [
  "async-trait",
  "cargo-audit",
