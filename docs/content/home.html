@@ -1,0 +1,102 @@
+<h1>Cano</h1>
+<p class="subtitle">Type-safe async workflow engine with built-in scheduling, retry logic, and state machine semantics.</p>
+
+<div class="badges" style="margin: 2rem 0; display: flex; gap: 0.5rem;">
+    <img src="https://img.shields.io/crates/v/cano.svg" alt="Crates.io">
+    <img src="https://docs.rs/cano/badge.svg" alt="Documentation">
+    <img src="https://img.shields.io/crates/d/cano.svg" alt="Downloads">
+    <img src="https://img.shields.io/crates/l/cano.svg" alt="License">
+</div>
+
+<p>
+    Cano is a high-performance orchestration engine designed for building resilient, self-healing systems in Rust. 
+    Unlike simple task queues, Cano uses <strong>Finite State Machines (FSM)</strong> to define strict, type-safe transitions between processing steps.
+</p>
+
+<p>
+    It excels at managing complex lifecycles where state transitions matter:
+</p>
+<ul>
+    <li><strong>Data Pipelines</strong>: ETL jobs with parallel processing (Split/Join) and aggregation.</li>
+    <li><strong>AI Agents</strong>: Multi-step inference chains with shared context and memory.</li>
+    <li><strong>Background Systems</strong>: Scheduled maintenance, periodic reporting, and distributed cron jobs.</li>
+</ul>
+
+<h2>Features</h2>
+<div class="card-grid">
+    <div class="card">
+        <h3>Tasks & Nodes</h3>
+        <p>Single <code>Task</code> trait for simple logic, or <code>Node</code> trait for structured three-phase lifecycle.</p>
+    </div>
+    <div class="card">
+        <h3>State Machines</h3>
+        <p>Type-safe enum-driven state transitions with compile-time checking.</p>
+    </div>
+    <div class="card">
+        <h3>Retry Strategies</h3>
+        <p>Fixed delays, exponential backoff with jitter, and custom strategies.</p>
+    </div>
+    <div class="card">
+        <h3>Scheduling</h3>
+        <p>Built-in scheduler with intervals, cron schedules, and manual triggers.</p>
+    </div>
+    <div class="card">
+        <h3>Concurrency</h3>
+        <p>Execute multiple workflow instances in parallel with timeout strategies.</p>
+    </div>
+    <div class="card">
+        <h3>Observability</h3>
+        <p>Comprehensive tracing and observability for workflow execution.</p>
+    </div>
+</div>
+
+<h2>Getting Started</h2>
+<p>Add Cano to your <code>Cargo.toml</code>:</p>
+
+<pre><code class="language-toml">[dependencies]
+cano = { version = "0.7", features = ["all"] }
+tokio = { version = "1", features = ["full"] }</code></pre>
+
+<h3>Basic Example</h3>
+<pre><code class="language-rust">use async_trait::async_trait;
+use cano::prelude::*;
+
+// Define your workflow states
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum WorkflowState {
+    Start,
+    Process,
+    Complete,
+}
+
+// Simple Task implementation
+#[derive(Clone)]
+struct SimpleTask;
+
+#[async_trait]
+impl Task<WorkflowState> for SimpleTask {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<WorkflowState>, CanoError> {
+        println!("Processing task...");
+        // Return the next state wrapped in TaskResult
+        Ok(TaskResult::Single(WorkflowState::Process))
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    let store = MemoryStore::new();
+
+    // Create workflow with initial store
+    let workflow = Workflow::new(store.clone())
+        .register(WorkflowState::Start, SimpleTask)
+        .register(WorkflowState::Process, |_: &MemoryStore| async {
+            println!("Done!");
+            Ok(TaskResult::Single(WorkflowState::Complete))
+        })
+        .add_exit_state(WorkflowState::Complete);
+    
+    // Run workflow starting at 'Start' state
+    workflow.orchestrate(WorkflowState::Start).await?;
+    
+    Ok(())
+}</code></pre>
