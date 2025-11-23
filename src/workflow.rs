@@ -414,13 +414,9 @@ where
 
             // Execute based on entry type
             current_state = match state_entry {
-                StateEntry::Single { task } => {
-                    self.execute_single_task(task, current_state.clone())
-                        .await?
-                }
+                StateEntry::Single { task } => self.execute_single_task(task).await?,
                 StateEntry::Split { tasks, join_config } => {
-                    self.execute_split_join(tasks, join_config, current_state.clone())
-                        .await?
+                    self.execute_split_join(tasks, join_config).await?
                 }
             };
         }
@@ -429,7 +425,6 @@ where
     async fn execute_single_task(
         &self,
         task: Arc<dyn Task<TState, MemoryStore, DefaultTaskParams> + Send + Sync>,
-        _state: TState,
     ) -> Result<TState, CanoError> {
         #[cfg(feature = "tracing")]
         let task_span = info_span!("single_task_execution");
@@ -459,7 +454,6 @@ where
         &self,
         tasks: Vec<Arc<dyn Task<TState, MemoryStore, DefaultTaskParams> + Send + Sync>>,
         join_config: Arc<JoinConfig<TState>>,
-        _state: TState,
     ) -> Result<TState, CanoError> {
         let store = self.store.clone();
         let total_tasks = tasks.len();
