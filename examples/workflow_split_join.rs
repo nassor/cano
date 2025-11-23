@@ -6,6 +6,11 @@
 //! - Use different join strategies (All, Any, Quorum, Percentage)
 //! - Handle timeouts at both workflow and state levels
 //! - Share data between parallel tasks
+//!
+//! Run with:
+//! ```bash
+//! cargo run --example workflow_split_join
+//! ```
 
 use cano::prelude::*;
 use std::time::Duration;

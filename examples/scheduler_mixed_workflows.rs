@@ -9,6 +9,11 @@
 //!
 //! For concurrent task execution within a workflow, see the workflow_concurrent.rs example
 //! which demonstrates the split/join pattern for parallel processing.
+//!
+//! Run with:
+//! ```bash
+//! cargo run --example scheduler_mixed_workflows --features scheduler
+//! ```
 
 use cano::prelude::*;
 use std::sync::Arc;

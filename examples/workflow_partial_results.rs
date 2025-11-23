@@ -1,3 +1,16 @@
+//! # Partial Results Workflow Example
+//!
+//! This example demonstrates how to handle partial results in a split/join workflow.
+//! It shows how to:
+//! - Execute multiple tasks in parallel with different failure rates and latencies
+//! - Use the `PartialResults` join strategy to proceed as soon as a threshold is met
+//! - Handle mixed success/failure results
+//!
+//! Run with:
+//! ```bash
+//! cargo run --example workflow_partial_results
+//! ```
+
 use async_trait::async_trait;
 use cano::prelude::*;
 use std::time::Duration;
