@@ -66,7 +66,10 @@ impl Node<RequestState> for MetricsNode {
     }
 
     async fn exec(&self, (request_id, request_body): Self::PrepResult) -> Self::ExecResult {
-        println!("🔍 MetricsNode: Extracting metrics from request {}", request_id);
+        println!(
+            "🔍 MetricsNode: Extracting metrics from request {}",
+            request_id
+        );
 
         // Simulate processing time
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -80,8 +83,10 @@ impl Node<RequestState> for MetricsNode {
             (0.0, "anonymous".to_string(), 0)
         };
 
-        println!("💰 MetricsNode: Extracted metrics - Revenue: ${:.2}, Customer: {}, Transactions: {}",
-            revenue, customer_id, transaction_count);
+        println!(
+            "💰 MetricsNode: Extracted metrics - Revenue: ${:.2}, Customer: {}, Transactions: {}",
+            revenue, customer_id, transaction_count
+        );
 
         (revenue, customer_id, transaction_count)
     }
@@ -125,7 +130,10 @@ impl Node<RequestState> for ResponseNode {
         Ok((revenue, customer_id, transaction_count, processing_time_ms))
     }
 
-    async fn exec(&self, (revenue, customer_id, transaction_count, processing_time_ms): Self::PrepResult) -> Self::ExecResult {
+    async fn exec(
+        &self,
+        (revenue, customer_id, transaction_count, processing_time_ms): Self::PrepResult,
+    ) -> Self::ExecResult {
         println!("✏️  ResponseNode: Generating response");
 
         // Simulate response generation time
@@ -146,7 +154,10 @@ impl Node<RequestState> for ResponseNode {
             (message, 200u16)
         };
 
-        println!("📝 ResponseNode: Generated response with status {}", status_code);
+        println!(
+            "📝 ResponseNode: Generated response with status {}",
+            status_code
+        );
         (response_message, status_code)
     }
 
@@ -196,9 +207,18 @@ async fn main() -> CanoResult<()> {
         // Display results
         println!("\n📊 Final Results:");
         println!("  State: {:?}", final_state);
-        println!("  Revenue: ${:.2}", store.get::<f64>("revenue").unwrap_or(0.0));
-        println!("  Customer: {}", store.get::<String>("customer_id").unwrap_or_default());
-        println!("  Response: {}", store.get::<String>("response_message").unwrap_or_default());
+        println!(
+            "  Revenue: ${:.2}",
+            store.get::<f64>("revenue").unwrap_or(0.0)
+        );
+        println!(
+            "  Customer: {}",
+            store.get::<String>("customer_id").unwrap_or_default()
+        );
+        println!(
+            "  Response: {}",
+            store.get::<String>("response_message").unwrap_or_default()
+        );
         println!();
     }
 
@@ -226,9 +246,18 @@ async fn main() -> CanoResult<()> {
         // Display results
         println!("\n📊 Final Results:");
         println!("  State: {:?}", final_state);
-        println!("  Revenue: ${:.2}", store.get::<f64>("revenue").unwrap_or(0.0));
-        println!("  Customer: {}", store.get::<String>("customer_id").unwrap_or_default());
-        println!("  Response: {}", store.get::<String>("response_message").unwrap_or_default());
+        println!(
+            "  Revenue: ${:.2}",
+            store.get::<f64>("revenue").unwrap_or(0.0)
+        );
+        println!(
+            "  Customer: {}",
+            store.get::<String>("customer_id").unwrap_or_default()
+        );
+        println!(
+            "  Response: {}",
+            store.get::<String>("response_message").unwrap_or_default()
+        );
         println!();
     }
 
@@ -256,9 +285,18 @@ async fn main() -> CanoResult<()> {
         // Display results
         println!("\n📊 Final Results:");
         println!("  State: {:?}", final_state);
-        println!("  Revenue: ${:.2}", store.get::<f64>("revenue").unwrap_or(0.0));
-        println!("  Customer: {}", store.get::<String>("customer_id").unwrap_or_default());
-        println!("  Response: {}", store.get::<String>("response_message").unwrap_or_default());
+        println!(
+            "  Revenue: ${:.2}",
+            store.get::<f64>("revenue").unwrap_or(0.0)
+        );
+        println!(
+            "  Customer: {}",
+            store.get::<String>("customer_id").unwrap_or_default()
+        );
+        println!(
+            "  Response: {}",
+            store.get::<String>("response_message").unwrap_or_default()
+        );
         println!();
     }
 

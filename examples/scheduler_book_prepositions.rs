@@ -58,10 +58,10 @@ struct BookRanking {
 
 /// Common English prepositions for analysis
 const PREPOSITIONS: &[&str] = &[
-    "about", "above", "across", "after", "against", "along", "among", "around",
-    "at", "before", "behind", "below", "beneath", "beside", "between", "beyond",
-    "by", "down", "during", "for", "from", "in", "inside", "into", "near", "of",
-    "off", "on", "onto", "over", "through", "to", "under", "up", "with", "within",
+    "about", "above", "across", "after", "against", "along", "among", "around", "at", "before",
+    "behind", "below", "beneath", "beside", "between", "beyond", "by", "down", "during", "for",
+    "from", "in", "inside", "into", "near", "of", "off", "on", "onto", "over", "through", "to",
+    "under", "up", "with", "within",
 ];
 
 /// Download Node: Downloads a book from Project Gutenberg
@@ -74,7 +74,11 @@ struct BookDownloadNode {
 
 impl BookDownloadNode {
     fn new(book_id: u32, title: String, url: String) -> Self {
-        Self { book_id, title, url }
+        Self {
+            book_id,
+            title,
+            url,
+        }
     }
 
     async fn download_book(&self) -> Result<Book, String> {
@@ -90,7 +94,11 @@ impl BookDownloadNode {
                 .map_err(|e| format!("Failed to fetch {}: {}", self.url, e))?;
 
             if !response.status().is_success() {
-                return Err(format!("HTTP error for {}: {}", self.title, response.status()));
+                return Err(format!(
+                    "HTTP error for {}: {}",
+                    self.title,
+                    response.status()
+                ));
             }
 
             let content = response
@@ -99,7 +107,10 @@ impl BookDownloadNode {
                 .map_err(|e| format!("Failed to read content for {}: {}", self.title, e))?;
 
             if content.len() < 1000 {
-                return Err(format!("Content too short for {}, might be an error page", self.title));
+                return Err(format!(
+                    "Content too short for {}, might be an error page",
+                    self.title
+                ));
             }
 
             println!("✅ Downloaded: {} ({} chars)", self.title, content.len());
@@ -220,8 +231,9 @@ impl Node<WorkflowPhase> for PrepositionAnalysisNode {
 
     async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
         println!("🔍 Analyzing prepositions in {} books...", prep_res.len());
-        
-        prep_res.iter()
+
+        prep_res
+            .iter()
             .map(Self::analyze_book_prepositions)
             .collect()
     }
@@ -362,7 +374,9 @@ async fn main() -> CanoResult<()> {
         .register(WorkflowPhase::Rank, BookRankingNode)
         .add_exit_state(WorkflowPhase::Complete);
 
-    analysis_workflow.orchestrate(WorkflowPhase::Analyze).await?;
+    analysis_workflow
+        .orchestrate(WorkflowPhase::Analyze)
+        .await?;
 
     println!("\n✅ Book preposition analysis complete!");
     println!("\n💡 Note: For concurrent downloads using split/join patterns,");
