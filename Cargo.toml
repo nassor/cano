@@ -1,9 +1,9 @@
 [package]
 name = "cano"
-version = "0.6.3"
+version = "0.7.0"
 homepage = "https://github.com/nassor/cano"
 edition = "2024"
-description = "Simple & Fast Async Workflows in Rust - Build data processing pipelines with Tasks and Nodes"
+description = "High-performance orchestration engine for building resilient, self-healing systems in Rust. Uses Finite State Machines (FSM) for strict, type-safe transitions."
 license = "MIT"
 repository = "https://github.com/nassor/cano"
 readme = "README.md"
@@ -29,8 +29,8 @@ all = ["scheduler", "tracing"]
 cargo-audit = "0.22.0"
 criterion = { version = "0.7", features = ["html_reports", "async_tokio"] }
 reqwest = { version = "0.12.24", features = ["json"] }
-rig-core = "0.23.1"
-wide = "0.8.2"
+rig-core = "0.24.0"
+wide = "0.8.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 chrono = { version = "0.4", features = ["serde"] }
 

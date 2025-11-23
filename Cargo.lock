@@ -340,7 +340,7 @@ checksum = "276a59bf2b2c967788139340c9f0c5b12d7fd6630315c15c217e559de85d2609"
 
 [[package]]
 name = "cano"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "cargo-audit",
@@ -2977,9 +2977,9 @@ dependencies = [
 
 [[package]]
 name = "rig-core"
-version = "0.23.1"
+version = "0.24.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f9cbb51d97b03fb936caf5c1b05a7229cca0ddd569a0d09d9d2e2be41538fc2"
+checksum = "112bd2e51d1fadd16509be2b3d45bfa197725787627f6addcaffe57294f64e18"
 dependencies = [
  "as-any",
  "async-stream",
@@ -4189,9 +4189,9 @@ dependencies = [
 
 [[package]]
 name = "wide"
-version = "0.8.2"
+version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7966aa4bc1b7ead85802bd41dc4f35e2ef69bc23b6d3c73d3d5df5e643384012"
+checksum = "13ca908d26e4786149c48efcf6c0ea09ab0e06d1fe3c17dc1b4b0f1ca4a7e788"
 dependencies = [
  "bytemuck",
  "safe_arch",
