@@ -40,7 +40,7 @@
         </p>
 
         <h2>Scheduling Strategies</h2>
-        <div class="card-grid">
+        <div class="card-stack">
             <div class="card">
                 <h3>Interval</h3>
                 <p>Run workflows at fixed time intervals.</p>
@@ -126,6 +126,8 @@ async fn main() -> Result<(), CanoError> {
                 section Workflow
                 Run 1 :09, 1h
                 Run 2 :18, 1h
+                %% Add empty space to ensure full visibility
+                Space :20, 0h
         </div>
 
         <pre><code class="language-rust">use cano::prelude::*;

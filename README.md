@@ -1,6 +1,6 @@
 <div align="center">
   <img src="docs/logo.png" alt="Cano Logo" width="200">
-  <h1>Cano: Async Data & AI Workflows in Rust</h1>
+  <h1>Cano: Type-Safe Async Workflow Engine</h1>
 
 [![Crates.io](https://img.shields.io/crates/v/cano.svg)](https://crates.io/crates/cano)
 [![Documentation](https://docs.rs/cano/badge.svg)](https://docs.rs/cano)
@@ -9,13 +9,18 @@
 [![License](https://img.shields.io/crates/l/cano.svg)](https://github.com/nassor/cano/blob/main/LICENSE)
 [![CI](https://github.com/nassor/cano/workflows/CI/badge.svg)](https://github.com/nassor/cano/actions)
 
-<em>**Async workflow engine with built-in scheduling, retry logic, and state machine semantics.**</em>
+<em>**Orchestrate complex async processes with finite state machines, parallel execution, and built-in scheduling.**</em>
 </div>
 
 # Overview
-Cano is an async workflow engine for Rust that manages complex processing through composable workflows. It can be used for data processing, AI inference workflows, and background jobs. Cano provides a simple, fast and type-safe API for defining workflows with retry strategies, scheduling capabilities, and shared state management.
+Cano is a high-performance orchestration engine designed for building resilient, self-healing systems in Rust. Unlike simple task queues, Cano uses **Finite State Machines (FSM)** to define strict, type-safe transitions between processing steps.
 
-The engine is built on three core concepts: **Tasks** and **Nodes** to encapsulate business logic, **Workflows** to manage state transitions, and **Schedulers** to run workflows on a schedule.
+It excels at managing complex lifecycles where state transitions matter:
+*   **Data Pipelines**: ETL jobs with parallel processing (Split/Join) and aggregation.
+*   **AI Agents**: Multi-step inference chains with shared context and memory.
+*   **Background Systems**: Scheduled maintenance, periodic reporting, and distributed cron jobs.
+
+The engine is built on three core concepts: **Tasks/Nodes** for logic, **Workflows** for state transitions, and **Schedulers** for timing.
 
 *The Node API is inspired by the [PocketFlow](https://github.com/The-Pocket/PocketFlow) project, adapted for Rust's async ecosystem.*
 
@@ -30,7 +35,7 @@ The engine is built on three core concepts: **Tasks** and **Nodes** to encapsula
 - **Observability**: Integrated `tracing` support for deep insights into workflow execution.
 - **Zero-Cost Abstractions**: Minimal overhead designed for high-performance async Rust.
 
-## Complex Example: Parallel Processing
+## Simple Example: Parallel Processing
 
 Here is a real-world example showing how to split execution into parallel tasks and join them back together.
 

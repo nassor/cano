@@ -133,6 +133,13 @@ a:hover {
     margin: 2rem 0;
 }
 
+.card-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+    margin: 2rem 0;
+}
+
 .card {
     background-color: var(--card-bg);
     padding: 2rem;
@@ -152,9 +159,7 @@ a:hover {
 
 /* Code Blocks */
 pre {
-    background-color: var(--code-bg) !important;
     border-radius: 0.75rem;
-    padding: 1.5rem !important;
     margin: 1.5rem 0 !important;
     border: 1px solid var(--border-color);
     overflow-x: auto;
@@ -178,8 +183,7 @@ code {
     padding: 2rem;
     border-radius: 1rem;
     margin: 2rem 0;
-    display: flex;
-    justify-content: center;
+    text-align: center;
 }
 
 /* Mobile Toggle */
