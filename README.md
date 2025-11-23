@@ -22,8 +22,6 @@ It excels at managing complex lifecycles where state transitions matter:
 
 The engine is built on three core concepts: **Tasks/Nodes** for logic, **Workflows** for state transitions, and **Schedulers** for timing.
 
-*The Node API is inspired by the [PocketFlow](https://github.com/The-Pocket/PocketFlow) project, adapted for Rust's async ecosystem.*
-
 ## Features
 
 - **Type-Safe State Machines**: Enum-driven transitions with compile-time guarantees.
