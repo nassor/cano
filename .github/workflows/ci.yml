@@ -17,7 +17,7 @@ jobs:
       matrix:
         rust:
           - stable
-          - 1.82.0  # Rust 2024 edition minimum version
+          - 1.89.0  # Rust minimum version
     steps:
     - uses: actions/checkout@v4
     
