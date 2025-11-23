@@ -959,7 +959,8 @@ async fn main() -> Result<(), CanoError> {
             graph TB
                 Start[Ad Request Received] --> Validate[Validate Request]
                 Validate -->|Valid| Split1[SPLIT: Context Gathering]
-                Validate -->|Invalid| Split5[SPLIT: Error Tracking]
+                Validate -->|Invalid| Invalid[Invalid Response]
+                Invalid --> Complete
                 
                 subgraph "Split 1: Context Gathering - All Strategy"
                     Split1 --> User[Fetch User Profile]
@@ -972,7 +973,7 @@ async fn main() -> Result<(), CanoError> {
                 Device --> Join1
                 
                 Join1 -->|Success| Split2[SPLIT: Bid Requests]
-                Join1 -.->|Timeout/Error| NoFill[No Fill Response]
+                Join1 -.->|Timeout/Error| Split5[SPLIT: Error Tracking]
                 
                 subgraph "Split 2: Bid Requests - PartialTimeout Strategy"
                     Split2 --> DSP1[DSP-FastBidder 45ms]
@@ -1001,12 +1002,12 @@ async fn main() -> Result<(), CanoError> {
                 Score3 --> Join3
                 
                 Join3 -->|Success| Auction[Run Auction]
-                Join3 -.->|Timeout/Error| NoFill
+                Join3 -.->|Timeout/Error| Split5
                 
                 Auction --> Winner{Has Winner?}
                 
                 Winner -->|Yes| Split4[SPLIT: Tracking]
-                Winner -->|No| NoFill
+                Winner -->|No| Split5
                 
                 subgraph "Split 4: Tracking - All Strategy"
                     Split4 --> Track1[Log Analytics]
@@ -1021,10 +1022,9 @@ async fn main() -> Result<(), CanoError> {
                 Track4 --> Join4
                 
                 Join4 -->|Success| Response[Build Response]
-                Join4 -.->|Timeout/Error| NoFill
+                Join4 -.->|Timeout/Error| Split5
                 
                 Response --> Complete[Complete]
-                NoFill --> Split5
                 
                 subgraph "Split 5: Error Tracking - All Strategy"
                     Split5 --> ErrLog[Log Error]
@@ -1034,11 +1034,13 @@ async fn main() -> Result<(), CanoError> {
                 ErrLog --> Join5[JOIN: All 50ms timeout]
                 ErrMetrics --> Join5
                 
-                Join5 --> Complete
+                Join5 --> NoFill[No Fill Response]
+                NoFill --> Complete
                 
                 style Start fill:#4CAF50
                 style Complete fill:#2196F3
                 style NoFill fill:#FF5722
+                style Invalid fill:#FF5722
                 style Split1 fill:#FF9800
                 style Split2 fill:#FF9800
                 style Split3 fill:#FF9800
@@ -1083,6 +1085,7 @@ enum AdExchangeState {
     
     // Terminal states
     BuildResponse,
+    InvalidResponse,
     Complete,
     Rejected,
     NoFill,
@@ -1147,12 +1150,12 @@ impl Task<AdExchangeState> for ValidateRequestTask {
         // Validation logic
         if request.placement_id.is_empty() {
             println!("❌ Invalid placement ID");
-            return Ok(TaskResult::Single(AdExchangeState::ErrorTracking));
+            return Ok(TaskResult::Single(AdExchangeState::InvalidResponse));
         }
         
         if request.floor_price < 0.01 {
             println!("❌ Floor price too low");
-            return Ok(TaskResult::Single(AdExchangeState::ErrorTracking));
+            return Ok(TaskResult::Single(AdExchangeState::InvalidResponse));
         }
         
         println!("✅ Request validated");
@@ -1252,7 +1255,7 @@ impl Task<AdExchangeState> for ContactDSPTask {
 }
 
 // ============================================================================
-// Phase 4: Bid Scoring (Split 3 - All Strategy)
+// Phase 4: Bid Scoring (Split 3 - Percentage Strategy)
 // ============================================================================
 
 #[derive(Clone)]
@@ -1329,7 +1332,7 @@ impl Task<AdExchangeState> for RunAuctionTask {
                 auction_time_ms: start.elapsed().as_millis() as u64,
             };
             store.put("auction_result", result)?;
-            return Ok(TaskResult::Single(AdExchangeState::NoFill));
+            return Ok(TaskResult::Single(AdExchangeState::ErrorTracking));
         }
         
         // Sort by score (descending)
@@ -1355,7 +1358,7 @@ impl Task<AdExchangeState> for RunAuctionTask {
 }
 
 // ============================================================================
-// Phase 6: Tracking (Split 4 - All Strategy)
+// Phase 6: Tracking (Split 4 - Quorum Strategy)
 // ============================================================================
 
 // Wrapper enum for heterogeneous tracking tasks
@@ -1452,7 +1455,23 @@ impl Task<AdExchangeState> for NoFillTask {
     async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<AdExchangeState>, CanoError> {
         println!("\n⚠️  No Fill Response");
         println!("Unable to complete ad request due to timeout or insufficient data.\n");
-        Ok(TaskResult::Single(AdExchangeState::ErrorTracking))
+        Ok(TaskResult::Single(AdExchangeState::Complete))
+    }
+}
+
+// ============================================================================
+// Invalid Response Handler
+// ============================================================================
+
+#[derive(Clone)]
+struct InvalidResponseTask;
+
+#[async_trait]
+impl Task<AdExchangeState> for InvalidResponseTask {
+    async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<AdExchangeState>, CanoError> {
+        println!("\n⚠️  Invalid Request");
+        println!("Request validation failed.\n");
+        Ok(TaskResult::Single(AdExchangeState::Complete))
     }
 }
 
@@ -1483,14 +1502,14 @@ impl Task<AdExchangeState> for ErrorTrackingTask {
                 };
                 
                 println!("  ✅ Error logged: {}", error_type);
-                Ok(TaskResult::Single(AdExchangeState::Complete))
+                Ok(TaskResult::Single(AdExchangeState::NoFill))
             }
             ErrorTrackingTask::UpdateErrorMetrics => {
                 println!("  📊 Updating error metrics...");
                 tokio::time::sleep(Duration::from_millis(25)).await;
                 
                 println!("  ✅ Error metrics updated");
-                Ok(TaskResult::Single(AdExchangeState::Complete))
+                Ok(TaskResult::Single(AdExchangeState::NoFill))
             }
         }
     }
@@ -1505,6 +1524,9 @@ fn create_ad_exchange_workflow(store: MemoryStore) -> Workflow<AdExchangeState> 
         // Phase 1: Validation
         .register(AdExchangeState::Start, ValidateRequestTask)
         
+        // Invalid Response Handler
+        .register(AdExchangeState::InvalidResponse, InvalidResponseTask)
+
         // Phase 2: Context Gathering - SPLIT 1 (All Strategy)
         // All three must succeed to proceed within 100ms timeout
         // If any task fails or timeout is exceeded, workflow will error and transition to NoFill
@@ -1595,7 +1617,7 @@ fn create_ad_exchange_workflow(store: MemoryStore) -> Workflow<AdExchangeState> 
             ],
             JoinConfig::new(
                 JoinStrategy::All,
-                AdExchangeState::Complete,
+                AdExchangeState::NoFill,
             )
             .with_timeout(Duration::from_millis(50)),
         )
@@ -1641,8 +1663,8 @@ async fn main() -> Result<(), CanoError> {
             eprintln!("❌ Workflow error: {}", e);
             println!("\n⚠️  Handling as No Fill due to error\n");
             
-            // Execute NoFill state explicitly
-            workflow.orchestrate(AdExchangeState::NoFill).await?
+            // Execute ErrorTracking state explicitly
+            workflow.orchestrate(AdExchangeState::ErrorTracking).await?
         }
     };
     
@@ -1663,8 +1685,8 @@ async fn main() -> Result<(), CanoError> {
                 <p><strong>Split 2:</strong> Bid requests with <code>PartialTimeout</code> - accept responses within 200ms (3-4 of 5 DSPs)</p>
                 <p><strong>Split 3:</strong> Bid scoring with <code>All</code> strategy - score all received bids (50ms timeout)</p>
                 <p><strong>Split 4:</strong> Tracking with <code>All</code> strategy - all 4 tracking tasks must complete (100ms timeout)</p>
-                <p><strong>Split 5:</strong> Error tracking with <code>All</code> strategy - log errors and update metrics (50ms timeout)</p>
-                <p><strong>Error Handling:</strong> If any <code>All</code> strategy split times out or fails, workflow gracefully transitions to NoFill, which then tracks errors before completing</p>
+                <p><strong>Split 5:</strong> Error tracking with <code>All</code> strategy - log errors and update metrics, then transition to NoFill (50ms timeout)</p>
+                <p><strong>Error Handling:</strong> If any <code>All</code> strategy split times out or fails, workflow gracefully transitions to ErrorTracking, which then calls NoFill before completing</p>
             </div>
             <div class="card">
                 <h3>Real-World Constraints</h3>
