@@ -1,0 +1,658 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scheduler - Cano Documentation</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;700&family=Fira+Code&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.6.1/mermaid.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-rust.min.js"></script>
+    <script src="script.js" defer></script>
+</head>
+<body>
+    <button id="menu-toggle" class="menu-toggle">☰</button>
+    
+    <nav class="sidebar">
+        <a href="index.html" class="logo">
+            <img src="logo.png" alt="Cano" style="height: 24px; vertical-align: middle; margin-right: 8px;">
+            Cano
+        </a>
+        <ul class="nav-links">
+            <li><a href="index.html">Home</a></li>
+            <li><a href="task.html">Tasks</a></li>
+            <li><a href="nodes.html">Nodes</a></li>
+            <li><a href="workflows.html">Workflows</a></li>
+            <li><a href="scheduler.html" class="active">Scheduler</a></li>
+            <li><a href="tracing.html">Tracing</a></li>
+        </ul>
+    </nav>
+
+    <main class="main-content">
+        <h1>Scheduler</h1>
+        <p class="subtitle">Automate your workflows with flexible scheduling and concurrency.</p>
+
+        <p>
+            The Scheduler provides workflow scheduling capabilities for background jobs and automated workflows. 
+            It supports intervals, cron expressions, and manual triggers.
+        </p>
+
+        <h2>Scheduling Strategies</h2>
+        <div class="card-grid">
+            <div class="card">
+                <h3>Interval</h3>
+                <p>Run workflows at fixed time intervals.</p>
+                <pre><code class="language-rust">scheduler.every_seconds(...)</code></pre>
+            </div>
+            <div class="card">
+                <h3>Cron</h3>
+                <p>Run workflows based on cron expressions.</p>
+                <pre><code class="language-rust">scheduler.cron(..., "0 0 9 * * *")</code></pre>
+            </div>
+            <div class="card">
+                <h3>Manual</h3>
+                <p>Trigger workflows on-demand via API.</p>
+                <pre><code class="language-rust">scheduler.manual(...)</code></pre>
+            </div>
+        </div>
+
+        <h2>Scheduling Strategy Examples</h2>
+        <p>The Scheduler supports multiple scheduling strategies. Here are complete examples for each.</p>
+
+        <h3>1. Interval Scheduling - Fixed Time Intervals</h3>
+        <p>Run workflows at regular time intervals. Best for periodic tasks like health checks or data syncing.</p>
+        
+        <div class="mermaid">
+            gantt
+                title Interval Scheduling (Every 30 seconds)
+                dateFormat ss
+                axisFormat %Ss
+                section Workflow
+                Run 1 :0, 2s
+                Wait  :2, 28s
+                Run 2 :30, 2s
+                Wait  :32, 28s
+                Run 3 :60, 2s
+        </div>
+
+        <pre><code class="language-rust">use cano::prelude::*;
+use async_trait::async_trait;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum State { Start, Complete }
+
+#[derive(Clone)]
+struct HealthCheckTask;
+
+#[async_trait]
+impl Task<State> for HealthCheckTask {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+        println!("Running health check...");
+        
+        // Check system health
+        let status = check_system_health().await?;
+        store.put("last_health_check", status)?;
+        
+        Ok(TaskResult::Single(State::Complete))
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    let mut scheduler = Scheduler::new();
+    let store = MemoryStore::new();
+
+    let workflow = Workflow::new(store.clone())
+        .register(State::Start, HealthCheckTask)
+        .add_exit_state(State::Complete);
+
+    // Run every 30 seconds
+    scheduler.every_seconds("health_check", workflow, State::Start, 30)?;
+
+    scheduler.start().await?;
+    Ok(())
+}</code></pre>
+
+        <h3>2. Cron Scheduling - Time-Based Expressions</h3>
+        <p>Run workflows based on cron expressions. Perfect for scheduled reports, backups, or time-specific tasks.</p>
+        
+        <div class="mermaid">
+            gantt
+                title Cron Scheduling (Daily at 9 AM and 6 PM)
+                dateFormat HH
+                axisFormat %H:00
+                section Workflow
+                Run 1 :09, 1h
+                Run 2 :18, 1h
+        </div>
+
+        <pre><code class="language-rust">use cano::prelude::*;
+use async_trait::async_trait;
+use chrono::Utc;
+
+#[derive(Clone)]
+struct DailyReportNode {
+    report_type: String,
+}
+
+#[async_trait]
+impl Node<State> for DailyReportNode {
+    type PrepResult = Vec<String>;
+    type ExecResult = String;
+
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        println!("📊 Preparing {} report...", self.report_type);
+        
+        // Load data for report
+        let data = load_daily_metrics().await?;
+        store.put("report_start", Utc::now().to_rfc3339())?;
+        
+        Ok(data)
+    }
+
+    async fn exec(&self, data: Self::PrepResult) -> Self::ExecResult {
+        println!("📊 Generating report with {} records", data.len());
+        
+        // Generate report
+        format!("{} report: {} records processed", self.report_type, data.len())
+    }
+
+    async fn post(&self, store: &MemoryStore, result: Self::ExecResult) -> Result<State, CanoError> {
+        println!("📊 Report completed: {}", result);
+        store.put("last_report", result)?;
+        
+        Ok(State::Complete)
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    let mut scheduler = Scheduler::new();
+    let store = MemoryStore::new();
+
+    // Morning report workflow
+    let morning_report = Workflow::new(store.clone())
+        .register(State::Start, DailyReportNode { 
+            report_type: "Morning".to_string() 
+        })
+        .add_exit_state(State::Complete);
+
+    // Evening report workflow
+    let evening_report = Workflow::new(store.clone())
+        .register(State::Start, DailyReportNode { 
+            report_type: "Evening".to_string() 
+        })
+        .add_exit_state(State::Complete);
+
+    // Run daily at 9 AM: "0 0 9 * * *"
+    scheduler.cron("morning_report", morning_report, State::Start, "0 0 9 * * *")?;
+    
+    // Run daily at 6 PM: "0 0 18 * * *"
+    scheduler.cron("evening_report", evening_report, State::Start, "0 0 18 * * *")?;
+
+    scheduler.start().await?;
+    Ok(())
+}</code></pre>
+
+        <h3>3. Manual Triggering - On-Demand Execution</h3>
+        <p>Trigger workflows manually via API. Ideal for user-initiated tasks or event-driven processing.</p>
+        
+        <div class="mermaid">
+            sequenceDiagram
+                participant API as API Request
+                participant S as Scheduler
+                participant W as Workflow
+                API->>S: trigger("data_export")
+                S->>W: Start Workflow
+                W-->>S: Complete
+                S-->>API: Success
+        </div>
+
+        <pre><code class="language-rust">use cano::prelude::*;
+
+#[derive(Clone)]
+struct DataExportTask;
+
+#[async_trait]
+impl Task<State> for DataExportTask {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+        println!("Starting data export...");
+        
+        // Export data to CSV
+        let export_path = export_to_csv().await?;
+        store.put("export_path", export_path)?;
+        
+        println!("Export completed");
+        Ok(TaskResult::Single(State::Complete))
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    let mut scheduler = Scheduler::new();
+    let store = MemoryStore::new();
+
+    let export_workflow = Workflow::new(store.clone())
+        .register(State::Start, DataExportTask)
+        .add_exit_state(State::Complete);
+
+    // Register as manual-only workflow
+    scheduler.manual("data_export", export_workflow, State::Start)?;
+
+    // Start scheduler in background
+    let scheduler_handle = scheduler.clone();
+    tokio::spawn(async move {
+        scheduler_handle.start().await.unwrap();
+    });
+
+    // Trigger manually when needed
+    println!("Triggering export...");
+    scheduler.trigger("data_export").await?;
+    
+    // Can be triggered again later
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    scheduler.trigger("data_export").await?;
+
+    scheduler.stop().await?;
+    Ok(())
+}</code></pre>
+
+        <h3>4. Mixed Scheduling - Combining Strategies</h3>
+        <p>Use multiple scheduling strategies together for complex automation scenarios.</p>
+        
+        <div class="mermaid">
+            gantt
+                title Mixed Scheduling Strategies
+                dateFormat HH:mm
+                axisFormat %H:%M
+                section Interval Tasks
+                Sync Every 5min :00:00, 24h
+                section Cron Tasks
+                Daily Backup :03:00, 1h
+                Weekly Report :09:00, 1h
+                section Manual Tasks
+                Emergency Export :done, 14:30, 15m
+        </div>
+
+        <pre><code class="language-rust">use cano::prelude::*;
+
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    let mut scheduler = Scheduler::new();
+    let store = MemoryStore::new();
+
+    // 1. Interval: Data sync every 5 minutes
+    let sync_workflow = Workflow::new(store.clone())
+        .register(State::Start, DataSyncTask)
+        .add_exit_state(State::Complete);
+    
+    scheduler.every_seconds("data_sync", sync_workflow, State::Start, 300)?;
+
+    // 2. Cron: Daily backup at 3 AM
+    let backup_workflow = Workflow::new(store.clone())
+        .register(State::Start, BackupTask)
+        .add_exit_state(State::Complete);
+    
+    scheduler.cron("daily_backup", backup_workflow, State::Start, "0 0 3 * * *")?;
+
+    // 3. Cron: Weekly report on Mondays at 9 AM
+    let report_workflow = Workflow::new(store.clone())
+        .register(State::Start, WeeklyReportTask)
+        .add_exit_state(State::Complete);
+    
+    scheduler.cron("weekly_report", report_workflow, State::Start, "0 0 9 * * MON")?;
+
+    // 4. Manual: Emergency data export
+    let export_workflow = Workflow::new(store.clone())
+        .register(State::Start, EmergencyExportTask)
+        .add_exit_state(State::Complete);
+    
+    scheduler.manual("emergency_export", export_workflow, State::Start)?;
+
+    // Start scheduler
+    let scheduler_handle = scheduler.clone();
+    tokio::spawn(async move {
+        scheduler_handle.start().await.unwrap();
+    });
+
+    // Monitor and trigger as needed
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        
+        // Check status of all workflows
+        let workflows = scheduler.list().await;
+        for info in workflows {
+            println!("{}: {:?} (runs: {})", info.id, info.status, info.run_count);
+        }
+        
+        // Trigger emergency export if needed
+        if emergency_condition() {
+            scheduler.trigger("emergency_export").await?;
+        }
+    }
+}</code></pre>
+
+        <h2>Concurrent Workflows</h2>
+        <pre><code class="language-rust">use cano::prelude::*;
+use async_trait::async_trait;
+use chrono::Utc;
+use std::time::Duration;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum WorkflowAction {
+    Start,
+    Complete,
+    Error,
+}
+
+#[derive(Clone)]
+struct ReportNode {
+    report_type: String,
+}
+
+impl ReportNode {
+    fn new(report_type: &str) -> Self {
+        Self { report_type: report_type.to_string() }
+    }
+}
+
+#[async_trait]
+impl Node<WorkflowAction> for ReportNode {
+    type PrepResult = String;
+    type ExecResult = String;
+
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        println!("📊 Preparing {} report...", self.report_type);
+        store.put("report_start_time", Utc::now().to_rfc3339())?;
+        Ok(format!("Preparing {} report", self.report_type))
+    }
+
+    async fn exec(&self, _prep_result: Self::PrepResult) -> Self::ExecResult {
+        // Simulate work
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        format!("{} report generated", self.report_type)
+    }
+
+    async fn post(&self, store: &MemoryStore, exec_result: Self::ExecResult) -> Result<WorkflowAction, CanoError> {
+        println!("📊 Report completed: {}", exec_result);
+        store.put("report_result", exec_result)?;
+        Ok(WorkflowAction::Complete)
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    let store = MemoryStore::new();
+    let mut scheduler = Scheduler::new();
+
+    // Define workflows
+    let hourly_report = Workflow::new(store.clone())
+        .register(WorkflowAction::Start, ReportNode::new("Hourly"))
+        .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
+
+    let daily_cleanup = Workflow::new(store.clone())
+        .register(WorkflowAction::Start, ReportNode::new("Cleanup")) // Reusing node for demo
+        .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
+
+    // 1. Interval: Run every 30 seconds
+    scheduler.every_seconds("hourly_report", hourly_report.clone(), WorkflowAction::Start, 30)?;
+
+    // 2. Cron: Run daily at 9 AM
+    scheduler.cron("daily_cleanup", daily_cleanup, WorkflowAction::Start, "0 0 9 * * *")?;
+
+    // 3. Manual: Only run when triggered
+    scheduler.manual("on_demand_report", hourly_report.clone(), WorkflowAction::Start)?;
+
+    // Start Scheduler in background
+    let scheduler_handle = scheduler.clone();
+    tokio::spawn(async move {
+        scheduler_handle.start().await.unwrap();
+    });
+
+    // Trigger manual job
+    println!("Triggering manual report...");
+    scheduler.trigger("on_demand_report").await?;
+
+    // Keep running for a bit
+    tokio::time::sleep(Duration::from_secs(60)).await;
+    
+    // Graceful shutdown
+    scheduler.stop().await?;
+    
+    Ok(())
+}</code></pre>
+
+        <h2>Concurrent Workflows</h2>
+        <p>
+            Execute multiple instances of the same workflow in parallel. This is useful for high-throughput processing 
+            where you don't want one long-running job to block others.
+        </p>
+
+        <h3>How Concurrent Workflows Work</h3>
+        <div class="mermaid">
+            gantt
+                title Concurrent Execution (Max 3, Trigger Every 2s)
+                dateFormat ss
+                axisFormat %Ss
+                section Instance 1
+                Execute :0, 5s
+                section Instance 2
+                Execute :2, 5s
+                section Instance 3
+                Execute :4, 5s
+                section Waiting
+                Wait (slots full) :6, 1s
+                section Instance 4
+                Execute :7, 5s
+        </div>
+
+        <h3>Wait Strategy Examples</h3>
+        <p>Control how the scheduler behaves when concurrency limit is reached.</p>
+
+        <h4>1. WaitForever - Queue and Wait</h4>
+        <p>Waits indefinitely until a slot becomes available. Ensures all scheduled executions eventually run.</p>
+        
+        <div class="mermaid">
+            sequenceDiagram
+                participant S as Scheduler
+                participant Q as Queue
+                participant W as Workflow
+                S->>Q: Check slots (Full)
+                Note over Q: Wait for slot...
+                W->>Q: Slot available
+                Q->>W: Start execution
+        </div>
+
+        <pre><code class="language-rust">use cano::prelude::*;
+
+#[derive(Clone)]
+struct BatchProcessor { batch_id: usize }
+
+#[async_trait]
+impl Task<State> for BatchProcessor {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+        println!("Processing batch {}...", self.batch_id);
+        
+        // Simulate long processing
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        
+        store.put(&format!("batch_{}_result", self.batch_id), "completed")?;
+        Ok(TaskResult::Single(State::Complete))
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    let mut scheduler = Scheduler::new();
+    let store = MemoryStore::new();
+
+    let mut concurrent_workflow = ConcurrentWorkflow::new(State::Start);
+    concurrent_workflow.register(State::Start, BatchProcessor { batch_id: 1 });
+    concurrent_workflow.add_exit_state(State::Complete);
+
+    // WaitForever: Queue all executions
+    scheduler.every_seconds_concurrent(
+        "batch_processor",
+        concurrent_workflow,
+        State::Start,
+        1,  // Trigger every 1 second
+        3,  // Max 3 concurrent
+        WaitStrategy::WaitForever  // Queue and wait
+    )?;
+
+    scheduler.start().await?;
+    Ok(())
+}</code></pre>
+
+        <h4>2. WaitForQuota(n) - Wait for N Slots</h4>
+        <p>Waits until a specific number of slots are available. Useful for batch operations requiring multiple workers.</p>
+        
+        <div class="mermaid">
+            sequenceDiagram
+                participant S as Scheduler
+                participant Q as Queue
+                participant W as Workers
+                S->>Q: Check slots (1 available)
+                Note over Q: Need 2 slots, wait...
+                W->>Q: Slot available (2 total)
+                Q->>W: Start with 2 slots
+        </div>
+
+        <pre><code class="language-rust">use cano::prelude::*;
+
+#[derive(Clone)]
+struct MultiSlotTask;
+
+#[async_trait]
+impl Task<State> for MultiSlotTask {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+        println!("Running multi-slot task...");
+        
+        // Task requires multiple workers/resources
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        
+        Ok(TaskResult::Single(State::Complete))
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    let mut scheduler = Scheduler::new();
+    let store = MemoryStore::new();
+
+    let mut concurrent_workflow = ConcurrentWorkflow::new(State::Start);
+    concurrent_workflow.register(State::Start, MultiSlotTask);
+    concurrent_workflow.add_exit_state(State::Complete);
+
+    // WaitForQuota(2): Wait until at least 2 slots available
+    scheduler.every_seconds_concurrent(
+        "multi_slot_task",
+        concurrent_workflow,
+        State::Start,
+        5,  // Trigger every 5 seconds
+        10, // Max 10 concurrent
+        WaitStrategy::WaitForQuota(2)  // Need 2 free slots to start
+    )?;
+
+    scheduler.start().await?;
+    Ok(())
+}</code></pre>
+
+        <h4>3. NoWait - Skip if Busy</h4>
+        <p>Skips execution if no slots are available. Best for non-critical periodic tasks.</p>
+        
+        <div class="mermaid">
+            sequenceDiagram
+                participant S as Scheduler
+                participant Q as Queue
+                participant W as Workflow
+                S->>Q: Check slots (Full)
+                Note over Q: No slots available
+                Q-->>S: Skip execution
+                Note over S: Continue scheduling
+        </div>
+
+        <pre><code class="language-rust">use cano::prelude::*;
+
+#[derive(Clone)]
+struct MetricsCollector;
+
+#[async_trait]
+impl Task<State> for MetricsCollector {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+        println!("Collecting metrics...");
+        
+        // Collect current metrics
+        let metrics = collect_system_metrics().await?;
+        store.put("latest_metrics", metrics)?;
+        
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        Ok(TaskResult::Single(State::Complete))
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    let mut scheduler = Scheduler::new();
+    let store = MemoryStore::new();
+
+    let mut concurrent_workflow = ConcurrentWorkflow::new(State::Start);
+    concurrent_workflow.register(State::Start, MetricsCollector);
+    concurrent_workflow.add_exit_state(State::Complete);
+
+    // NoWait: Skip if busy (OK to miss some metric collections)
+    scheduler.every_seconds_concurrent(
+        "metrics_collector",
+        concurrent_workflow,
+        State::Start,
+        1,  // Try every 1 second
+        5,  // Max 5 concurrent
+        WaitStrategy::NoWait  // Skip if all slots busy
+    )?;
+
+    println!("Starting metrics collection...");
+    println!("Note: Will skip collections when system is busy");
+    scheduler.start().await?;
+    Ok(())
+}</code></pre>
+
+        <h3>Comparison of Wait Strategies</h3>
+        <table style="width: 100%; border-collapse: collapse; margin: 2rem 0; background: var(--card-bg); border-radius: 1rem; overflow: hidden;">
+            <thead>
+                <tr style="background: rgba(255,255,255,0.05); text-align: left;">
+                    <th style="padding: 1rem;">Strategy</th>
+                    <th style="padding: 1rem;">Behavior When Full</th>
+                    <th style="padding: 1rem;">Best Use Case</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>WaitForever</code></td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Queue and wait indefinitely</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Critical tasks that must run</td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>WaitForQuota(n)</code></td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Wait for N slots to be free</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Batch operations needing multiple workers</td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>NoWait</code></td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Skip this execution</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Optional periodic tasks</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>Graceful Shutdown</h2>
+        <p>
+            The scheduler supports graceful shutdown, allowing currently running workflows to complete before stopping.
+        </p>
+
+        <pre><code class="language-rust">// Stop scheduler but allow running flows to finish
+scheduler.stop().await?;</code></pre>
+    </main>
+</body>
+</html>

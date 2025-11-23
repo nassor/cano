@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nodes - Cano Documentation</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;700&family=Fira+Code&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.6.1/mermaid.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-rust.min.js"></script>
+    <script src="script.js" defer></script>
+</head>
+<body>
+    <button id="menu-toggle" class="menu-toggle">☰</button>
+    
+    <nav class="sidebar">
+        <a href="index.html" class="logo">
+            <img src="logo.png" alt="Cano" style="height: 24px; vertical-align: middle; margin-right: 8px;">
+            Cano
+        </a>
+        <ul class="nav-links">
+            <li><a href="index.html">Home</a></li>
+            <li><a href="task.html">Tasks</a></li>
+            <li><a href="nodes.html" class="active">Nodes</a></li>
+            <li><a href="workflows.html">Workflows</a></li>
+            <li><a href="scheduler.html">Scheduler</a></li>
+            <li><a href="tracing.html">Tracing</a></li>
+        </ul>
+    </nav>
+
+    <main class="main-content">
+        <h1>Nodes</h1>
+        <p class="subtitle">Structured, resilient processing units with a three-phase lifecycle.</p>
+
+        <p>
+            A <code>Node</code> implements a structured three-phase lifecycle with built-in retry capabilities. 
+            Nodes are ideal for complex operations where separating data loading, execution, and result handling improves clarity and maintainability.
+        </p>
+
+        <h2>The Three Phases</h2>
+        <div class="mermaid">
+            graph LR
+                A[Prep] -->|Load Data| B[Exec]
+                B -->|Process| C[Post]
+                C -->|Save Result| D[Next State]
+        </div>
+
+        <div class="card-grid">
+            <div class="card">
+                <h3>1. Prep</h3>
+                <p>Load data from the store, validate inputs, and setup resources. Returns <code>PrepResult</code>.</p>
+            </div>
+            <div class="card">
+                <h3>2. Exec</h3>
+                <p>Core processing logic. This phase is automatically retried on failure. Returns <code>ExecResult</code>.</p>
+            </div>
+            <div class="card">
+                <h3>3. Post</h3>
+                <p>Store results, cleanup resources, and determine the next workflow state based on execution outcome.</p>
+            </div>
+        </div>
+
+        <h2>Implementing a Node</h2>
+        <p>
+            Here is a complete example of a Node that generates random numbers and filters them. 
+            This demonstrates the three-phase lifecycle: <code>prep</code> (generate), <code>exec</code> (filter), and <code>post</code> (store).
+        </p>
+        <pre><code class="language-rust">use async_trait::async_trait;
+use cano::prelude::*;
+use rand::Rng;
+
+#[derive(Clone)]
+struct GeneratorNode;
+
+#[async_trait]
+impl Node<WorkflowAction> for GeneratorNode {
+    // Define the types passed between phases
+    type PrepResult = Vec<u32>;
+    type ExecResult = Vec<u32>;
+
+    // Optional: Configure retry behavior
+    fn config(&self) -> TaskConfig {
+        TaskConfig::default().with_fixed_retry(3, Duration::from_secs(1))
+    }
+
+    // Phase 1: Preparation
+    // Load data, validate inputs, or generate initial state.
+    // This runs once and is not retried automatically.
+    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        let mut rng = rand::rng();
+        let size = rng.random_range(25..=150);
+        let numbers: Vec<u32> = (0..size).map(|_| rng.random_range(1..=1000)).collect();
+        
+        println!("Generated {} random numbers", numbers.len());
+        Ok(numbers)
+    }
+
+    // Phase 2: Execution
+    // Core logic. This phase is automatically retried on failure based on config.
+    // It receives the result from prep().
+    async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
+        // Filter out odd numbers
+        let even_numbers: Vec<u32> = prep_res.into_iter().filter(|&n| n % 2 == 0).collect();
+        println!("Filtered to {} even numbers", even_numbers.len());
+        even_numbers
+    }
+
+    // Phase 3: Post-processing
+    // Store results, cleanup, and decide next state.
+    // It receives the result from exec().
+    async fn post(
+        &self,
+        store: &MemoryStore,
+        exec_res: Self::ExecResult,
+    ) -> Result<WorkflowAction, CanoError> {
+        // Store the result in the shared memory store
+        store.put("filtered_numbers", exec_res)?;
+        
+        println!("✓ Generator node completed");
+        Ok(WorkflowAction::Count)
+    }
+}</code></pre>
+
+        <h2>Nodes vs Tasks</h2>
+        <p>
+            Every <code>Node</code> automatically implements <code>Task</code>, so you can use them interchangeably.
+        </p>
+        
+        <table style="width: 100%; border-collapse: collapse; margin: 2rem 0; background: var(--card-bg); border-radius: 1rem; overflow: hidden;">
+            <thead>
+                <tr style="background: rgba(255,255,255,0.05); text-align: left;">
+                    <th style="padding: 1rem;">Feature</th>
+                    <th style="padding: 1rem;">Task</th>
+                    <th style="padding: 1rem;">Node</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Structure</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Single <code>run</code> method</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">3 phases: Prep, Exec, Post</td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Complexity</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Low</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Medium</td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Use Case</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Simple logic, prototypes</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Production logic, complex flows</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <h2>Real-World Node Patterns</h2>
+        <p>Nodes provide structure for complex workflows. Here are proven patterns from production systems.</p>
+
+        <h3>1. ETL (Extract, Transform, Load) Pattern</h3>
+        <p>The three-phase lifecycle naturally maps to ETL operations.</p>
+        
+        <div class="mermaid">
+            graph LR
+                A[Prep: Extract] -->|Load from source| B[Exec: Transform]
+                B -->|Process data| C[Post: Load]
+                C -->|Save to destination| D[Next State]
+        </div>
+
+        <pre><code class="language-rust">use cano::prelude::*;
+
+#[derive(Clone)]
+struct ETLNode {
+    source: String,
+    destination: String,
+}
+
+#[async_trait]
+impl Node<State> for ETLNode {
+    type PrepResult = Vec<Record>;
+    type ExecResult = Vec<ProcessedRecord>;
+
+    fn config(&self) -> TaskConfig {
+        TaskConfig::default()
+            .with_exponential_retry(3) // Retry failures
+    }
+
+    // Extract: Load data from source
+    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        println!("📥 Extracting from: {}", self.source);
+        
+        let records = load_from_database(&self.source).await?;
+        println!("Loaded {} records", records.len());
+        
+        Ok(records)
+    }
+
+    // Transform: Process the data
+    async fn exec(&self, records: Self::PrepResult) -> Self::ExecResult {
+        println!("⚙️  Transforming {} records...", records.len());
+        
+        records.into_iter()
+            .map(|r| process_record(r))
+            .collect()
+    }
+
+    // Load: Save to destination
+    async fn post(&self, store: &MemoryStore, processed: Self::ExecResult) 
+        -> Result<State, CanoError> {
+        println!("📤 Loading to: {}", self.destination);
+        
+        save_to_database(&self.destination, &processed).await?;
+        store.put("processed_count", processed.len())?;
+        
+        Ok(State::Complete)
+    }
+}</code></pre>
+
+        <h3>2. Negotiation/Iterative Pattern</h3>
+        <p>Nodes can maintain state across iterations for negotiation workflows.</p>
+        
+        <div class="mermaid">
+            sequenceDiagram
+                participant W as Workflow
+                participant S as SellerNode
+                participant B as BuyerNode
+                W->>S: Round 1
+                S-->>B: Offer $10,000
+                B-->>S: Counter: Too high
+                W->>S: Round 2
+                S-->>B: Offer $8,000
+                B-->>S: Accept ✓
+        </div>
+
+        <pre><code class="language-rust">#[derive(Clone)]
+struct SellerNode;
+
+#[async_trait]
+impl Node<NegotiationState> for SellerNode {
+    type PrepResult = NegotiationState;
+    type ExecResult = NegotiationState;
+
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        // Load negotiation state or initialize
+        match store.get::<NegotiationState>("negotiation") {
+            Ok(state) => Ok(state),
+            Err(_) => Ok(NegotiationState::new(10000, 1000)), // initial price, budget
+        }
+    }
+
+    async fn exec(&self, mut state: Self::PrepResult) -> Self::ExecResult {
+        // Calculate new offer
+        if state.round > 1 {
+            let reduction = rand::random::<u32>() % 2000 + 500;
+            state.current_offer = state.current_offer.saturating_sub(reduction);
+            println!("Seller: New offer ${}", state.current_offer);
+        }
+        state
+    }
+
+    async fn post(&self, store: &MemoryStore, state: Self::ExecResult) 
+        -> Result<NegotiationState, CanoError> {
+        store.put("negotiation", state.clone())?;
+        Ok(NegotiationState::BuyerEvaluate)
+    }
+}</code></pre>
+
+        <h3>3. Download & Analyze Pattern</h3>
+        <p>Perfect for workflows that download content and perform analysis.</p>
+
+        <pre><code class="language-rust">#[derive(Clone)]
+struct BookAnalyzerNode;
+
+#[async_trait]
+impl Node<State> for BookAnalyzerNode {
+    type PrepResult = String;  // Book content
+    type ExecResult = BookAnalysis;
+
+    fn config(&self) -> TaskConfig {
+        TaskConfig::default()
+            .with_fixed_retry(2, Duration::from_secs(1))
+    }
+
+    // Prep: Download book
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        let url: String = store.get("book_url")?;
+        println!("📥 Downloading book from: {}", url);
+        
+        let client = reqwest::Client::new();
+        let content = client.get(&url)
+            .send().await?
+            .text().await?;
+        
+        println!("Downloaded {} characters", content.len());
+        Ok(content)
+    }
+
+    // Exec: Analyze content (retried on failure)
+    async fn exec(&self, content: Self::PrepResult) -> Self::ExecResult {
+        println!("🔍 Analyzing content...");
+        
+        let words: Vec<&str> = content.split_whitespace().collect();
+        let prepositions = count_prepositions(&words);
+        
+        BookAnalysis {
+            word_count: words.len(),
+            preposition_count: prepositions,
+            density: (prepositions as f64 / words.len() as f64) * 100.0,
+        }
+    }
+
+    // Post: Store results
+    async fn post(&self, store: &MemoryStore, analysis: Self::ExecResult) 
+        -> Result<State, CanoError> {
+        println!("📊 Analysis complete: {} words, {} prepositions", 
+                 analysis.word_count, analysis.preposition_count);
+        
+        store.put("analysis", analysis)?;
+        Ok(State::Complete)
+    }
+}</code></pre>
+
+        <h3>4. Multi-Step Processing Pattern</h3>
+        <p>Chain multiple nodes together for complex data pipelines.</p>
+
+        <pre><code class="language-rust">// Node 1: Data Generator
+#[derive(Clone)]
+struct GeneratorNode;
+
+#[async_trait]
+impl Node<State> for GeneratorNode {
+    type PrepResult = ();
+    type ExecResult = Vec<u32>;
+
+    async fn prep(&self, _: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        Ok(())
+    }
+
+    async fn exec(&self, _: Self::PrepResult) -> Self::ExecResult {
+        let mut rng = rand::rng();
+        (0..100).map(|_| rng.random_range(1..=1000)).collect()
+    }
+
+    async fn post(&self, store: &MemoryStore, data: Self::ExecResult) 
+        -> Result<State, CanoError> {
+        store.put("generated_data", data)?;
+        Ok(State::Filter)
+    }
+}
+
+// Node 2: Data Filter
+#[derive(Clone)]
+struct FilterNode;
+
+#[async_trait]
+impl Node<State> for FilterNode {
+    type PrepResult = Vec<u32>;
+    type ExecResult = Vec<u32>;
+
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        store.get("generated_data")
+    }
+
+    async fn exec(&self, data: Self::PrepResult) -> Self::ExecResult {
+        data.into_iter().filter(|&x| x % 2 == 0).collect()
+    }
+
+    async fn post(&self, store: &MemoryStore, filtered: Self::ExecResult) 
+        -> Result<State, CanoError> {
+        store.put("filtered_data", filtered)?;
+        Ok(State::Aggregate)
+    }
+}
+
+// Node 3: Aggregator
+#[derive(Clone)]
+struct AggregatorNode;
+
+#[async_trait]
+impl Node<State> for AggregatorNode {
+    type PrepResult = Vec<u32>;
+    type ExecResult = Stats;
+
+    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        store.get("filtered_data")
+    }
+
+    async fn exec(&self, data: Self::PrepResult) -> Self::ExecResult {
+        Stats {
+            count: data.len(),
+            sum: data.iter().sum(),
+            avg: data.iter().sum::<u32>() as f64 / data.len() as f64,
+        }
+    }
+
+    async fn post(&self, store: &MemoryStore, stats: Self::ExecResult) 
+        -> Result<State, CanoError> {
+        store.put("final_stats", stats)?;
+        Ok(State::Complete)
+    }
+}
+
+// Combine in workflow
+let workflow = Workflow::new(store.clone())
+    .register(State::Start, GeneratorNode)
+    .register(State::Filter, FilterNode)
+    .register(State::Aggregate, AggregatorNode)
+    .add_exit_state(State::Complete);</code></pre>
+
+        <h2>Node Configuration Best Practices</h2>
+        <p>Choose the right configuration for your node's reliability requirements.</p>
+
+        <table style="width: 100%; border-collapse: collapse; margin: 2rem 0; background: var(--card-bg); border-radius: 1rem; overflow: hidden;">
+            <thead>
+                <tr style="background: rgba(255,255,255,0.05); text-align: left;">
+                    <th style="padding: 1rem;">Config</th>
+                    <th style="padding: 1rem;">Use Case</th>
+                    <th style="padding: 1rem;">Example</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>minimal()</code></td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Fast, reliable operations</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Data transformations</td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>default()</code></td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Standard operations</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">File I/O, Database queries</td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>fixed_retry(n)</code></td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Transient failures</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Network operations</td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>exponential_retry(n)</code></td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Rate-limited APIs</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">External API calls</td>
+                </tr>
+            </tbody>
+        </table>
+    </main>
+</body>
+</html>

@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Tasks - Cano Documentation</title>
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;700&family=Fira+Code&display=swap" rel="stylesheet">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.6.1/mermaid.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-rust.min.js"></script>
+    <script src="script.js" defer></script>
+</head>
+<body>
+    <button id="menu-toggle" class="menu-toggle">☰</button>
+    
+    <nav class="sidebar">
+        <a href="index.html" class="logo">
+            <img src="logo.png" alt="Cano" style="height: 24px; vertical-align: middle; margin-right: 8px;">
+            Cano
+        </a>
+        <ul class="nav-links">
+            <li><a href="index.html">Home</a></li>
+            <li><a href="task.html" class="active">Tasks</a></li>
+            <li><a href="nodes.html">Nodes</a></li>
+            <li><a href="workflows.html">Workflows</a></li>
+            <li><a href="scheduler.html">Scheduler</a></li>
+            <li><a href="tracing.html">Tracing</a></li>
+        </ul>
+    </nav>
+
+    <main class="main-content">
+        <h1>Tasks</h1>
+        <p class="subtitle">Simple, flexible processing units for your workflows.</p>
+
+        <p>
+            A <code>Task</code> provides a simplified interface with a single <code>run</code> method. 
+            Use tasks when you want simplicity and direct control over the execution logic. 
+            Tasks are the fundamental building blocks of Cano workflows.
+        </p>
+
+        <h2>Implementing a Task</h2>
+        <p>To create a task, implement the `Task` trait for your struct. The trait requires a `run` method and an optional `config` method.</p>
+
+        <pre><code class="language-rust">use async_trait::async_trait;
+use cano::prelude::*;
+use rand::Rng;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Action { Generate, Count, Complete }
+
+struct GeneratorTask;
+
+#[async_trait]
+impl Task<Action> for GeneratorTask {
+    // Optional: Configure retries
+    fn config(&self) -> TaskConfig {
+        TaskConfig::default().with_fixed_retry(3, std::time::Duration::from_secs(1))
+    }
+
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<Action>, CanoError> {
+        println!("🎲 GeneratorTask: Creating random numbers...");
+
+        // 1. Perform logic
+        let mut rng = rand::rng();
+        let numbers: Vec<u32> = (0..10).map(|_| rng.random_range(1..=100)).collect();
+        
+        // 2. Store results
+        store.put("numbers", numbers)?;
+        println!("✅ Stored numbers");
+
+        // 3. Return next state
+        Ok(TaskResult::Single(Action::Count))
+    }
+}</code></pre>
+
+        <h2>Closure Tasks</h2>
+        <p>For very simple logic, you can register a closure directly as a task without defining a struct.</p>
+        <pre><code class="language-rust">workflow.register(Action::Count, |store: &MemoryStore| async move {
+    let numbers: Vec<u32> = store.get("numbers")?;
+    println!("Count: {}", numbers.len());
+    Ok(TaskResult::Single(Action::Complete))
+});</code></pre>
+
+        <h2>Configuration & Retries</h2>
+        <p>
+            Tasks can be configured with retry strategies to handle transient failures. 
+            The <code>TaskConfig</code> struct allows you to specify the retry behavior.
+        </p>
+
+        <h3>Retry Strategy Examples</h3>
+        <div class="mermaid">
+            sequenceDiagram
+                participant W as Workflow
+                participant T as Task
+                W->>T: Execute
+                T-->>W: Fail
+                Note over W: Wait (backoff)
+                W->>T: Retry 1
+                T-->>W: Fail
+                Note over W: Wait (longer)
+                W->>T: Retry 2
+                T-->>W: Success ✓
+        </div>
+
+        <div class="card-grid">
+            <div class="card">
+                <h3>Fixed Retry</h3>
+                <p>Retry a fixed number of times with a constant delay between attempts.</p>
+                <pre><code class="language-rust">TaskConfig::default()
+    .with_fixed_retry(3, Duration::from_secs(1))</code></pre>
+            </div>
+            <div class="card">
+                <h3>Exponential Backoff</h3>
+                <p>Retry with exponentially increasing delays, useful for rate-limited APIs.</p>
+                <pre><code class="language-rust">TaskConfig::default()
+    .with_exponential_retry(5)</code></pre>
+            </div>
+            <div class="card">
+                <h3>Minimal Config</h3>
+                <p>Fast execution with minimal retry overhead for reliable operations.</p>
+                <pre><code class="language-rust">TaskConfig::minimal()</code></pre>
+            </div>
+        </div>
+
+        <h3>Real-World Example: API Client with Retry</h3>
+        <pre><code class="language-rust">use cano::prelude::*;
+use async_trait::async_trait;
+
+#[derive(Clone)]
+struct ApiClientTask {
+    endpoint: String,
+}
+
+#[async_trait]
+impl Task<State> for ApiClientTask {
+    fn config(&self) -> TaskConfig {
+        // Exponential backoff for API rate limiting
+        TaskConfig::default()
+            .with_exponential_retry(5)
+    }
+
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+        println!("📡 Calling API: {}", self.endpoint);
+        
+        // Simulate API call that might fail
+        let response = reqwest::get(&self.endpoint)
+            .await
+            .map_err(|e| CanoError::task_execution(e.to_string()))?;
+        
+        let data = response.text().await
+            .map_err(|e| CanoError::task_execution(e.to_string()))?;
+        
+        store.put("api_response", data)?;
+        println!("✅ API call successful");
+        
+        Ok(TaskResult::Single(State::Complete))
+    }
+}</code></pre>
+
+        <h2>Real-World Task Patterns</h2>
+        <p>Tasks excel at various workflow scenarios. Here are proven patterns from production use.</p>
+
+        <h3>1. Data Transformation Task</h3>
+        <p>Simple, direct data processing without complex setup.</p>
+        <pre><code class="language-rust">#[derive(Clone)]
+struct DataTransformer;
+
+#[async_trait]
+impl Task<State> for DataTransformer {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+        let raw_data: Vec<i32> = store.get("raw_data")?;
+        
+        // Transform: filter and multiply
+        let processed: Vec<i32> = raw_data
+            .into_iter()
+            .filter(|&x| x > 0)
+            .map(|x| x * 2)
+            .collect();
+        
+        store.put("processed_data", processed)?;
+        Ok(TaskResult::Single(State::Complete))
+    }
+}</code></pre>
+
+        <h3>2. Validation Task</h3>
+        <p>Quick validation logic with multiple outcomes.</p>
+        <pre><code class="language-rust">#[derive(Clone)]
+struct ValidatorTask;
+
+#[async_trait]
+impl Task<State> for ValidatorTask {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+        let data: Vec<f64> = store.get("processed_data")?;
+        
+        let mut errors = Vec::new();
+        
+        if data.is_empty() {
+            errors.push("Data is empty");
+        }
+        
+        if data.iter().any(|&x| x.is_nan()) {
+            errors.push("Contains NaN values");
+        }
+        
+        store.put("validation_errors", errors.clone())?;
+        
+        if errors.is_empty() {
+            Ok(TaskResult::Single(State::Process))
+        } else {
+            Ok(TaskResult::Single(State::ValidationFailed))
+        }
+    }
+}</code></pre>
+
+        <h3>3. Conditional Routing Task</h3>
+        <p>Dynamic workflow routing based on runtime conditions.</p>
+        <pre><code class="language-rust">#[derive(Clone)]
+struct RoutingTask;
+
+#[async_trait]
+impl Task<State> for RoutingTask {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+        let item_count: usize = store.get("item_count")?;
+        let priority: String = store.get("priority")?;
+        
+        // Dynamic routing based on conditions
+        let next_state = match (item_count, priority.as_str()) {
+            (n, "high") if n > 100 => State::ParallelProcess,
+            (n, "high") if n > 0 => State::FastTrack,
+            (n, _) if n > 50 => State::BatchProcess,
+            (n, _) if n > 0 => State::SimpleProcess,
+            _ => State::Skip,
+        };
+        
+        println!("Routing to: {:?}", next_state);
+        Ok(TaskResult::Single(next_state))
+    }
+}</code></pre>
+
+        <h3>4. Aggregation Task</h3>
+        <p>Collect and combine results from previous steps.</p>
+        <pre><code class="language-rust">#[derive(Clone)]
+struct AggregatorTask;
+
+#[async_trait]
+impl Task<State> for AggregatorTask {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+        println!("Aggregating results...");
+        
+        let mut total = 0;
+        let mut count = 0;
+        
+        // Collect results from parallel tasks
+        for i in 1..=3 {
+            if let Ok(result) = store.get::<i32>(&format!("result_{}", i)) {
+                total += result;
+                count += 1;
+            }
+        }
+        
+        store.put("total", total)?;
+        store.put("count", count)?;
+        
+        println!("Aggregated {} results, total: {}", count, total);
+        Ok(TaskResult::Single(State::Complete))
+    }
+}</code></pre>
+
+        <h2>Task vs Node</h2>
+        <p>
+            Cano supports both <code>Task</code> and <code>Node</code> interfaces. Every Node automatically implements Task, so they can be mixed in the same workflow.
+        </p>
+        
+        <div class="card-grid">
+            <div class="card">
+                <h3>Task</h3>
+                <p><strong>Best for:</strong> Simple logic, quick prototyping, functional style.</p>
+                <ul>
+                    <li>Single <code>run()</code> method</li>
+                    <li>Direct control over flow</li>
+                    <li>Can be a closure</li>
+                </ul>
+            </div>
+            <div class="card">
+                <h3>Node</h3>
+                <p><strong>Best for:</strong> Complex operations, robust error handling, structured data flow.</p>
+                <ul>
+                    <li>3 Phases: <code>prep</code>, <code>exec</code>, <code>post</code></li>
+                    <li>Built-in retry logic for <code>exec</code> phase</li>
+                    <li>Separation of concerns (IO vs Compute)</li>
+                </ul>
+            </div>
+        </div>
+
+        <pre><code class="language-rust">// Mixing Tasks and Nodes in one workflow
+let workflow = Workflow::new(store.clone())
+    .register(State::Init, SimpleTask)           // Task
+    .register(State::Process, ComplexNode::new()) // Node
+    .register(State::Finish, |_: &MemoryStore| async { // Closure Task
+        Ok(TaskResult::Single(State::Done))
+    });</code></pre>
+
+        <h2>When to Use Tasks vs Nodes?</h2>
+        <p>Choose the right abstraction for your use case:</p>
+
+        <table style="width: 100%; border-collapse: collapse; margin: 2rem 0; background: var(--card-bg); border-radius: 1rem; overflow: hidden;">
+            <thead>
+                <tr style="background: rgba(255,255,255,0.05); text-align: left;">
+                    <th style="padding: 1rem;">Scenario</th>
+                    <th style="padding: 1rem;">Use Task</th>
+                    <th style="padding: 1rem;">Use Node</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Data transformation</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">✅ Simple transform</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">✅ Complex with validation</td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">API calls</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">✅ Simple requests</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">✅ With auth & retry logic</td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Validation</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">✅ Quick checks</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">⚪ Usually overkill</td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">File operations</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">⚪ For simple cases</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">✅ Load, process, save pattern</td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Prototyping</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">✅ Fastest iteration</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">⚪ More structure</td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Production systems</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">✅ When simple is sufficient</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">✅ For robust operations</td>
+                </tr>
+            </tbody>
+        </table>
+    </main>
+</body>
+</html>
