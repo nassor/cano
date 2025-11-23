@@ -11,47 +11,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-rust.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-toml.min.js"></script>
-    <script type="module" src="menu-component.js"></script>
-    <script type="module" src="content-component.js"></script>
-    <script>
-        // Initialize Mermaid
-        document.addEventListener('DOMContentLoaded', () => {
-            mermaid.initialize({
-                startOnLoad: true,
-                theme: 'dark',
-                securityLevel: 'loose',
-                fontFamily: 'Outfit, sans-serif'
-            });
-
-            // Mobile Menu Toggle
-            const menuToggle = document.getElementById('menu-toggle');
-            const menuComponent = document.querySelector('menu-component');
-
-            if (menuToggle && menuComponent) {
-                menuToggle.addEventListener('click', () => {
-                    const sidebar = menuComponent.querySelector('.sidebar');
-                    if (sidebar) {
-                        sidebar.classList.toggle('open');
-                        const icon = sidebar.classList.contains('open') ? '✕' : '☰';
-                        menuToggle.innerHTML = icon;
-                    }
-                });
-            }
-
-            // Close sidebar when clicking outside on mobile
-            document.addEventListener('click', (e) => {
-                if (window.innerWidth <= 768 && menuComponent) {
-                    const sidebar = menuComponent.querySelector('.sidebar');
-                    if (sidebar && !sidebar.contains(e.target) && 
-                        !menuToggle.contains(e.target) && 
-                        sidebar.classList.contains('open')) {
-                        sidebar.classList.remove('open');
-                        menuToggle.innerHTML = '☰';
-                    }
-                }
-            });
-        });
-    </script>
+    <script type="module" src="script.js"></script>
 </head>
 <body>
     <button id="menu-toggle" class="menu-toggle">☰</button>
