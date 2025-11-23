@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - split-join
   workflow_dispatch:
 
 permissions:
@@ -25,12 +24,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Build Rust Docs
-        run: |
-          cargo doc --no-deps
-          mkdir -p docs/api
-          cp -r target/doc/* docs/api/
 
       - name: Setup Pages
         uses: actions/configure-pages@v4

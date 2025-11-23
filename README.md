@@ -33,7 +33,7 @@ The engine is built on three core concepts: **Tasks/Nodes** for logic, **Workflo
 - **Built-in Scheduling**: Cron-based, interval, and manual triggers for background jobs.
 - **Concurrent Workflows**: Run multiple instances of the same workflow with quota management.
 - **Observability**: Integrated `tracing` support for deep insights into workflow execution.
-- **Zero-Cost Abstractions**: Minimal overhead designed for high-performance async Rust.
+- **Performance-Focused**: Minimizes heap allocations by leveraging stack-based objects wherever possible, giving you control over where allocations occur.
 
 ## Simple Example: Parallel Processing
 
