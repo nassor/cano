@@ -467,14 +467,14 @@ let workflow = Workflow::new(store.clone())
                 T1-->>W: Complete ✓
                 T2-->>W: Failed ✗
                 T3-->>W: Complete ✓
-                T4-->>W: Complete ✓
-                Note over W: 3 Successes → Proceed
-                Note over W: Track: 3 success, 1 error
+                Note over W: 2 Successes → Proceed
+                W->>T4: Cancel
+                Note over W: Track: 2 success, 1 error, 1 cancelled
         </div>
 
         <pre><code class="language-rust">// PartialResults Strategy: Best for fault-tolerant systems with latency optimization
 let join_config = JoinConfig::new(
-    JoinStrategy::PartialResults(3),  // Proceed after any 3 succeed
+    JoinStrategy::PartialResults(2),  // Proceed after any 2 succeed
     DataState::Aggregate
 )
 .with_timeout(Duration::from_secs(5))

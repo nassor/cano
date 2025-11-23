@@ -137,7 +137,7 @@ a:hover {
 .card-stack {
     display: flex;
     flex-direction: column;
-    gap: 4rem;
+    gap: 2rem;
     margin: 2rem 0;
 }
 
