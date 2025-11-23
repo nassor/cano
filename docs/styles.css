@@ -92,6 +92,7 @@ h1 {
     font-size: 3rem;
     margin-bottom: 1.5rem;
     background: linear-gradient(to right, var(--primary-color), var(--secondary-color));
+    background-clip: text;
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
 }
@@ -136,7 +137,7 @@ a:hover {
 .card-stack {
     display: flex;
     flex-direction: column;
-    gap: 2rem;
+    gap: 4rem;
     margin: 2rem 0;
 }
 

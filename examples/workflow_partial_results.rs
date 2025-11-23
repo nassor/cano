@@ -90,7 +90,7 @@ async fn main() -> Result<(), CanoError> {
     ];
 
     // Configure the join strategy:
-    // - PartialResults(2): Proceed as soon as 2 tasks complete (success or failure)
+    // - PartialResults(2): Proceed as soon as 2 tasks complete successfully
     // - store_partial_results(true): Keep track of what happened
     let join_config = JoinConfig::new(JoinStrategy::PartialResults(2), ApiState::Complete)
         .with_store_partial_results(true);
@@ -124,14 +124,17 @@ async fn main() -> Result<(), CanoError> {
     println!("- Cancelled: {}", cancelled);
 
     // Verify results
-    // We expect Task 1 (success) and Task 3 (failure) to complete first.
-    // Task 2 and 4 should be cancelled because we only asked for 2 completions.
-    // Wait, Task 3 fails at 150ms. Task 1 succeeds at 100ms.
-    // So at 150ms we have 2 completions (1 success, 1 failure).
+    // We expect Task 1 (success) and Task 2 (success) to complete.
+    // Task 3 (failure) will complete but not count towards the threshold.
+    // Task 4 should be cancelled because we only asked for 2 successful completions.
+    // Task 1 succeeds at 100ms.
+    // Task 3 fails at 150ms.
+    // Task 2 succeeds at 500ms.
+    // So at 500ms we have 2 successes.
     // The workflow should proceed.
 
-    if successes >= 1 && errors >= 1 {
-        println!("\nSUCCESS: Workflow behaved as expected (mixed results handled).");
+    if successes >= 2 {
+        println!("\nSUCCESS: Workflow behaved as expected (waited for successes).");
     } else {
         println!("\nWARNING: Unexpected results.");
     }

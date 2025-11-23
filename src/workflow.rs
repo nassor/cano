@@ -20,7 +20,7 @@
 //! - **Any**: Continue after any single task completes
 //! - **Quorum**: Wait for a specific number of tasks to complete successfully
 //! - **Percentage**: Wait for a percentage of tasks to complete successfully
-//! - **PartialResults**: Accept partial results after minimum tasks complete (success or failure),
+//! - **PartialResults**: Accept partial results after minimum tasks complete successfully,
 //!   cancel remaining tasks, and track both successes and errors
 //! - **PartialTimeout**: Accept whatever completes before timeout, cancel incomplete tasks,
 //!   and proceed with completed tasks (requires timeout configuration)
@@ -35,7 +35,7 @@
 //!
 //! ### Key Features
 //!
-//! - **Early Cancellation**: Once the minimum number of tasks complete (success or failure),
+//! - **Early Cancellation**: Once the minimum number of tasks complete successfully,
 //!   remaining tasks are cancelled
 //! - **Result Tracking**: Tracks successful, failed, and cancelled tasks separately
 //! - **Store Integration**: Optionally stores result summaries in the workflow store
@@ -117,9 +117,9 @@ pub enum JoinStrategy {
     Quorum(usize),
     /// Percentage of tasks must complete (0.0 to 1.0)
     Percentage(f64),
-    /// Accept partial results - continues after minimum tasks complete,
+    /// Accept partial results - continues after minimum tasks complete successfully,
     /// cancels remaining tasks, and returns both successes and errors
-    /// Parameter is the minimum number of tasks that must complete (success or failure)
+    /// Parameter is the minimum number of tasks that must complete successfully
     PartialResults(usize),
     /// Accept whatever completes before timeout - cancels tasks that haven't completed
     /// when timeout expires, and proceeds with completed tasks (successes and failures)
@@ -547,17 +547,14 @@ where
         // Check if join condition is met
         match &join_config.strategy {
             JoinStrategy::PartialResults(_) => {
-                // For PartialResults, we always continue if minimum tasks completed
+                // For PartialResults, we always continue if minimum tasks completed successfully
                 // We've already collected the required minimum
-                if join_config
-                    .strategy
-                    .is_satisfied(split_result.completed_count(), total_tasks)
-                {
+                if join_config.strategy.is_satisfied(successful, total_tasks) {
                     Ok(join_config.join_state.clone())
                 } else {
                     Err(CanoError::workflow(format!(
-                        "Partial results condition not met: {} completed, {} required",
-                        split_result.completed_count(),
+                        "Partial results condition not met: {} completed successfully, {} required",
+                        successful,
                         match &join_config.strategy {
                             JoinStrategy::PartialResults(min) => *min,
                             _ => 0,
@@ -665,7 +662,7 @@ where
                             }
                         }
                         JoinStrategy::PartialResults(min) => {
-                            if split_result.completed_count() >= *min {
+                            if split_result.successes.len() >= *min {
                                 break;
                             }
                         }
@@ -1248,10 +1245,10 @@ mod tests {
         let errors: usize = store.get("split_errors_count").unwrap();
         let cancelled: usize = store.get("split_cancelled_count").unwrap();
 
-        // Should have 1 success, 1 error, and 2 cancelled
-        assert_eq!(successes, 1);
+        // Should have 2 successes (one fast, one slow), 1 error, and 1 cancelled
+        assert_eq!(successes, 2);
         assert_eq!(errors, 1);
-        assert_eq!(cancelled, 2);
+        assert_eq!(cancelled, 1);
     }
 
     #[tokio::test]

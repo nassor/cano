@@ -144,7 +144,7 @@ async fn main() -> Result<(), CanoError> {
             </div>
             <div class="card">
                 <h3>PartialResults(n)</h3>
-                <p>Proceed after <strong>n</strong> tasks complete (success OR failure).</p>
+                <p>Proceed after <strong>n</strong> tasks complete successfully.</p>
                 <pre><code class="language-rust">JoinStrategy::PartialResults(3)</code></pre>
             </div>
         </div>
@@ -451,7 +451,7 @@ let workflow = Workflow::new(store.clone())
 </code></pre>
 
         <h3>5. PartialResults Strategy - Accept Partial Completion</h3>
-        <p>Proceeds after N tasks complete (success OR failure), cancels remaining tasks. Tracks all outcomes.</p>
+        <p>Proceeds after N tasks complete successfully, cancels remaining tasks. Tracks all outcomes.</p>
         
         <div class="mermaid">
             sequenceDiagram
@@ -467,14 +467,14 @@ let workflow = Workflow::new(store.clone())
                 T1-->>W: Complete ✓
                 T2-->>W: Failed ✗
                 T3-->>W: Complete ✓
-                Note over W: 3 Completed → Proceed
-                W->>T4: Cancel
-                Note over W: Track: 2 success, 1 error, 1 cancelled
+                T4-->>W: Complete ✓
+                Note over W: 3 Successes → Proceed
+                Note over W: Track: 3 success, 1 error
         </div>
 
         <pre><code class="language-rust">// PartialResults Strategy: Best for fault-tolerant systems with latency optimization
 let join_config = JoinConfig::new(
-    JoinStrategy::PartialResults(3),  // Proceed after any 3 complete
+    JoinStrategy::PartialResults(3),  // Proceed after any 3 succeed
     DataState::Aggregate
 )
 .with_timeout(Duration::from_secs(5))
@@ -592,7 +592,7 @@ let workflow = Workflow::new(store.clone())
                 </tr>
                 <tr>
                     <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>PartialResults(n)</code></td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">N tasks complete</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">N tasks succeed</td>
                     <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Yes</td>
                     <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Latency optimization</td>
                 </tr>
