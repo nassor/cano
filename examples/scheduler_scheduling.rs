@@ -276,9 +276,10 @@ async fn main() -> CanoResult<()> {
     println!("  • System Setup: Manual trigger only");
     println!();
 
-    // Start the scheduler
+    // Start the scheduler in the background
     println!("▶️  Starting scheduler system...");
-    scheduler.start().await?;
+    let mut scheduler_handle = scheduler.clone();
+    let scheduler_task = tokio::spawn(async move { scheduler_handle.start().await });
 
     // Wait a bit and check workflow status
     sleep(Duration::from_secs(2)).await;
@@ -322,6 +323,11 @@ async fn main() -> CanoResult<()> {
     // Stop the scheduler
     println!("\n⏹️  Stopping scheduler...");
     scheduler.stop().await?;
+
+    // Wait for scheduler task to finish
+    let _ = scheduler_task
+        .await
+        .map_err(|e| CanoError::task_execution(format!("Scheduler task failed: {}", e)))?;
 
     println!("✅ Scheduler scheduling example completed!");
     Ok(())

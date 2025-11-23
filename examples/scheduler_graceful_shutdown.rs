@@ -174,13 +174,33 @@ async fn main() -> CanoResult<()> {
 
         println!("\n\n🛑 Received Ctrl+C - Initiating graceful shutdown...");
         println!("   Stopping scheduler and waiting for running workflows to complete...");
-        println!("   (Press Ctrl+C again to force quit)\n");
 
         // Stop the scheduler (this will wait for running workflows to complete)
         match scheduler_for_signal.stop().await {
             Ok(()) => println!("✅ All workflows completed gracefully"),
             Err(e) => eprintln!("⚠️  Shutdown error: {}", e),
         }
+    });
+
+    // DEMO: Simulate user interrupt after 10 seconds
+    let pid = std::process::id();
+    tokio::spawn(async move {
+        println!("⏳ Demo will automatically trigger Ctrl+C in 10 seconds...");
+        sleep(Duration::from_secs(15)).await;
+        println!("\n⏰ Demo time limit reached - sending SIGINT...");
+
+        #[cfg(unix)]
+        std::process::Command::new("kill")
+            .arg("-s")
+            .arg("INT")
+            .arg(pid.to_string())
+            .output()
+            .expect("Failed to send SIGINT");
+
+        #[cfg(not(unix))]
+        println!(
+            "⚠️  Automatic SIGINT not supported on this platform, please press Ctrl+C manually"
+        );
     });
 
     // Start the scheduler

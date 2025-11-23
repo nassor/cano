@@ -140,34 +140,47 @@ async fn main() -> CanoResult<()> {
         "daily_task",
         daily_flow,
         TaskState::Start,
-        Duration::from_secs(86400),
-    )?; // 24 hours
+        Duration::from_secs(4),
+    )?; // Simulated daily (every 4s)
     scheduler.every(
         "hourly_task",
         hourly_flow,
         TaskState::Start,
-        Duration::from_secs(3600),
-    )?; // 1 hour
+        Duration::from_secs(2),
+    )?; // Simulated hourly (every 2s)
     scheduler.every(
         "frequent_task",
         frequent_flow,
         TaskState::Start,
-        Duration::from_secs(2),
-    )?; // 2 seconds for demo
+        Duration::from_secs(1),
+    )?; // Frequent (every 1s)
 
     println!("📅 Scheduled workflows:");
-    println!("  • Daily task: Every 24 hours");
-    println!("  • Hourly task: Every 1 hour");
-    println!("  • Frequent task: Every 2 seconds (for demo)");
+    println!("  • Daily task: Every 4 seconds (simulated)");
+    println!("  • Hourly task: Every 2 seconds (simulated)");
+    println!("  • Frequent task: Every 1 second");
     println!();
 
-    scheduler.start().await?;
+    // Start the scheduler in background
+    let mut scheduler_handle = scheduler.clone();
+    let scheduler_task = tokio::spawn(async move {
+        println!("Scheduler background task started.");
+        if let Err(e) = scheduler_handle.start().await {
+            eprintln!("Scheduler failed: {}", e);
+        }
+        println!("Scheduler background task finished.");
+    });
 
     println!("🚀 Scheduler started! Running for 10 seconds...");
     tokio::time::sleep(Duration::from_secs(10)).await;
 
     scheduler.stop().await?;
     println!("✅ Scheduler stopped gracefully");
+
+    // Await the scheduler task to ensure it cleans up
+    scheduler_task
+        .await
+        .map_err(|e| CanoError::task_execution(format!("Scheduler task failed: {}", e)))?;
 
     Ok(())
 }

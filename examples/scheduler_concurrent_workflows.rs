@@ -180,8 +180,9 @@ async fn main() -> CanoResult<()> {
     println!("  • Fast Task: Every 100ms (500ms execution time)");
     println!("  → This creates intentional overlapping executions!\n");
 
-    // Start the scheduler
-    scheduler.start().await?;
+    // Start the scheduler in background
+    let mut scheduler_handle = scheduler.clone();
+    let scheduler_task = tokio::spawn(async move { scheduler_handle.start().await });
 
     // Run for 10 seconds to let tasks start, then stop scheduling new tasks
     println!("🏃 Running for 10 seconds to start tasks...\n");
@@ -227,6 +228,11 @@ async fn main() -> CanoResult<()> {
     println!("   • No blocking occurred between instances");
     println!("   • Each instance had independent execution context");
     println!("   • Demo waited for ALL tasks to complete before finishing");
+
+    // Wait for scheduler task to finish
+    let _ = scheduler_task
+        .await
+        .map_err(|e| CanoError::task_execution(format!("Scheduler task failed: {}", e)))?;
 
     Ok(())
 }
