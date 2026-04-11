@@ -4,6 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Nodes - Cano Documentation</title>
+    <meta name="description" content="Learn how to use Nodes in Cano - structured, resilient processing units with a three-phase lifecycle.">
+    <meta property="og:title" content="Nodes - Cano Documentation">
+    <meta property="og:description" content="Structured, resilient processing units with a three-phase lifecycle.">
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;700&family=Fira+Code&display=swap" rel="stylesheet">
@@ -11,11 +14,417 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-rust.min.js"></script>
     <script src="script.js" defer></script>
+    <style>
+        /* ── Page-specific styles for nodes.html ── */
+
+        /* Table of Contents */
+        .page-toc {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 0.75rem;
+            padding: 1.5rem 2rem;
+            margin-bottom: 3rem;
+        }
+
+        .page-toc-title {
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--primary-color);
+            margin-bottom: 0.75rem;
+        }
+
+        .page-toc ol {
+            list-style: none;
+            counter-reset: toc-counter;
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+            gap: 0.25rem 2rem;
+            padding: 0;
+            margin: 0;
+        }
+
+        .page-toc li {
+            counter-increment: toc-counter;
+        }
+
+        .page-toc li a {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.35rem 0;
+            color: #94a3b8;
+            font-size: 0.925rem;
+            font-weight: 500;
+            text-decoration: none;
+            transition: color 0.2s;
+        }
+
+        .page-toc li a::before {
+            content: counter(toc-counter, decimal-leading-zero);
+            font-size: 0.75rem;
+            font-weight: 700;
+            color: var(--border-color);
+            font-family: 'Fira Code', monospace;
+            transition: color 0.2s;
+        }
+
+        .page-toc li a:hover {
+            color: var(--primary-color);
+        }
+
+        .page-toc li a:hover::before {
+            color: var(--primary-color);
+        }
+
+        /* Section dividers */
+        .section-divider {
+            border: none;
+            height: 1px;
+            background: linear-gradient(to right, var(--border-color), transparent);
+            margin: 3rem 0 0;
+        }
+
+        /* Callout boxes */
+        .callout {
+            padding: 1.25rem 1.5rem;
+            border-radius: 0.75rem;
+            margin: 1.5rem 0 2rem;
+            border-left: 4px solid;
+            font-size: 1rem;
+        }
+
+        .callout p {
+            margin: 0;
+            font-size: 1rem;
+            line-height: 1.6;
+        }
+
+        .callout-label {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-weight: 700;
+            font-size: 0.8rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            margin-bottom: 0.5rem;
+        }
+
+        .callout-info {
+            background: rgba(56, 189, 248, 0.08);
+            border-color: var(--primary-color);
+        }
+
+        .callout-info .callout-label {
+            color: var(--primary-color);
+        }
+
+        .callout-tip {
+            background: rgba(52, 211, 153, 0.08);
+            border-color: #34d399;
+        }
+
+        .callout-tip .callout-label {
+            color: #34d399;
+        }
+
+        .callout-warning {
+            background: rgba(251, 191, 36, 0.08);
+            border-color: #fbbf24;
+        }
+
+        .callout-warning .callout-label {
+            color: #fbbf24;
+        }
+
+        /* Code block labels */
+        .code-block {
+            position: relative;
+            margin: 1.5rem 0;
+        }
+
+        .code-block-label {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-bottom: 1px solid var(--code-bg);
+            border-radius: 0.5rem 0.5rem 0 0;
+            padding: 0.4rem 1rem;
+            font-size: 0.78rem;
+            font-weight: 600;
+            color: #94a3b8;
+            letter-spacing: 0.02em;
+            position: relative;
+            top: 1px;
+            z-index: 1;
+        }
+
+        .code-block-label .label-icon {
+            font-size: 0.85rem;
+            opacity: 0.7;
+        }
+
+        .code-block pre {
+            margin-top: 0 !important;
+            border-top-left-radius: 0 !important;
+        }
+
+        /* Lifecycle flow */
+        .lifecycle-flow {
+            display: grid;
+            grid-template-columns: 1fr auto 1fr auto 1fr;
+            gap: 0;
+            align-items: stretch;
+            margin: 2rem 0;
+        }
+
+        .lifecycle-phase {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 0.75rem;
+            padding: 1.5rem;
+            position: relative;
+            transition: border-color 0.2s, transform 0.2s;
+        }
+
+        .lifecycle-phase:hover {
+            border-color: var(--primary-color);
+            transform: translateY(-2px);
+        }
+
+        .phase-step {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-bottom: 0.75rem;
+        }
+
+        .phase-number {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 1.75rem;
+            height: 1.75rem;
+            border-radius: 50%;
+            font-weight: 700;
+            font-size: 0.8rem;
+            font-family: 'Fira Code', monospace;
+            flex-shrink: 0;
+        }
+
+        .phase-prep .phase-number {
+            background: rgba(56, 189, 248, 0.15);
+            color: var(--primary-color);
+        }
+
+        .phase-exec .phase-number {
+            background: rgba(129, 140, 248, 0.15);
+            color: var(--secondary-color);
+        }
+
+        .phase-post .phase-number {
+            background: rgba(52, 211, 153, 0.15);
+            color: #34d399;
+        }
+
+        .phase-step h3 {
+            margin: 0;
+            font-size: 1.15rem;
+        }
+
+        .phase-prep h3 { color: var(--primary-color); }
+        .phase-exec h3 { color: var(--secondary-color); }
+        .phase-post h3 { color: #34d399; }
+
+        .lifecycle-phase p {
+            font-size: 0.95rem;
+            margin: 0;
+            color: #94a3b8;
+        }
+
+        .phase-tag {
+            display: inline-block;
+            font-size: 0.7rem;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            padding: 0.15rem 0.5rem;
+            border-radius: 0.25rem;
+            margin-top: 0.75rem;
+        }
+
+        .phase-prep .phase-tag {
+            background: rgba(56, 189, 248, 0.1);
+            color: var(--primary-color);
+        }
+
+        .phase-exec .phase-tag {
+            background: rgba(129, 140, 248, 0.1);
+            color: var(--secondary-color);
+        }
+
+        .phase-post .phase-tag {
+            background: rgba(52, 211, 153, 0.1);
+            color: #34d399;
+        }
+
+        .lifecycle-arrow {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 0 0.5rem;
+            color: var(--border-color);
+            font-size: 1.25rem;
+        }
+
+        .lifecycle-arrow svg {
+            width: 24px;
+            height: 24px;
+            fill: none;
+            stroke: var(--border-color);
+            stroke-width: 2;
+            stroke-linecap: round;
+            stroke-linejoin: round;
+        }
+
+        /* Styled table */
+        .styled-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            margin: 2rem 0;
+            background: var(--card-bg);
+            border-radius: 0.75rem;
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+            font-size: 0.95rem;
+        }
+
+        .styled-table thead tr {
+            background: rgba(255, 255, 255, 0.04);
+        }
+
+        .styled-table th {
+            padding: 1rem 1.25rem;
+            text-align: left;
+            font-weight: 600;
+            color: #e2e8f0;
+            font-size: 0.85rem;
+            letter-spacing: 0.03em;
+            text-transform: uppercase;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .styled-table td {
+            padding: 0.875rem 1.25rem;
+            border-top: 1px solid rgba(255, 255, 255, 0.04);
+            color: #94a3b8;
+        }
+
+        .styled-table tbody tr:first-child td {
+            border-top: none;
+        }
+
+        .styled-table tbody tr:hover {
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        /* Pattern sections */
+        .pattern-section {
+            margin: 2rem 0;
+        }
+
+        .pattern-header {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .pattern-number {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 2rem;
+            height: 2rem;
+            border-radius: 0.5rem;
+            background: rgba(129, 140, 248, 0.12);
+            color: var(--secondary-color);
+            font-weight: 700;
+            font-size: 0.85rem;
+            font-family: 'Fira Code', monospace;
+            flex-shrink: 0;
+        }
+
+        .pattern-header h3 {
+            margin: 0;
+        }
+
+        /* Config best practices cards */
+        .config-cards .card {
+            border-left: 3px solid var(--secondary-color);
+        }
+
+        /* Responsive */
+        @media (max-width: 768px) {
+            .page-toc ol {
+                grid-template-columns: 1fr;
+            }
+
+            .page-toc {
+                padding: 1.25rem 1.25rem;
+            }
+
+            .lifecycle-flow {
+                grid-template-columns: 1fr;
+                gap: 0;
+            }
+
+            .lifecycle-phase {
+                padding: 1.25rem;
+            }
+
+            .lifecycle-arrow {
+                padding: 0.5rem 0;
+                transform: rotate(90deg);
+            }
+
+            .callout {
+                padding: 1rem 1.25rem;
+            }
+
+            .styled-table {
+                font-size: 0.85rem;
+                display: block;
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+            }
+
+            .styled-table th,
+            .styled-table td {
+                padding: 0.625rem 0.75rem;
+                white-space: nowrap;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .styled-table th,
+            .styled-table td {
+                padding: 0.5rem 0.625rem;
+                font-size: 0.8rem;
+            }
+        }
+    </style>
 </head>
 <body>
-    <button id="menu-toggle" class="menu-toggle">☰</button>
-    
-    <nav class="sidebar">
+    <button id="menu-toggle" class="menu-toggle" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+    <div class="sidebar-overlay"></div>
+
+    <nav class="sidebar" role="navigation" aria-label="Main navigation">
         <a href="index.html" class="logo">
             <img src="logo.png" alt="Cano" style="height: 24px; vertical-align: middle; margin-right: 8px;">
             Cano
@@ -25,6 +434,7 @@
             <li><a href="task.html">Tasks</a></li>
             <li><a href="nodes.html" class="active">Nodes</a></li>
             <li><a href="workflows.html">Workflows</a></li>
+            <li><a href="store.html">Store</a></li>
             <li><a href="scheduler.html">Scheduler</a></li>
             <li><a href="tracing.html">Tracing</a></li>
         </ul>
@@ -35,11 +445,35 @@
         <p class="subtitle">Structured, resilient processing units with a three-phase lifecycle.</p>
 
         <p>
-            A <code>Node</code> implements a structured three-phase lifecycle with built-in retry capabilities. 
+            A <code>Node</code> implements a structured three-phase lifecycle with built-in retry capabilities.
             Nodes are ideal for complex operations where separating data loading, execution, and result handling improves clarity and maintainability.
         </p>
 
-        <h2>The Three Phases</h2>
+        <div class="callout callout-info">
+            <div class="callout-label">Key concept</div>
+            <p>
+                Nodes separate <em>what data to load</em> (prep), <em>how to process it</em> (exec), and <em>where to store results</em> (post).
+                On any phase failure the entire <code>prep</code> &rarr; <code>exec</code> &rarr; <code>post</code> pipeline is retried from scratch,
+                so all three phases must be idempotent.
+            </p>
+        </div>
+
+        <!-- Table of Contents -->
+        <nav class="page-toc" aria-label="Table of contents">
+            <div class="page-toc-title">On this page</div>
+            <ol>
+                <li><a href="#three-phases">The Three Phases</a></li>
+                <li><a href="#implementing">Implementing a Node</a></li>
+                <li><a href="#nodes-vs-tasks">Nodes vs Tasks</a></li>
+                <li><a href="#patterns">Real-World Node Patterns</a></li>
+                <li><a href="#config">Configuration Best Practices</a></li>
+            </ol>
+        </nav>
+
+        <!-- Section: The Three Phases -->
+        <hr class="section-divider">
+        <h2 id="three-phases">The Three Phases</h2>
+
         <div class="mermaid">
             graph LR
                 A[Prep] -->|Load Data| B[Exec]
@@ -47,27 +481,65 @@
                 C -->|Save Result| D[Next State]
         </div>
 
-        <div class="card-grid">
-            <div class="card">
-                <h3>1. Prep</h3>
+        <!-- Visual lifecycle cards with step numbers and arrows -->
+        <div class="lifecycle-flow">
+            <div class="lifecycle-phase phase-prep">
+                <div class="phase-step">
+                    <span class="phase-number">1</span>
+                    <h3>Prep</h3>
+                </div>
                 <p>Load data from the store, validate inputs, and setup resources. Returns <code>PrepResult</code>.</p>
+                <span class="phase-tag">Runs once</span>
             </div>
-            <div class="card">
-                <h3>2. Exec</h3>
-                <p>Core processing logic. This phase is automatically retried on failure. Returns <code>ExecResult</code>.</p>
+
+            <div class="lifecycle-arrow">
+                <svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
             </div>
-            <div class="card">
-                <h3>3. Post</h3>
+
+            <div class="lifecycle-phase phase-exec">
+                <div class="phase-step">
+                    <span class="phase-number">2</span>
+                    <h3>Exec</h3>
+                </div>
+                <p>Core processing logic. No store access — receives <code>PrepResult</code> and returns <code>ExecResult</code>. Must be idempotent.</p>
+                <span class="phase-tag">Must be idempotent</span>
+            </div>
+
+            <div class="lifecycle-arrow">
+                <svg viewBox="0 0 24 24"><path d="M5 12h14M13 6l6 6-6 6"/></svg>
+            </div>
+
+            <div class="lifecycle-phase phase-post">
+                <div class="phase-step">
+                    <span class="phase-number">3</span>
+                    <h3>Post</h3>
+                </div>
                 <p>Store results, cleanup resources, and determine the next workflow state based on execution outcome.</p>
+                <span class="phase-tag">Runs once</span>
             </div>
         </div>
 
-        <h2>Implementing a Node</h2>
+        <div class="callout callout-tip">
+            <div class="callout-label">Tip</div>
+            <p>
+                Keep IO operations (database reads, file access) in <code>prep</code> and <code>post</code>.
+                The <code>exec</code> phase has no store access by design — treat it as a pure computation.
+                Because the entire pipeline restarts on any failure, making all three phases idempotent
+                is the safest approach.
+            </p>
+        </div>
+
+        <!-- Section: Implementing a Node -->
+        <hr class="section-divider">
+        <h2 id="implementing">Implementing a Node</h2>
         <p>
-            Here is a complete example of a Node that generates random numbers and filters them. 
+            Here is a complete example of a Node that generates random numbers and filters them.
             This demonstrates the three-phase lifecycle: <code>prep</code> (generate), <code>exec</code> (filter), and <code>post</code> (store).
         </p>
-        <pre><code class="language-rust">use async_trait::async_trait;
+
+        <div class="code-block">
+            <span class="code-block-label"><span class="label-icon">&#9998;</span> Complete Node implementation</span>
+            <pre><code class="language-rust">use async_trait::async_trait;
 use cano::prelude::*;
 use rand::Rng;
 
@@ -92,7 +564,7 @@ impl Node<WorkflowAction> for GeneratorNode {
         let mut rng = rand::rng();
         let size = rng.random_range(25..=150);
         let numbers: Vec<u32> = (0..size).map(|_| rng.random_range(1..=1000)).collect();
-        
+
         println!("Generated {} random numbers", numbers.len());
         Ok(numbers)
     }
@@ -117,58 +589,83 @@ impl Node<WorkflowAction> for GeneratorNode {
     ) -> Result<WorkflowAction, CanoError> {
         // Store the result in the shared memory store
         store.put("filtered_numbers", exec_res)?;
-        
+
         println!("✓ Generator node completed");
         Ok(WorkflowAction::Count)
     }
 }</code></pre>
+        </div>
 
-        <h2>Nodes vs Tasks</h2>
+        <!-- Section: Nodes vs Tasks -->
+        <hr class="section-divider">
+        <h2 id="nodes-vs-tasks">Nodes vs Tasks</h2>
         <p>
             Every <code>Node</code> automatically implements <code>Task</code>, so you can use them interchangeably.
         </p>
-        
-        <table style="width: 100%; border-collapse: collapse; margin: 2rem 0; background: var(--card-bg); border-radius: 1rem; overflow: hidden;">
+
+        <table class="styled-table">
             <thead>
-                <tr style="background: rgba(255,255,255,0.05); text-align: left;">
-                    <th style="padding: 1rem;">Feature</th>
-                    <th style="padding: 1rem;">Task</th>
-                    <th style="padding: 1rem;">Node</th>
+                <tr>
+                    <th>Feature</th>
+                    <th>Task</th>
+                    <th>Node</th>
                 </tr>
             </thead>
             <tbody>
                 <tr>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Structure</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Single <code>run</code> method</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">3 phases: Prep, Exec, Post</td>
+                    <td>Structure</td>
+                    <td>Single <code>run</code> method</td>
+                    <td>3 phases: Prep, Exec, Post</td>
                 </tr>
                 <tr>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Complexity</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Low</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Medium</td>
+                    <td>Retry scope</td>
+                    <td>Entire <code>run()</code> call</td>
+                    <td>Entire <code>prep</code> &rarr; <code>exec</code> &rarr; <code>post</code> pipeline</td>
                 </tr>
                 <tr>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Use Case</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Simple logic, prototypes</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Production logic, complex flows</td>
+                    <td>Complexity</td>
+                    <td>Low</td>
+                    <td>Medium</td>
+                </tr>
+                <tr>
+                    <td>Use Case</td>
+                    <td>Simple logic, prototypes</td>
+                    <td>Production logic, complex flows</td>
                 </tr>
             </tbody>
         </table>
 
-        <h2>Real-World Node Patterns</h2>
-        <p>Nodes provide structure for complex workflows. Here are proven patterns from production systems.</p>
-
-        <h3>1. ETL (Extract, Transform, Load) Pattern</h3>
-        <p>The three-phase lifecycle naturally maps to ETL operations.</p>
-        
-        <div class="mermaid">
-            graph LR
-                A[Prep: Extract] -->|Load from source| B[Exec: Transform]
-                B -->|Process data| C[Post: Load]
-                C -->|Save to destination| D[Next State]
+        <div class="callout callout-info">
+            <div class="callout-label">Blanket impl</div>
+            <p>
+                Because every <code>Node</code> automatically implements <code>Task</code>,
+                you can freely mix both types when calling <code>Workflow::register()</code>.
+                See the <a href="task.html">Tasks</a> page for the simpler interface.
+            </p>
         </div>
 
-        <pre><code class="language-rust">use cano::prelude::*;
+        <!-- Section: Real-World Patterns -->
+        <hr class="section-divider">
+        <h2 id="patterns">Real-World Node Patterns</h2>
+        <p>Nodes provide structure for complex workflows. Here are proven patterns from production systems.</p>
+
+        <section class="pattern-section">
+            <div class="pattern-header">
+                <span class="pattern-number">1</span>
+                <h3>ETL (Extract, Transform, Load) Pattern</h3>
+            </div>
+            <p>The three-phase lifecycle naturally maps to ETL operations.</p>
+
+            <div class="mermaid">
+                graph LR
+                    A[Prep: Extract] -->|Load from source| B[Exec: Transform]
+                    B -->|Process data| C[Post: Load]
+                    C -->|Save to destination| D[Next State]
+            </div>
+
+            <div class="code-block">
+                <span class="code-block-label"><span class="label-icon">&#128230;</span> ETL Node</span>
+                <pre><code class="language-rust">use cano::prelude::*;
 
 #[derive(Clone)]
 struct ETLNode {
@@ -189,51 +686,59 @@ impl Node<State> for ETLNode {
     // Extract: Load data from source
     async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         println!("📥 Extracting from: {}", self.source);
-        
+
         let records = load_from_database(&self.source).await?;
         println!("Loaded {} records", records.len());
-        
+
         Ok(records)
     }
 
     // Transform: Process the data
     async fn exec(&self, records: Self::PrepResult) -> Self::ExecResult {
         println!("⚙️  Transforming {} records...", records.len());
-        
+
         records.into_iter()
             .map(|r| process_record(r))
             .collect()
     }
 
     // Load: Save to destination
-    async fn post(&self, store: &MemoryStore, processed: Self::ExecResult) 
+    async fn post(&self, store: &MemoryStore, processed: Self::ExecResult)
         -> Result<State, CanoError> {
         println!("📤 Loading to: {}", self.destination);
-        
+
         save_to_database(&self.destination, &processed).await?;
         store.put("processed_count", processed.len())?;
-        
+
         Ok(State::Complete)
     }
 }</code></pre>
+            </div>
+        </section>
 
-        <h3>2. Negotiation/Iterative Pattern</h3>
-        <p>Nodes can maintain state across iterations for negotiation workflows.</p>
-        
-        <div class="mermaid">
-            sequenceDiagram
-                participant W as Workflow
-                participant S as SellerNode
-                participant B as BuyerNode
-                W->>S: Round 1
-                S-->>B: Offer $10,000
-                B-->>S: Counter: Too high
-                W->>S: Round 2
-                S-->>B: Offer $8,000
-                B-->>S: Accept ✓
-        </div>
+        <section class="pattern-section">
+            <div class="pattern-header">
+                <span class="pattern-number">2</span>
+                <h3>Negotiation/Iterative Pattern</h3>
+            </div>
+            <p>Nodes can maintain state across iterations for negotiation workflows.</p>
 
-        <pre><code class="language-rust">#[derive(Clone)]
+            <div class="mermaid">
+                sequenceDiagram
+                    participant W as Workflow
+                    participant S as SellerNode
+                    participant B as BuyerNode
+                    W->>S: Round 1
+                    S-->>B: Offer $10,000
+                    B-->>S: Counter: Too high
+                    W->>S: Round 2
+                    S-->>B: Offer $8,000
+                    B-->>S: Accept ✓
+            </div>
+
+            <div class="code-block">
+                <span class="code-block-label"><span class="label-icon">&#128176;</span> Negotiation Node</span>
+                <pre><code class="language-rust">#[derive(Clone)]
 struct SellerNode;
 
 #[async_trait]
@@ -259,17 +764,25 @@ impl Node<NegotiationState> for SellerNode {
         state
     }
 
-    async fn post(&self, store: &MemoryStore, state: Self::ExecResult) 
+    async fn post(&self, store: &MemoryStore, state: Self::ExecResult)
         -> Result<NegotiationState, CanoError> {
         store.put("negotiation", state.clone())?;
         Ok(NegotiationState::BuyerEvaluate)
     }
 }</code></pre>
+            </div>
+        </section>
 
-        <h3>3. Download & Analyze Pattern</h3>
-        <p>Perfect for workflows that download content and perform analysis.</p>
+        <section class="pattern-section">
+            <div class="pattern-header">
+                <span class="pattern-number">3</span>
+                <h3>Download &amp; Analyze Pattern</h3>
+            </div>
+            <p>Perfect for workflows that download content and perform analysis.</p>
 
-        <pre><code class="language-rust">#[derive(Clone)]
+            <div class="code-block">
+                <span class="code-block-label"><span class="label-icon">&#128269;</span> Download and analyze</span>
+                <pre><code class="language-rust">#[derive(Clone)]
 struct BookAnalyzerNode;
 
 #[async_trait]
@@ -286,12 +799,12 @@ impl Node<State> for BookAnalyzerNode {
     async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         let url: String = store.get("book_url")?;
         println!("📥 Downloading book from: {}", url);
-        
+
         let client = reqwest::Client::new();
         let content = client.get(&url)
             .send().await?
             .text().await?;
-        
+
         println!("Downloaded {} characters", content.len());
         Ok(content)
     }
@@ -299,10 +812,10 @@ impl Node<State> for BookAnalyzerNode {
     // Exec: Analyze content (retried on failure)
     async fn exec(&self, content: Self::PrepResult) -> Self::ExecResult {
         println!("🔍 Analyzing content...");
-        
+
         let words: Vec<&str> = content.split_whitespace().collect();
         let prepositions = count_prepositions(&words);
-        
+
         BookAnalysis {
             word_count: words.len(),
             preposition_count: prepositions,
@@ -311,20 +824,28 @@ impl Node<State> for BookAnalyzerNode {
     }
 
     // Post: Store results
-    async fn post(&self, store: &MemoryStore, analysis: Self::ExecResult) 
+    async fn post(&self, store: &MemoryStore, analysis: Self::ExecResult)
         -> Result<State, CanoError> {
-        println!("📊 Analysis complete: {} words, {} prepositions", 
+        println!("📊 Analysis complete: {} words, {} prepositions",
                  analysis.word_count, analysis.preposition_count);
-        
+
         store.put("analysis", analysis)?;
         Ok(State::Complete)
     }
 }</code></pre>
+            </div>
+        </section>
 
-        <h3>4. Multi-Step Processing Pattern</h3>
-        <p>Chain multiple nodes together for complex data pipelines.</p>
+        <section class="pattern-section">
+            <div class="pattern-header">
+                <span class="pattern-number">4</span>
+                <h3>Multi-Step Processing Pattern</h3>
+            </div>
+            <p>Chain multiple nodes together for complex data pipelines.</p>
 
-        <pre><code class="language-rust">// Node 1: Data Generator
+            <div class="code-block">
+                <span class="code-block-label"><span class="label-icon">&#9881;</span> Chained pipeline nodes</span>
+                <pre><code class="language-rust">// Node 1: Data Generator
 #[derive(Clone)]
 struct GeneratorNode;
 
@@ -342,7 +863,7 @@ impl Node<State> for GeneratorNode {
         (0..100).map(|_| rng.random_range(1..=1000)).collect()
     }
 
-    async fn post(&self, store: &MemoryStore, data: Self::ExecResult) 
+    async fn post(&self, store: &MemoryStore, data: Self::ExecResult)
         -> Result<State, CanoError> {
         store.put("generated_data", data)?;
         Ok(State::Filter)
@@ -366,7 +887,7 @@ impl Node<State> for FilterNode {
         data.into_iter().filter(|&x| x % 2 == 0).collect()
     }
 
-    async fn post(&self, store: &MemoryStore, filtered: Self::ExecResult) 
+    async fn post(&self, store: &MemoryStore, filtered: Self::ExecResult)
         -> Result<State, CanoError> {
         store.put("filtered_data", filtered)?;
         Ok(State::Aggregate)
@@ -394,7 +915,7 @@ impl Node<State> for AggregatorNode {
         }
     }
 
-    async fn post(&self, store: &MemoryStore, stats: Self::ExecResult) 
+    async fn post(&self, store: &MemoryStore, stats: Self::ExecResult)
         -> Result<State, CanoError> {
         store.put("final_stats", stats)?;
         Ok(State::Complete)
@@ -407,41 +928,54 @@ let workflow = Workflow::new(store.clone())
     .register(State::Filter, FilterNode)
     .register(State::Aggregate, AggregatorNode)
     .add_exit_state(State::Complete);</code></pre>
+            </div>
+        </section>
 
-        <h2>Node Configuration Best Practices</h2>
+        <!-- Section: Configuration Best Practices -->
+        <hr class="section-divider">
+        <h2 id="config">Node Configuration Best Practices</h2>
         <p>Choose the right configuration for your node's reliability requirements.</p>
 
-        <table style="width: 100%; border-collapse: collapse; margin: 2rem 0; background: var(--card-bg); border-radius: 1rem; overflow: hidden;">
+        <table class="styled-table">
             <thead>
-                <tr style="background: rgba(255,255,255,0.05); text-align: left;">
-                    <th style="padding: 1rem;">Config</th>
-                    <th style="padding: 1rem;">Use Case</th>
-                    <th style="padding: 1rem;">Example</th>
+                <tr>
+                    <th>Config</th>
+                    <th>Use Case</th>
+                    <th>Example</th>
                 </tr>
             </thead>
             <tbody>
                 <tr>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>minimal()</code></td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Fast, reliable operations</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Data transformations</td>
+                    <td><code>minimal()</code></td>
+                    <td>Fast, reliable operations</td>
+                    <td>Data transformations</td>
                 </tr>
                 <tr>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>default()</code></td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Standard operations</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">File I/O, Database queries</td>
+                    <td><code>default()</code></td>
+                    <td>Standard operations</td>
+                    <td>File I/O, Database queries</td>
                 </tr>
                 <tr>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>fixed_retry(n)</code></td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Transient failures</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Network operations</td>
+                    <td><code>fixed_retry(n)</code></td>
+                    <td>Transient failures</td>
+                    <td>Network operations</td>
                 </tr>
                 <tr>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>exponential_retry(n)</code></td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Rate-limited APIs</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">External API calls</td>
+                    <td><code>exponential_retry(n)</code></td>
+                    <td>Rate-limited APIs</td>
+                    <td>External API calls</td>
                 </tr>
             </tbody>
         </table>
+
+        <div class="callout callout-warning">
+            <div class="callout-label">Important</div>
+            <p>
+                On any phase failure, the entire <code>prep</code> &rarr; <code>exec</code> &rarr; <code>post</code> pipeline
+                restarts from the beginning. All three phases must be idempotent — side effects in <code>prep</code> or
+                <code>exec</code> (e.g. writing to an external system) will be repeated on every retry attempt.
+            </p>
+        </div>
     </main>
 </body>
 </html>

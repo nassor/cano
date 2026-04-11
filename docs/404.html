@@ -4,64 +4,16 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Page Not Found - Cano Documentation</title>
+    <meta name="description" content="The requested page could not be found in the Cano documentation.">
     <link rel="stylesheet" href="styles.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;700&family=Fira+Code&display=swap" rel="stylesheet">
     <script src="script.js" defer></script>
-    <style>
-        .not-found-content {
-            display: flex;
-            flex-direction: column;
-            align-items: center;
-            justify-content: center;
-            text-align: center;
-            min-height: 60vh;
-        }
-
-        .not-found-code {
-            font-family: 'Fira Code', monospace;
-            font-size: 8rem;
-            font-weight: 700;
-            background: linear-gradient(to right, var(--primary-color), var(--secondary-color));
-            background-clip: text;
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            line-height: 1;
-            margin-bottom: 1rem;
-        }
-
-        .not-found-message {
-            font-size: 1.5rem;
-            color: #cbd5e1;
-            margin-bottom: 2rem;
-        }
-
-        .not-found-hint {
-            font-size: 1rem;
-            color: #64748b;
-            margin-bottom: 2.5rem;
-        }
-
-        .not-found-link {
-            display: inline-block;
-            padding: 0.75rem 2rem;
-            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
-            color: #0f172a;
-            font-weight: 600;
-            border-radius: 0.5rem;
-            text-decoration: none;
-            transition: opacity 0.2s;
-        }
-
-        .not-found-link:hover {
-            opacity: 0.9;
-            color: #0f172a;
-        }
-    </style>
 </head>
 <body>
-    <button id="menu-toggle" class="menu-toggle">&#9776;</button>
+    <button id="menu-toggle" class="menu-toggle" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+    <div class="sidebar-overlay"></div>
 
-    <nav class="sidebar">
+    <nav class="sidebar" role="navigation" aria-label="Main navigation">
         <a href="index.html" class="logo">
             <img src="logo.png" alt="Cano" style="height: 24px; vertical-align: middle; margin-right: 8px;">
             Cano
@@ -79,10 +31,15 @@
 
     <main class="main-content">
         <div class="not-found-content">
-            <div class="not-found-code">404</div>
-            <p class="not-found-message">This state has no registered handler.</p>
-            <p class="not-found-hint">The page you are looking for does not exist or has been moved.</p>
-            <a href="index.html" class="not-found-link">Back to Home</a>
+            <div class="not-found-code animate-in">404</div>
+            <p class="not-found-message animate-in">This state has no registered handler.</p>
+            <p class="not-found-hint animate-in">The page you are looking for does not exist or has been moved.</p>
+            <a href="index.html" class="not-found-link animate-in">Back to Home</a>
+
+            <div class="not-found-terminal animate-in">
+                <div><span class="prompt">$</span> cano orchestrate ./missing-page</div>
+                <div><span class="error">error[E0404]</span>: state not found in workflow</div>
+            </div>
         </div>
     </main>
 </body>

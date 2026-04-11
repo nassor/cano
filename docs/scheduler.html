@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" style="scroll-behavior: smooth;">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -12,11 +12,242 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-rust.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-toml.min.js"></script>
     <script src="./script.js" defer></script>
+    <style>
+        /* ── Table of Contents ── */
+        .page-toc {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 0.75rem;
+            padding: 1.5rem 2rem;
+            margin: 2rem 0 3rem;
+            position: relative;
+        }
+        .page-toc::before {
+            content: '';
+            position: absolute;
+            left: 0; top: 0; bottom: 0;
+            width: 3px;
+            background: linear-gradient(to bottom, var(--primary-color), var(--secondary-color));
+            border-radius: 3px 0 0 3px;
+        }
+        .page-toc summary {
+            font-weight: 600;
+            font-size: 1.1rem;
+            color: #fff;
+            cursor: pointer;
+            list-style: none;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            user-select: none;
+        }
+        .page-toc summary::-webkit-details-marker { display: none; }
+        .page-toc summary::before {
+            content: '';
+            display: inline-block;
+            width: 6px; height: 6px;
+            border-right: 2px solid var(--primary-color);
+            border-bottom: 2px solid var(--primary-color);
+            transform: rotate(-45deg);
+            transition: transform 0.2s ease;
+            flex-shrink: 0;
+        }
+        .page-toc[open] summary::before { transform: rotate(45deg); }
+        .page-toc ol {
+            list-style: none;
+            padding: 0;
+            margin: 1rem 0 0;
+            columns: 2;
+            column-gap: 2rem;
+        }
+        .page-toc li {
+            break-inside: avoid;
+            margin-bottom: 0.35rem;
+        }
+        .page-toc a {
+            color: var(--text-color);
+            text-decoration: none;
+            font-size: 0.95rem;
+            display: block;
+            padding: 0.25rem 0.5rem;
+            border-radius: 0.25rem;
+            transition: all 0.15s ease;
+        }
+        .page-toc a:hover {
+            color: var(--primary-color);
+            background: rgba(56, 189, 248, 0.07);
+        }
+        .page-toc .toc-sub { padding-left: 1.25rem; font-size: 0.9rem; opacity: 0.8; }
+
+        /* ── Section anchors ── */
+        .main-content h2[id],
+        .main-content h3[id] { scroll-margin-top: 2rem; position: relative; }
+        .main-content h2[id] a.anchor-link,
+        .main-content h3[id] a.anchor-link {
+            position: absolute;
+            left: -1.5rem;
+            color: var(--border-color);
+            font-weight: 400;
+            opacity: 0;
+            text-decoration: none;
+            transition: opacity 0.15s ease;
+        }
+        .main-content h2[id]:hover a.anchor-link,
+        .main-content h3[id]:hover a.anchor-link {
+            opacity: 1;
+            color: var(--primary-color);
+        }
+
+        /* ── Diagram frame ── */
+        .diagram-frame {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 0.75rem;
+            margin: 2rem 0;
+            overflow: hidden;
+        }
+        .diagram-frame .diagram-label {
+            font-size: 0.78rem;
+            font-weight: 600;
+            letter-spacing: 0.06em;
+            text-transform: uppercase;
+            color: var(--secondary-color);
+            padding: 0.75rem 1.25rem 0;
+            margin: 0;
+        }
+        .diagram-frame .mermaid {
+            margin: 0;
+            border: none;
+            border-radius: 0;
+            background: transparent;
+        }
+
+        /* ── Scheduling mode cards ── */
+        .mode-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 1.25rem;
+            margin: 2rem 0;
+        }
+        .mode-card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 0.75rem;
+            padding: 1.5rem;
+            text-align: center;
+            transition: border-color 0.2s ease, transform 0.2s ease;
+        }
+        .mode-card:last-child {
+            grid-column: 1 / -1;
+            max-width: 50%;
+            justify-self: center;
+        }
+        .mode-card:hover {
+            border-color: var(--primary-color);
+            transform: translateY(-3px);
+        }
+        .mode-card .mode-icon {
+            font-size: 2rem;
+            margin-bottom: 0.75rem;
+            line-height: 1;
+        }
+        .mode-card h3 {
+            margin: 0 0 0.5rem;
+            font-size: 1.15rem;
+            color: #fff;
+        }
+        .mode-card p { font-size: 0.95rem; margin-bottom: 0.75rem; }
+        .mode-card pre { margin: 0.5rem 0 0 !important; text-align: left; }
+        .mode-card pre code { font-size: 0.85rem; }
+
+        /* ── Callout boxes ── */
+        .callout {
+            border-radius: 0.75rem;
+            padding: 1.25rem 1.5rem;
+            margin: 1.5rem 0;
+            border: 1px solid;
+        }
+        .callout-info {
+            background: rgba(56, 189, 248, 0.08);
+            border-color: rgba(56, 189, 248, 0.25);
+        }
+        .callout-info .callout-title { color: var(--primary-color); }
+        .callout-warn {
+            background: rgba(248, 113, 113, 0.08);
+            border-color: rgba(248, 113, 113, 0.25);
+        }
+        .callout-warn .callout-title { color: #f87171; }
+        .callout-tip {
+            background: rgba(56, 189, 248, 0.08);
+            border-left: 3px solid var(--primary-color);
+            border-top: none; border-right: none; border-bottom: none;
+        }
+        .callout .callout-title { font-weight: 600; margin-bottom: 0.5rem; }
+        .callout p:last-child { margin-bottom: 0; }
+
+        /* ── Comparison table ── */
+        .comparison-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 2rem 0;
+            background: var(--card-bg);
+            border-radius: 0.75rem;
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+        }
+        .comparison-table thead tr { background: rgba(255, 255, 255, 0.05); text-align: left; }
+        .comparison-table th {
+            padding: 1rem 1.25rem;
+            font-weight: 600;
+            color: #fff;
+            font-size: 0.9rem;
+        }
+        .comparison-table td {
+            padding: 0.85rem 1.25rem;
+            border-top: 1px solid var(--border-color);
+            font-size: 0.95rem;
+        }
+        .comparison-table tbody tr { transition: background 0.15s ease; }
+        .comparison-table tbody tr:hover { background: rgba(56, 189, 248, 0.04); }
+
+        /* ── Responsive ── */
+        @media (max-width: 768px) {
+            .page-toc ol { columns: 1; }
+            .page-toc { padding: 1.25rem 1.25rem; }
+            .mode-grid { grid-template-columns: 1fr; }
+            .mode-card { padding: 1.25rem; }
+            .mode-card:last-child { max-width: 100%; }
+            .callout { padding: 1rem 1.25rem; }
+            .diagram-frame { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+            .main-content h2[id] a.anchor-link,
+            .main-content h3[id] a.anchor-link { display: none; }
+            .comparison-table {
+                display: block;
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+            }
+            .comparison-table th,
+            .comparison-table td {
+                padding: 0.625rem 0.75rem;
+                white-space: nowrap;
+                font-size: 0.85rem;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .comparison-table th,
+            .comparison-table td {
+                padding: 0.5rem 0.625rem;
+                font-size: 0.8rem;
+            }
+        }
+    </style>
 </head>
 <body>
-    <button id="menu-toggle" class="menu-toggle">☰</button>
-    
-    <nav class="sidebar">
+    <button id="menu-toggle" class="menu-toggle" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+    <div class="sidebar-overlay"></div>
+
+    <nav class="sidebar" role="navigation" aria-label="Main navigation">
         <a href="index.html" class="logo">
             <img src="logo.png" alt="Cano" style="height: 24px; vertical-align: middle; margin-right: 8px;">
             Cano
@@ -38,14 +269,29 @@
         <h1>Scheduler</h1>
         <p class="subtitle">Automate your workflows with flexible scheduling and concurrency.</p>
 
+        <details class="page-toc" open>
+            <summary>On this page</summary>
+            <ol>
+                <li><a href="#overlap-prevention">Overlap Prevention</a></li>
+                <li><a href="#scheduling-strategies">Scheduling Strategies</a></li>
+                <li><a href="#strategy-examples">Strategy Examples</a></li>
+                <li class="toc-sub"><a href="#interval-scheduling">Interval Scheduling</a></li>
+                <li class="toc-sub"><a href="#cron-scheduling">Cron Scheduling</a></li>
+                <li class="toc-sub"><a href="#manual-triggering">Manual Triggering</a></li>
+                <li class="toc-sub"><a href="#mixed-scheduling">Mixed Scheduling</a></li>
+                <li><a href="#graceful-shutdown">Graceful Shutdown</a></li>
+                <li><a href="#multi-level-map-reduce">Advanced: Multi-Level Map-Reduce</a></li>
+            </ol>
+        </details>
+
         <p>
             The Scheduler provides workflow scheduling capabilities for background jobs and automated workflows.
             It supports intervals, cron expressions, and manual triggers.
         </p>
 
-        <div style="background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 0.75rem; padding: 1.5rem; margin: 1.5rem 0;">
-            <p style="margin: 0 0 1rem 0; color: var(--primary-color); font-weight: 600;">Type Constraint</p>
-            <p style="margin: 0;">
+        <div class="callout callout-info">
+            <p class="callout-title">Type Constraint</p>
+            <p>
                 All workflows registered with a single <code>Scheduler</code> instance must share the same
                 <code>TState</code> type. The scheduler is generic over <code>Scheduler&lt;TState&gt;</code>,
                 so all registered workflows use the same state enum. For workflows with different state enums,
@@ -53,7 +299,7 @@
             </p>
         </div>
 
-        <h2>Overlap Prevention</h2>
+        <h2 id="overlap-prevention"><a href="#overlap-prevention" class="anchor-link" aria-hidden="true">#</a>Overlap Prevention</h2>
         <p>
             The scheduler prevents overlapping executions of the same workflow. If a previous execution is still
             running when the next interval or cron trigger fires, the new run is skipped. This prevents resource
@@ -65,32 +311,37 @@
             after the current run completes.
         </p>
 
-        <h2>Scheduling Strategies</h2>
-        <div class="card-stack">
-            <div class="card">
+        <h2 id="scheduling-strategies"><a href="#scheduling-strategies" class="anchor-link" aria-hidden="true">#</a>Scheduling Strategies</h2>
+        <div class="mode-grid">
+            <div class="mode-card">
+                <div class="mode-icon" aria-hidden="true">⏱</div>
                 <h3>Interval</h3>
                 <p>Run workflows at fixed time intervals.</p>
                 <pre><code class="language-rust">scheduler.every_seconds(...)</code></pre>
             </div>
-            <div class="card">
+            <div class="mode-card">
+                <div class="mode-icon" aria-hidden="true">📅</div>
                 <h3>Cron</h3>
                 <p>Run workflows based on cron expressions.</p>
                 <pre><code class="language-rust">scheduler.cron(..., "0 0 9 * * *")</code></pre>
             </div>
-            <div class="card">
+            <div class="mode-card">
+                <div class="mode-icon" aria-hidden="true">👆</div>
                 <h3>Manual</h3>
                 <p>Trigger workflows on-demand via API.</p>
                 <pre><code class="language-rust">scheduler.manual(...)</code></pre>
             </div>
         </div>
 
-        <h2>Scheduling Strategy Examples</h2>
+        <h2 id="strategy-examples"><a href="#strategy-examples" class="anchor-link" aria-hidden="true">#</a>Scheduling Strategy Examples</h2>
         <p>The Scheduler supports multiple scheduling strategies. Here are complete examples for each.</p>
 
-        <h3>1. Interval Scheduling - Fixed Time Intervals</h3>
+        <h3 id="interval-scheduling"><a href="#interval-scheduling" class="anchor-link" aria-hidden="true">#</a>1. Interval Scheduling - Fixed Time Intervals</h3>
         <p>Run workflows at regular time intervals. Best for periodic tasks like health checks or data syncing.</p>
         
-        <div class="mermaid">
+        <div class="diagram-frame">
+            <p class="diagram-label">Interval Scheduling Timeline</p>
+            <div class="mermaid">
             gantt
                 title Interval Scheduling (Every 30 seconds)
                 dateFormat ss
@@ -101,6 +352,7 @@
                 Run 2 :30, 2s
                 Wait  :32, 28s
                 Run 3 :60, 2s
+            </div>
         </div>
 
         <pre><code class="language-rust">use cano::prelude::*;
@@ -141,10 +393,12 @@ async fn main() -> Result<(), CanoError> {
     Ok(())
 }</code></pre>
 
-        <h3>2. Cron Scheduling - Time-Based Expressions</h3>
+        <h3 id="cron-scheduling"><a href="#cron-scheduling" class="anchor-link" aria-hidden="true">#</a>2. Cron Scheduling - Time-Based Expressions</h3>
         <p>Run workflows based on cron expressions. Perfect for scheduled reports, backups, or time-specific tasks.</p>
         
-        <div class="mermaid">
+        <div class="diagram-frame">
+            <p class="diagram-label">Cron Scheduling Timeline</p>
+            <div class="mermaid">
             gantt
                 title Cron Scheduling (Daily at 9 AM and 6 PM)
                 dateFormat HH
@@ -154,6 +408,7 @@ async fn main() -> Result<(), CanoError> {
                 Run 2 :18, 1h
                 %% Add empty space to ensure full visibility
                 Space :20, 0h
+            </div>
         </div>
 
         <pre><code class="language-rust">use cano::prelude::*;
@@ -224,19 +479,21 @@ async fn main() -> Result<(), CanoError> {
     Ok(())
 }</code></pre>
 
-        <h3>3. Manual Triggering - On-Demand Execution</h3>
+        <h3 id="manual-triggering"><a href="#manual-triggering" class="anchor-link" aria-hidden="true">#</a>3. Manual Triggering - On-Demand Execution</h3>
         <p>Trigger workflows manually via API. Ideal for user-initiated tasks or event-driven processing.</p>
 
-        <div style="background: rgba(248, 113, 113, 0.1); border: 1px solid rgba(248, 113, 113, 0.3); border-radius: 0.75rem; padding: 1.5rem; margin: 1.5rem 0;">
-            <p style="margin: 0 0 1rem 0; color: #f87171; font-weight: 600;">Important</p>
-            <p style="margin: 0;">
+        <div class="callout callout-warn">
+            <p class="callout-title">Important</p>
+            <p>
                 Calling <code>trigger()</code> before the scheduler has been started will return an error.
                 Always call <code>scheduler.start()</code> (or spawn it in a background task) before
                 triggering workflows manually.
             </p>
         </div>
         
-        <div class="mermaid">
+        <div class="diagram-frame">
+            <p class="diagram-label">Manual Trigger Sequence</p>
+            <div class="mermaid">
             sequenceDiagram
                 participant API as API Request
                 participant S as Scheduler
@@ -245,6 +502,7 @@ async fn main() -> Result<(), CanoError> {
                 S->>W: Start Workflow
                 W-->>S: Complete
                 S-->>API: Success
+            </div>
         </div>
 
         <pre><code class="language-rust">use cano::prelude::*;
@@ -296,10 +554,12 @@ async fn main() -> Result<(), CanoError> {
     Ok(())
 }</code></pre>
 
-        <h3>4. Mixed Scheduling - Combining Strategies</h3>
+        <h3 id="mixed-scheduling"><a href="#mixed-scheduling" class="anchor-link" aria-hidden="true">#</a>4. Mixed Scheduling - Combining Strategies</h3>
         <p>Use multiple scheduling strategies together for complex automation scenarios.</p>
         
-        <div class="mermaid">
+        <div class="diagram-frame">
+            <p class="diagram-label">Mixed Strategy Overview</p>
+            <div class="mermaid">
             gantt
                 title Mixed Scheduling Strategies
                 dateFormat HH:mm
@@ -311,6 +571,7 @@ async fn main() -> Result<(), CanoError> {
                 Weekly Report :09:00, 1h
                 section Manual Tasks
                 Emergency Export :done, 14:30, 15m
+            </div>
         </div>
 
         <pre><code class="language-rust">use cano::prelude::*;
@@ -413,7 +674,7 @@ async fn main() -> Result<(), CanoError> {
     }
 }</code></pre>
 
-        <h2>Graceful Shutdown</h2>
+        <h2 id="graceful-shutdown"><a href="#graceful-shutdown" class="anchor-link" aria-hidden="true">#</a>Graceful Shutdown</h2>
         <p>
             The scheduler supports graceful shutdown, allowing currently running workflows to complete before stopping.
             This includes workflows started by interval or cron triggers as well as manually-triggered workflows.
@@ -429,15 +690,17 @@ scheduler.stop().await?;</code></pre>
             This ensures no workflow is abruptly terminated mid-execution.
         </p>
 
-        <h2>Advanced Pattern: Multi-Level Map-Reduce</h2>
+        <h2 id="multi-level-map-reduce"><a href="#multi-level-map-reduce" class="anchor-link" aria-hidden="true">#</a>Advanced Pattern: Multi-Level Map-Reduce</h2>
         <p>
             Combine manual workflow triggering with split/join to create powerful multi-level map-reduce patterns. 
             Each workflow processes a batch of data in parallel (workflow-level map-reduce), and multiple workflows 
             run concurrently with different parameters (scheduler-level map-reduce).
         </p>
 
-        <h3>Architecture Overview</h3>
-        <div class="mermaid">
+        <h3 id="architecture-overview"><a href="#architecture-overview" class="anchor-link" aria-hidden="true">#</a>Architecture Overview</h3>
+        <div class="diagram-frame">
+            <p class="diagram-label">Multi-Level Map-Reduce Architecture</p>
+            <div class="mermaid">
             graph TB
                 subgraph "Scheduler Level (Map-Reduce)"
                     S[Scheduler] -->|Trigger| W1[Workflow: Batch-A-Classics]
@@ -489,9 +752,10 @@ scheduler.stop().await?;</code></pre>
                 style A1B fill:#FFF9C4
                 style A2A fill:#FFF9C4
                 style A2B fill:#FFF9C4
+            </div>
         </div>
 
-        <h3>Complete Example: Multi-Batch Book Analysis</h3>
+        <h3 id="book-analysis"><a href="#book-analysis" class="anchor-link" aria-hidden="true">#</a>Complete Example: Multi-Batch Book Analysis</h3>
         <p>
             This example demonstrates analyzing books from Project Gutenberg using a two-level map-reduce pattern.
             Each batch workflow downloads and analyzes multiple books in parallel, then all results are aggregated globally.
@@ -1046,7 +1310,7 @@ async fn main() -> Result<(), CanoError> {
     Ok(())
 }</code></pre>
 
-        <h3>Key Concepts</h3>
+        <h3 id="key-concepts"><a href="#key-concepts" class="anchor-link" aria-hidden="true">#</a>Key Concepts</h3>
         <div class="card-stack">
             <div class="card">
                 <h3>Level 1: Workflow Split/Join</h3>
@@ -1065,7 +1329,7 @@ async fn main() -> Result<(), CanoError> {
             </div>
         </div>
 
-        <h3>Example Output</h3>
+        <h3 id="example-output"><a href="#example-output" class="anchor-link" aria-hidden="true">#</a>Example Output</h3>
         <pre><code>🚀 Multi-Level Map-Reduce Book Analysis
 ============================================================
 📚 Level 1: Workflow-level Split/Join (within each batch)
@@ -1146,11 +1410,12 @@ async fn main() -> Result<(), CanoError> {
 
 ✅ Multi-level map-reduce analysis complete!</code></pre>
 
-        <p style="margin-top: 2rem; padding: 1rem; background: rgba(56, 189, 248, 0.1); border-left: 3px solid var(--primary-color); border-radius: 0.5rem;">
+        <div class="callout callout-tip">
+            <p>
             <strong>💡 Use Case:</strong> This pattern is perfect for distributed data processing, multi-tenant systems, 
             batch ETL jobs, or any scenario where you need to process independent datasets in parallel and then 
-            aggregate the results. Each workflow can have completely different parameters while sharing the aggregation logic.
-        </p>
+            aggregate the results. Each workflow can have completely different parameters while sharing the aggregation logic.</p>
+        </div>
 
         </div>
     </main>
