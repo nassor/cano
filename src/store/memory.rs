@@ -1,4 +1,5 @@
 use super::{KeyValueStore, StoreResult, error::StoreError};
+use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -71,12 +72,38 @@ impl MemoryStore {
     }
 }
 
+impl MemoryStore {
+    /// Get a value as an `Arc<TState>` for zero-copy sharing
+    ///
+    /// If the stored value is already an `Arc<TState>`, returns a clone of that
+    /// pointer (cheap reference-count bump). Otherwise returns an error.
+    ///
+    /// For the general case — where values may not be stored as `Arc` — use the
+    /// trait method [`KeyValueStore::get_shared`], which falls back to `get()` +
+    /// `Arc::new()`.
+    fn get_arc<TState: 'static + Send + Sync>(&self, key: &str) -> StoreResult<Arc<TState>> {
+        let data = self
+            .data
+            .read()
+            .map_err(|e| StoreError::lock_error(format!("Read lock poisoned: {e}")))?;
+
+        match data.get(key) {
+            Some(value) => value.downcast_ref::<Arc<TState>>().cloned().ok_or_else(|| {
+                StoreError::type_mismatch(format!(
+                    "Cannot downcast value for key '{key}' to Arc<TState>"
+                ))
+            }),
+            None => Err(StoreError::key_not_found(key)),
+        }
+    }
+}
+
 impl KeyValueStore for MemoryStore {
     fn get<TState: 'static + Clone>(&self, key: &str) -> StoreResult<TState> {
         let data = self
             .data
             .read()
-            .map_err(|_| StoreError::lock_error("Failed to acquire read lock on store"))?;
+            .map_err(|e| StoreError::lock_error(format!("Read lock poisoned: {e}")))?;
 
         match data.get(key) {
             Some(value) => value.downcast_ref::<TState>().cloned().ok_or_else(|| {
@@ -88,6 +115,23 @@ impl KeyValueStore for MemoryStore {
         }
     }
 
+    /// Get a value wrapped in an `Arc` for zero-copy shared access
+    ///
+    /// If the stored entry was inserted as an `Arc<TState>`, the existing pointer
+    /// is returned (cheap reference-count bump). Otherwise the value is cloned
+    /// and wrapped in a new `Arc`.
+    fn get_shared<TState: 'static + Send + Sync + Clone>(
+        &self,
+        key: &str,
+    ) -> StoreResult<Arc<TState>> {
+        // Fast path: value was stored as Arc<TState> already
+        if let Ok(arc) = self.get_arc::<TState>(key) {
+            return Ok(arc);
+        }
+        // Slow path: clone the value and wrap it
+        self.get::<TState>(key).map(Arc::new)
+    }
+
     fn put<TState: 'static + Send + Sync + Clone>(
         &self,
         key: &str,
@@ -96,7 +140,7 @@ impl KeyValueStore for MemoryStore {
         let mut data = self
             .data
             .write()
-            .map_err(|_| StoreError::lock_error("Failed to acquire write lock on store"))?;
+            .map_err(|e| StoreError::lock_error(format!("Write lock poisoned: {e}")))?;
 
         data.insert(key.to_string(), Arc::new(value));
         Ok(())
@@ -106,11 +150,10 @@ impl KeyValueStore for MemoryStore {
         let mut data = self
             .data
             .write()
-            .map_err(|_| StoreError::lock_error("Failed to acquire write lock on store"))?;
+            .map_err(|e| StoreError::lock_error(format!("Write lock poisoned: {e}")))?;
 
-        data.remove(key)
-            .map(|_| ())
-            .ok_or_else(|| StoreError::key_not_found(key))
+        data.remove(key);
+        Ok(())
     }
 
     fn append<TState: 'static + Send + Sync + Clone>(
@@ -118,46 +161,76 @@ impl KeyValueStore for MemoryStore {
         key: &str,
         item: TState,
     ) -> StoreResult<()> {
+        // Step 1: read the existing entry under a short-lived read lock
+        let existing_arc: Option<Result<Box<dyn Any + Send + Sync>, StoreError>> = {
+            let data = self
+                .data
+                .read()
+                .map_err(|e| StoreError::lock_error(format!("Read lock poisoned: {e}")))?;
+
+            if let Some(existing) = data.get(key) {
+                if existing.downcast_ref::<Vec<TState>>().is_some() {
+                    // Key exists and is the right type — we'll handle it under write lock
+                    Some(Ok(Box::new(())))
+                } else {
+                    // Key exists but wrong type — return error now
+                    Some(Err(StoreError::append_type_mismatch(key)))
+                }
+            } else {
+                None
+            }
+        };
+        // read lock released here
+
+        // Propagate type error before taking write lock
+        if let Some(Err(e)) = existing_arc {
+            return Err(e);
+        }
+
+        // Step 2: acquire write lock and mutate
         let mut data = self
             .data
             .write()
-            .map_err(|_| StoreError::lock_error("Failed to acquire write lock on store"))?;
+            .map_err(|e| StoreError::lock_error(format!("Write lock poisoned: {e}")))?;
 
         if let Some(existing) = data.get(key) {
-            // Try to downcast to Vec<TState>
             if let Some(vec) = existing.downcast_ref::<Vec<TState>>() {
-                // Create a new vector with the existing elements + new item
-                // This is "Copy-on-Write" behavior - we create a new version
                 let mut new_vec = vec.clone();
                 new_vec.push(item);
                 data.insert(key.to_string(), Arc::new(new_vec));
                 Ok(())
             } else {
-                // Key exists but is not a Vec<TState>
                 Err(StoreError::append_type_mismatch(key))
             }
         } else {
-            // Key doesn't exist, create new Vec<TState> with the item
             data.insert(key.to_string(), Arc::new(vec![item]));
             Ok(())
         }
     }
 
-    fn keys(&self) -> StoreResult<Box<dyn Iterator<Item = String> + '_>> {
+    fn contains_key(&self, key: &str) -> StoreResult<bool> {
         let data = self
             .data
             .read()
-            .map_err(|_| StoreError::lock_error("Failed to acquire read lock on store"))?;
+            .map_err(|e| StoreError::lock_error(format!("Read lock poisoned: {e}")))?;
 
-        let keys: Vec<String> = data.keys().cloned().collect();
-        Ok(Box::new(keys.into_iter()))
+        Ok(data.contains_key(key))
+    }
+
+    fn keys(&self) -> StoreResult<Vec<String>> {
+        let data = self
+            .data
+            .read()
+            .map_err(|e| StoreError::lock_error(format!("Read lock poisoned: {e}")))?;
+
+        Ok(data.keys().cloned().collect())
     }
 
     fn len(&self) -> StoreResult<usize> {
         let data = self
             .data
             .read()
-            .map_err(|_| StoreError::lock_error("Failed to acquire read lock on store"))?;
+            .map_err(|e| StoreError::lock_error(format!("Read lock poisoned: {e}")))?;
 
         Ok(data.len())
     }
@@ -166,7 +239,7 @@ impl KeyValueStore for MemoryStore {
         let mut data = self
             .data
             .write()
-            .map_err(|_| StoreError::lock_error("Failed to acquire write lock on store"))?;
+            .map_err(|e| StoreError::lock_error(format!("Write lock poisoned: {e}")))?;
 
         data.clear();
         Ok(())
@@ -299,15 +372,9 @@ mod tests {
     #[test]
     fn test_remove_nonexistent_key() {
         let store = MemoryStore::new();
+        // Removing a missing key is a silent no-op
         let result = store.remove("nonexistent");
-
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            StoreError::KeyNotFound(msg) => {
-                assert_eq!(msg, "Key 'nonexistent' not found in store")
-            }
-            _ => panic!("Expected KeyNotFound error"),
-        }
+        assert!(result.is_ok());
     }
 
     #[test]
@@ -369,7 +436,7 @@ mod tests {
     #[test]
     fn test_keys_empty_store() {
         let store = MemoryStore::new();
-        let keys: Vec<String> = store.keys().unwrap().collect();
+        let keys = store.keys().unwrap();
         assert!(keys.is_empty());
     }
 
@@ -382,7 +449,7 @@ mod tests {
         store.put("key2", 42i32).unwrap();
         store.put("key3", vec![1, 2, 3]).unwrap();
 
-        let keys: Vec<String> = store.keys().unwrap().collect();
+        let keys = store.keys().unwrap();
         assert_eq!(keys.len(), 3);
 
         // Check that all keys are present (order might vary)
@@ -678,5 +745,50 @@ mod tests {
         let retrieved: Vec<i32> = store.get("large_data").unwrap();
         assert_eq!(retrieved, large_vec);
         assert_eq!(retrieved.len(), 10000);
+    }
+
+    #[test]
+    fn test_contains_key_present() {
+        let store = MemoryStore::new();
+        store.put("exists", 42i32).unwrap();
+        assert!(store.contains_key("exists").unwrap());
+    }
+
+    #[test]
+    fn test_contains_key_absent() {
+        let store = MemoryStore::new();
+        assert!(!store.contains_key("missing").unwrap());
+    }
+
+    #[test]
+    fn test_contains_key_after_remove() {
+        let store = MemoryStore::new();
+        store.put("key", "val".to_string()).unwrap();
+        assert!(store.contains_key("key").unwrap());
+        store.remove("key").unwrap();
+        assert!(!store.contains_key("key").unwrap());
+    }
+
+    #[test]
+    fn test_get_shared_returns_arc() {
+        let store = MemoryStore::new();
+        store.put("msg", "hello".to_string()).unwrap();
+
+        let arc1: Arc<String> = store.get_shared("msg").unwrap();
+        let arc2: Arc<String> = store.get_shared("msg").unwrap();
+
+        assert_eq!(*arc1, "hello");
+        assert_eq!(arc1, arc2);
+    }
+
+    #[test]
+    fn test_get_shared_missing_key() {
+        let store = MemoryStore::new();
+        let result: StoreResult<Arc<String>> = store.get_shared("nope");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            StoreError::KeyNotFound(_) => (),
+            _ => panic!("Expected KeyNotFound error"),
+        }
     }
 }

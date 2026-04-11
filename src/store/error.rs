@@ -91,7 +91,7 @@ impl fmt::Display for StoreError {
             StoreError::TypeMismatch(msg) => write!(f, "Type mismatch: {msg}"),
             StoreError::LockError(msg) => write!(f, "Lock error: {msg}"),
             StoreError::AppendTypeMismatch(msg) => write!(f, "Append type mismatch: {msg}"),
-            StoreError::Generic(msg) => write!(f, "store error: {msg}"),
+            StoreError::Generic(msg) => write!(f, "Store error: {msg}"),
         }
     }
 }

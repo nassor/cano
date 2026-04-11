@@ -1,98 +1,105 @@
 //! # Cano: Type-Safe Async Workflow Engine
 //!
-//! Cano is a high-performance orchestration engine designed for building resilient, self-healing systems in Rust.
-//! Unlike simple task queues, Cano uses **Finite State Machines (FSM)** to define strict, type-safe transitions between processing steps.
+//! Cano is an async workflow orchestration engine for Rust built on Finite State Machines (FSM).
+//! States are user-defined enums; the engine guarantees type-safe transitions between them.
 //!
-//! It excels at managing complex lifecycles where state transitions matter:
-//! *   **Data Pipelines**: ETL jobs with parallel processing (Split/Join) and aggregation.
-//! *   **AI Agents**: Multi-step inference chains with shared context and memory.
-//! *   **Background Systems**: Scheduled maintenance, periodic reporting, and distributed cron jobs.
+//! Well-suited for:
+//! - Data pipelines: ETL jobs with parallel processing (Split/Join) and aggregation
+//! - AI agents: Multi-step inference chains with shared context
+//! - Background systems: Scheduled maintenance, periodic reporting, cron jobs
 //!
-//! ## 🚀 Quick Start
+//! ## Quick Start
 //!
-//! Choose between [`Task`] (simple) or [`Node`] (structured) for your processing logic,
-//! create a [`MemoryStore`] for sharing data, then run your workflow. Every [`Node`] automatically
-//! works as a [`Task`] for maximum flexibility.
+//! ```rust
+//! use cano::prelude::*;
 //!
-//! ## 🎯 Core Concepts
+//! #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+//! enum Step { Fetch, Process, Done }
+//!
+//! struct FetchTask;
+//! struct ProcessTask;
+//!
+//! #[async_trait]
+//! impl Task<Step> for FetchTask {
+//!     async fn run(&self, store: &MemoryStore) -> Result<TaskResult<Step>, CanoError> {
+//!         store.put("data", vec![1u32, 2, 3])?;
+//!         Ok(TaskResult::Single(Step::Process))
+//!     }
+//! }
+//!
+//! #[async_trait]
+//! impl Task<Step> for ProcessTask {
+//!     async fn run(&self, store: &MemoryStore) -> Result<TaskResult<Step>, CanoError> {
+//!         let data: Vec<u32> = store.get("data")?;
+//!         store.put("sum", data.iter().sum::<u32>())?;
+//!         Ok(TaskResult::Single(Step::Done))
+//!     }
+//! }
+//!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), CanoError> {
+//! let store = MemoryStore::new();
+//! let workflow = Workflow::new(store.clone())
+//!     .register(Step::Fetch, FetchTask)
+//!     .register(Step::Process, ProcessTask)
+//!     .add_exit_state(Step::Done);
+//!
+//! let final_state = workflow.orchestrate(Step::Fetch).await?;
+//! assert_eq!(final_state, Step::Done);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Core Concepts
 //!
 //! ### Finite State Machines (FSM)
 //!
-//! Workflows in Cano are state machines. You define your states as an `enum`, and register
-//! handlers ([`Task`] or [`Node`]) for each state. The engine ensures type safety and
-//! manages transitions between states.
+//! Workflows in Cano are state machines. You define your states as an `enum`, register
+//! handlers ([`Task`] or [`Node`]) for each state, and the engine manages transitions.
 //!
-//! ### Tasks & Nodes - Your Processing Units
+//! ### Tasks and Nodes
 //!
-//! **Two approaches for implementing processing logic:**
-//! - [`Task`] trait: Simple interface with single `run()` method - perfect for prototypes and simple operations
-//! - [`Node`] trait: Structured three-phase lifecycle with built-in retry strategies - ideal for production workloads
+//! Two interfaces for processing logic:
+//! - [`Task`] trait: single `run()` method — straightforward operations and prototyping
+//! - [`Node`] trait: three-phase lifecycle (`prep` → `exec` → `post`) with built-in retry
 //!
-//! **Every [`Node`] automatically implements [`Task`]**, providing seamless interoperability and upgrade paths.
+//! Every [`Node`] automatically implements [`Task`] via a blanket impl, so both can be
+//! registered with the same [`Workflow::register`] method.
 //!
 //! ### Parallel Execution (Split/Join)
 //!
-//! Run tasks concurrently and join results with strategies like `All`, `Any`, `Quorum`, or `PartialResults`.
-//! This allows for powerful patterns like scatter-gather, redundant execution, and latency optimization.
+//! Run tasks concurrently with [`Workflow::register_split`] and join results using
+//! strategies: `All`, `Any`, `Quorum(n)`, `Percentage(f64)`, `PartialResults(min)`,
+//! or `PartialTimeout`.
 //!
-//! ### Store - Share Data Between Processing Units
+//! ### Store
 //!
-//! Use [`MemoryStore`] to pass data around your workflow. Store different types of data
-//! using key-value pairs, and retrieve them later with type safety. All values are
-//! wrapped in `std::borrow::Cow` for memory efficiency.
+//! [`MemoryStore`] provides a thread-safe `Arc<RwLock<HashMap>>` for sharing typed data
+//! between states. Implement [`KeyValueStore`] to plug in a custom backend.
 //!
-//! ## 🏗️ Processing Lifecycle
+//! ## Processing Lifecycle
 //!
-//! **Task**: Single `run()` method with full control over execution flow
+//! **Task**: Single `run()` method — full control over execution flow.
 //!
-//! **Node**: Three-phase lifecycle for structured processing:
+//! **Node**: Three-phase lifecycle:
+//! 1. `prep` — load data, validate inputs, allocate resources
+//! 2. `exec` — core logic; retry wraps this phase
+//! 3. `post` — write results, determine next state
 //!
-//! 1. **Prep**: Load data, validate inputs, setup resources
-//! 2. **Exec**: Core processing logic (with automatic retry support)
-//! 3. **Post**: Store results, cleanup, determine next action
+//! ## Module Overview
 //!
-//! This structure makes nodes predictable and easy to reason about, while tasks provide maximum flexibility.
+//! - [`task`]: The [`Task`] trait — single `run()` method
+//! - [`node`]: The [`Node`] trait — three-phase lifecycle with retry via [`TaskConfig`]
+//! - [`workflow`]: [`Workflow`] — FSM orchestration with Split/Join support
+//! - [`scheduler`] (requires `scheduler` feature): [`Scheduler`] — cron and interval scheduling
+//! - [`store`]: [`MemoryStore`] and the [`KeyValueStore`] trait
+//! - [`error`]: [`CanoError`] variants and the [`CanoResult`] alias
 //!
-//! ## 📚 Module Overview
+//! ## Getting Started
 //!
-//! - **[`task`]**: The [`Task`] trait for simple, flexible processing logic
-//!   - Single `run()` method for maximum simplicity
-//!   - Perfect for prototypes and straightforward operations
-//!
-//! - **[`node`]**: The [`Node`] trait for structured processing logic  
-//!   - Built-in retry logic and error handling
-//!   - Three-phase lifecycle (`prep`, `exec`, `post`)
-//!   - Fluent configuration API via [`TaskConfig`]
-//!
-//! - **[`workflow`]**: Core workflow orchestration
-//!   - [`Workflow`] for state machine-based workflows with Split/Join support
-//!
-//! - **[`scheduler`]** (optional `scheduler` feature): Advanced workflow scheduling
-//!   - [`Scheduler`] for managing multiple flows with cron support
-//!   - Time-based and event-driven scheduling
-//!
-//! - **[`store`]**: Thread-safe key-value storage helpers for pipeline data sharing
-//!   - [`MemoryStore`] for in-memory data sharing
-//!   - [`KeyValueStore`] trait for custom storage backends
-//!
-//! - **[`error`]**: Comprehensive error handling system
-//!   - [`CanoError`] for categorized error types
-//!   - [`CanoResult`] type alias for convenient error handling
-//!   - Rich error context and conversion traits
-//!
-//! ## 📈 Getting Started
-//!
-//! 1. **Start with the examples**: Run `cargo run --example basic_node_usage`
-//! 2. **Read the module docs**: Each module has detailed documentation and examples
-//! 3. **Check the benchmarks**: Run `cargo bench --bench node_performance` to see performance
-//! 4. **Join the community**: Contribute features, fixes, or feedback
-//!
-//! ## Performance Characteristics
-//!
-//! - **Low Latency**: Minimal overhead with direct execution
-//! - **High Throughput**: Direct execution for maximum performance
-//! - **Memory Efficient**: Scales with data size, not concurrency settings
-//! - **Async I/O**: Efficient async operations with tokio runtime
+//! 1. Run an example: `cargo run --example workflow_simple`
+//! 2. Read the module docs — each module has detailed documentation and examples
+//! 3. Run benchmarks: `cargo bench --bench node_performance`
 
 pub mod error;
 pub mod node;

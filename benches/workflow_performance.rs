@@ -254,7 +254,7 @@ fn bench_concurrent_node_execution(c: &mut Criterion) {
                             .map(|node| cano::Node::run(node, &store))
                             .collect();
 
-                        let results = futures::future::join_all(tasks).await;
+                        let results = futures_util::future::join_all(tasks).await;
                         for result in results {
                             assert!(result.is_ok());
                         }
@@ -430,7 +430,7 @@ fn bench_io_bound_workflows(c: &mut Criterion) {
                                 .map(|node| cano::Node::run(node, &store))
                                 .collect();
 
-                            let results = futures::future::join_all(tasks).await;
+                            let results = futures_util::future::join_all(tasks).await;
                             for result in results {
                                 assert!(result.is_ok());
                             }
@@ -512,7 +512,7 @@ fn bench_cpu_bound_workflows(c: &mut Criterion) {
                                 .map(|node| <_ as Node<TestState>>::run(node, &store))
                                 .collect();
 
-                            let results = futures::future::join_all(tasks).await;
+                            let results = futures_util::future::join_all(tasks).await;
                             for result in results {
                                 assert!(result.is_ok());
                             }
@@ -570,7 +570,7 @@ fn bench_mixed_workload_workflows(c: &mut Criterion) {
                         let cpu_task = <_ as Node<TestState>>::run(&cpu_node, &store);
 
                         let (io_result, cpu_result) =
-                            futures::future::join(io_task, cpu_task).await;
+                            futures_util::future::join(io_task, cpu_task).await;
                         assert!(io_result.is_ok());
                         assert!(cpu_result.is_ok());
                     });

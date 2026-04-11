@@ -132,7 +132,7 @@
 /// Cano errors can be created from various sources including standard library
 /// errors, string slices, and owned strings. Use the appropriate constructor
 /// method or the `Into` trait for convenient conversion.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub enum CanoError {
     /// Error during node execution phase (your business logic)
     ///
@@ -224,14 +224,6 @@ impl CanoError {
         CanoError::Generic(msg.into())
     }
 
-    /// Convert a StoreError to a CanoError
-    ///
-    /// This is a convenience method that explicitly converts store errors
-    /// to workflow errors. The automatic `From` implementation also works.
-    pub fn from_store_error(err: crate::store::error::StoreError) -> Self {
-        CanoError::store(err.to_string())
-    }
-
     /// Get the error message as a string slice
     pub fn message(&self) -> &str {
         match self {
@@ -278,6 +270,24 @@ impl std::fmt::Display for CanoError {
 
 impl std::error::Error for CanoError {}
 
+impl PartialEq for CanoError {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (CanoError::NodeExecution(a), CanoError::NodeExecution(b)) => a == b,
+            (CanoError::TaskExecution(a), CanoError::TaskExecution(b)) => a == b,
+            (CanoError::Preparation(a), CanoError::Preparation(b)) => a == b,
+            (CanoError::Store(a), CanoError::Store(b)) => a == b,
+            (CanoError::Workflow(a), CanoError::Workflow(b)) => a == b,
+            (CanoError::Configuration(a), CanoError::Configuration(b)) => a == b,
+            (CanoError::RetryExhausted(a), CanoError::RetryExhausted(b)) => a == b,
+            (CanoError::Generic(a), CanoError::Generic(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for CanoError {}
+
 // Conversion traits for ergonomic error handling
 
 impl From<Box<dyn std::error::Error + Send + Sync>> for CanoError {
@@ -300,7 +310,7 @@ impl From<String> for CanoError {
 
 impl From<std::io::Error> for CanoError {
     fn from(err: std::io::Error) -> Self {
-        CanoError::store(format!("IO error: {err}"))
+        CanoError::Generic(format!("IO error: {err}"))
     }
 }
 
@@ -403,10 +413,40 @@ mod tests {
         let cano_error: CanoError = store_error.into();
         assert_eq!(cano_error.category(), "store");
 
-        // Test explicit conversion method
+        // Test conversion via From trait
         let store_error = StoreError::lock_error("lock failed");
-        let cano_error = CanoError::from_store_error(store_error);
+        let cano_error: CanoError = store_error.into();
         assert_eq!(cano_error.category(), "store");
         assert!(cano_error.message().contains("lock failed"));
+    }
+
+    #[test]
+    fn test_io_error_maps_to_generic() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "file missing");
+        let cano_err: CanoError = io_err.into();
+        assert_eq!(cano_err.category(), "generic");
+        assert!(cano_err.message().contains("IO error"));
+        assert!(cano_err.message().contains("file missing"));
+    }
+
+    #[test]
+    fn test_partial_eq_same_variant_same_message() {
+        let a = CanoError::NodeExecution("oops".to_string());
+        let b = CanoError::NodeExecution("oops".to_string());
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_partial_eq_same_variant_different_message() {
+        let a = CanoError::NodeExecution("a".to_string());
+        let b = CanoError::NodeExecution("b".to_string());
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_partial_eq_different_variants() {
+        let a = CanoError::NodeExecution("msg".to_string());
+        let b = CanoError::TaskExecution("msg".to_string());
+        assert_ne!(a, b);
     }
 }

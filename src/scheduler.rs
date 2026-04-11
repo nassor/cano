@@ -13,6 +13,7 @@
 //! ```
 
 use crate::error::{CanoError, CanoResult};
+use crate::store::{KeyValueStore, MemoryStore};
 use crate::workflow::Workflow;
 use chrono::{DateTime, Utc};
 use cron::Schedule as CronSchedule;
@@ -55,28 +56,37 @@ pub struct FlowInfo {
 }
 
 /// Type alias for the workflow data stored in the scheduler
-type FlowData<TState> = (
-    Arc<Workflow<TState>>,
+type FlowData<TState, TStore> = (
+    Arc<Workflow<TState, TStore>>,
     TState, // Initial state
     Schedule,
     Arc<RwLock<FlowInfo>>,
 );
 
-/// Scheduler system for managing workflows
+/// Scheduler system for managing workflows.
+///
+/// All workflows registered with a single `Scheduler` instance must share the same
+/// `TState` and `TStore` types. The store type defaults to [`MemoryStore`].
+/// If your application requires workflows with different state enums,
+/// create a separate `Scheduler` instance for each state type.
+///
+/// Requires the `scheduler` feature.
 #[derive(Clone)]
-pub struct Scheduler<TState>
+pub struct Scheduler<TState, TStore = MemoryStore>
 where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
+    TStore: KeyValueStore + 'static,
 {
-    workflows: HashMap<String, FlowData<TState>>,
+    workflows: HashMap<String, FlowData<TState, TStore>>,
     command_tx: Arc<RwLock<Option<mpsc::UnboundedSender<String>>>>,
     running: Arc<RwLock<bool>>,
     scheduler_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
-impl<TState> Scheduler<TState>
+impl<TState, TStore> Scheduler<TState, TStore>
 where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
+    TStore: KeyValueStore + 'static,
 {
     /// Create a new scheduler
     pub fn new() -> Self {
@@ -92,7 +102,7 @@ where
     pub fn every(
         &mut self,
         id: &str,
-        workflow: Workflow<TState>,
+        workflow: Workflow<TState, TStore>,
         initial_state: TState,
         interval: Duration,
     ) -> CanoResult<()> {
@@ -103,7 +113,7 @@ where
     pub fn every_seconds(
         &mut self,
         id: &str,
-        workflow: Workflow<TState>,
+        workflow: Workflow<TState, TStore>,
         initial_state: TState,
         seconds: u64,
     ) -> CanoResult<()> {
@@ -114,7 +124,7 @@ where
     pub fn every_minutes(
         &mut self,
         id: &str,
-        workflow: Workflow<TState>,
+        workflow: Workflow<TState, TStore>,
         initial_state: TState,
         minutes: u64,
     ) -> CanoResult<()> {
@@ -130,7 +140,7 @@ where
     pub fn every_hours(
         &mut self,
         id: &str,
-        workflow: Workflow<TState>,
+        workflow: Workflow<TState, TStore>,
         initial_state: TState,
         hours: u64,
     ) -> CanoResult<()> {
@@ -146,7 +156,7 @@ where
     pub fn cron(
         &mut self,
         id: &str,
-        workflow: Workflow<TState>,
+        workflow: Workflow<TState, TStore>,
         initial_state: TState,
         expr: &str,
     ) -> CanoResult<()> {
@@ -165,7 +175,7 @@ where
     pub fn manual(
         &mut self,
         id: &str,
-        workflow: Workflow<TState>,
+        workflow: Workflow<TState, TStore>,
         initial_state: TState,
     ) -> CanoResult<()> {
         self.add_flow(id, workflow, initial_state, Schedule::Manual)
@@ -174,7 +184,7 @@ where
     fn add_flow(
         &mut self,
         id: &str,
-        workflow: Workflow<TState>,
+        workflow: Workflow<TState, TStore>,
         initial_state: TState,
         schedule: Schedule,
     ) -> CanoResult<()> {
@@ -200,7 +210,15 @@ where
         Ok(())
     }
 
-    /// Start the scheduler (blocking until stopped)
+    /// Start the scheduler, running all registered workflows on their configured schedules.
+    ///
+    /// Blocks until [`Scheduler::stop`] is called. After the stop signal is received the
+    /// scheduler waits up to 30 seconds for in-progress workflow executions to finish.
+    ///
+    /// # Errors
+    ///
+    /// - [`CanoError::Workflow`] — the 30-second graceful-shutdown timeout elapsed while
+    ///   one or more workflows were still running
     pub async fn start(&mut self) -> CanoResult<()> {
         *self.running.write().await = true;
 
@@ -218,13 +236,16 @@ where
             match schedule {
                 Schedule::Every(interval) => {
                     let handle = tokio::spawn(async move {
-                        // Execute immediately on first iteration
-                        execute_flow(
-                            Arc::clone(&workflow),
-                            initial_state.clone(),
-                            Arc::clone(&info),
-                        )
-                        .await;
+                        // Check if previous run is still active before executing
+                        let status = info.read().await.status.clone();
+                        if !matches!(status, Status::Running) {
+                            execute_flow(
+                                Arc::clone(&workflow),
+                                initial_state.clone(),
+                                Arc::clone(&info),
+                            )
+                            .await;
+                        }
 
                         loop {
                             sleep(interval).await;
@@ -232,6 +253,12 @@ where
                             // Check running flag immediately after sleep, before executing
                             if !*running_clone.read().await {
                                 break;
+                            }
+
+                            // Skip this run if the previous execution is still in progress
+                            let status = info.read().await.status.clone();
+                            if matches!(status, Status::Running) {
+                                continue;
                             }
 
                             execute_flow(
@@ -246,7 +273,8 @@ where
                 }
                 Schedule::Cron(expr) => {
                     let handle = tokio::spawn(async move {
-                        let schedule = CronSchedule::from_str(&expr).unwrap();
+                        let schedule = CronSchedule::from_str(&expr)
+                            .expect("cron expression was validated at registration time");
                         loop {
                             // Check running flag BEFORE calculating next execution
                             if !*running_clone.read().await {
@@ -255,13 +283,24 @@ where
 
                             let now = Utc::now();
                             if let Some(next) = schedule.after(&now).next() {
-                                let wait_duration =
-                                    (next - now).to_std().unwrap_or(Duration::from_secs(1));
+                                let wait_duration = match (next - now).to_std() {
+                                    Ok(d) => d,
+                                    Err(_) => {
+                                        // We're past the scheduled time; execute immediately
+                                        Duration::from_secs(0)
+                                    }
+                                };
                                 sleep(wait_duration).await;
 
                                 // Check again after sleep before executing
                                 if !*running_clone.read().await {
                                     break;
+                                }
+
+                                // Skip this run if the previous execution is still in progress
+                                let status = info.read().await.status.clone();
+                                if matches!(status, Status::Running) {
+                                    continue;
                                 }
 
                                 execute_flow(
@@ -292,9 +331,10 @@ where
                     let workflow = Arc::clone(workflow);
                     let initial_state = initial_state.clone();
                     let info = Arc::clone(info);
-                    tokio::spawn(async move {
+                    let handle = tokio::spawn(async move {
                         execute_flow(workflow, initial_state, info).await;
                     });
+                    self.scheduler_tasks.write().await.push(handle);
                 }
             }
         }
@@ -334,11 +374,23 @@ where
         Ok(())
     }
 
-    /// Manually trigger a workflow
+    /// Manually trigger a workflow by ID.
+    ///
+    /// Sends a trigger command to the running scheduler. The workflow executes
+    /// asynchronously — this method returns as soon as the command is enqueued.
+    ///
+    /// # Errors
+    ///
+    /// - [`CanoError::Workflow`] — the scheduler is not running (i.e. [`Scheduler::start`]
+    ///   has not been called or has already returned)
     pub async fn trigger(&self, id: &str) -> CanoResult<()> {
         if let Some(tx) = self.command_tx.read().await.as_ref() {
             tx.send(format!("trigger:{}", id))
                 .map_err(|e| CanoError::Workflow(format!("Failed to trigger: {}", e)))?;
+        } else {
+            return Err(CanoError::Workflow(
+                "Scheduler not running — call start() before trigger()".to_string(),
+            ));
         }
         Ok(())
     }
@@ -372,21 +424,23 @@ where
     }
 }
 
-impl<TState> Default for Scheduler<TState>
+impl<TState, TStore> Default for Scheduler<TState, TStore>
 where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
+    TStore: KeyValueStore + 'static,
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-async fn execute_flow<TState>(
-    workflow: Arc<Workflow<TState>>,
+async fn execute_flow<TState, TStore>(
+    workflow: Arc<Workflow<TState, TStore>>,
     initial_state: TState,
     info: Arc<RwLock<FlowInfo>>,
 ) where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
+    TStore: KeyValueStore + 'static,
 {
     // Update status to running
     {
@@ -610,21 +664,16 @@ mod tests {
                 .manual("test_task", workflow, TestState::Start)
                 .unwrap();
 
-            // Start scheduler in background
-            let scheduler_handle = {
-                let mut scheduler_clone = Scheduler::<TestState>::new();
-                let workflow = create_test_workflow();
-                scheduler_clone
-                    .manual("test_task", workflow, TestState::Start)
-                    .unwrap();
+            // Clone the scheduler — both clones share the same internal state
+            let mut scheduler_for_start = scheduler.clone();
 
-                tokio::spawn(async move { scheduler_clone.start().await })
-            };
+            // Start scheduler in background using the clone
+            let scheduler_handle = tokio::spawn(async move { scheduler_for_start.start().await });
 
             // Give time for scheduler to start
             sleep(Duration::from_millis(50)).await;
 
-            // Trigger the workflow
+            // Trigger the workflow on the original scheduler (shares command_tx)
             scheduler.trigger("test_task").await.unwrap();
 
             // Wait a bit for execution

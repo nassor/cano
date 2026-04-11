@@ -13,26 +13,26 @@ authors = ["Nassor Frazier-Silva"]
 
 [dependencies]
 async-trait = "0.1"
-tokio = { version = "1.48.0", features = ["macros", "sync", "time", "rt-multi-thread", "signal"] }
+tokio = { version = "1.48.0", features = ["macros", "sync", "time", "rt-multi-thread"] }
 rand = "0.9"
 chrono = { version = "0.4", features = ["serde"], optional = true }
 cron = { version = "0.15", optional = true }
-futures = "0.3"
+futures-util = "0.3"
 tracing = { version = "0.1", optional = true }
 
 [features]
-scheduler = ["dep:chrono", "dep:cron"]
+scheduler = ["dep:chrono", "dep:cron", "tokio/signal"]
 tracing = ["dep:tracing"]
 all = ["scheduler", "tracing"]
 
 [dev-dependencies]
-cargo-audit = "0.22.0"
 criterion = { version = "0.7", features = ["html_reports", "async_tokio"] }
 reqwest = { version = "0.12.24", features = ["json"] }
 rig-core = "0.24.0"
 wide = "0.8.3"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1.48.0", features = ["macros", "sync", "time", "rt-multi-thread", "signal"] }
 
 [[example]]
 name = "ai_workflow_yes_and"
@@ -92,6 +92,30 @@ required-features = ["tracing", "scheduler"]
 [[example]]
 name = "workflow_stack_store"
 path = "examples/workflow_stack_store.rs"
+
+[[example]]
+name = "mixed_workflow"
+path = "examples/mixed_workflow.rs"
+
+[[example]]
+name = "task_interface_demo"
+path = "examples/task_interface_demo.rs"
+
+[[example]]
+name = "task_simple"
+path = "examples/task_simple.rs"
+
+[[example]]
+name = "workflow_ad_exchange"
+path = "examples/workflow_ad_exchange.rs"
+
+[[example]]
+name = "workflow_partial_results"
+path = "examples/workflow_partial_results.rs"
+
+[[example]]
+name = "workflow_split_join"
+path = "examples/workflow_split_join.rs"
 
 [[bench]]
 name = "workflow_performance"
