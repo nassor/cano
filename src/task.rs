@@ -50,7 +50,7 @@
 use crate::error::CanoError;
 use crate::store::MemoryStore;
 use async_trait::async_trait;
-use rand::Rng;
+use rand::RngExt;
 use std::collections::HashMap;
 use std::time::Duration;
 
