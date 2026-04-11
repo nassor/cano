@@ -26,6 +26,7 @@
             <li><a href="task.html" class="active">Tasks</a></li>
             <li><a href="nodes.html">Nodes</a></li>
             <li><a href="workflows.html">Workflows</a></li>
+            <li><a href="store.html">Store</a></li>
             <li><a href="scheduler.html">Scheduler</a></li>
             <li><a href="tracing.html">Tracing</a></li>
         </ul>
@@ -47,7 +48,7 @@
 
         <pre><code class="language-rust">use async_trait::async_trait;
 use cano::prelude::*;
-use rand::Rng;
+use rand::RngExt; // rand 0.10+
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Action { Generate, Count, Complete }
@@ -56,23 +57,17 @@ struct GeneratorTask;
 
 #[async_trait]
 impl Task<Action> for GeneratorTask {
-    // Optional: Configure retries
+    // Optional: configure retries via TaskConfig
     fn config(&self) -> TaskConfig {
         TaskConfig::default().with_fixed_retry(3, std::time::Duration::from_secs(1))
     }
 
     async fn run(&self, store: &MemoryStore) -> Result<TaskResult<Action>, CanoError> {
-        println!("🎲 GeneratorTask: Creating random numbers...");
-
-        // 1. Perform logic
         let mut rng = rand::rng();
         let numbers: Vec<u32> = (0..10).map(|_| rng.random_range(1..=100)).collect();
-        
-        // 2. Store results
-        store.put("numbers", numbers)?;
-        println!("✅ Stored numbers");
 
-        // 3. Return next state
+        store.put("numbers", numbers)?;
+
         Ok(TaskResult::Single(Action::Count))
     }
 }</code></pre>
@@ -87,8 +82,13 @@ impl Task<Action> for GeneratorTask {
 
         <h2>Configuration & Retries</h2>
         <p>
-            Tasks can be configured with retry strategies to handle transient failures. 
+            Tasks can be configured with retry strategies to handle transient failures.
             The <code>TaskConfig</code> struct allows you to specify the retry behavior.
+        </p>
+        <p style="padding: 0.75rem 1rem; background: rgba(244, 114, 182, 0.1); border-left: 3px solid var(--accent-color); border-radius: 0.5rem;">
+            When all retry attempts are exhausted, the engine emits <code>CanoError::RetryExhausted</code>
+            containing the final error and the number of attempts made. Callers can pattern-match on
+            this variant to distinguish retry failures from other errors.
         </p>
 
         <h3>Retry Strategy Examples</h3>
@@ -144,19 +144,15 @@ impl Task<State> for ApiClientTask {
     }
 
     async fn run(&self, store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
-        println!("📡 Calling API: {}", self.endpoint);
-        
-        // Simulate API call that might fail
         let response = reqwest::get(&self.endpoint)
             .await
             .map_err(|e| CanoError::task_execution(e.to_string()))?;
-        
+
         let data = response.text().await
             .map_err(|e| CanoError::task_execution(e.to_string()))?;
-        
+
         store.put("api_response", data)?;
-        println!("✅ API call successful");
-        
+
         Ok(TaskResult::Single(State::Complete))
     }
 }</code></pre>

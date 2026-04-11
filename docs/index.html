@@ -26,6 +26,7 @@
             <li><a href="task.html">Tasks</a></li>
             <li><a href="nodes.html">Nodes</a></li>
             <li><a href="workflows.html">Workflows</a></li>
+            <li><a href="store.html">Store</a></li>
             <li><a href="scheduler.html">Scheduler</a></li>
             <li><a href="tracing.html">Tracing</a></li>
         </ul>
@@ -69,7 +70,7 @@
 </ul>
 
 <p style="margin-top: 2rem; padding: 1rem; background: rgba(56, 189, 248, 0.1); border-left: 3px solid var(--primary-color); border-radius: 0.5rem;">
-    <strong>Core Concepts:</strong> The engine is built on three foundational concepts: <strong><a href="task.html">Tasks</a>/<a href="nodes.html">Nodes</a></strong> for processing logic, <strong><a href="workflows.html">Workflows</a></strong> for state transitions, and <strong><a href="scheduler.html">Schedulers</a></strong> for timing and automation.
+    <strong>Core Concepts:</strong> The engine is built on four foundational concepts: <strong><a href="task.html">Tasks</a>/<a href="nodes.html">Nodes</a></strong> for processing logic, <strong><a href="workflows.html">Workflows</a></strong> for state transitions, <strong><a href="store.html">Store</a></strong> for shared pipeline data, and <strong><a href="scheduler.html">Schedulers</a></strong> for timing and automation.
 </p>
 
 <h2>Features</h2>
@@ -91,6 +92,10 @@
         <p>Built-in <a href="scheduler.html">scheduler</a> with intervals, cron schedules, and manual triggers.</p>
     </div>
     <div class="card">
+        <h3><a href="store.html" style="color: inherit; text-decoration: none;">Shared Store</a></h3>
+        <p>Thread-safe <a href="store.html">key-value store</a> with zero-copy reads via <code>Arc&lt;T&gt;</code>. Custom backends via <code>KeyValueStore</code> trait.</p>
+    </div>
+    <div class="card">
         <h3>Concurrency</h3>
         <p>Execute multiple <a href="workflows.html">workflow</a> instances in parallel with timeout strategies.</p>
     </div>
@@ -104,14 +109,49 @@
 <p>Add Cano to your <code>Cargo.toml</code>:</p>
 
 <pre><code class="language-toml">[dependencies]
-cano = { version = "0.7", features = ["all"] }
-tokio = { version = "1", features = ["full"] }</code></pre>
+cano = "0.7"
+tokio = { version = "1", features = ["full"] }
+
+# With optional features:
+# cano = { version = "0.7", features = ["scheduler", "tracing"] }
+# cano = { version = "0.7", features = ["all"] }</code></pre>
+
+<p style="margin-top: 1rem; padding: 0.75rem 1rem; background: rgba(129, 140, 248, 0.1); border-left: 3px solid var(--secondary-color); border-radius: 0.5rem; font-size: 1rem;">
+    <strong>Minimum Supported Rust Version:</strong> 1.89.0
+</p>
+
+<h3>Feature Flags</h3>
+<table style="width: 100%; border-collapse: collapse; margin: 1.5rem 0; background: var(--card-bg); border-radius: 1rem; overflow: hidden;">
+    <thead>
+        <tr style="background: rgba(255,255,255,0.05); text-align: left;">
+            <th style="padding: 1rem;">Flag</th>
+            <th style="padding: 1rem;">Enables</th>
+            <th style="padding: 1rem;">Adds dependencies</th>
+        </tr>
+    </thead>
+    <tbody>
+        <tr>
+            <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>scheduler</code></td>
+            <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Cron/interval scheduling, graceful shutdown via tokio signals</td>
+            <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>chrono</code>, <code>cron</code>, <code>tokio/signal</code></td>
+        </tr>
+        <tr>
+            <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>tracing</code></td>
+            <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Structured tracing instrumentation throughout the engine</td>
+            <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>tracing</code></td>
+        </tr>
+        <tr>
+            <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>all</code></td>
+            <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Both <code>scheduler</code> and <code>tracing</code></td>
+            <td style="padding: 1rem; border-top: 1px solid var(--border-color);">All of the above</td>
+        </tr>
+    </tbody>
+</table>
 
 <h3>Basic Example</h3>
 <pre><code class="language-rust">use async_trait::async_trait;
 use cano::prelude::*;
 
-// Define your workflow states
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum WorkflowState {
     Start,
@@ -119,15 +159,13 @@ enum WorkflowState {
     Complete,
 }
 
-// Simple Task implementation
 #[derive(Clone)]
 struct SimpleTask;
 
 #[async_trait]
 impl Task<WorkflowState> for SimpleTask {
     async fn run(&self, store: &MemoryStore) -> Result<TaskResult<WorkflowState>, CanoError> {
-        println!("Processing task...");
-        // Return the next state wrapped in TaskResult
+        store.put("message", "hello from Start".to_string())?;
         Ok(TaskResult::Single(WorkflowState::Process))
     }
 }
@@ -136,18 +174,17 @@ impl Task<WorkflowState> for SimpleTask {
 async fn main() -> Result<(), CanoError> {
     let store = MemoryStore::new();
 
-    // Create workflow with initial store
     let workflow = Workflow::new(store.clone())
         .register(WorkflowState::Start, SimpleTask)
-        .register(WorkflowState::Process, |_: &MemoryStore| async {
-            println!("Done!");
+        .register(WorkflowState::Process, |store: &MemoryStore| async move {
+            let msg: String = store.get("message")?;
+            println!("{msg}");
             Ok(TaskResult::Single(WorkflowState::Complete))
         })
         .add_exit_state(WorkflowState::Complete);
-    
-    // Run workflow starting at 'Start' state
+
     workflow.orchestrate(WorkflowState::Start).await?;
-    
+
     Ok(())
 }</code></pre>
         </div>

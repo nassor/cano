@@ -26,6 +26,7 @@
             <li><a href="task.html">Tasks</a></li>
             <li><a href="nodes.html" class="active">Nodes</a></li>
             <li><a href="workflows.html">Workflows</a></li>
+            <li><a href="store.html">Store</a></li>
             <li><a href="scheduler.html">Scheduler</a></li>
             <li><a href="tracing.html">Tracing</a></li>
         </ul>
@@ -53,16 +54,33 @@
         <div class="card-grid">
             <div class="card">
                 <h3>1. Prep</h3>
-                <p>Load data from the store, validate inputs, and setup resources. Returns <code>PrepResult</code>.</p>
+                <p>Load data from the store, validate inputs, and set up resources. Returns <code>PrepResult</code>. Fallible — errors abort the attempt and trigger a retry.</p>
             </div>
             <div class="card">
                 <h3>2. Exec</h3>
-                <p>Core processing logic. This phase is automatically retried on failure. Returns <code>ExecResult</code>.</p>
+                <p>Core processing logic. Infallible by design — encode outcomes in the <code>ExecResult</code> type. Receives the value returned by <code>prep()</code>.</p>
             </div>
             <div class="card">
                 <h3>3. Post</h3>
-                <p>Store results, cleanup resources, and determine the next workflow state based on execution outcome.</p>
+                <p>Store results, clean up resources, and determine the next workflow state. Receives the value returned by <code>exec()</code>. Fallible — errors trigger a retry.</p>
             </div>
+        </div>
+
+        <div style="margin: 2rem 0; padding: 1rem 1.25rem; background: rgba(244, 114, 182, 0.1); border-left: 4px solid var(--accent-color); border-radius: 0.5rem;">
+            <strong>Retry behavior — full pipeline re-run:</strong> When <code>prep()</code> or <code>post()</code> returns an error,
+            the engine re-runs the <em>entire</em> <code>prep &rarr; exec &rarr; post</code> pipeline from scratch.
+            This means <strong>both <code>prep</code> and <code>exec</code> must be idempotent</strong>: re-running them
+            with the same initial store state must produce the same result. Side effects that cannot be
+            safely repeated (e.g., charging a payment, sending an email) belong in <code>post()</code> only,
+            with idempotency guards. When all retry attempts are exhausted, the engine emits
+            <code>CanoError::RetryExhausted</code> with the final error and attempt count.
+        </div>
+
+        <div style="margin: 1.5rem 0; padding: 1rem 1.25rem; background: rgba(56, 189, 248, 0.1); border-left: 4px solid var(--primary-color); border-radius: 0.5rem;">
+            <strong>exec() is infallible by design:</strong> The <code>exec()</code> method returns <code>Self::ExecResult</code>
+            directly — not a <code>Result</code>. If the computation can fail, encode success and failure as variants
+            of <code>ExecResult</code> and handle them in <code>post()</code>. This separates pure computation from
+            I/O and error-routing concerns.
         </div>
 
         <h2>Implementing a Node</h2>
@@ -72,56 +90,43 @@
         </p>
         <pre><code class="language-rust">use async_trait::async_trait;
 use cano::prelude::*;
-use rand::Rng;
+use rand::RngExt; // rand 0.10+
 
 #[derive(Clone)]
 struct GeneratorNode;
 
 #[async_trait]
 impl Node<WorkflowAction> for GeneratorNode {
-    // Define the types passed between phases
     type PrepResult = Vec<u32>;
     type ExecResult = Vec<u32>;
 
-    // Optional: Configure retry behavior
     fn config(&self) -> TaskConfig {
         TaskConfig::default().with_fixed_retry(3, Duration::from_secs(1))
     }
 
-    // Phase 1: Preparation
-    // Load data, validate inputs, or generate initial state.
-    // This runs once and is not retried automatically.
+    // Phase 1: load/generate input data.
+    // Runs before exec() on every attempt — must be idempotent.
     async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         let mut rng = rand::rng();
         let size = rng.random_range(25..=150);
         let numbers: Vec<u32> = (0..size).map(|_| rng.random_range(1..=1000)).collect();
-        
-        println!("Generated {} random numbers", numbers.len());
         Ok(numbers)
     }
 
-    // Phase 2: Execution
-    // Core logic. This phase is automatically retried on failure based on config.
-    // It receives the result from prep().
+    // Phase 2: pure computation — infallible by design.
+    // Receives PrepResult, returns ExecResult.
     async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
-        // Filter out odd numbers
-        let even_numbers: Vec<u32> = prep_res.into_iter().filter(|&n| n % 2 == 0).collect();
-        println!("Filtered to {} even numbers", even_numbers.len());
-        even_numbers
+        prep_res.into_iter().filter(|&n| n % 2 == 0).collect()
     }
 
-    // Phase 3: Post-processing
-    // Store results, cleanup, and decide next state.
-    // It receives the result from exec().
+    // Phase 3: persist results and route to next state.
+    // Errors here trigger a full prep -> exec -> post retry.
     async fn post(
         &self,
         store: &MemoryStore,
         exec_res: Self::ExecResult,
     ) -> Result<WorkflowAction, CanoError> {
-        // Store the result in the shared memory store
         store.put("filtered_numbers", exec_res)?;
-        
-        println!("✓ Generator node completed");
         Ok(WorkflowAction::Count)
     }
 }</code></pre>
@@ -189,33 +194,24 @@ impl Node<State> for ETLNode {
             .with_exponential_retry(3) // Retry failures
     }
 
-    // Extract: Load data from source
+    // Extract: load data from source (idempotent — safe to retry)
     async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
-        println!("📥 Extracting from: {}", self.source);
-        
         let records = load_from_database(&self.source).await?;
-        println!("Loaded {} records", records.len());
-        
         Ok(records)
     }
 
-    // Transform: Process the data
+    // Transform: pure computation, no side effects
     async fn exec(&self, records: Self::PrepResult) -> Self::ExecResult {
-        println!("⚙️  Transforming {} records...", records.len());
-        
         records.into_iter()
             .map(|r| process_record(r))
             .collect()
     }
 
-    // Load: Save to destination
-    async fn post(&self, store: &MemoryStore, processed: Self::ExecResult) 
+    // Load: persist results (use idempotency keys for non-repeatable writes)
+    async fn post(&self, store: &MemoryStore, processed: Self::ExecResult)
         -> Result<State, CanoError> {
-        println!("📤 Loading to: {}", self.destination);
-        
         save_to_database(&self.destination, &processed).await?;
         store.put("processed_count", processed.len())?;
-        
         Ok(State::Complete)
     }
 }</code></pre>
@@ -253,11 +249,11 @@ impl Node<NegotiationState> for SellerNode {
     }
 
     async fn exec(&self, mut state: Self::PrepResult) -> Self::ExecResult {
-        // Calculate new offer
+        // Calculate new offer (pure computation — no store access, no I/O)
         if state.round > 1 {
-            let reduction = rand::random::<u32>() % 2000 + 500;
+            // reduction is deterministic based on round — safe to retry
+            let reduction = (state.round as u32) * 1000 + 500;
             state.current_offer = state.current_offer.saturating_sub(reduction);
-            println!("Seller: New offer ${}", state.current_offer);
         }
         state
     }
@@ -285,27 +281,20 @@ impl Node<State> for BookAnalyzerNode {
             .with_fixed_retry(2, Duration::from_secs(1))
     }
 
-    // Prep: Download book
+    // Prep: download book content (idempotent read)
     async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
         let url: String = store.get("book_url")?;
-        println!("📥 Downloading book from: {}", url);
-        
-        let client = reqwest::Client::new();
-        let content = client.get(&url)
+        let content = reqwest::Client::new()
+            .get(&url)
             .send().await?
             .text().await?;
-        
-        println!("Downloaded {} characters", content.len());
         Ok(content)
     }
 
-    // Exec: Analyze content (retried on failure)
+    // Exec: pure analysis, no I/O
     async fn exec(&self, content: Self::PrepResult) -> Self::ExecResult {
-        println!("🔍 Analyzing content...");
-        
         let words: Vec<&str> = content.split_whitespace().collect();
         let prepositions = count_prepositions(&words);
-        
         BookAnalysis {
             word_count: words.len(),
             preposition_count: prepositions,
@@ -313,12 +302,9 @@ impl Node<State> for BookAnalyzerNode {
         }
     }
 
-    // Post: Store results
-    async fn post(&self, store: &MemoryStore, analysis: Self::ExecResult) 
+    // Post: persist analysis result
+    async fn post(&self, store: &MemoryStore, analysis: Self::ExecResult)
         -> Result<State, CanoError> {
-        println!("📊 Analysis complete: {} words, {} prepositions", 
-                 analysis.word_count, analysis.preposition_count);
-        
         store.put("analysis", analysis)?;
         Ok(State::Complete)
     }
@@ -327,7 +313,9 @@ impl Node<State> for BookAnalyzerNode {
         <h3>4. Multi-Step Processing Pattern</h3>
         <p>Chain multiple nodes together for complex data pipelines.</p>
 
-        <pre><code class="language-rust">// Node 1: Data Generator
+        <pre><code class="language-rust">use rand::RngExt; // rand 0.10+
+
+// Node 1: Data Generator
 #[derive(Clone)]
 struct GeneratorNode;
 
