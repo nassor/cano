@@ -26,6 +26,7 @@
             <li><a href="task.html">Tasks</a></li>
             <li><a href="nodes.html">Nodes</a></li>
             <li><a href="workflows.html" class="active">Workflows</a></li>
+            <li><a href="store.html">Store</a></li>
             <li><a href="scheduler.html">Scheduler</a></li>
             <li><a href="tracing.html">Tracing</a></li>
         </ul>
@@ -75,32 +76,148 @@ enum OrderState {
 }
 
 // Define simple tasks (omitted for brevity, see Tasks page)
-struct ValidateTask; 
+struct ValidateTask;
 struct ProcessTask;
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     let store = MemoryStore::new();
 
-    // Create Workflow
-    let mut workflow = Workflow::new(store.clone());
-    
-    workflow
+    // Build workflow using the builder pattern — each method consumes self
+    // and returns a new Workflow, so you must capture the return value.
+    let workflow = Workflow::new(store.clone())
         // 1. Register Tasks for each state
         .register(OrderState::Start, |_: &MemoryStore| async {
             Ok(TaskResult::Single(OrderState::Validate))
         })
         .register(OrderState::Validate, ValidateTask)
         .register(OrderState::Process, ProcessTask)
-        
         // 2. Define Exit States (Workflow stops here)
         .add_exit_states(vec![OrderState::Complete, OrderState::Failed]);
 
     // 3. Execute
     let result = workflow.orchestrate(OrderState::Start).await?;
-    
+
     println!("Final State: {:?}", result);
     Ok(())
+}</code></pre>
+
+        <h2>Builder Pattern and #[must_use]</h2>
+        <p>
+            Workflow uses a builder pattern where <code>register()</code>, <code>register_split()</code>, and
+            <code>add_exit_state()</code> all consume <code>self</code> and return a new <code>Workflow</code>.
+            The <code>#[must_use]</code> attribute on <code>Workflow</code> and <code>JoinConfig</code> means the compiler
+            will warn you if you discard the return value. If you forget to capture it, the registration is silently lost.
+        </p>
+
+        <div style="background: rgba(248, 113, 113, 0.1); border: 1px solid rgba(248, 113, 113, 0.3); border-radius: 0.75rem; padding: 1.5rem; margin: 1.5rem 0;">
+            <p style="margin: 0 0 1rem 0; color: #f87171; font-weight: 600;">Warning: Do not discard the return value</p>
+            <pre style="margin: 0 !important;"><code class="language-rust">// WRONG — registration is lost!
+let workflow = Workflow::new(store.clone());
+workflow.register(State::Start, my_task);  // returns a new Workflow, but it is discarded
+
+// CORRECT — capture the returned workflow
+let workflow = Workflow::new(store.clone());
+let workflow = workflow.register(State::Start, my_task);
+
+// BEST — chain calls in a single expression
+let workflow = Workflow::new(store.clone())
+    .register(State::Start, my_task)
+    .add_exit_state(State::Complete);</code></pre>
+        </div>
+
+        <h2>Workflow Validation</h2>
+        <p>
+            Before orchestrating a workflow, you can validate its configuration to catch common mistakes early.
+            Cano provides two validation methods that check for different categories of problems.
+        </p>
+
+        <h3>validate()</h3>
+        <p>
+            Checks the overall workflow structure. Returns <code>CanoError::Configuration</code> if problems are found.
+        </p>
+        <div class="card-stack">
+            <div class="card">
+                <h3>Checks performed</h3>
+                <p>No handlers registered — the workflow has no states mapped to tasks.</p>
+                <p>No exit states defined — the workflow has no way to terminate.</p>
+            </div>
+        </div>
+
+        <h3>validate_initial_state()</h3>
+        <p>
+            Checks that a specific initial state has a handler registered. Returns <code>CanoError::Configuration</code>
+            if the given state has no registered task or split handler.
+        </p>
+
+        <pre><code class="language-rust">let workflow = Workflow::new(store.clone())
+    .register(State::Start, MyTask)
+    .register(State::Process, ProcessTask)
+    .add_exit_state(State::Complete);
+
+// Validate structure: ensures handlers and exit states exist
+workflow.validate()?;
+
+// Validate that the initial state has a handler
+workflow.validate_initial_state(&State::Start)?;
+
+// Safe to orchestrate
+let result = workflow.orchestrate(State::Start).await?;</code></pre>
+
+        <h2>Error Handling</h2>
+        <p>
+            The <code>orchestrate()</code> method can return several error variants depending on what goes wrong
+            during execution. Understanding these errors helps you build robust error recovery logic.
+        </p>
+
+        <table style="width: 100%; border-collapse: collapse; margin: 2rem 0; background: var(--card-bg); border-radius: 1rem; overflow: hidden;">
+            <thead>
+                <tr style="background: rgba(255,255,255,0.05); text-align: left;">
+                    <th style="padding: 1rem;">Error Variant</th>
+                    <th style="padding: 1rem;">Condition</th>
+                    <th style="padding: 1rem;">How to Fix</th>
+                </tr>
+            </thead>
+            <tbody>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>CanoError::Workflow</code></td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">No handler registered for current state</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Register a task for every reachable state with <code>register()</code></td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>CanoError::Workflow</code></td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Single task returned <code>TaskResult::Split</code></td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Use <code>register_split()</code> instead of <code>register()</code> for parallel tasks</td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>CanoError::Workflow</code></td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Workflow timeout exceeded</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Increase <code>with_timeout()</code> or optimize task execution time</td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>CanoError::Configuration</code></td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>PartialTimeout</code> strategy used without timeout configured</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Add <code>.with_timeout(duration)</code> to <code>JoinConfig</code></td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>CanoError::RetryExhausted</code></td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">All retry attempts exhausted by a Node</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Increase retry count or fix the underlying transient failure</td>
+                </tr>
+                <tr>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);"><code>CanoError::*</code></td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Any error propagated from task execution</td>
+                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Check the specific task logic — <code>NodeExecution</code>, <code>Preparation</code>, <code>Store</code>, etc.</td>
+                </tr>
+            </tbody>
+        </table>
+
+        <pre><code class="language-rust">match workflow.orchestrate(State::Start).await {
+    Ok(final_state) => println!("Completed: {:?}", final_state),
+    Err(CanoError::Workflow(msg)) => eprintln!("Workflow error: {}", msg),
+    Err(CanoError::Configuration(msg)) => eprintln!("Config error: {}", msg),
+    Err(CanoError::RetryExhausted(msg)) => eprintln!("Retries exhausted: {}", msg),
+    Err(e) => eprintln!("Task error: {}", e),
 }</code></pre>
 
         <h2>Split/Join Workflows</h2>

@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Tracing - Cano</title>
+    <title>Tracing - Cano Documentation</title>
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;700&family=Fira+Code&display=swap" rel="stylesheet">
@@ -11,11 +11,12 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-rust.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-toml.min.js"></script>
-    <script src="./script.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
+    <script src="script.js" defer></script>
 </head>
 <body>
-    <button id="menu-toggle" class="menu-toggle">☰</button>
-    
+    <button id="menu-toggle" class="menu-toggle">&#9776;</button>
+
     <nav class="sidebar">
         <a href="index.html" class="logo">
             <img src="logo.png" alt="Cano" style="height: 24px; vertical-align: middle; margin-right: 8px;">
@@ -26,33 +27,47 @@
             <li><a href="task.html">Tasks</a></li>
             <li><a href="nodes.html">Nodes</a></li>
             <li><a href="workflows.html">Workflows</a></li>
+            <li><a href="store.html">Store</a></li>
             <li><a href="scheduler.html">Scheduler</a></li>
             <li><a href="tracing.html" class="active">Tracing</a></li>
         </ul>
     </nav>
 
     <main class="main-content">
-        <div class="content-wrapper">
-
         <h1>Tracing</h1>
         <p class="subtitle">Comprehensive observability for your workflows.</p>
 
         <p>
-            Cano provides comprehensive observability through the optional <code>tracing</code> feature using the 
+            Cano provides comprehensive observability through the optional <code>tracing</code> feature using the
             <a href="https://docs.rs/tracing/latest/tracing/" target="_blank">tracing</a> library.
+            All tracing instrumentation is behind conditional compilation, so it adds zero overhead when disabled.
         </p>
 
         <h2>Setup</h2>
-        <p>To enable tracing, add the feature to your <code>Cargo.toml</code> and initialize a subscriber in your code.</p>
+        <p>Enable the <code>tracing</code> feature flag in your <code>Cargo.toml</code>. You can also use
+            <code>features = ["all"]</code> to enable both <code>tracing</code> and <code>scheduler</code> at once.</p>
+
         <pre><code class="language-toml">[dependencies]
 cano = { version = "0.7", features = ["tracing"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }</code></pre>
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-        <h3>Initialization</h3>
+# Or enable everything (tracing + scheduler):
+# cano = { version = "0.7", features = ["all"] }</code></pre>
+
+        <h3>Basic Initialization</h3>
+        <p>For quick setup during development, use the default formatter.</p>
+        <pre><code class="language-rust">use tracing_subscriber;
+
+// Simple setup for development
+tracing_subscriber::fmt::init();</code></pre>
+
+        <h3>Production Setup with Environment Filter</h3>
+        <p>For production use, configure an environment filter so you can control log levels
+            at runtime via the <code>RUST_LOG</code> environment variable.</p>
         <pre><code class="language-rust">use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-// Initialize tracing with environment filter
+// Production setup with env filter
 tracing_subscriber::registry()
     .with(tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "info".into()))
@@ -75,18 +90,169 @@ tracing_subscriber::registry()
             </div>
         </div>
 
-        <h2>Custom Spans</h2>
-        <p>You can attach custom tracing spans to your workflows to include business-specific context.</p>
+        <h2>Error Tracing</h2>
+        <p>
+            When the <code>tracing</code> feature is enabled, Cano automatically instruments error paths
+            at appropriate severity levels so you can diagnose failures without adding custom logging.
+        </p>
 
-        <pre><code class="language-rust">// Create workflow with custom tracing span
+        <div class="card-stack">
+            <div class="card">
+                <h3>Failed Task Attempts</h3>
+                <p>Each failed attempt is logged as a <strong>warning</strong> with the error details and current
+                    attempt number. This lets you see transient failures that are recovered by retry logic.</p>
+                <pre><code class="language-bash">WARN task_attempt{attempt=2 max_attempts=4}: Task execution failed, will retry error="connection timeout"</code></pre>
+            </div>
+            <div class="card">
+                <h3>Retry Exhaustion</h3>
+                <p>When all retry attempts are exhausted, the final failure is logged as an <strong>error</strong>
+                    with the total attempt count. This indicates a permanent failure that bubbles up as
+                    <code>CanoError</code>.</p>
+                <pre><code class="language-bash">ERROR task_attempt{attempt=4 max_attempts=4}: Task execution failed after all retry attempts error="connection timeout"</code></pre>
+            </div>
+            <div class="card">
+                <h3>Workflow-Level Errors</h3>
+                <p>Workflow orchestration traces include the current state context, so errors are always
+                    associated with the state that produced them.</p>
+                <pre><code class="language-bash">INFO workflow_orchestrate: Starting workflow execution initial_state=FetchData
+ERROR workflow_orchestrate: Task failed in state FetchData after exhausting retries</code></pre>
+            </div>
+        </div>
+
+        <h3>Filtering Trace Output</h3>
+        <p>Use the <code>RUST_LOG</code> environment variable to control which modules emit trace output.
+            This is especially useful in production to reduce noise.</p>
+        <pre><code class="language-bash"># Show only Cano debug logs
+RUST_LOG=cano=debug cargo run
+
+# Show Cano info + your app's debug logs
+RUST_LOG=cano=info,my_app=debug cargo run
+
+# Show retry-related details only
+RUST_LOG=cano::task=debug cargo run
+
+# Silence everything except errors
+RUST_LOG=error cargo run</code></pre>
+
+        <h2>Scheduler Tracing</h2>
+        <p>
+            When both the <code>scheduler</code> and <code>tracing</code> features are enabled, the scheduler
+            produces trace output for workflow lifecycle events. You can enable both with
+            <code>features = ["all"]</code>.
+        </p>
+
+        <div class="card-stack">
+            <div class="card">
+                <h3>Workflow Execution</h3>
+                <p>The scheduler traces when each managed workflow starts and completes, including the
+                    workflow identifier and scheduling trigger type.</p>
+            </div>
+            <div class="card">
+                <h3>Retry Attempts</h3>
+                <p>Retry delay durations are logged at debug level, so you can see the backoff progression
+                    for failing tasks within scheduled workflows.</p>
+            </div>
+            <div class="card">
+                <h3>Split Task Execution</h3>
+                <p>When a scheduled workflow uses split/join, each parallel task is traced with its task ID
+                    within a <code>split_task</code> span, making it straightforward to correlate concurrent
+                    execution in log output.</p>
+            </div>
+        </div>
+
+        <pre><code class="language-toml"># Enable both scheduler and tracing
+[dependencies]
+cano = { version = "0.7", features = ["all"] }</code></pre>
+
+        <h2>Custom Spans</h2>
+        <p>Attach custom tracing spans to your workflows to include business-specific context.
+            The span wraps all trace output generated during that workflow's execution.</p>
+
+        <pre><code class="language-rust">use tracing::info_span;
+use cano::prelude::*;
+
+// Create workflow with custom tracing span
 let workflow_span = info_span!(
-    "user_data_processing", 
-    user_id = "12345", 
+    "user_data_processing",
+    user_id = "12345",
     batch_id = "batch_001"
 );
 
-let mut workflow = Workflow::new(MyState::Start)
-    .with_tracing_span(workflow_span);</code></pre>
+let store = MemoryStore::new();
+let workflow = Workflow::new(store)
+    .with_tracing_span(workflow_span)
+    .register(MyState::Start, MyProcessorNode)
+    .add_exit_state(MyState::Complete);</code></pre>
+
+        <h2>Custom Instrumentation</h2>
+        <p>You can add your own tracing to Task and Node implementations using the
+            <code>tracing</code> crate's macros directly. This is useful for adding domain-specific
+            context that Cano's built-in instrumentation does not cover.</p>
+
+        <h3>Instrumenting a Task</h3>
+        <pre><code class="language-rust">use cano::prelude::*;
+use tracing::{info, warn};
+
+#[derive(Clone)]
+struct PaymentTask;
+
+#[async_trait]
+impl Task&lt;AppState&gt; for PaymentTask {
+    async fn run(&self, store: &MemoryStore) -> Result&lt;TaskResult&lt;AppState&gt;, CanoError&gt; {
+        let order_id: String = store.get("order_id")?;
+        info!(order_id = %order_id, "Processing payment");
+
+        match process_payment(&order_id).await {
+            Ok(receipt) => {
+                info!(order_id = %order_id, receipt = %receipt, "Payment succeeded");
+                store.put("receipt", receipt)?;
+                Ok(TaskResult::Single(AppState::Confirm))
+            }
+            Err(e) => {
+                warn!(order_id = %order_id, error = %e, "Payment failed");
+                Err(CanoError::task_execution(format!("payment failed: {e}")))
+            }
+        }
+    }
+}</code></pre>
+
+        <h3>Instrumenting a Node</h3>
+        <pre><code class="language-rust">use cano::prelude::*;
+use tracing::{info, debug, instrument};
+
+#[derive(Clone)]
+struct DataEnrichmentNode {
+    source: String,
+}
+
+#[async_trait]
+impl Node&lt;PipelineState&gt; for DataEnrichmentNode {
+    type PrepResult = Vec&lt;String&gt;;
+    type ExecResult = Vec&lt;String&gt;;
+
+    #[instrument(skip(self, store), fields(source = %self.source))]
+    async fn prep(&self, store: &MemoryStore) -> Result&lt;Self::PrepResult, CanoError&gt; {
+        let keys: Vec&lt;String&gt; = store.get("pending_keys")?;
+        debug!(count = keys.len(), "Loaded keys for enrichment");
+        Ok(keys)
+    }
+
+    async fn exec(&self, keys: Self::PrepResult) -> Self::ExecResult {
+        info!(count = keys.len(), source = %self.source, "Enriching records");
+        // ... enrichment logic
+        keys
+    }
+
+    async fn post(
+        &self,
+        store: &MemoryStore,
+        results: Self::ExecResult,
+    ) -> Result&lt;PipelineState, CanoError&gt; {
+        info!(enriched = results.len(), "Enrichment complete");
+        store.put("enriched_data", results)?;
+        Ok(PipelineState::Validate)
+    }
+}</code></pre>
 
         <h2>Example Output</h2>
         <p>Running with <code>RUST_LOG=info</code> produces structured logs:</p>
@@ -100,6 +266,7 @@ let mut workflow = Workflow::new(MyState::Start)
         <pre><code class="language-rust">use cano::prelude::*;
 use async_trait::async_trait;
 use tracing::{info, info_span};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum State {
@@ -111,29 +278,33 @@ enum State {
 struct ProcessOrderNode;
 
 #[async_trait]
-impl Task<State> for ProcessOrderNode {
-    async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+impl Task&lt;State&gt; for ProcessOrderNode {
+    async fn run(&self, _store: &MemoryStore) -> Result&lt;TaskResult&lt;State&gt;, CanoError&gt; {
         info!("Processing order...");
         Ok(TaskResult::Single(State::Complete))
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<(), CanoError> {
-    // 1. Setup Subscriber
-    tracing_subscriber::fmt::init();
+async fn main() -> Result&lt;(), CanoError&gt; {
+    // 1. Setup Subscriber with env filter
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| "info".into()))
+        .with(tracing_subscriber::fmt::layer())
+        .init();
 
     let store = MemoryStore::new();
 
     // 2. Create Workflow with Custom Span
     // This span will wrap all logs generated by this workflow
     let workflow_span = info_span!(
-        "order_processing", 
-        order_id = "ORD-2025-001", 
+        "order_processing",
+        order_id = "ORD-2025-001",
         customer = "Acme Corp"
     );
 
-    let workflow = Workflow::new(store.clone())
+    let workflow = Workflow::new(store)
         .register(State::Start, ProcessOrderNode)
         .add_exit_state(State::Complete)
         .with_tracing_span(workflow_span); // Attach span
@@ -141,11 +312,9 @@ async fn main() -> Result<(), CanoError> {
     // 3. Run
     info!("Submitting order...");
     workflow.orchestrate(State::Start).await?;
-    
+
     Ok(())
 }</code></pre>
-    
-        </div>
     </main>
 </body>
 </html>

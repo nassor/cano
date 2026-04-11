@@ -26,6 +26,7 @@
             <li><a href="task.html">Tasks</a></li>
             <li><a href="nodes.html">Nodes</a></li>
             <li><a href="workflows.html">Workflows</a></li>
+            <li><a href="store.html">Store</a></li>
             <li><a href="scheduler.html" class="active">Scheduler</a></li>
             <li><a href="tracing.html">Tracing</a></li>
         </ul>
@@ -38,8 +39,30 @@
         <p class="subtitle">Automate your workflows with flexible scheduling and concurrency.</p>
 
         <p>
-            The Scheduler provides workflow scheduling capabilities for background jobs and automated workflows. 
+            The Scheduler provides workflow scheduling capabilities for background jobs and automated workflows.
             It supports intervals, cron expressions, and manual triggers.
+        </p>
+
+        <div style="background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.3); border-radius: 0.75rem; padding: 1.5rem; margin: 1.5rem 0;">
+            <p style="margin: 0 0 1rem 0; color: var(--primary-color); font-weight: 600;">Type Constraint</p>
+            <p style="margin: 0;">
+                All workflows registered with a single <code>Scheduler</code> instance must share the same
+                <code>TState</code> type. The scheduler is generic over <code>Scheduler&lt;TState&gt;</code>,
+                so all registered workflows use the same state enum. For workflows with different state enums,
+                create separate <code>Scheduler</code> instances.
+            </p>
+        </div>
+
+        <h2>Overlap Prevention</h2>
+        <p>
+            The scheduler prevents overlapping executions of the same workflow. If a previous execution is still
+            running when the next interval or cron trigger fires, the new run is skipped. This prevents resource
+            exhaustion from slow-running workflows that accumulate concurrent instances over time.
+        </p>
+        <p>
+            For example, if a workflow is configured to run every 30 seconds but a particular execution takes
+            45 seconds, the scheduler will skip the trigger at the 30-second mark and wait for the next interval
+            after the current run completes.
         </p>
 
         <h2>Scheduling Strategies</h2>
@@ -203,6 +226,15 @@ async fn main() -> Result<(), CanoError> {
 
         <h3>3. Manual Triggering - On-Demand Execution</h3>
         <p>Trigger workflows manually via API. Ideal for user-initiated tasks or event-driven processing.</p>
+
+        <div style="background: rgba(248, 113, 113, 0.1); border: 1px solid rgba(248, 113, 113, 0.3); border-radius: 0.75rem; padding: 1.5rem; margin: 1.5rem 0;">
+            <p style="margin: 0 0 1rem 0; color: #f87171; font-weight: 600;">Important</p>
+            <p style="margin: 0;">
+                Calling <code>trigger()</code> before the scheduler has been started will return an error.
+                Always call <code>scheduler.start()</code> (or spawn it in a background task) before
+                triggering workflows manually.
+            </p>
+        </div>
         
         <div class="mermaid">
             sequenceDiagram
@@ -384,10 +416,18 @@ async fn main() -> Result<(), CanoError> {
         <h2>Graceful Shutdown</h2>
         <p>
             The scheduler supports graceful shutdown, allowing currently running workflows to complete before stopping.
+            This includes workflows started by interval or cron triggers as well as manually-triggered workflows.
+            All active executions are tracked and included in the shutdown wait.
         </p>
 
         <pre><code class="language-rust">// Stop scheduler but allow running flows to finish
 scheduler.stop().await?;</code></pre>
+
+        <p>
+            When <code>stop()</code> is called, the scheduler signals all scheduling loops to stop,
+            then waits for any in-progress workflow executions to complete before returning.
+            This ensures no workflow is abruptly terminated mid-execution.
+        </p>
 
         <h2>Advanced Pattern: Multi-Level Map-Reduce</h2>
         <p>
@@ -1111,7 +1151,7 @@ async fn main() -> Result<(), CanoError> {
             batch ETL jobs, or any scenario where you need to process independent datasets in parallel and then 
             aggregate the results. Each workflow can have completely different parameters while sharing the aggregation logic.
         </p>
-    
+
         </div>
     </main>
 </body>
