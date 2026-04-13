@@ -392,7 +392,8 @@ where
         // Send stop signal — use send().await to ensure delivery for critical control-plane command.
         // This is safe because stop signals are rare and waiting for queue space is acceptable.
         if let Some(tx) = self.command_tx.read().await.as_ref() {
-            tx.send(SchedulerCommand::Stop).await
+            tx.send(SchedulerCommand::Stop)
+                .await
                 .map_err(|e| CanoError::Workflow(format!("Failed to send stop: {}", e)))?;
         } else {
             return Err(CanoError::Workflow(

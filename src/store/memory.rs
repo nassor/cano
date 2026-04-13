@@ -403,8 +403,13 @@ mod tests {
         assert!(result.is_err());
 
         // Verify the original value is still in the store (non-destructive error)
-        let retrieved: String = store.get(key).expect("Value should still exist after append error");
-        assert_eq!(retrieved, original_value, "Original value should be preserved after type mismatch");
+        let retrieved: String = store
+            .get(key)
+            .expect("Value should still exist after append error");
+        assert_eq!(
+            retrieved, original_value,
+            "Original value should be preserved after type mismatch"
+        );
     }
 
     #[test]
