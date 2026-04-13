@@ -4,6 +4,12 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Cano - Async Data & AI Workflows in Rust</title>
+    <meta name="description" content="Cano is a high-performance async workflow orchestration engine for Rust using Finite State Machines for type-safe processing pipelines.">
+    <meta property="og:title" content="Cano - Async Data & AI Workflows in Rust">
+    <meta property="og:description" content="Type-safe async workflow engine with built-in scheduling, retry logic, and state machine semantics.">
+    <meta property="og:type" content="website">
+    <meta property="og:image" content="logo.png">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;700&family=Fira+Code&display=swap" rel="stylesheet">
@@ -14,11 +20,12 @@
     <script src="script.js" defer></script>
 </head>
 <body>
-    <button id="menu-toggle" class="menu-toggle">☰</button>
-    
-    <nav class="sidebar">
+    <button id="menu-toggle" class="menu-toggle" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+    <div class="sidebar-overlay"></div>
+
+    <nav class="sidebar" role="navigation" aria-label="Main navigation">
         <a href="index.html" class="logo">
-            <img src="logo.png" alt="Cano" style="height: 24px; vertical-align: middle; margin-right: 8px;">
+            <img src="logo.png" alt="" style="height: 24px; vertical-align: middle; margin-right: 8px;">
             Cano
         </a>
         <ul class="nav-links">
@@ -26,59 +33,84 @@
             <li><a href="task.html">Tasks</a></li>
             <li><a href="nodes.html">Nodes</a></li>
             <li><a href="workflows.html">Workflows</a></li>
+            <li><a href="store.html">Store</a></li>
             <li><a href="scheduler.html">Scheduler</a></li>
             <li><a href="tracing.html">Tracing</a></li>
         </ul>
+        <div class="sidebar-footer">
+            <span class="version-badge">v0.8.0</span>
+            <div class="sidebar-links">
+                <a href="https://github.com/nassor/cano" title="GitHub Repository" aria-label="GitHub">GitHub</a>
+                <a href="https://crates.io/crates/cano" title="Crates.io" aria-label="Crates.io">Crates.io</a>
+                <a href="https://docs.rs/cano" title="API Documentation" aria-label="API Docs">Docs.rs</a>
+            </div>
+        </div>
     </nav>
 
     <main class="main-content">
-        <h1>Cano</h1>
-        <p class="subtitle">Type-safe async workflow engine with built-in scheduling, retry logic, and state machine semantics.</p>
+        <section class="hero">
+            <h1 class="animate-in">Cano</h1>
+            <p class="subtitle animate-in">Type-safe async workflow engine with built-in scheduling, retry logic, and state machine semantics.</p>
 
-        <div class="badges" style="margin: 2rem 0; display: flex; gap: 0.5rem;">
-            <img src="https://img.shields.io/crates/v/cano.svg" alt="Crates.io">
-            <img src="https://docs.rs/cano/badge.svg" alt="Documentation">
-            <img src="https://img.shields.io/crates/d/cano.svg" alt="Downloads">
-            <img src="https://img.shields.io/crates/l/cano.svg" alt="License">
-        </div>
+            <div class="badges animate-in">
+                <a href="https://crates.io/crates/cano" title="Crates.io">
+                    <img src="https://img.shields.io/crates/v/cano.svg" alt="Crates.io">
+                </a>
+                <a href="https://docs.rs/cano" title="API Documentation">
+                    <img src="https://docs.rs/cano/badge.svg" alt="Documentation">
+                </a>
+                <a href="https://crates.io/crates/cano" title="Download Statistics">
+                    <img src="https://img.shields.io/crates/d/cano.svg" alt="Downloads">
+                </a>
+                <a href="https://github.com/nassor/cano/blob/main/LICENSE" title="MIT License">
+                    <img src="https://img.shields.io/crates/l/cano.svg" alt="License">
+                </a>
+            </div>
 
-        <p>
-            Cano is a high-performance orchestration engine designed for building resilient, self-healing systems in Rust. 
-            Unlike simple task queues, Cano uses <strong>Finite State Machines (FSM)</strong> to define strict, type-safe transitions between processing steps.
-        </p>
-        
-        <p>
-            It excels at managing complex lifecycles where state transitions matter:
-        </p>
-        <ul>
-            <li><strong>Data Pipelines</strong>: ETL jobs with parallel processing (Split/Join) and aggregation.</li>
-            <li><strong>AI Agents</strong>: Multi-step inference chains with shared context and memory.</li>
-            <li><strong>Background Systems</strong>: Scheduled maintenance, periodic reporting, and distributed cron jobs.</li>
-        </ul>
+            <p class="animate-in">
+                Cano is a high-performance orchestration engine designed for building resilient, self-healing systems in Rust.
+                Unlike simple task queues, Cano uses <strong>Finite State Machines (FSM)</strong> to define strict, type-safe transitions between processing steps.
+            </p>
+
+            <p class="animate-in">
+                It excels at managing complex lifecycles where state transitions matter:
+            </p>
+            <ul class="animate-in">
+                <li><strong>Data Pipelines</strong>: ETL jobs with parallel processing (Split/Join) and aggregation.</li>
+                <li><strong>AI Agents</strong>: Multi-step inference chains with shared context and memory.</li>
+                <li><strong>Background Systems</strong>: Scheduled maintenance, periodic reporting, and distributed cron jobs.</li>
+            </ul>
+        </section>
 
         <h2>Features</h2>
-        <div class="card-grid">
-            <div class="card">
+        <div class="feature-grid">
+            <div class="feature-card animate-in">
+                <div class="feature-icon" aria-hidden="true">&#9881;</div>
                 <h3>Tasks & Nodes</h3>
                 <p>Single <code>Task</code> trait for simple logic, or <code>Node</code> trait for structured three-phase lifecycle.</p>
             </div>
-            <div class="card">
+            <div class="feature-card animate-in">
+                <div class="feature-icon secondary" aria-hidden="true">&#9670;</div>
                 <h3>State Machines</h3>
                 <p>Type-safe enum-driven state transitions with compile-time checking.</p>
             </div>
-            <div class="card">
+            <div class="feature-card animate-in">
+                <div class="feature-icon accent" aria-hidden="true">&#8635;</div>
                 <h3>Retry Strategies</h3>
                 <p>Fixed delays, exponential backoff with jitter, and custom strategies.</p>
             </div>
-            <div class="card">
+            <div class="feature-card animate-in">
+                <div class="feature-icon" aria-hidden="true">&#9202;</div>
                 <h3>Scheduling</h3>
                 <p>Built-in scheduler with intervals, cron schedules, and manual triggers.</p>
             </div>
-            <div class="card">
+            <div class="feature-card animate-in">
+                <div class="feature-icon secondary" aria-hidden="true">&#9881;</div>
                 <h3>Concurrency</h3>
                 <p>Execute multiple workflow instances in parallel with timeout strategies.</p>
             </div>
-            <div class="card">
+            <div class="feature-card animate-in">
+                <div class="feature-icon accent" aria-hidden="true">&#9673;</div>
                 <h3>Observability</h3>
                 <p>Comprehensive tracing and observability for workflow execution.</p>
             </div>
@@ -86,13 +118,16 @@
 
         <h2>Getting Started</h2>
         <p>Add Cano to your <code>Cargo.toml</code>:</p>
-        
-        <pre><code class="language-toml">[dependencies]
-cano = { version = "0.7", features = ["all"] }
+
+        <div class="getting-started-code">
+            <pre><code class="language-toml">[dependencies]
+cano = { version = "0.8", features = ["all"] }
 tokio = { version = "1", features = ["full"] }</code></pre>
+        </div>
 
         <h3>Basic Example</h3>
-        <pre><code class="language-rust">use async_trait::async_trait;
+        <div class="getting-started-code">
+            <pre><code class="language-rust">use async_trait::async_trait;
 use cano::prelude::*;
 
 // Define your workflow states
@@ -128,12 +163,13 @@ async fn main() -> Result<(), CanoError> {
             Ok(TaskResult::Single(WorkflowState::Complete))
         })
         .add_exit_state(WorkflowState::Complete);
-    
+
     // Run workflow starting at 'Start' state
     workflow.orchestrate(WorkflowState::Start).await?;
-    
+
     Ok(())
 }</code></pre>
+        </div>
     </main>
 </body>
 </html>

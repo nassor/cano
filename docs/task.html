@@ -4,6 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Tasks - Cano Documentation</title>
+    <meta name="description" content="Learn how to use Tasks in Cano - simple, flexible processing units for async workflows in Rust.">
+    <meta property="og:title" content="Tasks - Cano Documentation">
+    <meta property="og:description" content="Simple, flexible processing units for your Cano workflows.">
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;700&family=Fira+Code&display=swap" rel="stylesheet">
@@ -11,13 +14,367 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-rust.min.js"></script>
     <script src="script.js" defer></script>
+    <style>
+        /* ── Page-specific styles for task.html ── */
+
+        /* Table of Contents */
+        .page-toc {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 0.75rem;
+            padding: 1.5rem 2rem;
+            margin-bottom: 3rem;
+        }
+
+        .page-toc-title {
+            font-size: 0.75rem;
+            font-weight: 700;
+            letter-spacing: 0.1em;
+            text-transform: uppercase;
+            color: var(--primary-color);
+            margin-bottom: 0.75rem;
+        }
+
+        .page-toc ol {
+            list-style: none;
+            counter-reset: toc-counter;
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+            gap: 0.25rem 2rem;
+            padding: 0;
+            margin: 0;
+        }
+
+        .page-toc li {
+            counter-increment: toc-counter;
+        }
+
+        .page-toc li a {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.35rem 0;
+            color: #94a3b8;
+            font-size: 0.925rem;
+            font-weight: 500;
+            text-decoration: none;
+            transition: color 0.2s;
+        }
+
+        .page-toc li a::before {
+            content: counter(toc-counter, decimal-leading-zero);
+            font-size: 0.75rem;
+            font-weight: 700;
+            color: var(--border-color);
+            font-family: 'Fira Code', monospace;
+            transition: color 0.2s;
+        }
+
+        .page-toc li a:hover {
+            color: var(--primary-color);
+        }
+
+        .page-toc li a:hover::before {
+            color: var(--primary-color);
+        }
+
+        /* Section dividers */
+        .section-divider {
+            border: none;
+            height: 1px;
+            background: linear-gradient(to right, var(--border-color), transparent);
+            margin: 3rem 0 0;
+        }
+
+        /* Callout boxes */
+        .callout {
+            padding: 1.25rem 1.5rem;
+            border-radius: 0.75rem;
+            margin: 1.5rem 0 2rem;
+            border-left: 4px solid;
+            font-size: 1rem;
+        }
+
+        .callout p {
+            margin: 0;
+            font-size: 1rem;
+            line-height: 1.6;
+        }
+
+        .callout-label {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-weight: 700;
+            font-size: 0.8rem;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            margin-bottom: 0.5rem;
+        }
+
+        .callout-info {
+            background: rgba(56, 189, 248, 0.08);
+            border-color: var(--primary-color);
+        }
+
+        .callout-info .callout-label {
+            color: var(--primary-color);
+        }
+
+        .callout-tip {
+            background: rgba(52, 211, 153, 0.08);
+            border-color: #34d399;
+        }
+
+        .callout-tip .callout-label {
+            color: #34d399;
+        }
+
+        .callout-warning {
+            background: rgba(251, 191, 36, 0.08);
+            border-color: #fbbf24;
+        }
+
+        .callout-warning .callout-label {
+            color: #fbbf24;
+        }
+
+        /* Code block labels */
+        .code-block {
+            position: relative;
+            margin: 1.5rem 0;
+        }
+
+        .code-block-label {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-bottom: 1px solid var(--code-bg);
+            border-radius: 0.5rem 0.5rem 0 0;
+            padding: 0.4rem 1rem;
+            font-size: 0.78rem;
+            font-weight: 600;
+            color: #94a3b8;
+            letter-spacing: 0.02em;
+            position: relative;
+            top: 1px;
+            z-index: 1;
+        }
+
+        .code-block-label .label-icon {
+            font-size: 0.85rem;
+            opacity: 0.7;
+        }
+
+        .code-block pre {
+            margin-top: 0 !important;
+            border-top-left-radius: 0 !important;
+        }
+
+        /* Comparison section */
+        .comparison-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0;
+            margin: 2rem 0;
+            border-radius: 1rem;
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+        }
+
+        .comparison-col {
+            padding: 2rem;
+            background: var(--card-bg);
+        }
+
+        .comparison-col:first-child {
+            border-right: 1px solid var(--border-color);
+        }
+
+        .comparison-col h3 {
+            margin-top: 0;
+            margin-bottom: 0.75rem;
+        }
+
+        .comparison-col ul {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        .comparison-col ul li {
+            padding: 0.5rem 0;
+            color: #94a3b8;
+            font-size: 0.95rem;
+            display: flex;
+            align-items: flex-start;
+            gap: 0.5rem;
+        }
+
+        .comparison-col ul li::before {
+            content: "";
+            display: inline-block;
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--primary-color);
+            margin-top: 0.55rem;
+            flex-shrink: 0;
+        }
+
+        .comparison-col:last-child ul li::before {
+            background: var(--secondary-color);
+        }
+
+        /* Styled table */
+        .styled-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            margin: 2rem 0;
+            background: var(--card-bg);
+            border-radius: 0.75rem;
+            overflow: hidden;
+            border: 1px solid var(--border-color);
+            font-size: 0.95rem;
+        }
+
+        .styled-table thead tr {
+            background: rgba(255, 255, 255, 0.04);
+        }
+
+        .styled-table th {
+            padding: 1rem 1.25rem;
+            text-align: left;
+            font-weight: 600;
+            color: #e2e8f0;
+            font-size: 0.85rem;
+            letter-spacing: 0.03em;
+            text-transform: uppercase;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .styled-table td {
+            padding: 0.875rem 1.25rem;
+            border-top: 1px solid rgba(255, 255, 255, 0.04);
+            color: #94a3b8;
+        }
+
+        .styled-table tbody tr:first-child td {
+            border-top: none;
+        }
+
+        .styled-table tbody tr:hover {
+            background: rgba(255, 255, 255, 0.02);
+        }
+
+        /* Pattern cards */
+        .pattern-section {
+            margin: 2rem 0;
+        }
+
+        .pattern-header {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .pattern-number {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 2rem;
+            height: 2rem;
+            border-radius: 0.5rem;
+            background: rgba(56, 189, 248, 0.12);
+            color: var(--primary-color);
+            font-weight: 700;
+            font-size: 0.85rem;
+            font-family: 'Fira Code', monospace;
+            flex-shrink: 0;
+        }
+
+        .pattern-header h3 {
+            margin: 0;
+        }
+
+        /* Retry card stack improvements */
+        .retry-cards .card {
+            border-left: 3px solid var(--secondary-color);
+        }
+
+        .retry-cards .card:nth-child(1) {
+            border-left-color: var(--primary-color);
+        }
+
+        .retry-cards .card:nth-child(2) {
+            border-left-color: var(--secondary-color);
+        }
+
+        .retry-cards .card:nth-child(3) {
+            border-left-color: #34d399;
+        }
+
+        /* Responsive adjustments */
+        @media (max-width: 768px) {
+            .page-toc ol {
+                grid-template-columns: 1fr;
+            }
+
+            .page-toc {
+                padding: 1.25rem 1.25rem;
+            }
+
+            .comparison-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .comparison-col:first-child {
+                border-right: none;
+                border-bottom: 1px solid var(--border-color);
+            }
+
+            .comparison-col {
+                padding: 1.25rem;
+            }
+
+            .callout {
+                padding: 1rem 1.25rem;
+            }
+
+            .styled-table {
+                font-size: 0.85rem;
+                display: block;
+                overflow-x: auto;
+                -webkit-overflow-scrolling: touch;
+            }
+
+            .styled-table th,
+            .styled-table td {
+                padding: 0.625rem 0.75rem;
+                white-space: nowrap;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .styled-table th,
+            .styled-table td {
+                padding: 0.5rem 0.625rem;
+                font-size: 0.8rem;
+            }
+        }
+    </style>
 </head>
 <body>
-    <button id="menu-toggle" class="menu-toggle">☰</button>
-    
-    <nav class="sidebar">
+    <button id="menu-toggle" class="menu-toggle" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+    <div class="sidebar-overlay"></div>
+
+    <nav class="sidebar" role="navigation" aria-label="Main navigation">
         <a href="index.html" class="logo">
-            <img src="logo.png" alt="Cano" style="height: 24px; vertical-align: middle; margin-right: 8px;">
+            <img src="logo.png" alt="" style="height: 24px; vertical-align: middle; margin-right: 8px;">
             Cano
         </a>
         <ul class="nav-links">
@@ -25,9 +382,18 @@
             <li><a href="task.html" class="active">Tasks</a></li>
             <li><a href="nodes.html">Nodes</a></li>
             <li><a href="workflows.html">Workflows</a></li>
+            <li><a href="store.html">Store</a></li>
             <li><a href="scheduler.html">Scheduler</a></li>
             <li><a href="tracing.html">Tracing</a></li>
         </ul>
+        <div class="sidebar-footer">
+            <span class="version-badge">v0.8.0</span>
+            <div class="sidebar-links">
+                <a href="https://github.com/nassor/cano" title="GitHub Repository" aria-label="GitHub">GitHub</a>
+                <a href="https://crates.io/crates/cano" title="Crates.io" aria-label="Crates.io">Crates.io</a>
+                <a href="https://docs.rs/cano" title="API Documentation" aria-label="API Docs">Docs.rs</a>
+            </div>
+        </div>
     </nav>
 
     <main class="main-content">
@@ -35,17 +401,42 @@
         <p class="subtitle">Simple, flexible processing units for your workflows.</p>
 
         <p>
-            A <code>Task</code> provides a simplified interface with a single <code>run</code> method. 
-            Use tasks when you want simplicity and direct control over the execution logic. 
+            A <code>Task</code> provides a simplified interface with a single <code>run</code> method.
+            Use tasks when you want simplicity and direct control over the execution logic.
             Tasks are the fundamental building blocks of Cano workflows.
         </p>
 
-        <h2>Implementing a Task</h2>
-        <p>To create a task, implement the `Task` trait for your struct. The trait requires a `run` method and an optional `config` method.</p>
+        <div class="callout callout-info">
+            <div class="callout-label">Key concept</div>
+            <p>
+                A Task is the simplest way to define workflow logic in Cano. Implement a single <code>run()</code> method,
+                and you have a fully functional processing unit. For more structured operations, see <a href="nodes.html">Nodes</a>.
+            </p>
+        </div>
 
-        <pre><code class="language-rust">use async_trait::async_trait;
+        <!-- Table of Contents -->
+        <nav class="page-toc" aria-label="Table of contents">
+            <div class="page-toc-title">On this page</div>
+            <ol>
+                <li><a href="#implementing">Implementing a Task</a></li>
+                <li><a href="#closures">Closure Tasks</a></li>
+                <li><a href="#config-retries">Configuration &amp; Retries</a></li>
+                <li><a href="#patterns">Real-World Task Patterns</a></li>
+                <li><a href="#task-vs-node">Task vs Node</a></li>
+                <li><a href="#when-to-use">When to Use Tasks vs Nodes</a></li>
+            </ol>
+        </nav>
+
+        <!-- Section: Implementing a Task -->
+        <hr class="section-divider">
+        <h2 id="implementing">Implementing a Task</h2>
+        <p>To create a task, implement the <code>Task</code> trait for your struct. The trait requires a <code>run</code> method and an optional <code>config</code> method.</p>
+
+        <div class="code-block">
+            <span class="code-block-label"><span class="label-icon">&#9998;</span> Implementing Task trait</span>
+            <pre><code class="language-rust">use async_trait::async_trait;
 use cano::prelude::*;
-use rand::Rng;
+use rand::RngExt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Action { Generate, Count, Complete }
@@ -65,7 +456,7 @@ impl Task<Action> for GeneratorTask {
         // 1. Perform logic
         let mut rng = rand::rng();
         let numbers: Vec<u32> = (0..10).map(|_| rng.random_range(1..=100)).collect();
-        
+
         // 2. Store results
         store.put("numbers", numbers)?;
         println!("✅ Stored numbers");
@@ -74,18 +465,32 @@ impl Task<Action> for GeneratorTask {
         Ok(TaskResult::Single(Action::Count))
     }
 }</code></pre>
+        </div>
 
-        <h2>Closure Tasks</h2>
+        <!-- Section: Closure Tasks -->
+        <hr class="section-divider">
+        <h2 id="closures">Closure Tasks</h2>
         <p>For very simple logic, you can register a closure directly as a task without defining a struct.</p>
-        <pre><code class="language-rust">workflow.register(Action::Count, |store: &MemoryStore| async move {
+
+        <div class="code-block">
+            <span class="code-block-label"><span class="label-icon">&#955;</span> Closure as a Task</span>
+            <pre><code class="language-rust">workflow.register(Action::Count, |store: &MemoryStore| async move {
     let numbers: Vec<u32> = store.get("numbers")?;
     println!("Count: {}", numbers.len());
     Ok(TaskResult::Single(Action::Complete))
 });</code></pre>
+        </div>
 
-        <h2>Configuration & Retries</h2>
+        <div class="callout callout-tip">
+            <div class="callout-label">Tip</div>
+            <p>Closures are great for prototyping and simple logic. When your closure starts growing beyond a few lines, consider refactoring into a named struct with the <code>Task</code> trait.</p>
+        </div>
+
+        <!-- Section: Configuration & Retries -->
+        <hr class="section-divider">
+        <h2 id="config-retries">Configuration &amp; Retries</h2>
         <p>
-            Tasks can be configured with retry strategies to handle transient failures. 
+            Tasks can be configured with retry strategies to handle transient failures.
             The <code>TaskConfig</code> struct allows you to specify the retry behavior.
         </p>
 
@@ -104,28 +509,40 @@ impl Task<Action> for GeneratorTask {
                 T-->>W: Success ✓
         </div>
 
-        <div class="card-stack">
+        <div class="card-stack retry-cards">
             <div class="card">
                 <h3>Fixed Retry</h3>
                 <p>Retry a fixed number of times with a constant delay between attempts.</p>
-                <pre><code class="language-rust">TaskConfig::default()
+                <div class="code-block">
+                    <span class="code-block-label">Fixed retry config</span>
+                    <pre><code class="language-rust">TaskConfig::default()
     .with_fixed_retry(3, Duration::from_secs(1))</code></pre>
+                </div>
             </div>
             <div class="card">
                 <h3>Exponential Backoff</h3>
                 <p>Retry with exponentially increasing delays, useful for rate-limited APIs.</p>
-                <pre><code class="language-rust">TaskConfig::default()
+                <div class="code-block">
+                    <span class="code-block-label">Exponential backoff config</span>
+                    <pre><code class="language-rust">TaskConfig::default()
     .with_exponential_retry(5)</code></pre>
+                </div>
             </div>
             <div class="card">
                 <h3>Minimal Config</h3>
                 <p>Fast execution with minimal retry overhead for reliable operations.</p>
-                <pre><code class="language-rust">TaskConfig::minimal()</code></pre>
+                <div class="code-block">
+                    <span class="code-block-label">Minimal config</span>
+                    <pre><code class="language-rust">TaskConfig::minimal()</code></pre>
+                </div>
             </div>
         </div>
 
         <h3>Real-World Example: API Client with Retry</h3>
-        <pre><code class="language-rust">use cano::prelude::*;
+
+        <div class="code-block">
+            <span class="code-block-label"><span class="label-icon">&#127760;</span> API client with exponential backoff</span>
+            <pre><code class="language-rust">use cano::prelude::*;
 use async_trait::async_trait;
 
 #[derive(Clone)]
@@ -143,69 +560,86 @@ impl Task<State> for ApiClientTask {
 
     async fn run(&self, store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
         println!("📡 Calling API: {}", self.endpoint);
-        
+
         // Simulate API call that might fail
         let response = reqwest::get(&self.endpoint)
             .await
             .map_err(|e| CanoError::task_execution(e.to_string()))?;
-        
+
         let data = response.text().await
             .map_err(|e| CanoError::task_execution(e.to_string()))?;
-        
+
         store.put("api_response", data)?;
         println!("✅ API call successful");
-        
+
         Ok(TaskResult::Single(State::Complete))
     }
 }</code></pre>
+        </div>
 
-        <h2>Real-World Task Patterns</h2>
+        <!-- Section: Real-World Patterns -->
+        <hr class="section-divider">
+        <h2 id="patterns">Real-World Task Patterns</h2>
         <p>Tasks excel at various workflow scenarios. Here are proven patterns from production use.</p>
 
-        <h3>1. Data Transformation Task</h3>
-        <p>Simple, direct data processing without complex setup.</p>
-        <pre><code class="language-rust">#[derive(Clone)]
+        <section class="pattern-section">
+            <div class="pattern-header">
+                <span class="pattern-number">1</span>
+                <h3>Data Transformation Task</h3>
+            </div>
+            <p>Simple, direct data processing without complex setup.</p>
+            <div class="code-block">
+                <span class="code-block-label">Data transformation</span>
+                <pre><code class="language-rust">#[derive(Clone)]
 struct DataTransformer;
 
 #[async_trait]
 impl Task<State> for DataTransformer {
     async fn run(&self, store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
         let raw_data: Vec<i32> = store.get("raw_data")?;
-        
+
         // Transform: filter and multiply
         let processed: Vec<i32> = raw_data
             .into_iter()
             .filter(|&x| x > 0)
             .map(|x| x * 2)
             .collect();
-        
+
         store.put("processed_data", processed)?;
         Ok(TaskResult::Single(State::Complete))
     }
 }</code></pre>
+            </div>
+        </section>
 
-        <h3>2. Validation Task</h3>
-        <p>Quick validation logic with multiple outcomes.</p>
-        <pre><code class="language-rust">#[derive(Clone)]
+        <section class="pattern-section">
+            <div class="pattern-header">
+                <span class="pattern-number">2</span>
+                <h3>Validation Task</h3>
+            </div>
+            <p>Quick validation logic with multiple outcomes.</p>
+            <div class="code-block">
+                <span class="code-block-label">Validation with branching</span>
+                <pre><code class="language-rust">#[derive(Clone)]
 struct ValidatorTask;
 
 #[async_trait]
 impl Task<State> for ValidatorTask {
     async fn run(&self, store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
         let data: Vec<f64> = store.get("processed_data")?;
-        
+
         let mut errors = Vec::new();
-        
+
         if data.is_empty() {
             errors.push("Data is empty");
         }
-        
+
         if data.iter().any(|&x| x.is_nan()) {
             errors.push("Contains NaN values");
         }
-        
+
         store.put("validation_errors", errors.clone())?;
-        
+
         if errors.is_empty() {
             Ok(TaskResult::Single(State::Process))
         } else {
@@ -213,10 +647,18 @@ impl Task<State> for ValidatorTask {
         }
     }
 }</code></pre>
+            </div>
+        </section>
 
-        <h3>3. Conditional Routing Task</h3>
-        <p>Dynamic workflow routing based on runtime conditions.</p>
-        <pre><code class="language-rust">#[derive(Clone)]
+        <section class="pattern-section">
+            <div class="pattern-header">
+                <span class="pattern-number">3</span>
+                <h3>Conditional Routing Task</h3>
+            </div>
+            <p>Dynamic workflow routing based on runtime conditions.</p>
+            <div class="code-block">
+                <span class="code-block-label">Dynamic routing with match</span>
+                <pre><code class="language-rust">#[derive(Clone)]
 struct RoutingTask;
 
 #[async_trait]
@@ -224,7 +666,7 @@ impl Task<State> for RoutingTask {
     async fn run(&self, store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
         let item_count: usize = store.get("item_count")?;
         let priority: String = store.get("priority")?;
-        
+
         // Dynamic routing based on conditions
         let next_state = match (item_count, priority.as_str()) {
             (n, "high") if n > 100 => State::ParallelProcess,
@@ -233,25 +675,33 @@ impl Task<State> for RoutingTask {
             (n, _) if n > 0 => State::SimpleProcess,
             _ => State::Skip,
         };
-        
+
         println!("Routing to: {:?}", next_state);
         Ok(TaskResult::Single(next_state))
     }
 }</code></pre>
+            </div>
+        </section>
 
-        <h3>4. Aggregation Task</h3>
-        <p>Collect and combine results from previous steps.</p>
-        <pre><code class="language-rust">#[derive(Clone)]
+        <section class="pattern-section">
+            <div class="pattern-header">
+                <span class="pattern-number">4</span>
+                <h3>Aggregation Task</h3>
+            </div>
+            <p>Collect and combine results from previous steps.</p>
+            <div class="code-block">
+                <span class="code-block-label">Aggregating parallel results</span>
+                <pre><code class="language-rust">#[derive(Clone)]
 struct AggregatorTask;
 
 #[async_trait]
 impl Task<State> for AggregatorTask {
     async fn run(&self, store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
         println!("Aggregating results...");
-        
+
         let mut total = 0;
         let mut count = 0;
-        
+
         // Collect results from parallel tasks
         for i in 1..=3 {
             if let Ok(result) = store.get::<i32>(&format!("result_{}", i)) {
@@ -259,22 +709,26 @@ impl Task<State> for AggregatorTask {
                 count += 1;
             }
         }
-        
+
         store.put("total", total)?;
         store.put("count", count)?;
-        
+
         println!("Aggregated {} results, total: {}", count, total);
         Ok(TaskResult::Single(State::Complete))
     }
 }</code></pre>
+            </div>
+        </section>
 
-        <h2>Task vs Node</h2>
+        <!-- Section: Task vs Node -->
+        <hr class="section-divider">
+        <h2 id="task-vs-node">Task vs Node</h2>
         <p>
             Cano supports both <code>Task</code> and <code>Node</code> interfaces. Every Node automatically implements Task, so they can be mixed in the same workflow.
         </p>
-        
-        <div class="card-grid">
-            <div class="card">
+
+        <div class="comparison-grid">
+            <div class="comparison-col">
                 <h3>Task</h3>
                 <p><strong>Best for:</strong> Simple logic, quick prototyping, functional style.</p>
                 <ul>
@@ -283,66 +737,71 @@ impl Task<State> for AggregatorTask {
                     <li>Can be a closure</li>
                 </ul>
             </div>
-            <div class="card">
+            <div class="comparison-col">
                 <h3>Node</h3>
                 <p><strong>Best for:</strong> Complex operations, robust error handling, structured data flow.</p>
                 <ul>
                     <li>3 Phases: <code>prep</code>, <code>exec</code>, <code>post</code></li>
-                    <li>Built-in retry logic for <code>exec</code> phase</li>
+                    <li>Full-pipeline retry: <code>prep</code> &rarr; <code>exec</code> &rarr; <code>post</code> restarts on failure</li>
                     <li>Separation of concerns (IO vs Compute)</li>
                 </ul>
             </div>
         </div>
 
-        <pre><code class="language-rust">// Mixing Tasks and Nodes in one workflow
+        <div class="code-block">
+            <span class="code-block-label"><span class="label-icon">&#128260;</span> Mixing Tasks and Nodes</span>
+            <pre><code class="language-rust">// Mixing Tasks and Nodes in one workflow
 let workflow = Workflow::new(store.clone())
     .register(State::Init, SimpleTask)           // Task
     .register(State::Process, ComplexNode::new()) // Node
     .register(State::Finish, |_: &MemoryStore| async { // Closure Task
         Ok(TaskResult::Single(State::Done))
     });</code></pre>
+        </div>
 
-        <h2>When to Use Tasks vs Nodes?</h2>
+        <!-- Section: When to Use -->
+        <hr class="section-divider">
+        <h2 id="when-to-use">When to Use Tasks vs Nodes?</h2>
         <p>Choose the right abstraction for your use case:</p>
 
-        <table style="width: 100%; border-collapse: collapse; margin: 2rem 0; background: var(--card-bg); border-radius: 1rem; overflow: hidden;">
+        <table class="styled-table">
             <thead>
-                <tr style="background: rgba(255,255,255,0.05); text-align: left;">
-                    <th style="padding: 1rem;">Scenario</th>
-                    <th style="padding: 1rem;">Use Task</th>
-                    <th style="padding: 1rem;">Use Node</th>
+                <tr>
+                    <th>Scenario</th>
+                    <th>Use Task</th>
+                    <th>Use Node</th>
                 </tr>
             </thead>
             <tbody>
                 <tr>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Data transformation</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">✅ Simple transform</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">✅ Complex with validation</td>
+                    <td>Data transformation</td>
+                    <td>Simple transform</td>
+                    <td>Complex with validation</td>
                 </tr>
                 <tr>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">API calls</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">✅ Simple requests</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">✅ With auth & retry logic</td>
+                    <td>API calls</td>
+                    <td>Simple requests</td>
+                    <td>With auth &amp; retry logic</td>
                 </tr>
                 <tr>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Validation</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">✅ Quick checks</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">⚪ Usually overkill</td>
+                    <td>Validation</td>
+                    <td>Quick checks</td>
+                    <td>Usually overkill</td>
                 </tr>
                 <tr>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">File operations</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">⚪ For simple cases</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">✅ Load, process, save pattern</td>
+                    <td>File operations</td>
+                    <td>For simple cases</td>
+                    <td>Load, process, save pattern</td>
                 </tr>
                 <tr>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Prototyping</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">✅ Fastest iteration</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">⚪ More structure</td>
+                    <td>Prototyping</td>
+                    <td>Fastest iteration</td>
+                    <td>More structure</td>
                 </tr>
                 <tr>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">Production systems</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">✅ When simple is sufficient</td>
-                    <td style="padding: 1rem; border-top: 1px solid var(--border-color);">✅ For robust operations</td>
+                    <td>Production systems</td>
+                    <td>When simple is sufficient</td>
+                    <td>For robust operations</td>
                 </tr>
             </tbody>
         </table>

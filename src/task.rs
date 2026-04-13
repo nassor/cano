@@ -50,7 +50,7 @@
 use crate::error::CanoError;
 use crate::store::MemoryStore;
 use async_trait::async_trait;
-use rand::Rng;
+use rand::RngExt;
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -168,7 +168,14 @@ impl RetryMode {
                         1.0
                     };
 
-                    let final_delay = (capped_delay * jitter_factor).max(0.0) as u64;
+                    let final_delay_f = (capped_delay * jitter_factor).max(0.0);
+                    // Saturate rather than wrap or panic when the computed delay
+                    // exceeds u64::MAX milliseconds (e.g. enormous max_delay + jitter).
+                    let final_delay = if final_delay_f >= u64::MAX as f64 {
+                        u64::MAX
+                    } else {
+                        final_delay_f as u64
+                    };
                     Some(Duration::from_millis(final_delay))
                 } else {
                     None
@@ -194,6 +201,7 @@ impl Default for RetryMode {
 ///
 /// This struct provides configuration for task execution behavior,
 /// including retry logic and custom parameters.
+#[must_use]
 #[derive(Clone, Default)]
 pub struct TaskConfig {
     /// Retry strategy for failed executions
@@ -240,13 +248,12 @@ impl TaskConfig {
     skip(config, run_fn),
     fields(max_attempts = config.retry_mode.max_attempts())
 ))]
-pub async fn run_with_retries<TState, TStore, F, Fut>(
+pub async fn run_with_retries<TState, F, Fut>(
     config: &TaskConfig,
     run_fn: F,
 ) -> Result<TState, CanoError>
 where
     TState: Send + Sync,
-    TStore: Send + Sync,
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<TState, CanoError>>,
 {
@@ -293,10 +300,14 @@ where
                 }
 
                 if attempt >= max_attempts {
-                    return Err(e);
-                }
-
-                if let Some(delay) = config.retry_mode.delay_for_attempt(attempt - 1) {
+                    if max_attempts <= 1 {
+                        return Err(e);
+                    }
+                    return Err(CanoError::retry_exhausted(format!(
+                        "Task failed after {} attempt(s): {}",
+                        attempt, e
+                    )));
+                } else if let Some(delay) = config.retry_mode.delay_for_attempt(attempt - 1) {
                     #[cfg(feature = "tracing")]
                     debug!(delay_ms = delay.as_millis(), "Waiting before retry");
 
@@ -407,11 +418,11 @@ where
         TaskConfig::default()
     }
 
-    /// Execute the task with the given store
+    /// Execute the task with the given store.
     ///
     /// This method contains all the task logic in a single place. Unlike [`crate::node::Node`],
-    /// there's no separation into prep/exec/post phases - you have full control
-    /// over the execution flow.
+    /// there's no separation into prep/exec/post phases — you have full control over the
+    /// execution flow.
     ///
     /// # Parameters
     ///
@@ -420,6 +431,12 @@ where
     /// # Returns
     ///
     /// A result containing either a single state or multiple states for parallel execution.
+    ///
+    /// # Errors
+    ///
+    /// Returns the [`CanoError`] propagated from the task's own logic. There is no automatic
+    /// retry at this level; wrap the implementation with [`crate::task::run_with_retries`] or
+    /// use [`crate::node::Node`] if retry behavior is needed.
     async fn run(&self, store: &TStore) -> Result<TaskResult<TState>, CanoError>;
 }
 
@@ -431,13 +448,20 @@ where
 /// - **[`Task`]**: Simple `run()` method
 /// - **[`crate::node::Node`]**: Three-phase lifecycle (`prep`, `exec`, `post`) + retry strategies
 ///
-/// The [`crate::node::Node::run`] method (which orchestrates the three phases) is used directly
-/// as the [`Task::run`] implementation, providing seamless interoperability.
-///
 /// This enables:
 /// - Using any Node wherever Tasks are expected
 /// - Mixing Tasks and Nodes in the same workflow
 /// - Gradual migration from simple Tasks to full-featured Nodes
+///
+/// # Retry contract
+///
+/// This blanket `Task::run` executes exactly **one** `prep` → `exec` → `post` pass with no
+/// retries. Retries are driven by the workflow dispatcher's outer `run_with_retries` call,
+/// which uses this single-pass method as the unit of work.
+///
+/// **Do not call [`crate::node::Node::run`] inside a `Task::run` override for a Node** —
+/// `Node::run` applies its own retry loop, so doing so would retry twice: once inside
+/// `Node::run` and again in the workflow dispatcher.
 #[async_trait]
 impl<TState, TStore, TParams, N> Task<TState, TStore, TParams> for N
 where
@@ -465,7 +489,13 @@ where
         #[cfg(feature = "tracing")]
         debug!("Executing task through Node adapter");
 
-        let state = crate::node::Node::run(self, store).await?;
+        // Run a single attempt of prep → exec → post without the Node's own retry loop.
+        // Retries are driven by the outer `run_with_retries` in both `execute_single_task` and
+        // `execute_split_join`, which use this method as the unit of work. Calling `Node::run`
+        // here would double-retry nodes (inner Node::run_with_retries + outer run_with_retries).
+        let prep_res = crate::node::Node::prep(self, store).await?;
+        let exec_res = crate::node::Node::exec(self, prep_res).await;
+        let state = crate::node::Node::post(self, store, exec_res).await?;
 
         #[cfg(feature = "tracing")]
         info!(next_state = ?state, "Task execution completed successfully");
@@ -959,7 +989,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = Arc::clone(&counter);
 
-        let result = run_with_retries::<TaskResult<String>, (), _, _>(&config, || {
+        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
             let counter = Arc::clone(&counter_clone);
             async move {
                 counter.fetch_add(1, Ordering::SeqCst);
@@ -982,7 +1012,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = Arc::clone(&counter);
 
-        let result = run_with_retries::<TaskResult<String>, (), _, _>(&config, || {
+        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
             let counter = Arc::clone(&counter_clone);
             async move {
                 let count = counter.fetch_add(1, Ordering::SeqCst);
@@ -1009,7 +1039,7 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = Arc::clone(&counter);
 
-        let result = run_with_retries::<TaskResult<String>, (), _, _>(&config, || {
+        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
             let counter = Arc::clone(&counter_clone);
             async move {
                 counter.fetch_add(1, Ordering::SeqCst);
@@ -1020,5 +1050,60 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(counter.load(Ordering::SeqCst), 3); // 1 initial + 2 retries
+    }
+
+    #[tokio::test]
+    async fn test_run_with_retries_mode_none() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let config = TaskConfig::minimal();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&counter);
+
+        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+            let counter = Arc::clone(&counter_clone);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err::<TaskResult<String>, CanoError>(CanoError::task_execution("immediate fail"))
+            }
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CanoError::TaskExecution(_)),
+            "expected original TaskExecution variant when retries disabled, got: {err}"
+        );
+        assert!(err.to_string().contains("immediate fail"));
+    }
+
+    #[tokio::test]
+    async fn test_retry_exhausted_error_type() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let config = TaskConfig::new().with_fixed_retry(2, Duration::from_millis(1));
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&counter);
+
+        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+            let counter = Arc::clone(&counter_clone);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err::<TaskResult<String>, CanoError>(CanoError::task_execution(
+                    "persistent failure",
+                ))
+            }
+        })
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CanoError::RetryExhausted(_)),
+            "expected RetryExhausted after retry exhaustion, got: {err}"
+        );
     }
 }

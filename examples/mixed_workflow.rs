@@ -25,7 +25,7 @@
 
 use async_trait::async_trait;
 use cano::prelude::*;
-use rand::Rng;
+use rand::RngExt;
 
 /// Workflow states
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -63,8 +63,8 @@ impl Task<WorkflowState> for DataGeneratorTask {
 
         println!(
             "   Generated data range: {:.2} to {:.2}",
-            data.iter().fold(f64::INFINITY, |a, &b| a.min(b)),
-            data.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b))
+            data.iter().fold(f64::INFINITY, |a: f64, &b| a.min(b)),
+            data.iter().fold(f64::NEG_INFINITY, |a: f64, &b| a.max(b))
         );
 
         store.put("raw_data", data)?;

@@ -1,2 +1,6 @@
 /target
 **/.DS_Store
+
+# Avoid agent files
+.claude/
+CLAUDE.md

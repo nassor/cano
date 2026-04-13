@@ -26,11 +26,35 @@
 //! then implement the three-phase lifecycle: `prep()` (load data), `exec()` (process),
 //! and `post()` (store results and route to next node).
 //!
+//! ## Retry Behavior
+//!
+//! When a node is configured with retries (via [`TaskConfig`]), the **entire three-phase
+//! pipeline** (`prep` → `exec` → `post`) is re-run from scratch on any failure:
+//!
+//! - If `post` fails, both `prep` and `exec` run again on the next attempt.
+//! - If `prep` fails, the whole pipeline retries from `prep`.
+//!
+//! **Implementors must ensure `prep` and `exec` are idempotent** — safe to call multiple
+//! times with the same observable effect — because any phase failure causes the entire
+//! pipeline to restart. Side effects in `exec` (e.g. writing to an external system) will
+//! be repeated on every retry attempt.
+//!
 //! ## 🚀 Performance Tips
 //!
 //! - Nodes execute with minimal overhead for maximum throughput
 //! - Use async operations for I/O bound work
 //! - Implement retry logic in TaskConfig for resilience
+//!
+//! ## Retry semantics: direct use vs. workflow use
+//!
+//! | Call site | Retry behaviour |
+//! |-----------|----------------|
+//! | `node.run(store)` directly | Retries run **inside** `Node::run` via `run_with_retries` |
+//! | Node registered in a `Workflow` | Workflow dispatcher drives retries; `Task::run` (blanket impl) executes one `prep`→`exec`→`post` pass per attempt |
+//!
+//! Both paths honour the same [`TaskConfig`] from [`Node::config`]; retry count and delays are
+//! identical. The difference is **where** the retry loop lives. Do not call `Node::run` inside
+//! a hand-written `Task::run` override — that would execute the retry loop twice.
 
 use crate::error::CanoError;
 use crate::store::MemoryStore;
@@ -172,7 +196,13 @@ where
     /// - Clear separation of concerns
     /// - Easier testing (pure function)
     /// - Better performance (no store access during processing)
-    /// - Retry logic can wrap just this phase
+    ///
+    /// # Retry Note
+    ///
+    /// On any phase failure, the **entire** `prep` → `exec` → `post` pipeline restarts.
+    /// This method must be idempotent: if it has side effects (e.g. sending a network
+    /// request or writing to an external system), those side effects will be repeated
+    /// on every retry attempt.
     async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult;
 
     /// Post-processing phase - cleanup and result handling
@@ -186,13 +216,31 @@ where
     /// This method returns a typed value that determines what happens next in the workflow.
     async fn post(&self, store: &TStore, exec_res: Self::ExecResult) -> Result<TState, CanoError>;
 
-    /// Run the complete node lifecycle with configuration-driven execution
+    /// Run the complete node lifecycle with configuration-driven execution.
     ///
-    /// This method provides a default implementation that runs the three
-    /// lifecycle phases with execution behavior controlled by the node's configuration.
-    /// Nodes execute with minimal overhead for maximum throughput.
+    /// Orchestrates `prep` → `exec` → `post` with the retry policy from [`Node::config`].
+    /// Only `prep` and `post` failures are retried; `exec` is infallible by design (returns
+    /// `Self::ExecResult` directly). You can override this method for completely custom
+    /// orchestration.
     ///
-    /// You can override this method for completely custom orchestration.
+    /// # Workflow integration
+    ///
+    /// When a `Node` is registered with a [`crate::workflow::Workflow`], the workflow engine
+    /// uses the blanket [`crate::task::Task`] impl rather than calling this method directly.
+    /// That blanket impl runs a **single** `prep` → `exec` → `post` pass per attempt and
+    /// delegates retries to the outer `run_with_retries` call in the workflow dispatcher.
+    ///
+    /// If you call `Node::run` directly (outside a workflow), retries run **here**, which is
+    /// correct for standalone use. Do not call `Node::run` inside a custom `Task::run`
+    /// implementation — that would double-retry the node.
+    ///
+    /// # Errors
+    ///
+    /// - [`CanoError::Preparation`] — `prep` failed on all retry attempts
+    /// - [`CanoError::NodeExecution`] — `post` failed on all retry attempts
+    /// - [`CanoError::RetryExhausted`] — retry limit reached before a successful attempt
+    ///
+    /// Any error returned by `prep` or `post` is propagated after retries are exhausted.
     async fn run(&self, store: &TStore) -> Result<TState, CanoError> {
         let config = self.config();
         self.run_with_retries(store, &config).await
@@ -200,8 +248,23 @@ where
 
     /// Internal method to run the node lifecycle with retry logic
     ///
-    /// This method handles the actual execution of the three phases (prep, exec, post)
-    /// with retry logic based on the node configuration.
+    /// Executes the three phases (`prep` → `exec` → `post`) in sequence, retrying the
+    /// **entire pipeline** from `prep` whenever any phase returns an error.
+    ///
+    /// # Full-Pipeline Retry Semantics
+    ///
+    /// Unlike retry strategies that only re-run the failing step, this method restarts
+    /// from the very beginning on each attempt:
+    ///
+    /// - If `prep` fails → the whole pipeline retries from `prep`.
+    /// - If `post` fails → `prep` and `exec` both re-run before `post` is tried again.
+    ///
+    /// This means **all three phases must be idempotent** when retries are enabled.
+    /// Any side effects (network calls, writes to external systems, etc.) in `prep` or
+    /// `exec` will be repeated on every retry attempt.
+    ///
+    /// The number of attempts and delay between them are controlled by the
+    /// [`TaskConfig`] returned from [`Node::config`].
     async fn run_with_retries(
         &self,
         store: &TStore,
@@ -281,10 +344,16 @@ where
                             if attempt >= max_attempts {
                                 #[cfg(feature = "tracing")]
                                 tracing::error!(attempt = attempt, error = ?e, "Node execution failed after maximum attempts");
-                                return Err(e);
-                            }
-
-                            if let Some(delay) = config.retry_mode.delay_for_attempt(attempt - 1) {
+                                if max_attempts <= 1 {
+                                    return Err(e);
+                                }
+                                return Err(CanoError::retry_exhausted(format!(
+                                    "Node post phase failed after {} attempt(s): {}",
+                                    attempt, e
+                                )));
+                            } else if let Some(delay) =
+                                config.retry_mode.delay_for_attempt(attempt - 1)
+                            {
                                 #[cfg(feature = "tracing")]
                                 tracing::debug!(
                                     attempt = attempt,
@@ -305,10 +374,14 @@ where
                     if attempt >= max_attempts {
                         #[cfg(feature = "tracing")]
                         tracing::error!(attempt = attempt, error = ?e, "Node execution failed after maximum attempts");
-                        return Err(e);
-                    }
-
-                    if let Some(delay) = config.retry_mode.delay_for_attempt(attempt - 1) {
+                        if max_attempts <= 1 {
+                            return Err(e);
+                        }
+                        return Err(CanoError::retry_exhausted(format!(
+                            "Node prep phase failed after {} attempt(s): {}",
+                            attempt, e
+                        )));
+                    } else if let Some(delay) = config.retry_mode.delay_for_attempt(attempt - 1) {
                         #[cfg(feature = "tracing")]
                         tracing::debug!(
                             attempt = attempt,
@@ -330,8 +403,8 @@ where
 pub trait DynNode<TState>:
     Node<
         TState,
-        DefaultParams,
         MemoryStore,
+        DefaultParams,
         PrepResult = Box<dyn std::any::Any + Send + Sync>,
         ExecResult = DefaultNodeResult,
     >
@@ -345,8 +418,8 @@ where
     TState: Clone + std::fmt::Debug + Send + Sync + 'static,
     N: Node<
             TState,
-            DefaultParams,
             MemoryStore,
+            DefaultParams,
             PrepResult = Box<dyn std::any::Any + Send + Sync>,
             ExecResult = DefaultNodeResult,
         >,
@@ -1762,5 +1835,195 @@ mod tests {
 
         let result = node.run(&store).await.unwrap();
         assert_eq!(result, TestAction::Complete);
+    }
+
+    #[tokio::test]
+    async fn test_retry_reruns_all_phases() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountedNode {
+            prep_counter: Arc<AtomicUsize>,
+            exec_counter: Arc<AtomicUsize>,
+            post_counter: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl Node<TestAction> for CountedNode {
+            type PrepResult = ();
+            type ExecResult = ();
+
+            fn config(&self) -> TaskConfig {
+                TaskConfig::new().with_fixed_retry(2, Duration::from_millis(1))
+            }
+
+            async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+                self.prep_counter.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+
+            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
+                self.exec_counter.fetch_add(1, Ordering::SeqCst);
+            }
+
+            async fn post(
+                &self,
+                _store: &MemoryStore,
+                _exec_res: Self::ExecResult,
+            ) -> Result<TestAction, CanoError> {
+                let count = self.post_counter.fetch_add(1, Ordering::SeqCst) + 1;
+                if count < 2 {
+                    Err(CanoError::node_execution("post fails first time"))
+                } else {
+                    Ok(TestAction::Complete)
+                }
+            }
+        }
+
+        let prep_counter = Arc::new(AtomicUsize::new(0));
+        let exec_counter = Arc::new(AtomicUsize::new(0));
+        let post_counter = Arc::new(AtomicUsize::new(0));
+
+        let node = CountedNode {
+            prep_counter: Arc::clone(&prep_counter),
+            exec_counter: Arc::clone(&exec_counter),
+            post_counter: Arc::clone(&post_counter),
+        };
+        let store = MemoryStore::new();
+
+        let result = node.run(&store).await.unwrap();
+        assert_eq!(result, TestAction::Complete);
+
+        assert_eq!(prep_counter.load(Ordering::SeqCst), 2, "prep ran twice");
+        assert_eq!(exec_counter.load(Ordering::SeqCst), 2, "exec ran twice");
+        assert_eq!(post_counter.load(Ordering::SeqCst), 2, "post ran twice");
+    }
+
+    #[tokio::test]
+    async fn test_node_retry_exhausted_error_type() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct AlwaysFailNode {
+            attempt_counter: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl Node<TestAction> for AlwaysFailNode {
+            type PrepResult = ();
+            type ExecResult = ();
+
+            fn config(&self) -> TaskConfig {
+                TaskConfig::new().with_fixed_retry(2, Duration::from_millis(1))
+            }
+
+            async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+                self.attempt_counter.fetch_add(1, Ordering::SeqCst);
+                Err(CanoError::preparation("always fails"))
+            }
+
+            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {}
+
+            async fn post(
+                &self,
+                _store: &MemoryStore,
+                _exec_res: Self::ExecResult,
+            ) -> Result<TestAction, CanoError> {
+                Ok(TestAction::Complete)
+            }
+        }
+
+        let node = AlwaysFailNode {
+            attempt_counter: Arc::new(AtomicUsize::new(0)),
+        };
+        let store = MemoryStore::new();
+
+        let result = node.run(&store).await;
+        assert!(result.is_err());
+        assert_eq!(node.attempt_counter.load(Ordering::SeqCst), 3);
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CanoError::RetryExhausted(_)),
+            "expected RetryExhausted after retry exhaustion, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_node_no_retry_preserves_error_variant() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct PrepFailNode {
+            attempt_counter: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl Node<TestAction> for PrepFailNode {
+            type PrepResult = ();
+            type ExecResult = ();
+
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+
+            async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+                self.attempt_counter.fetch_add(1, Ordering::SeqCst);
+                Err(CanoError::preparation("prep boom"))
+            }
+
+            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {}
+
+            async fn post(
+                &self,
+                _store: &MemoryStore,
+                _exec_res: Self::ExecResult,
+            ) -> Result<TestAction, CanoError> {
+                Ok(TestAction::Complete)
+            }
+        }
+
+        let node = PrepFailNode {
+            attempt_counter: Arc::new(AtomicUsize::new(0)),
+        };
+        let store = MemoryStore::new();
+        let err = node.run(&store).await.unwrap_err();
+
+        assert_eq!(node.attempt_counter.load(Ordering::SeqCst), 1);
+        assert!(
+            matches!(err, CanoError::Preparation(_)),
+            "expected original Preparation variant when retries disabled, got: {err}"
+        );
+        assert!(err.to_string().contains("prep boom"));
+
+        struct PostFailNode;
+
+        #[async_trait]
+        impl Node<TestAction> for PostFailNode {
+            type PrepResult = ();
+            type ExecResult = ();
+
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+
+            async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+                Ok(())
+            }
+
+            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {}
+
+            async fn post(
+                &self,
+                _store: &MemoryStore,
+                _exec_res: Self::ExecResult,
+            ) -> Result<TestAction, CanoError> {
+                Err(CanoError::node_execution("post boom"))
+            }
+        }
+
+        let err = PostFailNode.run(&store).await.unwrap_err();
+        assert!(
+            matches!(err, CanoError::NodeExecution(_)),
+            "expected original NodeExecution variant when retries disabled, got: {err}"
+        );
+        assert!(err.to_string().contains("post boom"));
     }
 }

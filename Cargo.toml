@@ -1,8 +1,9 @@
 [package]
 name = "cano"
-version = "0.7.2"
+version = "0.8.0"
 homepage = "https://nassor.github.io/cano/"
 edition = "2024"
+rust-version = "1.89.0"
 description = "High-performance orchestration engine for building resilient, self-healing systems in Rust. Uses Finite State Machines (FSM) for strict, type-safe transitions."
 license = "MIT"
 repository = "https://github.com/nassor/cano"
@@ -13,26 +14,26 @@ authors = ["Nassor Frazier-Silva"]
 
 [dependencies]
 async-trait = "0.1"
-tokio = { version = "1.48.0", features = ["macros", "sync", "time", "rt-multi-thread", "signal"] }
-rand = "0.9"
+tokio = { version = "1.51.1", features = ["macros", "sync", "time", "rt-multi-thread"] }
+rand = "0.10"
 chrono = { version = "0.4", features = ["serde"], optional = true }
-cron = { version = "0.15", optional = true }
-futures = "0.3"
+cron = { version = "0.16", optional = true }
+futures-util = "0.3"
 tracing = { version = "0.1", optional = true }
 
 [features]
-scheduler = ["dep:chrono", "dep:cron"]
+scheduler = ["dep:chrono", "dep:cron", "tokio/signal"]
 tracing = ["dep:tracing"]
 all = ["scheduler", "tracing"]
 
 [dev-dependencies]
-cargo-audit = "0.22.0"
-criterion = { version = "0.7", features = ["html_reports", "async_tokio"] }
-reqwest = { version = "0.12.24", features = ["json"] }
-rig-core = "0.24.0"
-wide = "0.8.3"
+criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
+reqwest = { version = "0.13", features = ["json"] }
+rig-core = "0.34"
+wide = "1.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1.51.1", features = ["macros", "sync", "time", "rt-multi-thread", "signal"] }
 
 [[example]]
 name = "ai_workflow_yes_and"
@@ -60,11 +61,6 @@ path = "examples/scheduler_scheduling.rs"
 required-features = ["scheduler"]
 
 [[example]]
-name = "scheduler_concurrent_workflows"
-path = "examples/scheduler_concurrent_workflows.rs"
-required-features = ["scheduler"]
-
-[[example]]
 name = "scheduler_duration_scheduling"
 path = "examples/scheduler_duration_scheduling.rs"
 required-features = ["scheduler"]
@@ -85,6 +81,11 @@ path = "examples/scheduler_book_prepositions.rs"
 required-features = ["scheduler"]
 
 [[example]]
+name = "scheduler_mapreduce_books"
+path = "examples/scheduler_mapreduce_books.rs"
+required-features = ["scheduler"]
+
+[[example]]
 name = "tracing_demo"
 path = "examples/tracing_demo.rs"
 required-features = ["tracing", "scheduler"]
@@ -92,6 +93,30 @@ required-features = ["tracing", "scheduler"]
 [[example]]
 name = "workflow_stack_store"
 path = "examples/workflow_stack_store.rs"
+
+[[example]]
+name = "mixed_workflow"
+path = "examples/mixed_workflow.rs"
+
+[[example]]
+name = "task_interface_demo"
+path = "examples/task_interface_demo.rs"
+
+[[example]]
+name = "task_simple"
+path = "examples/task_simple.rs"
+
+[[example]]
+name = "workflow_ad_exchange"
+path = "examples/workflow_ad_exchange.rs"
+
+[[example]]
+name = "workflow_partial_results"
+path = "examples/workflow_partial_results.rs"
+
+[[example]]
+name = "workflow_split_join"
+path = "examples/workflow_split_join.rs"
 
 [[bench]]
 name = "workflow_performance"
@@ -107,4 +132,8 @@ harness = false
 
 [[bench]]
 name = "task_performance"
+harness = false
+
+[[bench]]
+name = "store_shared_performance"
 harness = false

@@ -23,8 +23,8 @@
 
 use async_trait::async_trait;
 use cano::prelude::*;
-use rand::Rng;
-use rig::client::CompletionClient;
+use rand::RngExt;
+use rig::client::{CompletionClient, Nothing};
 use rig::completion::Prompt;
 use rig::providers::ollama::Client;
 
@@ -164,7 +164,8 @@ impl Clone for Actor1Node {
 impl Actor1Node {
     async fn new() -> Result<Self, CanoError> {
         Ok(Self {
-            client: Client::new(),
+            client: Client::new(Nothing)
+                .map_err(|e| CanoError::Generic(format!("Ollama client error: {e}")))?,
         })
     }
 
@@ -241,7 +242,8 @@ struct Actor2Node {
 impl Actor2Node {
     async fn new() -> Result<Self, CanoError> {
         Ok(Self {
-            client: Client::new(),
+            client: Client::new(Nothing)
+                .map_err(|e| CanoError::Generic(format!("Ollama client error: {e}")))?,
         })
     }
 

@@ -6,8 +6,7 @@
 //! 2. Analyzes preposition usage in each book
 //! 3. Ranks books by preposition diversity
 //!
-//! For concurrent downloads, see the workflow_concurrent.rs example which demonstrates
-//! the split/join pattern for parallel task execution.
+//! For parallel processing, see the workflow examples that demonstrate split/join patterns.
 //!
 //! ## Execution
 //!
@@ -379,8 +378,8 @@ async fn main() -> CanoResult<()> {
         .await?;
 
     println!("\n✅ Book preposition analysis complete!");
-    println!("\n💡 Note: For concurrent downloads using split/join patterns,");
-    println!("   see examples/workflow_concurrent.rs");
+    println!("\n💡 Note: For parallel processing using split/join patterns,");
+    println!("   see examples like workflow_split_join.rs");
 
     Ok(())
 }

@@ -106,33 +106,32 @@ mod tests {
                 .manual("test_workflow", workflow, TestState::Start)
                 .unwrap();
 
+            // Clone the scheduler before moving into spawn so we can stop it later.
+            // Scheduler clones share the same internal Arc state.
+            let scheduler_ref = scheduler.clone();
+
             // Spawn scheduler in background
             let scheduler_handle = tokio::spawn(async move { scheduler.start().await });
 
-            // Give scheduler time to start
-            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+            // Poll until start() has initialised the command channel.
+            // Using a short spin-sleep avoids a hard-coded delay that can
+            // race on slow CI runners.
+            let mut stop_result = scheduler_ref.stop().await;
+            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
+            while stop_result.is_err() && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(tokio::time::Duration::from_millis(5)).await;
+                stop_result = scheduler_ref.stop().await;
+            }
 
-            // Create a new scheduler instance to check status (since we moved the original)
-            let mut check_scheduler = Scheduler::<TestState>::new();
-            let store2 = MemoryStore::new();
-            let workflow2 = Workflow::new(store2)
-                .register(TestState::Start, TestNode::new("start"))
-                .register(TestState::Processing, TestNode::new("processing"))
-                .add_exit_state(TestState::Complete);
-            check_scheduler
-                .manual("test_workflow", workflow2, TestState::Start)
-                .unwrap();
-
-            // Check initial status
-            let status = check_scheduler.status("test_workflow").await;
+            // Check initial status via the shared clone
+            let status = scheduler_ref.status("test_workflow").await;
             assert!(status.is_some());
             assert_eq!(status.unwrap().status, crate::scheduler::Status::Idle);
 
-            // Stop the scheduler
-            check_scheduler.stop().await.unwrap();
+            stop_result.unwrap();
 
             // Wait for scheduler to finish
-            let _ = tokio::time::timeout(tokio::time::Duration::from_millis(100), scheduler_handle)
+            let _ = tokio::time::timeout(tokio::time::Duration::from_millis(500), scheduler_handle)
                 .await;
         })
         .await;

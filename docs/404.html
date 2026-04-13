@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Page Not Found - Cano Documentation</title>
+    <meta name="description" content="The requested page could not be found in the Cano documentation.">
+    <link rel="stylesheet" href="styles.css">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;700&family=Fira+Code&display=swap" rel="stylesheet">
+    <script src="script.js" defer></script>
+</head>
+<body>
+    <button id="menu-toggle" class="menu-toggle" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+    <div class="sidebar-overlay"></div>
+
+    <nav class="sidebar" role="navigation" aria-label="Main navigation">
+        <a href="index.html" class="logo">
+            <img src="logo.png" alt="Cano" style="height: 24px; vertical-align: middle; margin-right: 8px;">
+            Cano
+        </a>
+        <ul class="nav-links">
+            <li><a href="index.html">Home</a></li>
+            <li><a href="task.html">Tasks</a></li>
+            <li><a href="nodes.html">Nodes</a></li>
+            <li><a href="workflows.html">Workflows</a></li>
+            <li><a href="store.html">Store</a></li>
+            <li><a href="scheduler.html">Scheduler</a></li>
+            <li><a href="tracing.html">Tracing</a></li>
+        </ul>
+    </nav>
+
+    <main class="main-content">
+        <div class="not-found-content">
+            <div class="not-found-code animate-in">404</div>
+            <p class="not-found-message animate-in">This state has no registered handler.</p>
+            <p class="not-found-hint animate-in">The page you are looking for does not exist or has been moved.</p>
+            <a href="index.html" class="not-found-link animate-in">Back to Home</a>
+
+            <div class="not-found-terminal animate-in">
+                <div><span class="prompt">$</span> cano orchestrate ./missing-page</div>
+                <div><span class="error">error[E0404]</span>: state not found in workflow</div>
+            </div>
+        </div>
+    </main>
+</body>
+</html>

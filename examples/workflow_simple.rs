@@ -20,7 +20,7 @@
 
 use async_trait::async_trait;
 use cano::prelude::*;
-use rand::Rng;
+use rand::RngExt;
 
 /// Action enum for controlling workflow workflow
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -220,35 +220,19 @@ async fn run_simple_workflow_with_flow() -> Result<(), CanoError> {
 /// Demonstrate the workflow with Workflow accepting different node types
 #[tokio::main]
 async fn main() {
-    println!("🚀 Simple Two-Node Workflow Example");
-    println!("===================================");
+    println!("Simple Two-Node Workflow Example");
+    println!("=================================");
 
-    // Run the Workflow-based workflow with different node types
-    println!("\n� Running Workflow-Based Workflow (Different Node Types):");
+    println!("\nRunning Workflow-Based Workflow:");
     match run_simple_workflow_with_flow().await {
         Ok(()) => {
-            println!("✅ Manual workflow completed successfully!");
+            println!("Workflow completed successfully!");
         }
         Err(e) => {
-            eprintln!("❌ Manual workflow failed: {e}");
+            eprintln!("Workflow failed: {e}");
             std::process::exit(1);
         }
     }
-
-    // Then, run the Workflow-based workflow with different node types
-    println!("\n� Running Workflow-Based Workflow (Different Node Types):");
-    match run_simple_workflow_with_flow().await {
-        Ok(()) => {
-            println!("✅ Workflow-based workflow completed successfully!");
-        }
-        Err(e) => {
-            eprintln!("❌ Workflow-based workflow failed: {e}");
-            std::process::exit(1);
-        }
-    }
-
-    println!("\n🎉 Workflow executed successfully!");
-    println!("✨ The Workflow supports different node types in the same workflow!");
 }
 
 #[cfg(test)]

@@ -22,7 +22,7 @@
 
 use async_trait::async_trait;
 use cano::prelude::*;
-use rand::Rng;
+use rand::RngExt;
 
 /// Action enum for controlling negotiation workflow
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -30,7 +30,6 @@ The engine is built on three core concepts: **Tasks/Nodes** for logic, **Workflo
 - **Parallel Execution (Split/Join)**: Run tasks concurrently and join results with strategies like `All`, `Any`, `Quorum`, or `PartialResults`.
 - **Robust Retry Logic**: Configurable strategies including exponential backoff with jitter.
 - **Built-in Scheduling**: Cron-based, interval, and manual triggers for background jobs.
-- **Concurrent Workflows**: Run multiple instances of the same workflow with quota management.
 - **Observability**: Integrated `tracing` support for deep insights into workflow execution.
 - **Performance-Focused**: Minimizes heap allocations by leveraging stack-based objects wherever possible, giving you control over where allocations occur.
 
@@ -47,8 +46,7 @@ graph TD
     T1 --> Join{Join All}
     T2 --> Join
     T3 --> Join
-    Join --> Aggregate[Aggregate]
-    Aggregate --> Complete([Complete])
+    Join --> Complete([Complete])
 ```
 
 ```rust
@@ -58,8 +56,6 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum FlowState {
     Start,
-    FetchData,
-    Aggregate,
     Complete,
 }
 
@@ -71,7 +67,7 @@ struct FetchSourceTask {
 
 #[async_trait::async_trait]
 impl Task<FlowState> for FetchSourceTask {
-    async fn run(&self, store: &MemoryStore) -> Result<FlowState, CanoError> {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<FlowState>, CanoError> {
         // Simulate async work
         tokio::time::sleep(Duration::from_millis(100)).await;
         
@@ -79,13 +75,12 @@ impl Task<FlowState> for FetchSourceTask {
         let key = format!("source_{}", self.source_id);
         store.put(&key, format!("data_from_{}", self.source_id))?;
         
-        Ok(FlowState::Aggregate)
+        Ok(TaskResult::Single(FlowState::Complete))
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let mut workflow = Workflow::new(FlowState::Start);
     let store = MemoryStore::new();
 
     // 1. Define parallel tasks
@@ -96,29 +91,24 @@ async fn main() -> Result<(), CanoError> {
     ];
 
     // 2. Configure join strategy
-    // Wait for ALL tasks to complete successfully before moving to Aggregate
+    // Wait for ALL tasks to complete successfully before moving to Complete
     let join_config = JoinConfig::new(
         JoinStrategy::All,
-        FlowState::Aggregate
+        FlowState::Complete
     ).with_timeout(Duration::from_secs(5));
 
     // 3. Build Workflow
-    workflow
-        // Start -> Split into parallel tasks
+    let workflow = Workflow::new(store)
+        // Start -> Split into parallel tasks -> Complete
         .register_split(
             FlowState::Start,
             sources,
             join_config
         )
-        // Aggregate -> Complete (using a closure task for simplicity)
-        .register(FlowState::Aggregate, |store: &MemoryStore| async move {
-            println!("All sources fetched! Aggregating...");
-            Ok(FlowState::Complete)
-        })
         .add_exit_state(FlowState::Complete);
 
     // 4. Run
-    let result = workflow.orchestrate(&store).await?;
+    let result = workflow.orchestrate(FlowState::Start).await?;
     println!("Workflow finished: {:?}", result);
     
     Ok(())

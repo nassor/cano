@@ -77,6 +77,8 @@
 pub mod error;
 pub mod memory;
 
+use std::sync::Arc;
+
 /// Type alias for store operation results
 pub type StoreResult<TState> = Result<TState, error::StoreError>;
 
@@ -117,10 +119,12 @@ pub type StoreResult<TState> = Result<TState, error::StoreError>;
 /// | Method | Purpose | Example Usage |
 /// |--------|---------|---------------|
 /// | `get` | Retrieve typed value | `let val: String = store.get("key")?` |
+/// | `get_shared` | Retrieve Arc-wrapped value | `let val: Arc<String> = store.get_shared("key")?` |
 /// | `put` | Store typed value | `store.put("key", value)?` |
 /// | `remove` | Delete by key | `store.remove("key")?` |
 /// | `append` | Add to collection | `store.append("list", item)?` |
-/// | `keys` | List all keys | `for key in store.keys()? { ... }` |
+/// | `contains_key` | Check key existence | `if store.contains_key("key")? { ... }` |
+/// | `keys` | List all keys | `let keys: Vec<String> = store.keys()?` |
 /// | `len` | Count stored items | `let count = store.len()?` |
 /// | `clear` | Remove all data | `store.clear()?` |
 ///
@@ -136,20 +140,41 @@ pub type StoreResult<TState> = Result<TState, error::StoreError>;
 /// Mutable operations typically require interior mutability patterns or
 /// external synchronization mechanisms.
 pub trait KeyValueStore: Send + Sync {
-    /// Get a typed value by key
+    /// Retrieve a typed value by key.
     ///
-    /// Returns the value if the key exists and can be downcast to type T.
-    /// Returns an error if the key doesn't exist or type mismatch occurs.
-    /// The user is responsible for choosing whether to use
-    /// Copy-on-Write or direct value store.
+    /// Returns a clone of the stored value if the key exists and the value can be
+    /// downcast to `TState`. The user is responsible for choosing whether to store
+    /// values directly or via Copy-on-Write (`Arc<T>`).
+    ///
+    /// # Errors
+    ///
+    /// - [`StoreError::KeyNotFound`] — the key does not exist in the store
+    /// - [`StoreError::TypeMismatch`] — the stored value cannot be downcast to `TState`
+    /// - [`StoreError::LockError`] — the internal lock is poisoned
     fn get<TState: 'static + Clone>(&self, key: &str) -> StoreResult<TState>;
 
-    /// Store a typed value by key
+    /// Get a value wrapped in an `Arc` for zero-copy shared access.
     ///
-    /// Stores the value under the given key. If the key already exists,
-    /// the previous value is replaced. The store accepts both stack and
-    /// heap-based values - it's the user's responsibility to choose the
-    /// appropriate allocation strategy.
+    /// Returns the value wrapped in an `Arc<TState>`, avoiding an extra clone
+    /// when sharing data across tasks. Backends that store values as `Arc<TState>`
+    /// internally (such as [`MemoryStore`]) return the existing pointer directly.
+    ///
+    /// Unlike [`get`](Self::get), this method does **not** require `TState: Clone`,
+    /// since the underlying value is never cloned — only the `Arc` pointer is.
+    /// Backends that cannot provide zero-copy access may store their values inside
+    /// an `Arc` internally and hand out clones of that pointer.
+    ///
+    /// [`MemoryStore`]: memory::MemoryStore
+    fn get_shared<TState: 'static + Send + Sync>(&self, key: &str) -> StoreResult<Arc<TState>>;
+
+    /// Store a typed value by key.
+    ///
+    /// Inserts or replaces the value at `key`. Both stack-allocated and heap-allocated
+    /// types are accepted; choose the allocation strategy appropriate for your workload.
+    ///
+    /// # Errors
+    ///
+    /// - [`StoreError::LockError`] — the internal write lock is poisoned
     fn put<TState: 'static + Send + Sync + Clone>(
         &self,
         key: &str,
@@ -158,8 +183,12 @@ pub trait KeyValueStore: Send + Sync {
 
     /// Remove a value by key
     ///
-    /// Removes the value associated with the key and returns Ok(()) if successful.
-    /// Returns an error if the operation fails.
+    /// Removes the value associated with the key. Returns `Ok(())` whether or
+    /// not the key existed — callers that need to distinguish the two cases
+    /// should call [`contains_key`] first. Returns an error only if the
+    /// underlying storage operation itself fails (e.g., a poisoned lock).
+    ///
+    /// [`contains_key`]: KeyValueStore::contains_key
     fn remove(&self, key: &str) -> StoreResult<()>;
 
     /// Append an item to an existing collection value
@@ -173,10 +202,16 @@ pub trait KeyValueStore: Send + Sync {
         item: TState,
     ) -> StoreResult<()>;
 
+    /// Check whether the store contains the given key
+    ///
+    /// Returns `Ok(true)` if the key exists, `Ok(false)` if it does not.
+    /// Returns an error only if the storage backend itself fails.
+    fn contains_key(&self, key: &str) -> StoreResult<bool>;
+
     /// Get all keys in the store
     ///
-    /// Returns an iterator over all keys currently stored.
-    fn keys(&self) -> StoreResult<Box<dyn Iterator<Item = String> + '_>>;
+    /// Returns a `Vec<String>` of all keys currently stored.
+    fn keys(&self) -> StoreResult<Vec<String>>;
 
     /// Get the number of key-value pairs in store
     ///
