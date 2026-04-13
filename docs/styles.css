@@ -270,12 +270,12 @@ img {
 }
 
 .sidebar-links a:hover {
-    color: var(--text-default);
-    background: rgba(59, 130, 246, 0.1);
+    color: var(--text-color);
+    background: var(--primary-muted);
 }
 
 .sidebar-links a:focus-visible {
-    outline: 2px solid var(--accent-blue);
+    outline: 2px solid var(--primary-color);
     outline-offset: 2px;
 }
 
