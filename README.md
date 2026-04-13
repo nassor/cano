@@ -46,8 +46,7 @@ graph TD
     T1 --> Join{Join All}
     T2 --> Join
     T3 --> Join
-    Join --> Aggregate[Aggregate]
-    Aggregate --> Complete([Complete])
+    Join --> Complete([Complete])
 ```
 
 ```rust
@@ -57,8 +56,6 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum FlowState {
     Start,
-    FetchData,
-    Aggregate,
     Complete,
 }
 
@@ -78,7 +75,7 @@ impl Task<FlowState> for FetchSourceTask {
         let key = format!("source_{}", self.source_id);
         store.put(&key, format!("data_from_{}", self.source_id))?;
         
-        Ok(TaskResult::Single(FlowState::Aggregate))
+        Ok(TaskResult::Single(FlowState::Complete))
     }
 }
 
@@ -94,15 +91,15 @@ async fn main() -> Result<(), CanoError> {
     ];
 
     // 2. Configure join strategy
-    // Wait for ALL tasks to complete successfully before moving to Aggregate
+    // Wait for ALL tasks to complete successfully before moving to Complete
     let join_config = JoinConfig::new(
         JoinStrategy::All,
-        FlowState::Aggregate
+        FlowState::Complete
     ).with_timeout(Duration::from_secs(5));
 
     // 3. Build Workflow
     let workflow = Workflow::new(store)
-        // Start -> Split into parallel tasks
+        // Start -> Split into parallel tasks -> Complete
         .register_split(
             FlowState::Start,
             sources,
