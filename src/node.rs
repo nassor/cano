@@ -326,9 +326,9 @@ where
                                     "Node post phase failed after {} attempt(s): {}",
                                     attempt, e
                                 )));
-                            }
-
-                            if let Some(delay) = config.retry_mode.delay_for_attempt(attempt - 1) {
+                            } else if let Some(delay) =
+                                config.retry_mode.delay_for_attempt(attempt - 1)
+                            {
                                 #[cfg(feature = "tracing")]
                                 tracing::debug!(
                                     attempt = attempt,
@@ -353,9 +353,7 @@ where
                             "Node prep phase failed after {} attempt(s): {}",
                             attempt, e
                         )));
-                    }
-
-                    if let Some(delay) = config.retry_mode.delay_for_attempt(attempt - 1) {
+                    } else if let Some(delay) = config.retry_mode.delay_for_attempt(attempt - 1) {
                         #[cfg(feature = "tracing")]
                         tracing::debug!(
                             attempt = attempt,

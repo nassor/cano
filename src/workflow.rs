@@ -135,8 +135,15 @@ impl JoinStrategy {
             JoinStrategy::Any => completed >= 1,
             JoinStrategy::Quorum(n) => completed >= *n,
             JoinStrategy::Percentage(p) => {
-                let required = (total as f64 * p).ceil() as usize;
-                completed >= required
+                // Require percentage to be in valid range (0.0, 1.0]
+                // Percentages <= 0 or > 1.0 are invalid; treat as requesting all tasks
+                if *p <= 0.0 || *p > 1.0 {
+                    // Conservative: invalid percentages require all tasks to complete
+                    completed >= total
+                } else {
+                    let required = (total as f64 * p).ceil() as usize;
+                    completed >= required
+                }
             }
             JoinStrategy::PartialResults(min) => completed >= *min,
             JoinStrategy::PartialTimeout => completed >= 1, // At least one task must complete
@@ -556,17 +563,31 @@ where
         &self,
         task: Arc<dyn Task<TState, TStore, DefaultTaskParams> + Send + Sync>,
     ) -> Result<TState, CanoError> {
+        use crate::task::run_with_retries;
+
         #[cfg(feature = "tracing")]
         let task_span = info_span!("single_task_execution");
+
+        let config = task.config();
 
         #[cfg(feature = "tracing")]
         let result = {
             let _enter = task_span.enter();
-            task.run(&*self.store).await
+            run_with_retries(&config, || {
+                let task_clone = task.clone();
+                let store_clone = self.store.clone();
+                async move { task_clone.run(&*store_clone).await }
+            })
+            .await
         };
 
         #[cfg(not(feature = "tracing"))]
-        let result = task.run(&*self.store).await;
+        let result = run_with_retries(&config, || {
+            let task_clone = task.clone();
+            let store_clone = self.store.clone();
+            async move { task_clone.run(&*store_clone).await }
+        })
+        .await;
 
         match result? {
             TaskResult::Single(next_state) => {
@@ -1703,14 +1724,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_percentage_zero() {
+        // Invalid percentage (0.0) should require all tasks to complete
         let store = MemoryStore::new();
         let tasks = vec![FailTask::new(true), FailTask::new(true)];
         let join_config = JoinConfig::new(JoinStrategy::Percentage(0.0), TestState::Complete);
         let workflow = Workflow::new(store)
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
-        assert_eq!(result, TestState::Complete);
+        // With all tasks failing, the workflow should fail (requiring all tasks to complete)
+        assert!(workflow.orchestrate(TestState::Start).await.is_err());
     }
 
     #[tokio::test]
@@ -1740,15 +1762,17 @@ mod tests {
 
     #[tokio::test]
     async fn test_percentage_over_one() {
+        // Invalid percentage (>1.0) should require all tasks to complete
         let store = MemoryStore::new();
         let tasks = vec![
-            SimpleTask::new(TestState::Join),
-            SimpleTask::new(TestState::Join),
+            FailTask::new(false), // One task succeeds
+            FailTask::new(true),  // One task fails
         ];
         let join_config = JoinConfig::new(JoinStrategy::Percentage(1.5), TestState::Complete);
         let workflow = Workflow::new(store)
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
+        // With one task failing and requirement for all tasks, workflow should fail
         assert!(workflow.orchestrate(TestState::Start).await.is_err());
     }
 

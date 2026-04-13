@@ -1,5 +1,4 @@
 use super::{KeyValueStore, StoreResult, error::StoreError};
-use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
@@ -72,32 +71,6 @@ impl MemoryStore {
     }
 }
 
-impl MemoryStore {
-    /// Get a value as an `Arc<TState>` for zero-copy sharing
-    ///
-    /// If the stored value is already an `Arc<TState>`, returns a clone of that
-    /// pointer (cheap reference-count bump). Otherwise returns an error.
-    ///
-    /// For the general case — where values may not be stored as `Arc` — use the
-    /// trait method [`KeyValueStore::get_shared`], which falls back to `get()` +
-    /// `Arc::new()`.
-    fn get_arc<TState: 'static + Send + Sync>(&self, key: &str) -> StoreResult<Arc<TState>> {
-        let data = self
-            .data
-            .read()
-            .map_err(|e| StoreError::lock_error(format!("Read lock poisoned: {e}")))?;
-
-        match data.get(key) {
-            Some(value) => value.downcast_ref::<Arc<TState>>().cloned().ok_or_else(|| {
-                StoreError::type_mismatch(format!(
-                    "Cannot downcast value for key '{key}' to Arc<TState>"
-                ))
-            }),
-            None => Err(StoreError::key_not_found(key)),
-        }
-    }
-}
-
 impl KeyValueStore for MemoryStore {
     fn get<TState: 'static + Clone>(&self, key: &str) -> StoreResult<TState> {
         let data = self
@@ -117,19 +90,25 @@ impl KeyValueStore for MemoryStore {
 
     /// Get a value wrapped in an `Arc` for zero-copy shared access
     ///
-    /// If the stored entry was inserted as an `Arc<TState>`, the existing pointer
-    /// is returned (cheap reference-count bump). Otherwise the value is cloned
-    /// and wrapped in a new `Arc`.
+    /// Returns a reference-counted pointer to the stored value. The Arc is
+    /// cloned (cheap reference-count bump) rather than creating a new allocation.
     fn get_shared<TState: 'static + Send + Sync + Clone>(
         &self,
         key: &str,
     ) -> StoreResult<Arc<TState>> {
-        // Fast path: value was stored as Arc<TState> already
-        if let Ok(arc) = self.get_arc::<TState>(key) {
-            return Ok(arc);
+        let data = self
+            .data
+            .read()
+            .map_err(|e| StoreError::lock_error(format!("Read lock poisoned: {e}")))?;
+
+        match data.get(key) {
+            Some(value) => value.clone().downcast::<TState>().map_err(|_| {
+                StoreError::type_mismatch(format!(
+                    "Cannot downcast value for key '{key}' to requested type"
+                ))
+            }),
+            None => Err(StoreError::key_not_found(key)),
         }
-        // Slow path: clone the value and wrap it
-        self.get::<TState>(key).map(Arc::new)
     }
 
     fn put<TState: 'static + Send + Sync + Clone>(
@@ -161,33 +140,7 @@ impl KeyValueStore for MemoryStore {
         key: &str,
         item: TState,
     ) -> StoreResult<()> {
-        // Step 1: read the existing entry under a short-lived read lock
-        let existing_arc: Option<Result<Box<dyn Any + Send + Sync>, StoreError>> = {
-            let data = self
-                .data
-                .read()
-                .map_err(|e| StoreError::lock_error(format!("Read lock poisoned: {e}")))?;
-
-            if let Some(existing) = data.get(key) {
-                if existing.downcast_ref::<Vec<TState>>().is_some() {
-                    // Key exists and is the right type — we'll handle it under write lock
-                    Some(Ok(Box::new(())))
-                } else {
-                    // Key exists but wrong type — return error now
-                    Some(Err(StoreError::append_type_mismatch(key)))
-                }
-            } else {
-                None
-            }
-        };
-        // read lock released here
-
-        // Propagate type error before taking write lock
-        if let Some(Err(e)) = existing_arc {
-            return Err(e);
-        }
-
-        // Step 2: acquire write lock and mutate
+        // Acquire write lock once and perform all operations under it to avoid TOCTOU race
         let mut data = self
             .data
             .write()

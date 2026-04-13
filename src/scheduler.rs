@@ -236,6 +236,11 @@ where
             match schedule {
                 Schedule::Every(interval) => {
                     let handle = tokio::spawn(async move {
+                        // Check running flag before first execution
+                        if !*running_clone.read().await {
+                            return;
+                        }
+
                         // Check if previous run is still active before executing
                         let status = info.read().await.status.clone();
                         if !matches!(status, Status::Running) {

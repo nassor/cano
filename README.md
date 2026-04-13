@@ -69,29 +69,29 @@ struct FetchSourceTask {
 }
 
 #[async_trait::async_trait]
-impl Task<FlowState> for FetchSourceTask {
-    async fn run(&self, store: &MemoryStore) -> Result<FlowState, CanoError> {
+impl Task<FlowState, MemoryStore> for FetchSourceTask {
+    async fn run(&self, _state: FlowState, store: &MemoryStore) -> Result<cano::TaskResult<FlowState>, CanoError> {
         // Simulate async work
         tokio::time::sleep(Duration::from_millis(100)).await;
         
         // Store result
         let key = format!("source_{}", self.source_id);
-        store.put(&key, format!("data_from_{}", self.source_id))?;
+        store.set(key, format!("data_from_{}", self.source_id))?;
         
-        Ok(FlowState::Aggregate)
+        Ok(cano::TaskResult::Single(FlowState::Aggregate))
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let mut workflow = Workflow::new(FlowState::Start);
     let store = MemoryStore::new();
+    let mut workflow: Workflow<FlowState, MemoryStore> = Workflow::new(store);
 
     // 1. Define parallel tasks
-    let sources = vec![
-        FetchSourceTask { source_id: 1 },
-        FetchSourceTask { source_id: 2 },
-        FetchSourceTask { source_id: 3 },
+    let sources: Vec<std::sync::Arc<dyn Task<FlowState, MemoryStore>>> = vec![
+        std::sync::Arc::new(FetchSourceTask { source_id: 1 }),
+        std::sync::Arc::new(FetchSourceTask { source_id: 2 }),
+        std::sync::Arc::new(FetchSourceTask { source_id: 3 }),
     ];
 
     // 2. Configure join strategy
@@ -109,15 +109,10 @@ async fn main() -> Result<(), CanoError> {
             sources,
             join_config
         )
-        // Aggregate -> Complete (using a closure task for simplicity)
-        .register(FlowState::Aggregate, |store: &MemoryStore| async move {
-            println!("All sources fetched! Aggregating...");
-            Ok(FlowState::Complete)
-        })
         .add_exit_state(FlowState::Complete);
 
     // 4. Run
-    let result = workflow.orchestrate(&store).await?;
+    let result = workflow.orchestrate(FlowState::Start).await?;
     println!("Workflow finished: {:?}", result);
     
     Ok(())
