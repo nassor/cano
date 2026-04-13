@@ -18,35 +18,37 @@
 //! `CanoError` variants to indicate specific failure types. Handle errors
 //! with pattern matching to provide appropriate responses.
 //!
-//! ## 📊 Error Categories
+//! ## Error Categories
 //!
 //! | Error Type | When It Occurs | How to Fix |
 //! |------------|----------------|------------|
-//! | `NodeExecution` | Node processing fails | Check your business logic |
-//! | `Preparation` | Node prep phase fails | Verify input data and store |
-//! | `store` | store operations fail | Check store state and keys |
+//! | `NodeExecution` | Node `post` phase fails | Check your `post` method logic |
+//! | `TaskExecution` | `Task::run` fails | Check your `run` method logic |
+//! | `Preparation` | Node `prep` phase fails | Verify input data and store |
+//! | `Store` | Store operations fail | Check store state and keys |
 //! | `Workflow` | Workflow orchestration fails | Verify node registration and routing |
 //! | `Configuration` | Invalid node/workflow config | Check parameters and settings |
-//! | `RetryExhausted` | All retries failed | Increase retries or fix root cause |
+//! | `RetryExhausted` | All retries exhausted | Increase retries or fix root cause |
 //! | `Generic` | General errors | Check the specific error message |
 //!
-//! ## 🔧 Using Errors in Your Nodes
+//! ## Using Errors in Your Nodes
 //!
 //! In your custom nodes, return specific error types for different failures.
 //! Use `CanoError::Preparation` for prep phase issues, `CanoError::NodeExecution`
-//! for exec phase problems, and handle errors appropriately in the post phase.
+//! for post phase failures (exec is infallible), and `CanoError::TaskExecution`
+//! for errors from a `Task::run` implementation.
 //!
-//! ## 🔗 store Error Integration
+//! ## Store Error Integration
 //!
-//! `CanoError` automatically understands and converts `StoreError` instances.
-//! This means store operations can seamlessly workflow into the broader error system:
+//! `CanoError` automatically converts `StoreError` instances via the `From` impl.
+//! Store operations propagate seamlessly into the broader error system:
 //!
 //! ```rust
 //! use cano::{CanoResult, store::{KeyValueStore, MemoryStore}};
 //!
 //! fn example_function() -> CanoResult<String> {
 //!     let store = MemoryStore::new();
-//!     // StoreError is automatically converted to CanoError::store
+//!     // StoreError is automatically converted to CanoError::Store via From
 //!     let value: String = store.get("key")?;
 //!     Ok(value)
 //! }
@@ -61,15 +63,15 @@
 /// ## 🎯 Error Categories
 ///
 /// ### NodeExecution
-/// Something went wrong in your node's business logic during the `exec` phase.
+/// Something went wrong during node execution — specifically, the `post` phase failed.
+/// (The `exec` phase is infallible by design; it cannot produce this error.)
 ///
 /// **Common causes:**
-/// - Invalid input data
-/// - External API failures  
-/// - Business rule violations
-/// - Resource unavailability
+/// - Failed store write in `post`
+/// - Business-logic validation in `post` rejected the `exec` result
+/// - External API call in `post` failed
 ///
-/// **How to fix:** Check your node's `exec` method logic and input validation.
+/// **How to fix:** Check your node's `post` method logic and store writes.
 ///
 /// ### Preparation  
 /// Something went wrong while preparing data in the `prep` phase.
@@ -81,12 +83,12 @@
 ///
 /// **How to fix:** Verify that previous nodes stored the expected data.
 ///
-/// ### store
-/// store operations failed (get, put, remove, etc.).
+/// ### Store
+/// Store operations failed (get, put, remove, etc.).
 ///
 /// **Common causes:**
 /// - Type mismatches when retrieving data
-/// - store backend issues
+/// - Store backend issues
 /// - Concurrent access problems
 ///
 /// **How to fix:** Check store keys and ensure type consistency.
@@ -124,7 +126,7 @@
 /// ## 💡 Usage Examples
 ///
 /// Create specific error types with helpful messages. Use the appropriate
-/// error variant (NodeExecution, Configuration, store, etc.) and provide
+/// error variant (NodeExecution, Configuration, Store, etc.) and provide
 /// clear, actionable error messages that help users understand what went wrong.
 ///
 /// ## 🔄 Converting from Other Errors
@@ -134,10 +136,10 @@
 /// method or the `Into` trait for convenient conversion.
 #[derive(Debug, Clone)]
 pub enum CanoError {
-    /// Error during node execution phase (your business logic)
+    /// Error during node execution — used for `post` phase failures.
     ///
-    /// Use this when your node's `exec` method encounters an error in its
-    /// core processing logic. Include specific details about what went wrong.
+    /// `exec` is infallible by design (returns `Self::ExecResult` directly).
+    /// This variant is emitted by the blanket `Task` impl when `post` fails.
     NodeExecution(String),
 
     /// Error during task execution

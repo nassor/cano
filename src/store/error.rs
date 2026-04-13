@@ -56,22 +56,22 @@ pub enum StoreError {
 
 impl StoreError {
     /// Create a new key not found error
-    pub fn key_not_found<TStore: Into<String>>(key: TStore) -> Self {
+    pub fn key_not_found<S: Into<String>>(key: S) -> Self {
         StoreError::KeyNotFound(format!("Key '{}' not found in store", key.into()))
     }
 
     /// Create a new type mismatch error
-    pub fn type_mismatch<TStore: Into<String>>(msg: TStore) -> Self {
+    pub fn type_mismatch<S: Into<String>>(msg: S) -> Self {
         StoreError::TypeMismatch(msg.into())
     }
 
     /// Create a new lock error
-    pub fn lock_error<TStore: Into<String>>(msg: TStore) -> Self {
+    pub fn lock_error<S: Into<String>>(msg: S) -> Self {
         StoreError::LockError(msg.into())
     }
 
     /// Create a new append type mismatch error
-    pub fn append_type_mismatch<TStore: Into<String>>(key: TStore) -> Self {
+    pub fn append_type_mismatch<S: Into<String>>(key: S) -> Self {
         StoreError::AppendTypeMismatch(format!(
             "Cannot append to key '{}': existing value is not a Vec<TState>",
             key.into()
@@ -79,7 +79,7 @@ impl StoreError {
     }
 
     /// Create a new generic store error
-    pub fn generic<TStore: Into<String>>(msg: TStore) -> Self {
+    pub fn generic<S: Into<String>>(msg: S) -> Self {
         StoreError::Generic(msg.into())
     }
 }

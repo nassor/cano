@@ -7,7 +7,7 @@
 //!
 //! ### Split/Join Workflows
 //!
-//! The [`Workflow`] API now supports splitting into multiple parallel tasks:
+//! The [`Workflow`] API supports splitting into multiple parallel tasks:
 //! - Define your workflow states using custom enums
 //! - Register tasks for each state
 //! - Use `register_split()` to execute multiple tasks in parallel
@@ -301,8 +301,10 @@ where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
     TStore: KeyValueStore + 'static,
 {
-    /// State machine with support for split/join
-    states: HashMap<TState, StateEntry<TState, TStore>>,
+    /// State machine with support for split/join.
+    /// Arc-wrapped so the FSM loop clones the entry as a cheap refcount bump
+    /// rather than cloning the inner Vec<Arc<dyn Task>> on every iteration.
+    states: HashMap<TState, Arc<StateEntry<TState, TStore>>>,
     /// Shared store for all tasks
     store: Arc<TStore>,
     /// Global workflow timeout
@@ -347,9 +349,9 @@ where
     {
         self.states.insert(
             state,
-            StateEntry::Single {
+            Arc::new(StateEntry::Single {
                 task: Arc::new(task),
-            },
+            }),
         );
         self
     }
@@ -369,10 +371,10 @@ where
 
         self.states.insert(
             state,
-            StateEntry::Split {
+            Arc::new(StateEntry::Split {
                 tasks: arc_tasks,
                 join_config: Arc::new(join_config),
-            },
+            }),
         );
         self
     }
@@ -534,26 +536,20 @@ where
                 return Ok(current_state);
             }
 
-            // Get the state entry
-            let state_entry = self
-                .states
-                .get(&current_state)
-                .ok_or_else(|| {
-                    CanoError::workflow(format!(
-                        "No task registered for state: {:?}",
-                        current_state
-                    ))
-                })?
-                .clone();
+            // Get the state entry — borrow from map, clone only the Arc handles
+            let state_entry = self.states.get(&current_state).ok_or_else(|| {
+                CanoError::workflow(format!("No task registered for state: {:?}", current_state))
+            })?;
 
             #[cfg(feature = "tracing")]
             debug!(current_state = ?current_state, "Executing state");
 
-            // Execute based on entry type
-            current_state = match state_entry {
-                StateEntry::Single { task } => self.execute_single_task(task).await?,
+            // Execute based on entry type — deref the Arc then clone only the inner Arc handles
+            current_state = match state_entry.as_ref() {
+                StateEntry::Single { task } => self.execute_single_task(task.clone()).await?,
                 StateEntry::Split { tasks, join_config } => {
-                    self.execute_split_join(tasks, join_config).await?
+                    self.execute_split_join(tasks.clone(), join_config.clone())
+                        .await?
                 }
             };
         }
@@ -1929,10 +1925,7 @@ mod tests {
                     .with_fixed_retry(4, std::time::Duration::from_millis(1))
             }
 
-            async fn run(
-                &self,
-                _store: &MemoryStore,
-            ) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
                 let count = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
                 if count >= self.succeed_after {
                     Ok(TaskResult::Single(TestState::Complete))

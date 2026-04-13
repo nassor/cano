@@ -58,7 +58,7 @@ impl MemoryStore {
         let data = self
             .data
             .read()
-            .map_err(|_| StoreError::lock_error("Failed to acquire read lock on store"))?;
+            .map_err(|e| StoreError::lock_error(format!("Read lock poisoned: {e}")))?;
 
         match data.get(key) {
             Some(value) => value.clone().downcast::<TState>().map_err(|_| {
@@ -146,14 +146,21 @@ impl KeyValueStore for MemoryStore {
             .write()
             .map_err(|e| StoreError::lock_error(format!("Write lock poisoned: {e}")))?;
 
-        if let Some(existing) = data.get(key) {
-            if let Some(vec) = existing.downcast_ref::<Vec<TState>>() {
-                let mut new_vec = vec.clone();
-                new_vec.push(item);
-                data.insert(key.to_string(), Arc::new(new_vec));
-                Ok(())
-            } else {
-                Err(StoreError::append_type_mismatch(key))
+        if let Some(existing) = data.remove(key) {
+            match existing.downcast::<Vec<TState>>() {
+                Ok(arc_vec) => {
+                    // Try to take ownership of the Vec to avoid a clone when no
+                    // other Arc references exist (the common case when the value
+                    // was only put/appended and never retrieved via get_shared).
+                    let mut vec = match Arc::try_unwrap(arc_vec) {
+                        Ok(v) => v,
+                        Err(shared) => (*shared).clone(),
+                    };
+                    vec.push(item);
+                    data.insert(key.to_string(), Arc::new(vec));
+                    Ok(())
+                }
+                Err(_) => Err(StoreError::append_type_mismatch(key)),
             }
         } else {
             data.insert(key.to_string(), Arc::new(vec![item]));
