@@ -436,7 +436,7 @@
             <span class="code-block-label"><span class="label-icon">&#9998;</span> Implementing Task trait</span>
             <pre><code class="language-rust">use async_trait::async_trait;
 use cano::prelude::*;
-use rand::Rng;
+use rand::RngExt;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Action { Generate, Count, Complete }
