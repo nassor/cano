@@ -1,6 +1,6 @@
 [package]
 name = "cano"
-version = "0.7.2"
+version = "0.8.0"
 homepage = "https://nassor.github.io/cano/"
 edition = "2024"
 rust-version = "1.89.0"

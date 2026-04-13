@@ -9,7 +9,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! cano = { version = "0.7", features = ["scheduler"] }
+//! cano = { version = "0.8", features = ["scheduler"] }
 //! ```
 
 use crate::error::{CanoError, CanoResult};
