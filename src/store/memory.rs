@@ -134,9 +134,14 @@ impl KeyValueStore for MemoryStore {
             .write()
             .map_err(|e| StoreError::lock_error(format!("Write lock poisoned: {e}")))?;
 
-        if let Some(existing) = data.remove(key) {
-            match existing.downcast::<Vec<TState>>() {
+        if let Some(existing) = data.get(key) {
+            // Clone the Arc to get a temporary reference for type checking.
+            // Do NOT remove from map until we've verified the type.
+            let existing_clone = Arc::clone(existing);
+            match existing_clone.downcast::<Vec<TState>>() {
                 Ok(arc_vec) => {
+                    // Type check passed; now remove and update.
+                    data.remove(key);
                     // Try to take ownership of the Vec to avoid a clone when no
                     // other Arc references exist (the common case when the value
                     // was only put/appended and never retrieved via get_shared).
@@ -148,7 +153,10 @@ impl KeyValueStore for MemoryStore {
                     data.insert(key.to_string(), Arc::new(vec));
                     Ok(())
                 }
-                Err(_) => Err(StoreError::append_type_mismatch(key)),
+                Err(_) => {
+                    // Type mismatch — original value is still in map, error is non-destructive.
+                    Err(StoreError::append_type_mismatch(key))
+                }
             }
         } else {
             data.insert(key.to_string(), Arc::new(vec![item]));
@@ -379,6 +387,24 @@ mod tests {
             ),
             _ => panic!("Expected AppendTypeMismatch error"),
         }
+    }
+
+    #[test]
+    fn test_append_non_destructive_on_type_mismatch() {
+        let store = MemoryStore::new();
+        let key = "test_non_destructive";
+        let original_value = "original".to_string();
+
+        // Store a non-vector value
+        store.put(key, original_value.clone()).unwrap();
+
+        // Try to append with wrong type — should fail
+        let result = store.append::<String>(key, "item".to_string());
+        assert!(result.is_err());
+
+        // Verify the original value is still in the store (non-destructive error)
+        let retrieved: String = store.get(key).expect("Value should still exist after append error");
+        assert_eq!(retrieved, original_value, "Original value should be preserved after type mismatch");
     }
 
     #[test]
