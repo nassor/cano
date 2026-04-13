@@ -472,7 +472,13 @@ where
         #[cfg(feature = "tracing")]
         debug!("Executing task through Node adapter");
 
-        let state = crate::node::Node::run(self, store).await?;
+        // Run a single attempt of prep → exec → post without the Node's own retry loop.
+        // Retries are driven by the outer `run_with_retries` in `execute_single_task`,
+        // which uses this method as the unit of work. Calling `Node::run` here would
+        // double-retry nodes (inner Node::run_with_retries + outer run_with_retries).
+        let prep_res = crate::node::Node::prep(self, store).await?;
+        let exec_res = crate::node::Node::exec(self, prep_res).await;
+        let state = crate::node::Node::post(self, store, exec_res).await?;
 
         #[cfg(feature = "tracing")]
         info!(next_state = ?state, "Task execution completed successfully");

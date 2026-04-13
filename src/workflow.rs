@@ -629,8 +629,11 @@ where
         let mut handles = Vec::new();
         #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
         for (idx, task) in tasks.into_iter().enumerate() {
+            use crate::task::run_with_retries;
+
             let task_clone = task.clone();
             let store_clone = store.clone();
+            let config = task.config();
 
             #[cfg(feature = "tracing")]
             let task_span = info_span!("split_task", task_id = idx);
@@ -642,7 +645,12 @@ where
                 #[cfg(feature = "tracing")]
                 debug!(task_id = idx, "Executing split task");
 
-                let result = task_clone.run(&*store_clone).await;
+                let result = run_with_retries(&config, || {
+                    let t = task_clone.clone();
+                    let s = store_clone.clone();
+                    async move { t.run(&*s).await }
+                })
+                .await;
 
                 #[cfg(feature = "tracing")]
                 match &result {
@@ -1347,6 +1355,10 @@ mod tests {
 
         #[async_trait]
         impl Task<TestState> for MixedTask {
+            fn config(&self) -> crate::task::TaskConfig {
+                crate::task::TaskConfig::minimal()
+            }
+
             async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
                 tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
                 if self.should_fail {
@@ -1501,6 +1513,10 @@ mod tests {
 
         #[async_trait]
         impl Task<TestState> for MixedTask {
+            fn config(&self) -> crate::task::TaskConfig {
+                crate::task::TaskConfig::minimal()
+            }
+
             async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
                 tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
                 if self.should_fail {
@@ -1834,5 +1850,116 @@ mod tests {
         let result = workflow.orchestrate(TestState::Start).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("register_split"));
+    }
+
+    /// Regression test: a Node used in a workflow should only be retried once per the
+    /// configured retry count, not double-retried by both Node::run_with_retries and
+    /// the outer execute_single_task run_with_retries.
+    #[tokio::test]
+    async fn test_node_in_workflow_no_double_retry() {
+        use crate::node::Node;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        struct CountingNode {
+            call_count: Arc<std::sync::atomic::AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl Node<TestState> for CountingNode {
+            type PrepResult = ();
+            type ExecResult = ();
+
+            fn config(&self) -> crate::task::TaskConfig {
+                crate::task::TaskConfig::new().with_fixed_retry(2, Duration::from_millis(1))
+            }
+
+            async fn prep(&self, _store: &MemoryStore) -> Result<(), CanoError> {
+                self.call_count.fetch_add(1, Ordering::SeqCst);
+                Err(CanoError::preparation("always fails"))
+            }
+
+            async fn exec(&self, _: ()) -> () {}
+
+            async fn post(&self, _store: &MemoryStore, _: ()) -> Result<TestState, CanoError> {
+                Ok(TestState::Complete)
+            }
+        }
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let node = CountingNode {
+            call_count: Arc::clone(&call_count),
+        };
+
+        let store = MemoryStore::new();
+        let workflow = Workflow::new(store)
+            .register(TestState::Start, node)
+            .add_exit_state(TestState::Complete);
+
+        let result = workflow.orchestrate(TestState::Start).await;
+        assert!(result.is_err());
+
+        // With max_retries=2, there should be exactly 3 attempts (1 initial + 2 retries).
+        // Before the fix, double-retry would cause 3*3 = 9 attempts.
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            3,
+            "Node should be called exactly 3 times (1 + 2 retries), not double-retried"
+        );
+    }
+
+    /// Regression test: tasks registered via register_split() must honour their TaskConfig
+    /// retry settings. Before the fix, split tasks called task.run() directly and retries
+    /// were silently ignored.
+    #[tokio::test]
+    async fn test_split_task_retry_config_honoured() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct RetryCountingTask {
+            call_count: Arc<AtomicUsize>,
+            succeed_after: usize,
+        }
+
+        #[async_trait]
+        impl Task<TestState> for RetryCountingTask {
+            fn config(&self) -> crate::task::TaskConfig {
+                // Allow up to 4 retries so the task can eventually succeed
+                crate::task::TaskConfig::new()
+                    .with_fixed_retry(4, std::time::Duration::from_millis(1))
+            }
+
+            async fn run(
+                &self,
+                _store: &MemoryStore,
+            ) -> Result<TaskResult<TestState>, CanoError> {
+                let count = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
+                if count >= self.succeed_after {
+                    Ok(TaskResult::Single(TestState::Complete))
+                } else {
+                    Err(CanoError::task_execution("not ready yet"))
+                }
+            }
+        }
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let tasks = vec![RetryCountingTask {
+            call_count: Arc::clone(&call_count),
+            succeed_after: 3, // fails twice, succeeds on third attempt
+        }];
+
+        let join_config = JoinConfig::new(JoinStrategy::All, TestState::Complete);
+        let store = MemoryStore::new();
+        let workflow = Workflow::new(store)
+            .register_split(TestState::Start, tasks, join_config)
+            .add_exit_state(TestState::Complete);
+
+        let result = workflow.orchestrate(TestState::Start).await;
+        assert!(result.is_ok(), "workflow should succeed after retries");
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            3,
+            "task should have been called exactly 3 times (2 failures + 1 success)"
+        );
     }
 }
