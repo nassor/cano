@@ -81,9 +81,9 @@
 //!
 //! **Task**: Single `run()` method — full control over execution flow.
 //!
-//! **Node**: Three-phase lifecycle:
+//! **Node**: Three-phase lifecycle (retried as a unit on `prep` or `post` failure):
 //! 1. `prep` — load data, validate inputs, allocate resources
-//! 2. `exec` — core logic; retry wraps this phase
+//! 2. `exec` — core logic (infallible — signature returns result directly)
 //! 3. `post` — write results, determine next state
 //!
 //! ## Module Overview

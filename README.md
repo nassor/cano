@@ -69,14 +69,14 @@ struct FetchSourceTask {
 }
 
 #[async_trait::async_trait]
-impl Task<FlowState, MemoryStore> for FetchSourceTask {
-    async fn run(&self, _state: FlowState, store: &MemoryStore) -> Result<cano::TaskResult<FlowState>, CanoError> {
+impl Task<FlowState> for FetchSourceTask {
+    async fn run(&self, store: &MemoryStore) -> Result<cano::TaskResult<FlowState>, CanoError> {
         // Simulate async work
         tokio::time::sleep(Duration::from_millis(100)).await;
         
         // Store result
         let key = format!("source_{}", self.source_id);
-        store.set(key, format!("data_from_{}", self.source_id))?;
+        store.put(&key, format!("data_from_{}", self.source_id))?;
         
         Ok(cano::TaskResult::Single(FlowState::Aggregate))
     }
@@ -85,13 +85,12 @@ impl Task<FlowState, MemoryStore> for FetchSourceTask {
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     let store = MemoryStore::new();
-    let mut workflow: Workflow<FlowState, MemoryStore> = Workflow::new(store);
 
     // 1. Define parallel tasks
-    let sources: Vec<std::sync::Arc<dyn Task<FlowState, MemoryStore>>> = vec![
-        std::sync::Arc::new(FetchSourceTask { source_id: 1 }),
-        std::sync::Arc::new(FetchSourceTask { source_id: 2 }),
-        std::sync::Arc::new(FetchSourceTask { source_id: 3 }),
+    let sources = vec![
+        FetchSourceTask { source_id: 1 },
+        FetchSourceTask { source_id: 2 },
+        FetchSourceTask { source_id: 3 },
     ];
 
     // 2. Configure join strategy
@@ -102,7 +101,7 @@ async fn main() -> Result<(), CanoError> {
     ).with_timeout(Duration::from_secs(5));
 
     // 3. Build Workflow
-    workflow
+    let workflow = Workflow::new(store)
         // Start -> Split into parallel tasks
         .register_split(
             FlowState::Start,
