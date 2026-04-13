@@ -342,6 +342,11 @@ where
             match cmd {
                 SchedulerCommand::Stop => {
                     *self.running.write().await = false;
+                    // Clear the sender immediately so callers racing with the
+                    // graceful-shutdown window (draining loop tasks + waiting on
+                    // in-flight workflows) get a deterministic "not running" error
+                    // instead of enqueueing commands into a queue nobody is draining.
+                    *self.command_tx.write().await = None;
                     break;
                 }
                 SchedulerCommand::Trigger(id) => {
@@ -875,6 +880,100 @@ mod tests {
             sleep(Duration::from_millis(50)).await;
             scheduler.stop().await.unwrap();
             restart_handle.await.unwrap().unwrap();
+        })
+        .await;
+
+        assert!(result.is_ok(), "Test timed out");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_stop_clears_sender_during_graceful_shutdown_window() {
+        // Regression: while start() drains the command loop and waits on
+        // in-flight workflows, a concurrent stop()/trigger() must report
+        // "not running" instead of enqueueing into a queue nobody drains.
+        #[derive(Clone)]
+        struct SlowNode;
+
+        #[async_trait]
+        impl Node<TestState> for SlowNode {
+            type PrepResult = ();
+            type ExecResult = ();
+
+            async fn prep(&self, _store: &MemoryStore) -> CanoResult<()> {
+                Ok(())
+            }
+
+            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
+                // Hold Status::Running long enough to span the shutdown window.
+                sleep(Duration::from_millis(400)).await;
+            }
+
+            async fn post(
+                &self,
+                _store: &MemoryStore,
+                _exec_res: Self::ExecResult,
+            ) -> CanoResult<TestState> {
+                Ok(TestState::Complete)
+            }
+        }
+
+        let timeout = Duration::from_secs(5);
+        let result = tokio::time::timeout(timeout, async {
+            let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
+            let slow_workflow = Workflow::new(MemoryStore::new())
+                .register(TestState::Start, SlowNode)
+                .add_exit_state(TestState::Complete)
+                .add_exit_state(TestState::Error);
+            scheduler
+                .manual("slow_task", slow_workflow, TestState::Start)
+                .unwrap();
+
+            let mut scheduler_for_start = scheduler.clone();
+            let scheduler_handle = tokio::spawn(async move { scheduler_for_start.start().await });
+
+            // Let start() spin up.
+            sleep(Duration::from_millis(50)).await;
+
+            // Kick off the slow workflow and wait until it is actually Running
+            // so has_running_flows() will keep start() parked after Stop.
+            scheduler.trigger("slow_task").await.unwrap();
+            sleep(Duration::from_millis(50)).await;
+            assert!(
+                scheduler.has_running_flows().await,
+                "slow workflow should be in Running state before we call stop()"
+            );
+
+            // First stop(): succeeds, Stop lands in the channel.
+            scheduler.stop().await.unwrap();
+
+            // Let start() dequeue Stop and clear command_tx. The slow workflow
+            // is still in exec (~400ms total), so start() is parked inside
+            // has_running_flows() — the shutdown window we want to probe.
+            sleep(Duration::from_millis(50)).await;
+            assert!(
+                !scheduler_handle.is_finished(),
+                "start() must still be parked waiting for the slow workflow"
+            );
+            assert!(
+                scheduler.has_running_flows().await,
+                "slow workflow must still be running during the shutdown window"
+            );
+
+            // During the window, stop()/trigger() must report not-running
+            // instead of filling a queue that will never be drained.
+            let err = scheduler.stop().await.unwrap_err();
+            assert!(
+                err.to_string().contains("Scheduler not running"),
+                "expected not-running during shutdown window, got: {err}"
+            );
+            let err = scheduler.trigger("slow_task").await.unwrap_err();
+            assert!(
+                err.to_string().contains("Scheduler not running"),
+                "expected not-running during shutdown window, got: {err}"
+            );
+
+            // Finally, start() completes cleanly once the slow workflow finishes.
+            scheduler_handle.await.unwrap().unwrap();
         })
         .await;
 
