@@ -398,17 +398,18 @@ where
     ///
     /// - [`CanoError::Workflow`] — the scheduler is not running
     pub async fn stop(&self) -> CanoResult<()> {
-        // Send stop signal — use send().await to ensure delivery for critical control-plane command.
-        // This is safe because stop signals are rare and waiting for queue space is acceptable.
-        if let Some(tx) = self.command_tx.read().await.as_ref() {
-            tx.send(SchedulerCommand::Stop)
-                .await
-                .map_err(|e| CanoError::Workflow(format!("Failed to send stop: {}", e)))?;
-        } else {
-            return Err(CanoError::Workflow(
-                "Scheduler not running — call start() before stop()".to_string(),
-            ));
-        }
+        // Clone the sender out of the lock and drop the guard before awaiting
+        // send(): holding an async RwLock guard across .await would block a
+        // concurrent writer (e.g. start() clearing command_tx at shutdown).
+        let tx = self.command_tx.read().await.clone().ok_or_else(|| {
+            CanoError::Workflow("Scheduler not running — call start() before stop()".to_string())
+        })?;
+
+        // Use send().await to ensure delivery for this critical control-plane
+        // command. Safe because stop is rare and waiting for queue space is OK.
+        tx.send(SchedulerCommand::Stop)
+            .await
+            .map_err(|e| CanoError::Workflow(format!("Failed to send stop: {}", e)))?;
 
         // The actual waiting happens in start()
         Ok(())
