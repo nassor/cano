@@ -344,6 +344,9 @@ where
                             if attempt >= max_attempts {
                                 #[cfg(feature = "tracing")]
                                 tracing::error!(attempt = attempt, error = ?e, "Node execution failed after maximum attempts");
+                                if max_attempts <= 1 {
+                                    return Err(e);
+                                }
                                 return Err(CanoError::retry_exhausted(format!(
                                     "Node post phase failed after {} attempt(s): {}",
                                     attempt, e
@@ -371,6 +374,9 @@ where
                     if attempt >= max_attempts {
                         #[cfg(feature = "tracing")]
                         tracing::error!(attempt = attempt, error = ?e, "Node execution failed after maximum attempts");
+                        if max_attempts <= 1 {
+                            return Err(e);
+                        }
                         return Err(CanoError::retry_exhausted(format!(
                             "Node prep phase failed after {} attempt(s): {}",
                             attempt, e
@@ -1939,5 +1945,85 @@ mod tests {
             matches!(err, CanoError::RetryExhausted(_)),
             "expected RetryExhausted after retry exhaustion, got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn test_node_no_retry_preserves_error_variant() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct PrepFailNode {
+            attempt_counter: Arc<AtomicUsize>,
+        }
+
+        #[async_trait]
+        impl Node<TestAction> for PrepFailNode {
+            type PrepResult = ();
+            type ExecResult = ();
+
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+
+            async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+                self.attempt_counter.fetch_add(1, Ordering::SeqCst);
+                Err(CanoError::preparation("prep boom"))
+            }
+
+            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {}
+
+            async fn post(
+                &self,
+                _store: &MemoryStore,
+                _exec_res: Self::ExecResult,
+            ) -> Result<TestAction, CanoError> {
+                Ok(TestAction::Complete)
+            }
+        }
+
+        let node = PrepFailNode {
+            attempt_counter: Arc::new(AtomicUsize::new(0)),
+        };
+        let store = MemoryStore::new();
+        let err = node.run(&store).await.unwrap_err();
+
+        assert_eq!(node.attempt_counter.load(Ordering::SeqCst), 1);
+        assert!(
+            matches!(err, CanoError::Preparation(_)),
+            "expected original Preparation variant when retries disabled, got: {err}"
+        );
+        assert!(err.to_string().contains("prep boom"));
+
+        struct PostFailNode;
+
+        #[async_trait]
+        impl Node<TestAction> for PostFailNode {
+            type PrepResult = ();
+            type ExecResult = ();
+
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+
+            async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+                Ok(())
+            }
+
+            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {}
+
+            async fn post(
+                &self,
+                _store: &MemoryStore,
+                _exec_res: Self::ExecResult,
+            ) -> Result<TestAction, CanoError> {
+                Err(CanoError::node_execution("post boom"))
+            }
+        }
+
+        let err = PostFailNode.run(&store).await.unwrap_err();
+        assert!(
+            matches!(err, CanoError::NodeExecution(_)),
+            "expected original NodeExecution variant when retries disabled, got: {err}"
+        );
+        assert!(err.to_string().contains("post boom"));
     }
 }

@@ -757,7 +757,10 @@ mod tests {
         let arc2: Arc<String> = store.get_shared("msg").unwrap();
 
         assert_eq!(*arc1, "hello");
-        assert_eq!(arc1, arc2);
+        assert!(
+            Arc::ptr_eq(&arc1, &arc2),
+            "get_shared must return clones of the same Arc, not fresh allocations"
+        );
     }
 
     #[test]

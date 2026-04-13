@@ -300,6 +300,9 @@ where
                 }
 
                 if attempt >= max_attempts {
+                    if max_attempts <= 1 {
+                        return Err(e);
+                    }
                     return Err(CanoError::retry_exhausted(format!(
                         "Task failed after {} attempt(s): {}",
                         attempt, e
@@ -1068,7 +1071,12 @@ mod tests {
 
         assert!(result.is_err());
         assert_eq!(counter.load(Ordering::SeqCst), 1);
-        assert!(result.unwrap_err().to_string().contains("immediate fail"));
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CanoError::TaskExecution(_)),
+            "expected original TaskExecution variant when retries disabled, got: {err}"
+        );
+        assert!(err.to_string().contains("immediate fail"));
     }
 
     #[tokio::test]
