@@ -168,7 +168,14 @@ impl RetryMode {
                         1.0
                     };
 
-                    let final_delay = (capped_delay * jitter_factor).max(0.0) as u64;
+                    let final_delay_f = (capped_delay * jitter_factor).max(0.0);
+                    // Saturate rather than wrap or panic when the computed delay
+                    // exceeds u64::MAX milliseconds (e.g. enormous max_delay + jitter).
+                    let final_delay = if final_delay_f >= u64::MAX as f64 {
+                        u64::MAX
+                    } else {
+                        final_delay_f as u64
+                    };
                     Some(Duration::from_millis(final_delay))
                 } else {
                     None

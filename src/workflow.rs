@@ -135,15 +135,9 @@ impl JoinStrategy {
             JoinStrategy::Any => completed >= 1,
             JoinStrategy::Quorum(n) => completed >= *n,
             JoinStrategy::Percentage(p) => {
-                // Require percentage to be in valid range (0.0, 1.0]
-                // Percentages <= 0 or > 1.0 are invalid; treat as requesting all tasks
-                if *p <= 0.0 || *p > 1.0 {
-                    // Conservative: invalid percentages require all tasks to complete
-                    completed >= total
-                } else {
-                    let required = (total as f64 * p).ceil() as usize;
-                    completed >= required
-                }
+                // Percentage must be in (0.0, 1.0] — validated at execute_split_join entry
+                let required = (total as f64 * p).ceil() as usize;
+                completed >= required
             }
             JoinStrategy::PartialResults(min) => completed >= *min,
             JoinStrategy::PartialTimeout => completed >= 1, // At least one task must complete
@@ -612,13 +606,20 @@ where
             "Starting split execution"
         );
 
-        // Validate PartialTimeout configuration before spawning tasks
+        // Validate strategy configuration before spawning tasks
         if matches!(join_config.strategy, JoinStrategy::PartialTimeout)
             && join_config.timeout.is_none()
         {
             return Err(CanoError::configuration(
                 "PartialTimeout strategy requires a timeout to be configured",
             ));
+        }
+        if let JoinStrategy::Percentage(p) = join_config.strategy {
+            if p <= 0.0 || p > 1.0 {
+                return Err(CanoError::configuration(format!(
+                    "Percentage strategy requires a value in (0.0, 1.0], got {p}"
+                )));
+            }
         }
 
         // Spawn all parallel tasks
@@ -627,9 +628,8 @@ where
         for (idx, task) in tasks.into_iter().enumerate() {
             use crate::task::run_with_retries;
 
-            let task_clone = task.clone();
-            let store_clone = store.clone();
             let config = task.config();
+            let store_clone = store.clone();
 
             #[cfg(feature = "tracing")]
             let task_span = info_span!("split_task", task_id = idx);
@@ -642,7 +642,7 @@ where
                 debug!(task_id = idx, "Executing split task");
 
                 let result = run_with_retries(&config, || {
-                    let t = task_clone.clone();
+                    let t = task.clone();
                     let s = store_clone.clone();
                     async move { t.run(&*s).await }
                 })
