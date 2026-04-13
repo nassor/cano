@@ -115,7 +115,7 @@ mod tracing_tests;
 
 // Core public API - simplified imports
 pub use error::{CanoError, CanoResult};
-pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node};
+pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node, NodeObject};
 pub use store::{KeyValueStore, MemoryStore};
 pub use task::{DefaultTaskParams, DynTask, RetryMode, Task, TaskConfig, TaskObject, TaskResult};
 pub use workflow::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult, StateEntry, Workflow};
