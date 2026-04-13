@@ -212,6 +212,17 @@ where
     /// `Self::ExecResult` directly). You can override this method for completely custom
     /// orchestration.
     ///
+    /// # Workflow integration
+    ///
+    /// When a `Node` is registered with a [`crate::workflow::Workflow`], the workflow engine
+    /// uses the blanket [`crate::task::Task`] impl rather than calling this method directly.
+    /// That blanket impl runs a **single** `prep` → `exec` → `post` pass per attempt and
+    /// delegates retries to the outer `run_with_retries` call in the workflow dispatcher.
+    ///
+    /// If you call `Node::run` directly (outside a workflow), retries run **here**, which is
+    /// correct for standalone use. Do not call `Node::run` inside a custom `Task::run`
+    /// implementation — that would double-retry the node.
+    ///
     /// # Errors
     ///
     /// - [`CanoError::Preparation`] — `prep` failed on all retry attempts

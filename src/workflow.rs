@@ -135,8 +135,15 @@ impl JoinStrategy {
             JoinStrategy::Any => completed >= 1,
             JoinStrategy::Quorum(n) => completed >= *n,
             JoinStrategy::Percentage(p) => {
-                // Percentage must be in (0.0, 1.0] — validated at execute_split_join entry
-                let required = (total as f64 * p).ceil() as usize;
+                // Percentage must be in (0.0, 1.0] — validated at execute_split_join entry.
+                // Saturate to usize::MAX rather than wrap; a task count large enough to
+                // overflow f64→usize would OOM first anyway.
+                let required_f = (total as f64 * p).ceil();
+                let required = if required_f >= usize::MAX as f64 {
+                    usize::MAX
+                } else {
+                    required_f as usize
+                };
                 completed >= required
             }
             JoinStrategy::PartialResults(min) => completed >= *min,
@@ -438,6 +445,19 @@ where
                 "Workflow has no exit states defined — orchestration may loop forever",
             ));
         }
+        // Each join_state in a Split entry must either be registered or an exit state;
+        // otherwise orchestration will always error at runtime after the split completes.
+        for entry in self.states.values() {
+            if let StateEntry::Split { join_config, .. } = entry.as_ref() {
+                let js = &join_config.join_state;
+                if !self.states.contains_key(js) && !self.exit_states.contains(js) {
+                    return Err(CanoError::configuration(format!(
+                        "Split join_state {:?} is neither registered nor an exit state",
+                        js
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -614,12 +634,12 @@ where
                 "PartialTimeout strategy requires a timeout to be configured",
             ));
         }
-        if let JoinStrategy::Percentage(p) = join_config.strategy {
-            if p <= 0.0 || p > 1.0 {
-                return Err(CanoError::configuration(format!(
-                    "Percentage strategy requires a value in (0.0, 1.0], got {p}"
-                )));
-            }
+        if let JoinStrategy::Percentage(p) = join_config.strategy
+            && (p <= 0.0 || p > 1.0)
+        {
+            return Err(CanoError::configuration(format!(
+                "Percentage strategy requires a value in (0.0, 1.0], got {p}"
+            )));
         }
 
         // Spawn all parallel tasks
@@ -1736,15 +1756,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_percentage_zero() {
-        // Invalid percentage (0.0) should require all tasks to complete
+        // Invalid percentage (0.0) should return a configuration error
         let store = MemoryStore::new();
         let tasks = vec![FailTask::new(true), FailTask::new(true)];
         let join_config = JoinConfig::new(JoinStrategy::Percentage(0.0), TestState::Complete);
         let workflow = Workflow::new(store)
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
-        // With all tasks failing, the workflow should fail (requiring all tasks to complete)
-        assert!(workflow.orchestrate(TestState::Start).await.is_err());
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        assert!(
+            matches!(err, CanoError::Configuration(_)),
+            "expected Configuration error, got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -1774,7 +1797,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_percentage_over_one() {
-        // Invalid percentage (>1.0) should require all tasks to complete
+        // Invalid percentage (>1.0) should return a configuration error
         let store = MemoryStore::new();
         let tasks = vec![
             FailTask::new(false), // One task succeeds
@@ -1784,8 +1807,11 @@ mod tests {
         let workflow = Workflow::new(store)
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
-        // With one task failing and requirement for all tasks, workflow should fail
-        assert!(workflow.orchestrate(TestState::Start).await.is_err());
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        assert!(
+            matches!(err, CanoError::Configuration(_)),
+            "expected Configuration error, got {err:?}"
+        );
     }
 
     #[tokio::test]

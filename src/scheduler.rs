@@ -26,6 +26,15 @@ use tokio::time::{Duration, sleep};
 #[cfg(feature = "tracing")]
 use tracing::Instrument;
 
+/// Commands sent over the internal scheduler control channel.
+///
+/// Using a typed enum instead of magic strings eliminates a class of runtime
+/// errors and makes the protocol self-documenting.
+enum SchedulerCommand {
+    Stop,
+    Trigger(String),
+}
+
 /// Simplified scheduling options
 #[derive(Debug, Clone)]
 pub enum Schedule {
@@ -78,7 +87,7 @@ where
     TStore: KeyValueStore + 'static,
 {
     workflows: HashMap<String, FlowData<TState, TStore>>,
-    command_tx: Arc<RwLock<Option<mpsc::UnboundedSender<String>>>>,
+    command_tx: Arc<RwLock<Option<mpsc::UnboundedSender<SchedulerCommand>>>>,
     running: Arc<RwLock<bool>>,
     scheduler_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
 }
@@ -222,7 +231,7 @@ where
     pub async fn start(&mut self) -> CanoResult<()> {
         *self.running.write().await = true;
 
-        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (tx, mut rx) = mpsc::unbounded_channel::<SchedulerCommand>();
         *self.command_tx.write().await = Some(tx);
 
         let workflows = self.workflows.clone();
@@ -327,19 +336,23 @@ where
 
         // Wait for stop command
         while let Some(cmd) = rx.recv().await {
-            if cmd == "stop" {
-                *self.running.write().await = false;
-                break;
-            } else if cmd.starts_with("trigger:") {
-                let id = cmd.strip_prefix("trigger:").unwrap();
-                if let Some((workflow, initial_state, _schedule, info)) = self.workflows.get(id) {
-                    let workflow = Arc::clone(workflow);
-                    let initial_state = initial_state.clone();
-                    let info = Arc::clone(info);
-                    let handle = tokio::spawn(async move {
-                        execute_flow(workflow, initial_state, info).await;
-                    });
-                    self.scheduler_tasks.write().await.push(handle);
+            match cmd {
+                SchedulerCommand::Stop => {
+                    *self.running.write().await = false;
+                    break;
+                }
+                SchedulerCommand::Trigger(id) => {
+                    if let Some((workflow, initial_state, _schedule, info)) =
+                        self.workflows.get(&id)
+                    {
+                        let workflow = Arc::clone(workflow);
+                        let initial_state = initial_state.clone();
+                        let info = Arc::clone(info);
+                        let handle = tokio::spawn(async move {
+                            execute_flow(workflow, initial_state, info).await;
+                        });
+                        self.scheduler_tasks.write().await.push(handle);
+                    }
                 }
             }
         }
@@ -375,7 +388,7 @@ where
     pub async fn stop(&self) -> CanoResult<()> {
         // Send stop signal
         if let Some(tx) = self.command_tx.read().await.as_ref() {
-            tx.send("stop".to_string())
+            tx.send(SchedulerCommand::Stop)
                 .map_err(|e| CanoError::Workflow(format!("Failed to send stop: {}", e)))?;
         } else {
             return Err(CanoError::Workflow(
@@ -398,7 +411,7 @@ where
     ///   has not been called or has already returned)
     pub async fn trigger(&self, id: &str) -> CanoResult<()> {
         if let Some(tx) = self.command_tx.read().await.as_ref() {
-            tx.send(format!("trigger:{}", id))
+            tx.send(SchedulerCommand::Trigger(id.to_string()))
                 .map_err(|e| CanoError::Workflow(format!("Failed to trigger: {}", e)))?;
         } else {
             return Err(CanoError::Workflow(
