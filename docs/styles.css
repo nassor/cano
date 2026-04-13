@@ -252,6 +252,33 @@ img {
     font-family: 'Fira Code', monospace;
 }
 
+.sidebar-links {
+    display: flex;
+    gap: var(--space-4);
+    margin-top: var(--space-4);
+    flex-wrap: wrap;
+}
+
+.sidebar-links a {
+    font-size: var(--text-xs);
+    color: var(--text-muted);
+    text-decoration: none;
+    transition: color 0.2s ease;
+    padding: var(--space-2) var(--space-3);
+    border-radius: var(--radius-sm);
+    display: inline-block;
+}
+
+.sidebar-links a:hover {
+    color: var(--text-default);
+    background: rgba(59, 130, 246, 0.1);
+}
+
+.sidebar-links a:focus-visible {
+    outline: 2px solid var(--accent-blue);
+    outline-offset: 2px;
+}
+
 /* --------------------------------------------------------------------------
    4. Main Content Area
    -------------------------------------------------------------------------- */

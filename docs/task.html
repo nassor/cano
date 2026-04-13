@@ -374,7 +374,7 @@
 
     <nav class="sidebar" role="navigation" aria-label="Main navigation">
         <a href="index.html" class="logo">
-            <img src="logo.png" alt="Cano" style="height: 24px; vertical-align: middle; margin-right: 8px;">
+            <img src="logo.png" alt="" style="height: 24px; vertical-align: middle; margin-right: 8px;">
             Cano
         </a>
         <ul class="nav-links">
@@ -386,6 +386,14 @@
             <li><a href="scheduler.html">Scheduler</a></li>
             <li><a href="tracing.html">Tracing</a></li>
         </ul>
+        <div class="sidebar-footer">
+            <span class="version-badge">v0.8.0</span>
+            <div class="sidebar-links">
+                <a href="https://github.com/nassor/cano" title="GitHub Repository" aria-label="GitHub">GitHub</a>
+                <a href="https://crates.io/crates/cano" title="Crates.io" aria-label="Crates.io">Crates.io</a>
+                <a href="https://docs.rs/cano" title="API Documentation" aria-label="API Docs">Docs.rs</a>
+            </div>
+        </div>
     </nav>
 
     <main class="main-content">
@@ -422,7 +430,7 @@
         <!-- Section: Implementing a Task -->
         <hr class="section-divider">
         <h2 id="implementing">Implementing a Task</h2>
-        <p>To create a task, implement the `Task` trait for your struct. The trait requires a `run` method and an optional `config` method.</p>
+        <p>To create a task, implement the <code>Task</code> trait for your struct. The trait requires a <code>run</code> method and an optional <code>config</code> method.</p>
 
         <div class="code-block">
             <span class="code-block-label"><span class="label-icon">&#9998;</span> Implementing Task trait</span>

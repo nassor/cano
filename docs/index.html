@@ -8,6 +8,8 @@
     <meta property="og:title" content="Cano - Async Data & AI Workflows in Rust">
     <meta property="og:description" content="Type-safe async workflow engine with built-in scheduling, retry logic, and state machine semantics.">
     <meta property="og:type" content="website">
+    <meta property="og:image" content="logo.png">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;700&family=Fira+Code&display=swap" rel="stylesheet">
@@ -23,7 +25,7 @@
 
     <nav class="sidebar" role="navigation" aria-label="Main navigation">
         <a href="index.html" class="logo">
-            <img src="logo.png" alt="Cano" style="height: 24px; vertical-align: middle; margin-right: 8px;">
+            <img src="logo.png" alt="" style="height: 24px; vertical-align: middle; margin-right: 8px;">
             Cano
         </a>
         <ul class="nav-links">
@@ -35,6 +37,14 @@
             <li><a href="scheduler.html">Scheduler</a></li>
             <li><a href="tracing.html">Tracing</a></li>
         </ul>
+        <div class="sidebar-footer">
+            <span class="version-badge">v0.8.0</span>
+            <div class="sidebar-links">
+                <a href="https://github.com/nassor/cano" title="GitHub Repository" aria-label="GitHub">GitHub</a>
+                <a href="https://crates.io/crates/cano" title="Crates.io" aria-label="Crates.io">Crates.io</a>
+                <a href="https://docs.rs/cano" title="API Documentation" aria-label="API Docs">Docs.rs</a>
+            </div>
+        </div>
     </nav>
 
     <main class="main-content">
@@ -43,10 +53,18 @@
             <p class="subtitle animate-in">Type-safe async workflow engine with built-in scheduling, retry logic, and state machine semantics.</p>
 
             <div class="badges animate-in">
-                <img src="https://img.shields.io/crates/v/cano.svg" alt="Crates.io">
-                <img src="https://docs.rs/cano/badge.svg" alt="Documentation">
-                <img src="https://img.shields.io/crates/d/cano.svg" alt="Downloads">
-                <img src="https://img.shields.io/crates/l/cano.svg" alt="License">
+                <a href="https://crates.io/crates/cano" title="Crates.io">
+                    <img src="https://img.shields.io/crates/v/cano.svg" alt="Crates.io">
+                </a>
+                <a href="https://docs.rs/cano" title="API Documentation">
+                    <img src="https://docs.rs/cano/badge.svg" alt="Documentation">
+                </a>
+                <a href="https://crates.io/crates/cano" title="Download Statistics">
+                    <img src="https://img.shields.io/crates/d/cano.svg" alt="Downloads">
+                </a>
+                <a href="https://github.com/nassor/cano/blob/main/LICENSE" title="MIT License">
+                    <img src="https://img.shields.io/crates/l/cano.svg" alt="License">
+                </a>
             </div>
 
             <p class="animate-in">

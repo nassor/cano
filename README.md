@@ -70,7 +70,7 @@ struct FetchSourceTask {
 
 #[async_trait::async_trait]
 impl Task<FlowState> for FetchSourceTask {
-    async fn run(&self, store: &MemoryStore) -> Result<cano::TaskResult<FlowState>, CanoError> {
+    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<FlowState>, CanoError> {
         // Simulate async work
         tokio::time::sleep(Duration::from_millis(100)).await;
         
@@ -78,7 +78,7 @@ impl Task<FlowState> for FetchSourceTask {
         let key = format!("source_{}", self.source_id);
         store.put(&key, format!("data_from_{}", self.source_id))?;
         
-        Ok(cano::TaskResult::Single(FlowState::Aggregate))
+        Ok(TaskResult::Single(FlowState::Aggregate))
     }
 }
 

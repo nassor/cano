@@ -426,7 +426,7 @@
 
     <nav class="sidebar" role="navigation" aria-label="Main navigation">
         <a href="index.html" class="logo">
-            <img src="logo.png" alt="Cano" style="height: 24px; vertical-align: middle; margin-right: 8px;">
+            <img src="logo.png" alt="" style="height: 24px; vertical-align: middle; margin-right: 8px;">
             Cano
         </a>
         <ul class="nav-links">
@@ -438,6 +438,14 @@
             <li><a href="scheduler.html">Scheduler</a></li>
             <li><a href="tracing.html">Tracing</a></li>
         </ul>
+        <div class="sidebar-footer">
+            <span class="version-badge">v0.8.0</span>
+            <div class="sidebar-links">
+                <a href="https://github.com/nassor/cano" title="GitHub Repository" aria-label="GitHub">GitHub</a>
+                <a href="https://crates.io/crates/cano" title="Crates.io" aria-label="Crates.io">Crates.io</a>
+                <a href="https://docs.rs/cano" title="API Documentation" aria-label="API Docs">Docs.rs</a>
+            </div>
+        </div>
     </nav>
 
     <main class="main-content">
@@ -570,8 +578,8 @@ impl Node<WorkflowAction> for GeneratorNode {
     }
 
     // Phase 2: Execution
-    // Core logic. This phase is automatically retried on failure based on config.
-    // It receives the result from prep().
+    // Core logic. Infallible by design — returns ExecResult directly, not Result.
+    // If prep or post fail, the entire pipeline restarts; exec itself cannot fail.
     async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
         // Filter out odd numbers
         let even_numbers: Vec<u32> = prep_res.into_iter().filter(|&n| n % 2 == 0).collect();
@@ -664,8 +672,15 @@ impl Node<WorkflowAction> for GeneratorNode {
             </div>
 
             <div class="code-block">
-                <span class="code-block-label"><span class="label-icon">&#128230;</span> ETL Node</span>
+                <span class="code-block-label"><span class="label-icon">&#128230;</span> ETL Node (illustrative — Record, ProcessedRecord, and database helpers are application-defined)</span>
                 <pre><code class="language-rust">use cano::prelude::*;
+
+// Application-defined types and helpers (not part of Cano)
+// struct Record { ... }
+// struct ProcessedRecord { ... }
+// async fn load_from_database(src: &str) -> Result<Vec<Record>, CanoError> { ... }
+// async fn save_to_database(dst: &str, data: &[ProcessedRecord]) -> Result<(), CanoError> { ... }
+// fn process_record(r: Record) -> ProcessedRecord { ... }
 
 #[derive(Clone)]
 struct ETLNode {
