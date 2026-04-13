@@ -473,9 +473,9 @@ where
         debug!("Executing task through Node adapter");
 
         // Run a single attempt of prep → exec → post without the Node's own retry loop.
-        // Retries are driven by the outer `run_with_retries` in `execute_single_task`,
-        // which uses this method as the unit of work. Calling `Node::run` here would
-        // double-retry nodes (inner Node::run_with_retries + outer run_with_retries).
+        // Retries are driven by the outer `run_with_retries` in both `execute_single_task` and
+        // `execute_split_join`, which use this method as the unit of work. Calling `Node::run`
+        // here would double-retry nodes (inner Node::run_with_retries + outer run_with_retries).
         let prep_res = crate::node::Node::prep(self, store).await?;
         let exec_res = crate::node::Node::exec(self, prep_res).await;
         let state = crate::node::Node::post(self, store, exec_res).await?;
