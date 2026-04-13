@@ -135,5 +135,5 @@ name = "task_performance"
 harness = false
 
 [[bench]]
-name = "cow_performance"
+name = "store_shared_performance"
 harness = false

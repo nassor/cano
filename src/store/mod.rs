@@ -158,16 +158,17 @@ pub trait KeyValueStore: Send + Sync {
     /// Returns the value wrapped in an `Arc<TState>`, avoiding an extra clone
     /// when sharing data across tasks. Backends that store values as `Arc<TState>`
     /// internally (such as [`MemoryStore`]) return the existing pointer directly.
-    /// Other backends fall back to calling `get()` and wrapping the result in a
-    /// new `Arc`.
+    ///
+    /// Unlike [`get`](Self::get), this method does **not** require `TState: Clone`,
+    /// since the underlying value is never cloned — only the `Arc` pointer is.
+    /// Backends that cannot provide zero-copy access may store their values inside
+    /// an `Arc` internally and hand out clones of that pointer.
     ///
     /// [`MemoryStore`]: memory::MemoryStore
-    fn get_shared<TState: 'static + Send + Sync + Clone>(
+    fn get_shared<TState: 'static + Send + Sync>(
         &self,
         key: &str,
-    ) -> StoreResult<Arc<TState>> {
-        self.get::<TState>(key).map(Arc::new)
-    }
+    ) -> StoreResult<Arc<TState>>;
 
     /// Store a typed value by key.
     ///

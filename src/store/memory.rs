@@ -92,7 +92,7 @@ impl KeyValueStore for MemoryStore {
     ///
     /// Returns a reference-counted pointer to the stored value. The Arc is
     /// cloned (cheap reference-count bump) rather than creating a new allocation.
-    fn get_shared<TState: 'static + Send + Sync + Clone>(
+    fn get_shared<TState: 'static + Send + Sync>(
         &self,
         key: &str,
     ) -> StoreResult<Arc<TState>> {
@@ -771,6 +771,37 @@ mod tests {
         match result.unwrap_err() {
             StoreError::KeyNotFound(_) => (),
             _ => panic!("Expected KeyNotFound error"),
+        }
+    }
+
+    #[test]
+    fn test_get_shared_trait_bound_no_clone_required() {
+        // A generic helper that only requires `Send + Sync` (no `Clone`) on the
+        // stored type. This function would fail to compile if the
+        // `KeyValueStore::get_shared` trait method still carried a `Clone` bound.
+        fn shared_via_trait<T: 'static + Send + Sync, S: KeyValueStore>(
+            store: &S,
+            key: &str,
+        ) -> StoreResult<Arc<T>> {
+            store.get_shared::<T>(key)
+        }
+
+        // Positive path: for a `Clone` type we already put, the relaxed bound
+        // still retrieves the value correctly through the generic helper.
+        let store = MemoryStore::new();
+        store.put("n", 42u32).unwrap();
+        let got: Arc<u32> = shared_via_trait::<u32, _>(&store, "n").unwrap();
+        assert_eq!(*got, 42);
+
+        // Explicit non-`Clone` type: proves the trait bound is truly relaxed,
+        // not just "works for Clone types by coincidence". We cannot `put` a
+        // bare non-`Clone` value (put still requires Clone), so we assert the
+        // compile-time call is well-formed and the runtime returns KeyNotFound.
+        struct NotClone(#[allow(dead_code)] u32);
+        match shared_via_trait::<NotClone, _>(&store, "missing") {
+            Err(StoreError::KeyNotFound(_)) => (),
+            Err(e) => panic!("expected KeyNotFound for non-Clone type, got: {e:?}"),
+            Ok(_) => panic!("expected error for missing key"),
         }
     }
 }

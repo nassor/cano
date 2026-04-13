@@ -2,8 +2,8 @@ use cano::{MemoryStore, store::KeyValueStore};
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::sync::Arc;
 
-fn bench_cow_operations(c: &mut Criterion) {
-    let mut group = c.benchmark_group("cow_performance");
+fn bench_store_shared_operations(c: &mut Criterion) {
+    let mut group = c.benchmark_group("store_shared_performance");
 
     // Test with different data sizes
     // Small: 1KB
@@ -49,5 +49,5 @@ fn bench_cow_operations(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_cow_operations);
+criterion_group!(benches, bench_store_shared_operations);
 criterion_main!(benches);

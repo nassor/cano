@@ -354,7 +354,9 @@ where
                         let handle = tokio::spawn(async move {
                             execute_flow(workflow, initial_state, info).await;
                         });
-                        self.scheduler_tasks.write().await.push(handle);
+                        let mut tasks = self.scheduler_tasks.write().await;
+                        tasks.retain(|h| !h.is_finished());
+                        tasks.push(handle);
                     }
                 }
             }
@@ -371,16 +373,23 @@ where
         let timeout = Duration::from_secs(30);
         let start_time = tokio::time::Instant::now();
 
+        let mut result = Ok(());
         while self.has_running_flows().await {
             if start_time.elapsed() >= timeout {
-                return Err(CanoError::Workflow(
+                result = Err(CanoError::Workflow(
                     "Timeout waiting for workflows to complete".to_string(),
                 ));
+                break;
             }
             sleep(Duration::from_millis(100)).await;
         }
 
-        Ok(())
+        // Clear the command sender so subsequent stop()/trigger() calls report
+        // the documented "Scheduler not running" error instead of a channel-closed
+        // surprise, and allow clean restarts via a fresh start() call.
+        *self.command_tx.write().await = None;
+
+        result
     }
 
     /// Stop the scheduler and wait for all running workflows to complete
@@ -771,6 +780,104 @@ mod tests {
         let scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
         let status = scheduler.status("nonexistent").await;
         assert!(status.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_trigger_reaps_finished_handles() {
+        let timeout = Duration::from_secs(5);
+        let result = tokio::time::timeout(timeout, async {
+            let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
+            scheduler
+                .manual("manual_task", create_test_workflow(), TestState::Start)
+                .unwrap();
+
+            let mut scheduler_for_start = scheduler.clone();
+            let scheduler_handle = tokio::spawn(async move { scheduler_for_start.start().await });
+
+            // Let scheduler boot. Manual schedules push no loop handles.
+            sleep(Duration::from_millis(50)).await;
+            assert_eq!(scheduler.scheduler_tasks.read().await.len(), 0);
+
+            // Fire many triggers sequentially, letting each complete before the next.
+            // Without reaping, scheduler_tasks would grow to 20 entries.
+            for _ in 0..20 {
+                scheduler.trigger("manual_task").await.unwrap();
+                sleep(Duration::from_millis(30)).await;
+            }
+
+            // After reaping, only the most recent (finished) handle can still sit in the vec.
+            let in_flight = scheduler.scheduler_tasks.read().await.len();
+            assert!(
+                in_flight <= 1,
+                "expected reaping to bound in-flight handles to <=1, got {in_flight}"
+            );
+
+            // Sanity: workflow actually ran all 20 times.
+            let status = scheduler.status("manual_task").await.unwrap();
+            assert_eq!(status.run_count, 20);
+
+            scheduler.stop().await.unwrap();
+            let _ = tokio::time::timeout(Duration::from_secs(1), scheduler_handle).await;
+        })
+        .await;
+
+        assert!(result.is_ok(), "Test timed out");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_stop_and_trigger_after_shutdown_report_not_running() {
+        let timeout = Duration::from_secs(5);
+        let result = tokio::time::timeout(timeout, async {
+            let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
+            scheduler
+                .manual("manual_task", create_test_workflow(), TestState::Start)
+                .unwrap();
+
+            // Before start(), both calls must report "not running".
+            let err = scheduler.stop().await.unwrap_err();
+            assert!(
+                err.to_string().contains("Scheduler not running"),
+                "expected not-running error before start, got: {err}"
+            );
+            let err = scheduler.trigger("manual_task").await.unwrap_err();
+            assert!(
+                err.to_string().contains("Scheduler not running"),
+                "expected not-running error before start, got: {err}"
+            );
+
+            // Start, then stop, then wait for start() to actually return.
+            let mut scheduler_for_start = scheduler.clone();
+            let scheduler_handle = tokio::spawn(async move { scheduler_for_start.start().await });
+            sleep(Duration::from_millis(50)).await;
+            scheduler.stop().await.unwrap();
+            scheduler_handle.await.unwrap().unwrap();
+
+            // After start() returned, the API contract must hold again:
+            // subsequent stop()/trigger() must report "not running" (not a
+            // channel-closed error leak).
+            let err = scheduler.stop().await.unwrap_err();
+            assert!(
+                err.to_string().contains("Scheduler not running"),
+                "expected not-running error after shutdown, got: {err}"
+            );
+            let err = scheduler.trigger("manual_task").await.unwrap_err();
+            assert!(
+                err.to_string().contains("Scheduler not running"),
+                "expected not-running error after shutdown, got: {err}"
+            );
+
+            // And a clean restart must work.
+            let mut scheduler_for_restart = scheduler.clone();
+            let restart_handle = tokio::spawn(async move { scheduler_for_restart.start().await });
+            sleep(Duration::from_millis(50)).await;
+            scheduler.trigger("manual_task").await.unwrap();
+            sleep(Duration::from_millis(50)).await;
+            scheduler.stop().await.unwrap();
+            restart_handle.await.unwrap().unwrap();
+        })
+        .await;
+
+        assert!(result.is_ok(), "Test timed out");
     }
 
     #[tokio::test(flavor = "multi_thread")]
