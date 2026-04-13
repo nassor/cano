@@ -87,7 +87,7 @@ where
     TStore: KeyValueStore + 'static,
 {
     workflows: HashMap<String, FlowData<TState, TStore>>,
-    command_tx: Arc<RwLock<Option<mpsc::UnboundedSender<SchedulerCommand>>>>,
+    command_tx: Arc<RwLock<Option<mpsc::Sender<SchedulerCommand>>>>,
     running: Arc<RwLock<bool>>,
     scheduler_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
 }
@@ -231,7 +231,10 @@ where
     pub async fn start(&mut self) -> CanoResult<()> {
         *self.running.write().await = true;
 
-        let (tx, mut rx) = mpsc::unbounded_channel::<SchedulerCommand>();
+        // Capacity of 64: Stop is sent once, each Trigger enqueues one item.
+        // try_send in stop()/trigger() returns an error if this fills up rather
+        // than growing without bound.
+        let (tx, mut rx) = mpsc::channel::<SchedulerCommand>(64);
         *self.command_tx.write().await = Some(tx);
 
         let workflows = self.workflows.clone();
@@ -386,9 +389,9 @@ where
     ///
     /// - [`CanoError::Workflow`] — the scheduler is not running
     pub async fn stop(&self) -> CanoResult<()> {
-        // Send stop signal
+        // Send stop signal — non-blocking; fails immediately if channel is full or disconnected
         if let Some(tx) = self.command_tx.read().await.as_ref() {
-            tx.send(SchedulerCommand::Stop)
+            tx.try_send(SchedulerCommand::Stop)
                 .map_err(|e| CanoError::Workflow(format!("Failed to send stop: {}", e)))?;
         } else {
             return Err(CanoError::Workflow(
@@ -408,10 +411,10 @@ where
     /// # Errors
     ///
     /// - [`CanoError::Workflow`] — the scheduler is not running (i.e. [`Scheduler::start`]
-    ///   has not been called or has already returned)
+    ///   has not been called or has already returned), or the command queue is full
     pub async fn trigger(&self, id: &str) -> CanoResult<()> {
         if let Some(tx) = self.command_tx.read().await.as_ref() {
-            tx.send(SchedulerCommand::Trigger(id.to_string()))
+            tx.try_send(SchedulerCommand::Trigger(id.to_string()))
                 .map_err(|e| CanoError::Workflow(format!("Failed to trigger: {}", e)))?;
         } else {
             return Err(CanoError::Workflow(

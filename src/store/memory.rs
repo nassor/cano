@@ -96,19 +96,7 @@ impl KeyValueStore for MemoryStore {
         &self,
         key: &str,
     ) -> StoreResult<Arc<TState>> {
-        let data = self
-            .data
-            .read()
-            .map_err(|e| StoreError::lock_error(format!("Read lock poisoned: {e}")))?;
-
-        match data.get(key) {
-            Some(value) => value.clone().downcast::<TState>().map_err(|_| {
-                StoreError::type_mismatch(format!(
-                    "Cannot downcast value for key '{key}' to requested type"
-                ))
-            }),
-            None => Err(StoreError::key_not_found(key)),
-        }
+        MemoryStore::get_shared(self, key)
     }
 
     fn put<TState: 'static + Send + Sync + Clone>(
