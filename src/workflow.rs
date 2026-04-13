@@ -115,15 +115,29 @@ pub enum JoinStrategy {
     Any,
     /// Specific number of tasks must complete
     Quorum(usize),
-    /// Percentage of tasks must complete (0.0 to 1.0)
+    /// A fraction of tasks must complete successfully.
+    ///
+    /// The value must be in the range `(0.0, 1.0]`. A value of `1.0` means all tasks
+    /// must succeed (equivalent to [`All`](JoinStrategy::All)). Values outside this
+    /// range return [`CanoError::Configuration`] when the split executes.
     Percentage(f64),
     /// Accept partial results - continues after minimum tasks complete successfully,
     /// cancels remaining tasks, and returns both successes and errors
     /// Parameter is the minimum number of tasks that must complete successfully
     PartialResults(usize),
-    /// Accept whatever completes before timeout - cancels tasks that haven't completed
-    /// when timeout expires, and proceeds with completed tasks (successes and failures)
-    /// Requires timeout to be set in JoinConfig
+    /// Accept whatever completes before the deadline, then cancel the rest.
+    ///
+    /// The join succeeds as long as at least one task (success **or** failure) finished
+    /// before the timeout; the workflow continues with [`JoinConfig::join_state`].
+    /// If zero tasks complete before the deadline, the workflow errors with
+    /// [`CanoError::Workflow`].
+    ///
+    /// Unlike [`PartialResults`](JoinStrategy::PartialResults), which waits for a
+    /// minimum number of *successful* completions, `PartialTimeout` is purely
+    /// time-bounded and accepts any mixture of successes and failures.
+    ///
+    /// **Requires** a timeout to be set via [`JoinConfig::with_timeout`]; configuring
+    /// this strategy without a timeout returns [`CanoError::Configuration`] at runtime.
     PartialTimeout,
 }
 
@@ -1709,6 +1723,34 @@ mod tests {
     fn test_validate_valid_workflow() {
         let workflow = Workflow::new(MemoryStore::new())
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
+            .add_exit_state(TestState::Complete);
+        assert!(workflow.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_split_join_state_unregistered() {
+        // join_state points to a state that is neither registered nor an exit state
+        let workflow = Workflow::new(MemoryStore::new())
+            .register_split(
+                TestState::Start,
+                vec![SimpleTask::new(TestState::Join)],
+                JoinConfig::new(JoinStrategy::All, TestState::Process), // Process not registered
+            )
+            .add_exit_state(TestState::Complete);
+        let result = workflow.validate();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("join_state"));
+    }
+
+    #[test]
+    fn test_validate_split_join_state_as_exit_state() {
+        // join_state that is an exit state (valid)
+        let workflow = Workflow::new(MemoryStore::new())
+            .register_split(
+                TestState::Start,
+                vec![SimpleTask::new(TestState::Complete)],
+                JoinConfig::new(JoinStrategy::All, TestState::Complete),
+            )
             .add_exit_state(TestState::Complete);
         assert!(workflow.validate().is_ok());
     }
