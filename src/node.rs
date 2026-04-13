@@ -44,6 +44,17 @@
 //! - Nodes execute with minimal overhead for maximum throughput
 //! - Use async operations for I/O bound work
 //! - Implement retry logic in TaskConfig for resilience
+//!
+//! ## Retry semantics: direct use vs. workflow use
+//!
+//! | Call site | Retry behaviour |
+//! |-----------|----------------|
+//! | `node.run(store)` directly | Retries run **inside** `Node::run` via `run_with_retries` |
+//! | Node registered in a `Workflow` | Workflow dispatcher drives retries; `Task::run` (blanket impl) executes one `prep`→`exec`→`post` pass per attempt |
+//!
+//! Both paths honour the same [`TaskConfig`] from [`Node::config`]; retry count and delays are
+//! identical. The difference is **where** the retry loop lives. Do not call `Node::run` inside
+//! a hand-written `Task::run` override — that would execute the retry loop twice.
 
 use crate::error::CanoError;
 use crate::store::MemoryStore;

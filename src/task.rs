@@ -445,13 +445,20 @@ where
 /// - **[`Task`]**: Simple `run()` method
 /// - **[`crate::node::Node`]**: Three-phase lifecycle (`prep`, `exec`, `post`) + retry strategies
 ///
-/// The [`crate::node::Node::run`] method (which orchestrates the three phases) is used directly
-/// as the [`Task::run`] implementation, providing seamless interoperability.
-///
 /// This enables:
 /// - Using any Node wherever Tasks are expected
 /// - Mixing Tasks and Nodes in the same workflow
 /// - Gradual migration from simple Tasks to full-featured Nodes
+///
+/// # Retry contract
+///
+/// This blanket `Task::run` executes exactly **one** `prep` → `exec` → `post` pass with no
+/// retries. Retries are driven by the workflow dispatcher's outer `run_with_retries` call,
+/// which uses this single-pass method as the unit of work.
+///
+/// **Do not call [`crate::node::Node::run`] inside a `Task::run` override for a Node** —
+/// `Node::run` applies its own retry loop, so doing so would retry twice: once inside
+/// `Node::run` and again in the workflow dispatcher.
 #[async_trait]
 impl<TState, TStore, TParams, N> Task<TState, TStore, TParams> for N
 where
