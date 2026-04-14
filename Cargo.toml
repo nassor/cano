@@ -27,9 +27,12 @@ tracing = ["dep:tracing"]
 all = ["scheduler", "tracing"]
 
 [dev-dependencies]
+axum = "0.8"
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 reqwest = { version = "0.13", features = ["json"] }
 rig-core = "0.34"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 wide = "1.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 chrono = { version = "0.4", features = ["serde"] }
@@ -117,6 +120,10 @@ path = "examples/workflow_partial_results.rs"
 [[example]]
 name = "workflow_split_join"
 path = "examples/workflow_split_join.rs"
+
+[[example]]
+name = "workflow_on_request"
+path = "examples/workflow_on_request.rs"
 
 [[bench]]
 name = "workflow_performance"

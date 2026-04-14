@@ -279,6 +279,7 @@
                 <li><a href="#join-strategy-examples">Join Strategy Examples</a></li>
                 <li><a href="#comparison-table">Comparison Table</a></li>
                 <li><a href="#parallel-patterns">Common Parallel Patterns</a></li>
+                <li><a href="#workflow-on-request">Common: Workflow per HTTP Request</a></li>
                 <li><a href="#ad-exchange">Advanced: Ad Exchange</a></li>
             </ol>
         </details>
@@ -1359,6 +1360,180 @@ async fn main() -> Result<(), CanoError> {
             the same parallelism as running multiple concurrent workflow instances, but with simpler mental model, 
             better resource control, and type-safe state management.</p>
         </div>
+
+        <h2 id="workflow-on-request"><a href="#workflow-on-request" class="anchor-link" aria-hidden="true">#</a>Common Example: Workflow per HTTP Request</h2>
+        <p>
+            A very common pattern is triggering a workflow for every incoming HTTP request, running the FSM to completion,
+            and returning the results in the response. Cano workflows are cheap to construct — tasks are small <code>Clone</code>
+            structs wrapped in <code>Arc</code> internally — so building one per request is fast.
+        </p>
+
+        <div class="callout callout-warning">
+            <p><strong>⚠️ Store isolation:</strong> The <code>MemoryStore</code> is <code>Arc</code>-wrapped, so cloning a
+            workflow shares the same store. For request-scoped data you should create a <strong>fresh store per request</strong>
+            to avoid data leaking between concurrent requests.</p>
+        </div>
+
+        <h3 id="on-request-pattern"><a href="#on-request-pattern" class="anchor-link" aria-hidden="true">#</a>Pattern Overview</h3>
+        <div class="diagram-frame">
+            <p class="diagram-label">Workflow per Request</p>
+            <div class="mermaid">
+            sequenceDiagram
+                participant Client
+                participant Handler as Axum Handler
+                participant Store as MemoryStore
+                participant WF as Workflow FSM
+
+                Client->>Handler: POST /process {text}
+                Handler->>Store: put("input_text", text)
+                Handler->>WF: orchestrate(Parse)
+                WF->>Store: get / put during tasks
+                WF-->>Handler: Ok(Done)
+                Handler->>Store: get("word_count"), get("uppercased")
+                Handler-->>Client: 200 JSON response
+            </div>
+        </div>
+
+        <ol>
+            <li>Create a <strong>fresh <code>MemoryStore</code></strong> for each request.</li>
+            <li>Write request data into the store with <code>store.put()</code>.</li>
+            <li>Build the workflow using a <strong>factory function</strong> that receives the store.</li>
+            <li>Call <code>workflow.orchestrate(initial_state)</code> — this drives the FSM to an exit state.</li>
+            <li>Read the results from the store and return them in the HTTP response.</li>
+        </ol>
+
+        <h3 id="on-request-example"><a href="#on-request-example" class="anchor-link" aria-hidden="true">#</a>Full Example (Axum)</h3>
+        <pre><code class="language-rust">use async_trait::async_trait;
+use axum::http::StatusCode;
+use axum::routing::post;
+use axum::{Json, Router};
+use cano::prelude::*;
+use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+// ── States ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum TextPipelineState {
+    Parse,
+    Transform,
+    Done,
+}
+
+// ── Request / Response ──────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct ProcessRequest { text: String }
+
+#[derive(Serialize)]
+struct ProcessResponse {
+    original: String,
+    word_count: usize,
+    uppercased: String,
+}
+
+// ── Tasks ───────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+struct ParseTask;
+
+#[async_trait]
+impl Task&lt;TextPipelineState&gt; for ParseTask {
+    async fn run(
+        &amp;self,
+        store: &amp;MemoryStore,
+    ) -&gt; Result&lt;TaskResult&lt;TextPipelineState&gt;, CanoError&gt; {
+        let text: String = store.get("input_text")
+            .map_err(|e| CanoError::task_execution(format!("missing input: {e}")))?;
+
+        if text.trim().is_empty() {
+            return Err(CanoError::task_execution("input text is empty"));
+        }
+        store.put("validated_text", text)
+            .map_err(|e| CanoError::store(format!("{e}")))?;
+
+        Ok(TaskResult::Single(TextPipelineState::Transform))
+    }
+}
+
+#[derive(Clone)]
+struct TransformTask;
+
+#[async_trait]
+impl Task&lt;TextPipelineState&gt; for TransformTask {
+    async fn run(
+        &amp;self,
+        store: &amp;MemoryStore,
+    ) -&gt; Result&lt;TaskResult&lt;TextPipelineState&gt;, CanoError&gt; {
+        let text: String = store.get("validated_text")
+            .map_err(|e| CanoError::task_execution(format!("{e}")))?;
+
+        store.put("word_count", text.split_whitespace().count())
+            .map_err(|e| CanoError::store(format!("{e}")))?;
+        store.put("uppercased", text.to_uppercase())
+            .map_err(|e| CanoError::store(format!("{e}")))?;
+
+        Ok(TaskResult::Single(TextPipelineState::Done))
+    }
+}
+
+// ── Workflow factory ────────────────────────────────────────────────────
+
+fn build_workflow(store: MemoryStore) -&gt; Workflow&lt;TextPipelineState&gt; {
+    Workflow::new(store)
+        .register(TextPipelineState::Parse, ParseTask)
+        .register(TextPipelineState::Transform, TransformTask)
+        .add_exit_state(TextPipelineState::Done)
+        .with_timeout(Duration::from_secs(5))
+}
+
+// ── Handler ─────────────────────────────────────────────────────────────
+
+async fn process_handler(
+    Json(payload): Json&lt;ProcessRequest&gt;,
+) -&gt; Result&lt;Json&lt;ProcessResponse&gt;, StatusCode&gt; {
+    // Fresh store per request — full isolation
+    let store = MemoryStore::new();
+    store.put("input_text", payload.text.clone())
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let workflow = build_workflow(store.clone());
+    workflow.orchestrate(TextPipelineState::Parse).await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let word_count: usize = store.get("word_count")
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let uppercased: String = store.get("uppercased")
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(ProcessResponse {
+        original: payload.text,
+        word_count,
+        uppercased,
+    }))
+}
+
+// ── Main ────────────────────────────────────────────────────────────────
+
+#[tokio::main]
+async fn main() {
+    let app = Router::new().route("/process", post(process_handler));
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:4001").await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}</code></pre>
+
+        <div class="callout callout-tip">
+            <p><strong>💡 Tips:</strong></p>
+            <ul>
+                <li>Use <code>.with_timeout()</code> on the workflow to prevent hung requests from blocking indefinitely.</li>
+                <li>The final state returned by <code>orchestrate()</code> tells you which exit state was reached — use it for branching response logic (e.g., success vs. error states).</li>
+                <li>For read-heavy workloads with shared reference data, you can pre-populate a store and share it via <code>Arc</code>, using per-request keys to avoid collisions.</li>
+            </ul>
+        </div>
+
+        <p>
+            Run the full example with <code>cargo run --example workflow_on_request</code>.
+        </p>
 
         <h2 id="ad-exchange"><a href="#ad-exchange" class="anchor-link" aria-hidden="true">#</a>Advanced Example: Real-Time Ad Exchange Workflow</h2>
         <p>
