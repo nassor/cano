@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+
+{% block title %}Page Not Found - Cano Documentation{% endblock title %}
+{% block description %}The requested page could not be found in the Cano documentation.{% endblock description %}
+{% block og_title %}Page Not Found - Cano Documentation{% endblock og_title %}
+{% block og_description %}The requested page could not be found in the Cano documentation.{% endblock og_description %}
+
+{% block head_extra %}{% endblock head_extra %}
+{% block scripts_head %}{% endblock scripts_head %}
+
+{% block content %}
+<div class="not-found-content">
+    <div class="not-found-code animate-in">404</div>
+    <p class="not-found-message animate-in">This state has no registered handler.</p>
+    <p class="not-found-hint animate-in">The page you are looking for does not exist or has been moved.</p>
+    <a href="{{ get_url(path='@/_index.md') }}" class="not-found-link animate-in">Back to Home</a>
+
+    <div class="not-found-terminal animate-in">
+        <div><span class="prompt">$</span> cano orchestrate ./missing-page</div>
+        <div><span class="error">error[E0404]</span>: state not found in workflow</div>
+    </div>
+</div>
+{% endblock content %}

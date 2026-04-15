@@ -8,12 +8,16 @@
 [![Downloads](https://img.shields.io/crates/d/cano.svg)](https://crates.io/crates/cano)
 [![License](https://img.shields.io/crates/l/cano.svg)](https://github.com/nassor/cano/blob/main/LICENSE)
 [![CI](https://github.com/nassor/cano/workflows/CI/badge.svg)](https://github.com/nassor/cano/actions)
-[![Rust Version](https://img.shields.io/badge/rust-1.89%2B-blue.svg)](https://www.rust-lang.org)
+[![Rust Version](https://img.shields.io/badge/rust-1.95%2B-blue.svg)](https://www.rust-lang.org)
 
 <em>**Orchestrate complex async processes with finite state machines, parallel execution, and built-in scheduling.**</em>
+
+<em>Cano is still far from a 1.0 release. The API is subject to changes and may include breaking changes.</em>
+
 </div>
 
 # Overview
+
 Cano is a high-performance orchestration engine designed for building resilient, self-healing systems in Rust. Unlike simple task queues, Cano uses **Finite State Machines (FSM)** to define strict, type-safe transitions between processing steps.
 
 It excels at managing complex lifecycles where state transitions matter:
@@ -65,7 +69,7 @@ struct FetchSourceTask {
     source_id: u32,
 }
 
-#[async_trait::async_trait]
+#[cano::task]
 impl Task<FlowState> for FetchSourceTask {
     async fn run(&self, store: &MemoryStore) -> Result<TaskResult<FlowState>, CanoError> {
         // Simulate async work
@@ -131,4 +135,13 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or <http://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <http://opensource.org/licenses/MIT>)
+
+at your option.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.

@@ -1,0 +1,23 @@
+[package]
+name = "cano-macros"
+description = "Procedural macros for the cano workflow engine."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "../README.md"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "visit-mut"] }
+
+[dev-dependencies]
+cano = { path = "../cano" }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }

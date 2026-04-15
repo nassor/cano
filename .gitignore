@@ -1,6 +1,9 @@
 /target
 **/.DS_Store
 
+# Zola build output
+docs/public/
+
 # Avoid agent files
 .claude/
 CLAUDE.md
