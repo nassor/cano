@@ -80,7 +80,8 @@ impl Node<NegotiationAction> for SellerNode {
     }
 
     /// Preparation phase: Load current negotiation state or initialize if first round
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         match store.get::<NegotiationState>("negotiation_state") {
             Ok(state) => {
                 println!(
@@ -137,9 +138,10 @@ impl Node<NegotiationAction> for SellerNode {
     /// Post-processing phase: Store the updated offer for buyer evaluation
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<NegotiationAction, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         // Store the current negotiation state
         store.put("negotiation_state", exec_res.clone())?;
 
@@ -187,7 +189,8 @@ impl Node<NegotiationAction> for BuyerNode {
     }
 
     /// Preparation phase: Load the current negotiation state
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         let state: NegotiationState = store.get("negotiation_state").map_err(|e| {
             CanoError::preparation(format!("Failed to load negotiation state: {e}"))
         })?;
@@ -237,9 +240,10 @@ impl Node<NegotiationAction> for BuyerNode {
     /// Post-processing phase: Update state and determine next action
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<NegotiationAction, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         let (mut state, acceptable) = exec_res;
 
         if acceptable && state.current_offer <= state.buyer_budget {
@@ -281,7 +285,7 @@ async fn run_negotiation_workflow() -> Result<(), CanoError> {
     let store = MemoryStore::new();
 
     // Create a Workflow that handles the negotiation process
-    let workflow = Workflow::new(store.clone())
+    let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(NegotiationAction::StartSelling, SellerNode::new())
         .register(NegotiationAction::BuyerEvaluate, BuyerNode::new())
         .add_exit_states(vec![
@@ -388,9 +392,10 @@ mod tests {
     async fn test_seller_node_initialization() {
         let seller = SellerNode::new();
         let store = MemoryStore::new();
+        let res = Resources::new().insert("store", store.clone());
 
         // First run should initialize the negotiation
-        let result = seller.run(&store).await.unwrap();
+        let result = seller.run(&res).await.unwrap();
         assert_eq!(result, NegotiationAction::BuyerEvaluate);
 
         // Verify state was stored
@@ -413,7 +418,8 @@ mod tests {
             .unwrap();
 
         let buyer = BuyerNode::new();
-        let result = buyer.run(&store).await.unwrap();
+        let res = Resources::new().insert("store", store.clone());
+        let result = buyer.run(&res).await.unwrap();
 
         // Should accept the deal
         assert_eq!(result, NegotiationAction::Deal);
@@ -433,7 +439,8 @@ mod tests {
             .unwrap();
 
         let buyer = BuyerNode::new();
-        let result = buyer.run(&store).await.unwrap();
+        let res = Resources::new().insert("store", store.clone());
+        let result = buyer.run(&res).await.unwrap();
 
         // Should continue negotiating
         assert_eq!(result, NegotiationAction::StartSelling);
@@ -453,7 +460,8 @@ mod tests {
             .unwrap();
 
         let buyer = BuyerNode::new();
-        let result = buyer.run(&store).await.unwrap();
+        let res = Resources::new().insert("store", store.clone());
+        let result = buyer.run(&res).await.unwrap();
 
         // Should give up
         assert_eq!(result, NegotiationAction::NoDeal);
@@ -473,7 +481,8 @@ mod tests {
             .unwrap();
 
         let seller = SellerNode::new();
-        let result = seller.run(&store).await.unwrap();
+        let res = Resources::new().insert("store", store.clone());
+        let result = seller.run(&res).await.unwrap();
 
         assert_eq!(result, NegotiationAction::BuyerEvaluate);
 

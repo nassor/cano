@@ -3,7 +3,7 @@
 //!
 //! This example demonstrates the Scheduler scheduler with multiple flows:
 //! 1. **Hourly Report Workflow**: Runs every minute using cron scheduling
-//! 2. **Data Cleanup Workflow**: Runs every 10 seconds using interval scheduling  
+//! 2. **Data Cleanup Workflow**: Runs every 10 seconds using interval scheduling
 //! 3. **Manual Task Workflow**: Only runs when manually triggered
 //! 4. **One-time Setup Workflow**: Runs once at a specific time
 //!
@@ -54,7 +54,8 @@ impl Node<WorkflowAction> for ReportNode {
         TaskConfig::minimal()
     }
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         println!("📊 Preparing {} report...", self.report_type);
         store.put("report_start_time", Utc::now().to_rfc3339())?;
         Ok(format!("Preparing {} report", self.report_type))
@@ -69,9 +70,10 @@ impl Node<WorkflowAction> for ReportNode {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_result: Self::ExecResult,
     ) -> Result<WorkflowAction, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         println!("📊 Report completed: {}", exec_result);
         store.put("report_result", exec_result)?;
         Ok(WorkflowAction::Complete)
@@ -101,7 +103,8 @@ impl Node<WorkflowAction> for CleanupNode {
         TaskConfig::minimal()
     }
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         println!("🧹 Scanning for {} cleanup...", self.cleanup_type);
         store.put("cleanup_start", Utc::now().to_rfc3339())?;
         // Simulate finding items to clean
@@ -121,9 +124,10 @@ impl Node<WorkflowAction> for CleanupNode {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_result: Self::ExecResult,
     ) -> Result<WorkflowAction, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         println!("🧹 Cleanup completed: {} items removed", exec_result);
         store.put("cleanup_count", exec_result.to_string())?;
         Ok(WorkflowAction::Complete)
@@ -153,7 +157,8 @@ impl Node<WorkflowAction> for ManualTaskNode {
         TaskConfig::minimal()
     }
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         println!("⚡ Starting manual task: {}", self.task_name);
         store.put("manual_task_start", Utc::now().to_rfc3339())?;
         Ok(format!("Manual task: {}", self.task_name))
@@ -168,9 +173,10 @@ impl Node<WorkflowAction> for ManualTaskNode {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_result: Self::ExecResult,
     ) -> Result<WorkflowAction, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         println!("⚡ Manual task finished: {}", exec_result);
         store.put("manual_task_result", exec_result)?;
         Ok(WorkflowAction::Complete)
@@ -200,7 +206,8 @@ impl Node<WorkflowAction> for SetupNode {
         TaskConfig::minimal()
     }
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         println!("🔧 Preparing {} setup...", self.setup_type);
         store.put("setup_start", Utc::now().to_rfc3339())?;
         Ok(vec![
@@ -219,9 +226,10 @@ impl Node<WorkflowAction> for SetupNode {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_result: Self::ExecResult,
     ) -> Result<WorkflowAction, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         println!("🔧 Setup completed successfully: {}", exec_result);
         store.put("setup_complete", exec_result.to_string())?;
         Ok(WorkflowAction::Complete)
@@ -236,19 +244,19 @@ async fn main() -> CanoResult<()> {
     let store = MemoryStore::new();
 
     // Create flows
-    let hourly_report_flow = Workflow::new(store.clone())
+    let hourly_report_flow = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(WorkflowAction::Start, ReportNode::new("Hourly"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
-    let cleanup_flow = Workflow::new(store.clone())
+    let cleanup_flow = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(WorkflowAction::Start, CleanupNode::new("Temporary"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
-    let manual_flow = Workflow::new(store.clone())
+    let manual_flow = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(WorkflowAction::Start, ManualTaskNode::new("Data Migration"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
-    let setup_flow = Workflow::new(store.clone())
+    let setup_flow = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(WorkflowAction::Start, SetupNode::new("System"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 

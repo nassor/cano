@@ -86,7 +86,8 @@ struct ValidateRequestTask;
 
 #[async_trait]
 impl Task<AdExchangeState> for ValidateRequestTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<AdExchangeState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         let request: AdRequest = store.get("ad_request")?;
 
         println!("🔍 Validating request {}", request.request_id);
@@ -121,7 +122,8 @@ enum ContextTask {
 
 #[async_trait]
 impl Task<AdExchangeState> for ContextTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<AdExchangeState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         match self {
             ContextTask::FetchUser => {
                 println!("  👤 Fetching user profile...");
@@ -169,7 +171,8 @@ struct ContactDSPTask {
 
 #[async_trait]
 impl Task<AdExchangeState> for ContactDSPTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<AdExchangeState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         println!("  📡 Requesting bid from {}...", self.partner_id);
 
         // Simulate DSP bid request with varying latency
@@ -209,7 +212,8 @@ struct ScoreBidTask {
 
 #[async_trait]
 impl Task<AdExchangeState> for ScoreBidTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<AdExchangeState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         let bids: Vec<BidResponse> = store.get("bids")?;
 
         if self.bid_index >= bids.len() {
@@ -258,7 +262,8 @@ struct RunAuctionTask;
 
 #[async_trait]
 impl Task<AdExchangeState> for RunAuctionTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<AdExchangeState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         println!("\n  🎯 Running auction...");
 
         let start = tokio::time::Instant::now();
@@ -319,7 +324,8 @@ enum TrackingTask {
 
 #[async_trait]
 impl Task<AdExchangeState> for TrackingTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<AdExchangeState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         match self {
             TrackingTask::LogAnalytics => {
                 println!("  📈 Logging to analytics...");
@@ -367,7 +373,8 @@ struct BuildResponseTask;
 
 #[async_trait]
 impl Task<AdExchangeState> for BuildResponseTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<AdExchangeState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         println!("\n  📦 Building response...");
 
         let request: AdRequest = store.get("ad_request")?;
@@ -399,7 +406,7 @@ struct NoFillTask;
 
 #[async_trait]
 impl Task<AdExchangeState> for NoFillTask {
-    async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<AdExchangeState>, CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
         println!("\n⚠️  No Fill Response");
         println!("Unable to complete ad request due to timeout or insufficient data.\n");
         Ok(TaskResult::Single(AdExchangeState::Complete))
@@ -415,7 +422,7 @@ struct InvalidResponseTask;
 
 #[async_trait]
 impl Task<AdExchangeState> for InvalidResponseTask {
-    async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<AdExchangeState>, CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
         println!("\n⚠️  Invalid Request");
         println!("Request validation failed.\n");
         Ok(TaskResult::Single(AdExchangeState::Complete))
@@ -435,7 +442,8 @@ enum ErrorTrackingTask {
 
 #[async_trait]
 impl Task<AdExchangeState> for ErrorTrackingTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<AdExchangeState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         match self {
             ErrorTrackingTask::LogError => {
                 println!("  📝 Logging error...");
@@ -467,7 +475,7 @@ impl Task<AdExchangeState> for ErrorTrackingTask {
 // ============================================================================
 
 fn create_ad_exchange_workflow(store: MemoryStore) -> Workflow<AdExchangeState> {
-    Workflow::new(store.clone())
+    Workflow::new(Resources::new().insert("store", store.clone()))
         // Phase 1: Validation
         .register(AdExchangeState::Start, ValidateRequestTask)
         // Invalid Response Handler
@@ -512,8 +520,7 @@ fn create_ad_exchange_workflow(store: MemoryStore) -> Workflow<AdExchangeState> 
                 },
             ],
             JoinConfig::new(JoinStrategy::PartialTimeout, AdExchangeState::ScoreBids)
-                .with_timeout(Duration::from_millis(200))
-                .with_store_partial_results(true),
+                .with_timeout(Duration::from_millis(200)),
         )
         // Phase 4: Bid Scoring - SPLIT 3 (All Strategy)
         // Score all received bids within 50ms timeout
@@ -597,8 +604,20 @@ async fn main() -> Result<(), CanoError> {
             eprintln!("❌ Workflow error: {}", e);
             println!("\n⚠️  Handling as No Fill due to error\n");
 
-            // Execute ErrorTracking state explicitly
-            workflow.orchestrate(AdExchangeState::ErrorTracking).await?
+            // Build a fresh workflow for the error recovery path
+            let store2 = MemoryStore::new();
+            store2.put(
+                "ad_request",
+                AdRequest {
+                    request_id: "req_abc123".to_string(),
+                    placement_id: "placement_728x90_top".to_string(),
+                    floor_price: 1.50,
+                },
+            )?;
+            let workflow2 = create_ad_exchange_workflow(store2);
+            workflow2
+                .orchestrate(AdExchangeState::ErrorTracking)
+                .await?
         }
     };
 

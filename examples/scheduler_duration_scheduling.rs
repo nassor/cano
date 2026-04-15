@@ -38,7 +38,7 @@ impl Node<TaskState> for DailyTask {
     type PrepResult = ();
     type ExecResult = ();
 
-    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
         Ok(())
     }
 
@@ -51,7 +51,7 @@ impl Node<TaskState> for DailyTask {
 
     async fn post(
         &self,
-        _store: &MemoryStore,
+        _res: &Resources,
         _result: Self::ExecResult,
     ) -> Result<TaskState, CanoError> {
         Ok(TaskState::Complete)
@@ -66,7 +66,7 @@ impl Node<TaskState> for HourlyTask {
     type PrepResult = ();
     type ExecResult = ();
 
-    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
         Ok(())
     }
 
@@ -79,7 +79,7 @@ impl Node<TaskState> for HourlyTask {
 
     async fn post(
         &self,
-        _store: &MemoryStore,
+        _res: &Resources,
         _result: Self::ExecResult,
     ) -> Result<TaskState, CanoError> {
         Ok(TaskState::Complete)
@@ -94,7 +94,7 @@ impl Node<TaskState> for FrequentTask {
     type PrepResult = ();
     type ExecResult = ();
 
-    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
         Ok(())
     }
 
@@ -107,7 +107,7 @@ impl Node<TaskState> for FrequentTask {
 
     async fn post(
         &self,
-        _store: &MemoryStore,
+        _res: &Resources,
         _result: Self::ExecResult,
     ) -> Result<TaskState, CanoError> {
         Ok(TaskState::Complete)
@@ -123,15 +123,15 @@ async fn main() -> CanoResult<()> {
     let store = MemoryStore::new();
 
     // Create workflows with different durations
-    let daily_flow = Workflow::new(store.clone())
+    let daily_flow = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(TaskState::Start, DailyTask)
         .add_exit_state(TaskState::Complete);
 
-    let hourly_flow = Workflow::new(store.clone())
+    let hourly_flow = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(TaskState::Start, HourlyTask)
         .add_exit_state(TaskState::Complete);
 
-    let frequent_flow = Workflow::new(store.clone())
+    let frequent_flow = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(TaskState::Start, FrequentTask)
         .add_exit_state(TaskState::Complete);
 

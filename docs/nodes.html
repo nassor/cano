@@ -568,7 +568,7 @@ impl Node<WorkflowAction> for GeneratorNode {
     // Phase 1: Preparation
     // Load data, validate inputs, or generate initial state.
     // This runs once and is not retried automatically.
-    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
         let mut rng = rand::rng();
         let size = rng.random_range(25..=150);
         let numbers: Vec<u32> = (0..size).map(|_| rng.random_range(1..=1000)).collect();
@@ -592,10 +592,11 @@ impl Node<WorkflowAction> for GeneratorNode {
     // It receives the result from exec().
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<WorkflowAction, CanoError> {
-        // Store the result in the shared memory store
+        // Retrieve the store from resources and write results
+        let store = res.get::<MemoryStore, str>("store")?;
         store.put("filtered_numbers", exec_res)?;
 
         println!("✓ Generator node completed");
@@ -699,7 +700,7 @@ impl Node<State> for ETLNode {
     }
 
     // Extract: Load data from source
-    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
         println!("📥 Extracting from: {}", self.source);
 
         let records = load_from_database(&self.source).await?;
@@ -718,11 +719,12 @@ impl Node<State> for ETLNode {
     }
 
     // Load: Save to destination
-    async fn post(&self, store: &MemoryStore, processed: Self::ExecResult)
+    async fn post(&self, res: &Resources, processed: Self::ExecResult)
         -> Result<State, CanoError> {
         println!("📤 Loading to: {}", self.destination);
 
         save_to_database(&self.destination, &processed).await?;
+        let store = res.get::<MemoryStore, str>("store")?;
         store.put("processed_count", processed.len())?;
 
         Ok(State::Complete)
@@ -761,7 +763,8 @@ impl Node<NegotiationState> for SellerNode {
     type PrepResult = NegotiationState;
     type ExecResult = NegotiationState;
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         // Load negotiation state or initialize
         match store.get::<NegotiationState>("negotiation") {
             Ok(state) => Ok(state),
@@ -779,8 +782,9 @@ impl Node<NegotiationState> for SellerNode {
         state
     }
 
-    async fn post(&self, store: &MemoryStore, state: Self::ExecResult)
+    async fn post(&self, res: &Resources, state: Self::ExecResult)
         -> Result<NegotiationState, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         store.put("negotiation", state.clone())?;
         Ok(NegotiationState::BuyerEvaluate)
     }
@@ -811,7 +815,8 @@ impl Node<State> for BookAnalyzerNode {
     }
 
     // Prep: Download book
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         let url: String = store.get("book_url")?;
         println!("📥 Downloading book from: {}", url);
 
@@ -839,11 +844,12 @@ impl Node<State> for BookAnalyzerNode {
     }
 
     // Post: Store results
-    async fn post(&self, store: &MemoryStore, analysis: Self::ExecResult)
+    async fn post(&self, res: &Resources, analysis: Self::ExecResult)
         -> Result<State, CanoError> {
         println!("📊 Analysis complete: {} words, {} prepositions",
                  analysis.word_count, analysis.preposition_count);
 
+        let store = res.get::<MemoryStore, str>("store")?;
         store.put("analysis", analysis)?;
         Ok(State::Complete)
     }
@@ -869,7 +875,7 @@ impl Node<State> for GeneratorNode {
     type PrepResult = ();
     type ExecResult = Vec<u32>;
 
-    async fn prep(&self, _: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _: &Resources) -> Result<Self::PrepResult, CanoError> {
         Ok(())
     }
 
@@ -878,8 +884,9 @@ impl Node<State> for GeneratorNode {
         (0..100).map(|_| rng.random_range(1..=1000)).collect()
     }
 
-    async fn post(&self, store: &MemoryStore, data: Self::ExecResult)
+    async fn post(&self, res: &Resources, data: Self::ExecResult)
         -> Result<State, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         store.put("generated_data", data)?;
         Ok(State::Filter)
     }
@@ -894,7 +901,8 @@ impl Node<State> for FilterNode {
     type PrepResult = Vec<u32>;
     type ExecResult = Vec<u32>;
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         store.get("generated_data")
     }
 
@@ -902,8 +910,9 @@ impl Node<State> for FilterNode {
         data.into_iter().filter(|&x| x % 2 == 0).collect()
     }
 
-    async fn post(&self, store: &MemoryStore, filtered: Self::ExecResult)
+    async fn post(&self, res: &Resources, filtered: Self::ExecResult)
         -> Result<State, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         store.put("filtered_data", filtered)?;
         Ok(State::Aggregate)
     }
@@ -918,7 +927,8 @@ impl Node<State> for AggregatorNode {
     type PrepResult = Vec<u32>;
     type ExecResult = Stats;
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         store.get("filtered_data")
     }
 
@@ -930,15 +940,16 @@ impl Node<State> for AggregatorNode {
         }
     }
 
-    async fn post(&self, store: &MemoryStore, stats: Self::ExecResult)
+    async fn post(&self, res: &Resources, stats: Self::ExecResult)
         -> Result<State, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         store.put("final_stats", stats)?;
         Ok(State::Complete)
     }
 }
 
 // Combine in workflow
-let workflow = Workflow::new(store.clone())
+let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
     .register(State::Start, GeneratorNode)
     .register(State::Filter, FilterNode)
     .register(State::Aggregate, AggregatorNode)

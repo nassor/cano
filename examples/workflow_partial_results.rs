@@ -47,7 +47,8 @@ impl ApiTask {
 
 #[async_trait]
 impl Task<ApiState> for ApiTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<ApiState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<ApiState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         println!(
             "Task {}: Starting (latency: {}ms)",
             self.id, self.latency_ms
@@ -91,13 +92,11 @@ async fn main() -> Result<(), CanoError> {
 
     // Configure the join strategy:
     // - PartialResults(2): Proceed as soon as 2 tasks complete successfully
-    // - store_partial_results(true): Keep track of what happened
-    let join_config = JoinConfig::new(JoinStrategy::PartialResults(2), ApiState::Complete)
-        .with_store_partial_results(true);
+    let join_config = JoinConfig::new(JoinStrategy::PartialResults(2), ApiState::Complete);
 
     let store = MemoryStore::new();
 
-    let workflow = Workflow::new(store.clone())
+    let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
         .register_split(ApiState::Start, tasks, join_config)
         .add_exit_state(ApiState::Complete)
         .add_exit_state(ApiState::Failed);
@@ -113,15 +112,13 @@ async fn main() -> Result<(), CanoError> {
         duration, result
     );
 
-    // Check statistics from the store
-    let successes: usize = store.get("split_successes_count").unwrap_or(0);
-    let errors: usize = store.get("split_errors_count").unwrap_or(0);
-    let cancelled: usize = store.get("split_cancelled_count").unwrap_or(0);
+    // Check individual results stored by successful tasks
+    let result_1 = store.get::<String>("result_1").ok();
+    let result_2 = store.get::<String>("result_2").ok();
 
-    println!("\nStatistics:");
-    println!("- Successes: {}", successes);
-    println!("- Errors:    {}", errors);
-    println!("- Cancelled: {}", cancelled);
+    println!("\nResults:");
+    println!("- Task 1: {:?}", result_1);
+    println!("- Task 2: {:?}", result_2);
 
     // Verify results
     // We expect Task 1 (success) and Task 2 (success) to complete.
@@ -133,6 +130,7 @@ async fn main() -> Result<(), CanoError> {
     // So at 500ms we have 2 successes.
     // The workflow should proceed.
 
+    let successes = [result_1, result_2].iter().filter(|r| r.is_some()).count();
     if successes >= 2 {
         println!("\nSUCCESS: Workflow behaved as expected (waited for successes).");
     } else {

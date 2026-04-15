@@ -1,7 +1,5 @@
 use async_trait::async_trait;
-use cano::store::KeyValueStore;
-use cano::task::{DefaultTaskParams, TaskConfig, TaskResult};
-use cano::{CanoError, MemoryStore, Task};
+use cano::prelude::*;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 /// Simple do-nothing task for benchmarking
@@ -27,7 +25,7 @@ enum TestState {
 
 #[async_trait]
 impl Task<TestState> for DoNothingTask {
-    async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
         // Do nothing - minimal overhead
         Ok(TaskResult::Single(self.next_state.clone()))
     }
@@ -51,7 +49,9 @@ impl CpuIntensiveTask {
 
 #[async_trait]
 impl Task<TestState> for CpuIntensiveTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
+
         // Generate some data to process
         let data: Vec<u64> = (0..self.iterations as u64).collect();
 
@@ -82,7 +82,9 @@ impl IoSimulationTask {
 
 #[async_trait]
 impl Task<TestState> for IoSimulationTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
+
         // Simulate I/O preparation delay
         tokio::time::sleep(tokio::time::Duration::from_millis(self.delay_ms)).await;
         let prepared_data = "prepared_data".to_string();
@@ -123,7 +125,7 @@ impl Task<TestState> for ConfigurableTask {
         self.config.clone()
     }
 
-    async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
         if self.should_fail {
             Err(CanoError::TaskExecution("Intentional failure".to_string()))
         } else {
@@ -222,9 +224,9 @@ fn bench_task_execution(c: &mut Criterion) {
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let store = MemoryStore::new();
+                        let res = Resources::new().insert("store", MemoryStore::new());
                         for task in &tasks {
-                            let _result = task.run(&store).await;
+                            let _result = task.run(&res).await;
                         }
                     });
             },
@@ -238,9 +240,9 @@ fn bench_task_execution(c: &mut Criterion) {
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let store = MemoryStore::new();
+                        let res = Resources::new().insert("store", MemoryStore::new());
                         for _i in 0..task_count {
-                            let _result = task.run(&store).await;
+                            let _result = task.run(&res).await;
                         }
                     });
             },
@@ -258,9 +260,9 @@ fn bench_task_execution(c: &mut Criterion) {
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
-                            let store = MemoryStore::new();
+                            let res = Resources::new().insert("store", MemoryStore::new());
                             for task in &tasks {
-                                let _result = task.run(&store).await;
+                                let _result = task.run(&res).await;
                             }
                         });
                 },
@@ -279,83 +281,14 @@ fn bench_task_execution(c: &mut Criterion) {
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
-                            let store = MemoryStore::new();
+                            let res = Resources::new().insert("store", MemoryStore::new());
                             for task in &tasks {
-                                let _result = task.run(&store).await;
+                                let _result = task.run(&res).await;
                             }
                         });
                 },
             );
         }
-    }
-
-    group.finish();
-}
-
-/// Benchmark task configuration and parameter setting
-fn bench_task_configuration(c: &mut Criterion) {
-    let mut group = c.benchmark_group("task_configuration");
-
-    let sizes = vec![1, 10, 100, 1000];
-
-    for &size in &sizes {
-        group.bench_with_input(
-            BenchmarkId::new("parameter_setting", size),
-            &size,
-            |b, &size| {
-                let mut tasks: Vec<DoNothingTask> = (0..size)
-                    .map(|i| DoNothingTask::new(TestState::Task(i)))
-                    .collect();
-
-                let params = DefaultTaskParams::new();
-
-                b.iter(|| {
-                    for task in &mut tasks {
-                        task.set_params(params.clone());
-                    }
-                });
-            },
-        );
-
-        group.bench_with_input(
-            BenchmarkId::new("task_config_creation", size),
-            &size,
-            |b, &size| {
-                let tasks: Vec<DoNothingTask> = (0..size)
-                    .map(|i| DoNothingTask::new(TestState::Task(i)))
-                    .collect();
-
-                b.iter(|| {
-                    for task in &tasks {
-                        let _config = task.config();
-                    }
-                });
-            },
-        );
-
-        group.bench_with_input(
-            BenchmarkId::new("minimal_config_creation", size),
-            &size,
-            |b, &size| {
-                b.iter(|| {
-                    for _i in 0..size {
-                        let _config = TaskConfig::minimal();
-                    }
-                });
-            },
-        );
-
-        group.bench_with_input(
-            BenchmarkId::new("default_config_creation", size),
-            &size,
-            |b, &size| {
-                b.iter(|| {
-                    for _i in 0..size {
-                        let _config = TaskConfig::default();
-                    }
-                });
-            },
-        );
     }
 
     group.finish();
@@ -534,17 +467,19 @@ fn bench_concurrent_task_execution(c: &mut Criterion) {
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let store = std::sync::Arc::new(MemoryStore::new());
+                        let res = std::sync::Arc::new(
+                            Resources::new().insert("store", MemoryStore::new()),
+                        );
                         let chunk_size = std::cmp::max(1, task_count / concurrency);
 
                         let handles: Vec<_> = tasks
                             .chunks(chunk_size)
                             .map(|chunk| {
                                 let chunk = chunk.to_vec();
-                                let store = store.clone();
+                                let res = res.clone();
                                 tokio::spawn(async move {
                                     for task in chunk {
-                                        let _result = task.run(&*store).await;
+                                        let _result = task.run(&*res).await;
                                     }
                                 })
                             })
@@ -570,17 +505,19 @@ fn bench_concurrent_task_execution(c: &mut Criterion) {
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
-                            let store = std::sync::Arc::new(MemoryStore::new());
+                            let res = std::sync::Arc::new(
+                                Resources::new().insert("store", MemoryStore::new()),
+                            );
                             let chunk_size = std::cmp::max(1, small_count / concurrency);
 
                             let handles: Vec<_> = tasks
                                 .chunks(chunk_size)
                                 .map(|chunk| {
                                     let chunk = chunk.to_vec();
-                                    let store = store.clone();
+                                    let res = res.clone();
                                     tokio::spawn(async move {
                                         for task in chunk {
-                                            let _result = task.run(&*store).await;
+                                            let _result = task.run(&*res).await;
                                         }
                                     })
                                 })
@@ -615,9 +552,9 @@ fn bench_task_dispatch(c: &mut Criterion) {
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let store = MemoryStore::new();
+                        let res = Resources::new().insert("store", MemoryStore::new());
                         for task in &tasks {
-                            let _result = task.run(&store).await;
+                            let _result = task.run(&res).await;
                         }
                     });
             },
@@ -635,9 +572,9 @@ fn bench_task_dispatch(c: &mut Criterion) {
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let store = MemoryStore::new();
+                        let res = Resources::new().insert("store", MemoryStore::new());
                         for task in &tasks {
-                            let _result = task.run(&store).await;
+                            let _result = task.run(&res).await;
                         }
                     });
             },
@@ -658,9 +595,9 @@ fn bench_task_dispatch(c: &mut Criterion) {
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let store = MemoryStore::new();
+                        let res = Resources::new().insert("store", MemoryStore::new());
                         for task in &tasks {
-                            let _result = task.run(&store).await;
+                            let _result = task.run(&res).await;
                         }
                     });
             },
@@ -683,9 +620,9 @@ fn bench_task_config_scenarios(c: &mut Criterion) {
 
         b.to_async(tokio::runtime::Runtime::new().unwrap())
             .iter(|| async {
-                let store = MemoryStore::new();
+                let res = Resources::new().insert("store", MemoryStore::new());
                 for task in &tasks {
-                    let _result = task.run(&store).await;
+                    let _result = task.run(&res).await;
                 }
             });
     });
@@ -697,9 +634,9 @@ fn bench_task_config_scenarios(c: &mut Criterion) {
 
         b.to_async(tokio::runtime::Runtime::new().unwrap())
             .iter(|| async {
-                let store = MemoryStore::new();
+                let res = Resources::new().insert("store", MemoryStore::new());
                 for task in &tasks {
-                    let _result = task.run(&store).await;
+                    let _result = task.run(&res).await;
                 }
             });
     });
@@ -717,9 +654,9 @@ fn bench_task_config_scenarios(c: &mut Criterion) {
 
         b.to_async(tokio::runtime::Runtime::new().unwrap())
             .iter(|| async {
-                let store = MemoryStore::new();
+                let res = Resources::new().insert("store", MemoryStore::new());
                 for task in &tasks {
-                    let _result = task.run(&store).await;
+                    let _result = task.run(&res).await;
                 }
             });
     });
@@ -737,12 +674,84 @@ fn bench_task_config_scenarios(c: &mut Criterion) {
 
         b.to_async(tokio::runtime::Runtime::new().unwrap())
             .iter(|| async {
-                let store = MemoryStore::new();
+                let res = Resources::new().insert("store", MemoryStore::new());
                 for task in &tasks {
-                    let _result = task.run(&store).await;
+                    let _result = task.run(&res).await;
                 }
             });
     });
+
+    group.finish();
+}
+
+/// States used exclusively by the run_bare delegation benchmark.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum BareState {
+    Done,
+}
+
+/// Task that overrides `run()` directly — the baseline with no extra call hop.
+struct DirectRunTask;
+
+#[async_trait]
+impl Task<BareState> for DirectRunTask {
+    async fn run(&self, _res: &Resources) -> Result<TaskResult<BareState>, CanoError> {
+        Ok(TaskResult::Single(BareState::Done))
+    }
+}
+
+/// Task that overrides only `run_bare()` — exercises the default `run()` delegation path.
+struct ViaRunBareTask;
+
+#[async_trait]
+impl Task<BareState> for ViaRunBareTask {
+    async fn run_bare(&self) -> Result<TaskResult<BareState>, CanoError> {
+        Ok(TaskResult::Single(BareState::Done))
+    }
+}
+
+/// Benchmark comparing `run()` called directly versus via the `run_bare()` delegation default.
+///
+/// Both tasks perform identical trivial work so any timing difference reflects only the
+/// extra async call hop introduced by the default `run()` → `run_bare()` delegation.
+fn bench_task_run_bare(c: &mut Criterion) {
+    let mut group = c.benchmark_group("task_run_bare");
+
+    let iteration_counts = vec![1, 10, 100, 1000];
+
+    for &count in &iteration_counts {
+        group.bench_with_input(
+            BenchmarkId::new("direct_run", count),
+            &count,
+            |b, &count| {
+                let task = DirectRunTask;
+
+                b.to_async(tokio::runtime::Runtime::new().unwrap())
+                    .iter(|| async {
+                        let res = Resources::new();
+                        for _i in 0..count {
+                            let _result = task.run(&res).await;
+                        }
+                    });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("via_run_bare", count),
+            &count,
+            |b, &count| {
+                let task = ViaRunBareTask;
+
+                b.to_async(tokio::runtime::Runtime::new().unwrap())
+                    .iter(|| async {
+                        let res = Resources::new();
+                        for _i in 0..count {
+                            let _result = task.run(&res).await;
+                        }
+                    });
+            },
+        );
+    }
 
     group.finish();
 }
@@ -751,11 +760,11 @@ criterion_group!(
     benches,
     bench_task_creation,
     bench_task_execution,
-    bench_task_configuration,
     bench_task_memory_patterns,
     bench_task_cloning,
     bench_concurrent_task_execution,
     bench_task_dispatch,
-    bench_task_config_scenarios
+    bench_task_config_scenarios,
+    bench_task_run_bare
 );
 criterion_main!(benches);

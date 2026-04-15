@@ -400,10 +400,12 @@
         </p>
 
         <p>
-            <code>Workflow</code> is generic over the store type:
-            <code>Workflow&lt;TState, TStore = MemoryStore&gt;</code>. The same applies to
-            <code>Scheduler&lt;TState, TStore = MemoryStore&gt;</code>. Unless you need a custom
-            backend, the default is sufficient.
+            Starting with the resources-based API, <code>MemoryStore</code> is no longer passed
+            directly into tasks. Instead, you register it inside a <code>Resources</code> dictionary
+            and retrieve it from tasks and nodes with
+            <code>res.get::&lt;MemoryStore, str&gt;("store")?</code>. This makes the store just one
+            of many named dependencies a workflow can carry, alongside database pools, HTTP clients,
+            configuration, or any other type that implements the <code>Resource</code> trait.
         </p>
 
         <div class="callout callout-info">
@@ -614,7 +616,9 @@ assert!(Arc::ptr_eq(&handle_a, &handle_b));</code></pre>
         <h2 id="workflow-usage">Store in a Workflow</h2>
 
         <p>
-            Pass a store instance to <code>Workflow::new()</code>. The store is shared by reference
+            Register the store inside a <code>Resources</code> dictionary and pass it to
+            <code>Workflow::new()</code>. Each task retrieves the store via
+            <code>res.get::&lt;MemoryStore, str&gt;("store")?</code>, so the same handle is shared
             across all registered tasks for the duration of a single <code>orchestrate()</code> call.
         </p>
 
@@ -633,14 +637,16 @@ async fn main() -> Result<(), CanoError> {
     // Pre-populate before the workflow starts
     store.put("batch_size", 256usize)?;
 
-    let workflow = Workflow::new(store.clone())
-        .register(Stage::Ingest, |store: &MemoryStore| async move {
+    let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+        .register(Stage::Ingest, |res: &Resources| async move {
+            let store = res.get::<MemoryStore, str>("store")?;
             let batch: usize = store.get("batch_size")?;
             let records: Vec<u32> = (0..batch as u32).collect();
             store.put("records", records)?;
             Ok(TaskResult::Single(Stage::Transform))
         })
-        .register(Stage::Transform, |store: &MemoryStore| async move {
+        .register(Stage::Transform, |res: &Resources| async move {
+            let store = res.get::<MemoryStore, str>("store")?;
             let records: Vec<u32> = store.get("records")?;
             let transformed: Vec<u32> = records.into_iter().map(|x| x * 2).collect();
             store.put("result", transformed)?;
@@ -740,12 +746,15 @@ impl KeyValueStore for NamespacedStore {
     }
 }
 
-// Use it like any other store
+// Use it like any other store — register it in Resources with your own key
 let store = NamespacedStore::new("pipeline_v2");
 store.put("status", "running".to_string())?;
 
-let workflow = Workflow::new(store.clone())
-    // ... register tasks ...
+let workflow = Workflow::new(
+        Resources::new().insert("namespaced_store", store.clone()),
+    )
+    // ... register tasks that retrieve it via
+    //     res.get::<NamespacedStore, str>("namespaced_store")? ...
     ;</code></pre>
         </div>
 
@@ -753,8 +762,10 @@ let workflow = Workflow::new(store.clone())
             <div class="callout-label">Trait object note</div>
             <p>
                 <code>KeyValueStore</code> is not object-safe due to its generic methods.
-                You cannot store it as <code>Box&lt;dyn KeyValueStore&gt;</code> directly. Use a concrete type parameter
-                (<code>Workflow&lt;S, MyStore&gt;</code>) or wrap the store in a newtype that exposes a non-generic API.
+                You cannot store it as <code>Box&lt;dyn KeyValueStore&gt;</code> directly. Register a
+                concrete store type in <code>Resources</code> and retrieve it with its concrete type
+                (<code>res.get::&lt;MyStore, _&gt;("my_store")?</code>), or wrap the store in a newtype
+                that exposes a non-generic API.
             </p>
         </div>
 

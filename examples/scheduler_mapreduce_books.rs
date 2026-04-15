@@ -291,7 +291,8 @@ struct InitBatchTask {
 
 #[async_trait]
 impl Task<BookAnalysisState> for InitBatchTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<BookAnalysisState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         println!(
             "\n🎯 [{0}] Initializing batch with {1} books",
             self.batch_name,
@@ -316,7 +317,8 @@ struct DownloadTask {
 
 #[async_trait]
 impl Task<BookAnalysisState> for DownloadTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<BookAnalysisState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         match download_book(
             self.book_id,
             self.title.clone(),
@@ -343,7 +345,8 @@ struct AnalyzeTask {
 
 #[async_trait]
 impl Task<BookAnalysisState> for AnalyzeTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<BookAnalysisState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         let book: Book = store
             .get(&format!("book_{}", self.book_id))
             .map_err(|e| CanoError::task_execution(format!("Book not found: {e}")))?;
@@ -370,7 +373,8 @@ struct SummarizeBatchTask {
 
 #[async_trait]
 impl Task<BookAnalysisState> for SummarizeBatchTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<BookAnalysisState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         let batch_name: String = store.get("batch_name")?;
         let books: Vec<BookMetadata> = store.get("book_metadata")?;
 
@@ -428,7 +432,7 @@ fn create_batch_workflow(
     books: Vec<BookMetadata>,
     global_results: GlobalResults,
 ) -> Workflow<BookAnalysisState> {
-    Workflow::new(store)
+    Workflow::new(Resources::new().insert("store", store))
         .register(
             BookAnalysisState::Start,
             InitBatchTask {

@@ -13,11 +13,11 @@
 //! ```
 
 use crate::error::{CanoError, CanoResult};
-use crate::store::{KeyValueStore, MemoryStore};
 use crate::workflow::Workflow;
 use chrono::{DateTime, Utc};
 use cron::Schedule as CronSchedule;
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
@@ -65,8 +65,8 @@ pub struct FlowInfo {
 }
 
 /// Type alias for the workflow data stored in the scheduler
-type FlowData<TState, TStore> = (
-    Arc<Workflow<TState, TStore>>,
+type FlowData<TState, TResourceKey> = (
+    Arc<Workflow<TState, TResourceKey>>,
     TState, // Initial state
     Schedule,
     Arc<RwLock<FlowInfo>>,
@@ -75,27 +75,27 @@ type FlowData<TState, TStore> = (
 /// Scheduler system for managing workflows.
 ///
 /// All workflows registered with a single `Scheduler` instance must share the same
-/// `TState` and `TStore` types. The store type defaults to [`MemoryStore`].
+/// `TState` and `TResourceKey` types. The resource key type defaults to [`String`].
 /// If your application requires workflows with different state enums,
 /// create a separate `Scheduler` instance for each state type.
 ///
 /// Requires the `scheduler` feature.
 #[derive(Clone)]
-pub struct Scheduler<TState, TStore = MemoryStore>
+pub struct Scheduler<TState, TResourceKey = String>
 where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    TStore: KeyValueStore + 'static,
+    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
-    workflows: HashMap<String, FlowData<TState, TStore>>,
+    workflows: HashMap<String, FlowData<TState, TResourceKey>>,
     command_tx: Arc<RwLock<Option<mpsc::Sender<SchedulerCommand>>>>,
     running: Arc<RwLock<bool>>,
     scheduler_tasks: Arc<RwLock<Vec<tokio::task::JoinHandle<()>>>>,
 }
 
-impl<TState, TStore> Scheduler<TState, TStore>
+impl<TState, TResourceKey> Scheduler<TState, TResourceKey>
 where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    TStore: KeyValueStore + 'static,
+    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// Create a new scheduler
     pub fn new() -> Self {
@@ -111,7 +111,7 @@ where
     pub fn every(
         &mut self,
         id: &str,
-        workflow: Workflow<TState, TStore>,
+        workflow: Workflow<TState, TResourceKey>,
         initial_state: TState,
         interval: Duration,
     ) -> CanoResult<()> {
@@ -122,7 +122,7 @@ where
     pub fn every_seconds(
         &mut self,
         id: &str,
-        workflow: Workflow<TState, TStore>,
+        workflow: Workflow<TState, TResourceKey>,
         initial_state: TState,
         seconds: u64,
     ) -> CanoResult<()> {
@@ -133,7 +133,7 @@ where
     pub fn every_minutes(
         &mut self,
         id: &str,
-        workflow: Workflow<TState, TStore>,
+        workflow: Workflow<TState, TResourceKey>,
         initial_state: TState,
         minutes: u64,
     ) -> CanoResult<()> {
@@ -149,7 +149,7 @@ where
     pub fn every_hours(
         &mut self,
         id: &str,
-        workflow: Workflow<TState, TStore>,
+        workflow: Workflow<TState, TResourceKey>,
         initial_state: TState,
         hours: u64,
     ) -> CanoResult<()> {
@@ -165,7 +165,7 @@ where
     pub fn cron(
         &mut self,
         id: &str,
-        workflow: Workflow<TState, TStore>,
+        workflow: Workflow<TState, TResourceKey>,
         initial_state: TState,
         expr: &str,
     ) -> CanoResult<()> {
@@ -184,7 +184,7 @@ where
     pub fn manual(
         &mut self,
         id: &str,
-        workflow: Workflow<TState, TStore>,
+        workflow: Workflow<TState, TResourceKey>,
         initial_state: TState,
     ) -> CanoResult<()> {
         self.add_flow(id, workflow, initial_state, Schedule::Manual)
@@ -193,7 +193,7 @@ where
     fn add_flow(
         &mut self,
         id: &str,
-        workflow: Workflow<TState, TStore>,
+        workflow: Workflow<TState, TResourceKey>,
         initial_state: TState,
         schedule: Schedule,
     ) -> CanoResult<()> {
@@ -221,13 +221,18 @@ where
 
     /// Start the scheduler, running all registered workflows on their configured schedules.
     ///
+    /// Sets up all workflow resources before starting. If setup fails for a workflow,
+    /// already-setup workflows are torn down in reverse order and the error is returned.
+    ///
     /// Blocks until [`Scheduler::stop`] is called. After the stop signal is received the
-    /// scheduler waits up to 30 seconds for in-progress workflow executions to finish.
+    /// scheduler waits up to 30 seconds for in-progress workflow executions to finish,
+    /// then tears down all workflow resources in reverse registration order.
     ///
     /// # Errors
     ///
     /// - [`CanoError::Workflow`] — the 30-second graceful-shutdown timeout elapsed while
     ///   one or more workflows were still running
+    /// - Any resource setup error from a registered workflow
     pub async fn start(&mut self) -> CanoResult<()> {
         *self.running.write().await = true;
 
@@ -238,6 +243,23 @@ where
         *self.command_tx.write().await = Some(tx);
 
         let workflows = self.workflows.clone();
+
+        // Setup resources for all workflows; on failure, teardown already-setup ones in reverse
+        {
+            let flows: Vec<_> = workflows.values().collect();
+            for (idx, (workflow, _, _, _)) in flows.iter().enumerate() {
+                if let Err(e) = workflow.resources.setup_all().await {
+                    for (prior_wf, _, _, _) in flows[..idx].iter().rev() {
+                        let len = prior_wf.resources.lifecycle_len();
+                        prior_wf.resources.teardown_range(0..len).await;
+                    }
+                    *self.running.write().await = false;
+                    *self.command_tx.write().await = None;
+                    return Err(e);
+                }
+            }
+        }
+
         let running = Arc::clone(&self.running);
         let scheduler_tasks = Arc::clone(&self.scheduler_tasks);
 
@@ -389,6 +411,13 @@ where
             sleep(Duration::from_millis(100)).await;
         }
 
+        // Teardown workflow resources (reverse order where possible)
+        let flows_for_teardown: Vec<_> = self.workflows.values().collect();
+        for (workflow, _, _, _) in flows_for_teardown.iter().rev() {
+            let len = workflow.resources.lifecycle_len();
+            workflow.resources.teardown_range(0..len).await;
+        }
+
         // Clear the command sender so subsequent stop()/trigger() calls report
         // the documented "Scheduler not running" error instead of a channel-closed
         // surprise, and allow clean restarts via a fresh start() call.
@@ -470,23 +499,23 @@ where
     }
 }
 
-impl<TState, TStore> Default for Scheduler<TState, TStore>
+impl<TState, TResourceKey> Default for Scheduler<TState, TResourceKey>
 where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    TStore: KeyValueStore + 'static,
+    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-async fn execute_flow<TState, TStore>(
-    workflow: Arc<Workflow<TState, TStore>>,
+async fn execute_flow<TState, TResourceKey>(
+    workflow: Arc<Workflow<TState, TResourceKey>>,
     initial_state: TState,
     info: Arc<RwLock<FlowInfo>>,
 ) where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    TStore: KeyValueStore + 'static,
+    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     // Update status to running
     {
@@ -496,15 +525,15 @@ async fn execute_flow<TState, TStore>(
         info_guard.run_count += 1;
     }
 
-    // Execute workflow
+    // Execute workflow — skip lifecycle (setup/teardown handled by start/stop)
     #[cfg(feature = "tracing")]
     let result = workflow
-        .orchestrate(initial_state)
+        .execute_workflow(initial_state)
         .instrument(tracing::info_span!("execute_flow"))
         .await;
 
     #[cfg(not(feature = "tracing"))]
-    let result = workflow.orchestrate(initial_state).await;
+    let result = workflow.execute_workflow(initial_state).await;
 
     // Update status based on result
     let mut info_guard = info.write().await;
@@ -518,7 +547,7 @@ async fn execute_flow<TState, TStore>(
 mod tests {
     use super::*;
     use crate::node::Node;
-    use crate::store::MemoryStore;
+    use crate::resource::Resources;
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicU32, Ordering};
     use tokio::time::sleep;
@@ -557,7 +586,7 @@ mod tests {
         type PrepResult = ();
         type ExecResult = ();
 
-        async fn prep(&self, _store: &MemoryStore) -> CanoResult<()> {
+        async fn prep(&self, _res: &Resources) -> CanoResult<()> {
             Ok(())
         }
 
@@ -567,7 +596,7 @@ mod tests {
 
         async fn post(
             &self,
-            _store: &MemoryStore,
+            _res: &Resources,
             _exec_res: Self::ExecResult,
         ) -> CanoResult<TestState> {
             if self.should_fail {
@@ -579,16 +608,14 @@ mod tests {
     }
 
     fn create_test_workflow() -> Workflow<TestState> {
-        let store = MemoryStore::new();
-        Workflow::new(store)
+        Workflow::bare()
             .register(TestState::Start, TestNode::new())
             .add_exit_state(TestState::Complete)
             .add_exit_state(TestState::Error)
     }
 
     fn create_failing_workflow() -> Workflow<TestState> {
-        let store = MemoryStore::new();
-        Workflow::new(store)
+        Workflow::bare()
             .register(TestState::Start, TestNode::new_failing())
             .add_exit_state(TestState::Complete)
             .add_exit_state(TestState::Error)
@@ -899,7 +926,7 @@ mod tests {
             type PrepResult = ();
             type ExecResult = ();
 
-            async fn prep(&self, _store: &MemoryStore) -> CanoResult<()> {
+            async fn prep(&self, _res: &Resources) -> CanoResult<()> {
                 Ok(())
             }
 
@@ -910,7 +937,7 @@ mod tests {
 
             async fn post(
                 &self,
-                _store: &MemoryStore,
+                _res: &Resources,
                 _exec_res: Self::ExecResult,
             ) -> CanoResult<TestState> {
                 Ok(TestState::Complete)
@@ -920,7 +947,7 @@ mod tests {
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            let slow_workflow = Workflow::new(MemoryStore::new())
+            let slow_workflow = Workflow::bare()
                 .register(TestState::Start, SlowNode)
                 .add_exit_state(TestState::Complete)
                 .add_exit_state(TestState::Error);

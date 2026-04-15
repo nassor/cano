@@ -51,7 +51,7 @@ impl Node<MyState> for LongProcessingNode {
     type PrepResult = ();
     type ExecResult = String;
 
-    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
         println!("🔧 Starting long task ({}s)", self.duration_secs);
         Ok(())
     }
@@ -66,11 +66,8 @@ impl Node<MyState> for LongProcessingNode {
         format!("Long task finished after {}s", self.duration_secs)
     }
 
-    async fn post(
-        &self,
-        store: &MemoryStore,
-        result: Self::ExecResult,
-    ) -> Result<MyState, CanoError> {
+    async fn post(&self, res: &Resources, result: Self::ExecResult) -> Result<MyState, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         store.put("long_task_result", result)?;
         Ok(MyState::Processing)
     }
@@ -85,7 +82,8 @@ impl Node<MyState> for ProcessingNode {
     type PrepResult = String;
     type ExecResult = String;
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         let result: String = store
             .get("long_task_result")
             .unwrap_or_else(|_| "No result available".to_string());
@@ -98,11 +96,8 @@ impl Node<MyState> for ProcessingNode {
         format!("Processed: {}", data)
     }
 
-    async fn post(
-        &self,
-        store: &MemoryStore,
-        result: Self::ExecResult,
-    ) -> Result<MyState, CanoError> {
+    async fn post(&self, res: &Resources, result: Self::ExecResult) -> Result<MyState, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         store.put("processed_result", result)?;
         println!("✅ Processing completed");
         Ok(MyState::End)
@@ -118,7 +113,7 @@ impl Node<MyState> for QuickNode {
     type PrepResult = ();
     type ExecResult = ();
 
-    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
         println!("⚡ Quick task starting");
         Ok(())
     }
@@ -129,7 +124,7 @@ impl Node<MyState> for QuickNode {
 
     async fn post(
         &self,
-        _store: &MemoryStore,
+        _res: &Resources,
         _result: Self::ExecResult,
     ) -> Result<MyState, CanoError> {
         Ok(MyState::End)
@@ -145,13 +140,13 @@ async fn main() -> CanoResult<()> {
     let store = MemoryStore::new();
 
     // Create a long-running workflow
-    let long_flow = Workflow::new(store.clone())
+    let long_flow = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(MyState::Start, LongProcessingNode::new(5))
         .register(MyState::Processing, ProcessingNode)
         .add_exit_state(MyState::End);
 
     // Create a quick workflow
-    let quick_flow = Workflow::new(store.clone())
+    let quick_flow = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(MyState::Start, QuickNode)
         .add_exit_state(MyState::End);
 

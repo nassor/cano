@@ -1,7 +1,5 @@
 use async_trait::async_trait;
-use cano::node::DefaultParams;
-use cano::store::KeyValueStore;
-use cano::{CanoError, MemoryStore, Node};
+use cano::prelude::*;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 /// Simple do-nothing node for benchmarking
@@ -30,7 +28,7 @@ impl Node<TestState> for DoNothingNode {
     type PrepResult = ();
     type ExecResult = ();
 
-    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
         Ok(())
     }
 
@@ -40,7 +38,7 @@ impl Node<TestState> for DoNothingNode {
 
     async fn post(
         &self,
-        _store: &MemoryStore,
+        _res: &Resources,
         _exec_res: Self::ExecResult,
     ) -> Result<TestState, CanoError> {
         Ok(self.next_state.clone())
@@ -68,7 +66,7 @@ impl Node<TestState> for CpuIntensiveNode {
     type PrepResult = Vec<u64>;
     type ExecResult = u64;
 
-    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
         // Generate some data to process
         Ok((0..self.iterations as u64).collect())
     }
@@ -80,9 +78,10 @@ impl Node<TestState> for CpuIntensiveNode {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<TestState, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         // Store the result
         store.put("cpu_result", exec_res)?;
         Ok(self.next_state.clone())
@@ -110,7 +109,7 @@ impl Node<TestState> for IoSimulationNode {
     type PrepResult = String;
     type ExecResult = String;
 
-    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
         // Simulate I/O delay
         tokio::time::sleep(tokio::time::Duration::from_millis(self.delay_ms)).await;
         Ok("prepared_data".to_string())
@@ -124,9 +123,10 @@ impl Node<TestState> for IoSimulationNode {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<TestState, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         // Simulate I/O delay
         tokio::time::sleep(tokio::time::Duration::from_millis(self.delay_ms)).await;
         store.put("io_result", exec_res)?;
@@ -210,9 +210,9 @@ fn bench_node_execution(c: &mut Criterion) {
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let store = MemoryStore::new();
+                        let res = Resources::new().insert("store", MemoryStore::new());
                         for node in &nodes {
-                            let _result = node.run(&store).await;
+                            let _result = Task::run(node, &res).await;
                         }
                     });
             },
@@ -226,9 +226,9 @@ fn bench_node_execution(c: &mut Criterion) {
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let store = MemoryStore::new();
+                        let res = Resources::new().insert("store", MemoryStore::new());
                         for _i in 0..node_count {
-                            let _result = node.run(&store).await;
+                            let _result = Task::run(&node, &res).await;
                         }
                     });
             },
@@ -246,9 +246,9 @@ fn bench_node_execution(c: &mut Criterion) {
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
-                            let store = MemoryStore::new();
+                            let res = Resources::new().insert("store", MemoryStore::new());
                             for node in &nodes {
-                                let _result = node.run(&store).await;
+                                let _result = Task::run(node, &res).await;
                             }
                         });
                 },
@@ -274,9 +274,9 @@ fn bench_node_phases(c: &mut Criterion) {
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let store = MemoryStore::new();
+                        let res = Resources::new().insert("store", MemoryStore::new());
                         for _i in 0..iterations {
-                            let _result = node.prep(&store).await;
+                            let _result = node.prep(&res).await;
                         }
                     });
             },
@@ -305,9 +305,9 @@ fn bench_node_phases(c: &mut Criterion) {
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let store = MemoryStore::new();
+                        let res = Resources::new().insert("store", MemoryStore::new());
                         for _i in 0..iterations {
-                            let _result = node.post(&store, ()).await;
+                            let _result = node.post(&res, ()).await;
                         }
                     });
             },
@@ -323,9 +323,9 @@ fn bench_node_phases(c: &mut Criterion) {
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
-                            let store = MemoryStore::new();
+                            let res = Resources::new().insert("store", MemoryStore::new());
                             for _i in 0..iterations {
-                                let _result = node.prep(&store).await;
+                                let _result = node.prep(&res).await;
                             }
                         });
                 },
@@ -510,17 +510,19 @@ fn bench_concurrent_node_execution(c: &mut Criterion) {
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let store = std::sync::Arc::new(MemoryStore::new());
+                        let res = std::sync::Arc::new(
+                            Resources::new().insert("store", MemoryStore::new()),
+                        );
                         let chunk_size = std::cmp::max(1, node_count / concurrency);
 
                         let tasks: Vec<_> = nodes
                             .chunks(chunk_size)
                             .map(|chunk| {
                                 let chunk = chunk.to_vec();
-                                let store = store.clone();
+                                let res = res.clone();
                                 tokio::spawn(async move {
                                     for node in chunk {
-                                        let _result = node.run(&*store).await;
+                                        let _result = Task::run(&*node, &*res).await;
                                     }
                                 })
                             })
@@ -546,17 +548,19 @@ fn bench_concurrent_node_execution(c: &mut Criterion) {
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
-                            let store = std::sync::Arc::new(MemoryStore::new());
+                            let res = std::sync::Arc::new(
+                                Resources::new().insert("store", MemoryStore::new()),
+                            );
                             let chunk_size = std::cmp::max(1, small_count / concurrency);
 
                             let tasks: Vec<_> = nodes
                                 .chunks(chunk_size)
                                 .map(|chunk| {
                                     let chunk = chunk.to_vec();
-                                    let store = store.clone();
+                                    let res = res.clone();
                                     tokio::spawn(async move {
                                         for node in chunk {
-                                            let _result = node.run(&*store).await;
+                                            let _result = Task::run(&*node, &*res).await;
                                         }
                                     })
                                 })
@@ -574,51 +578,6 @@ fn bench_concurrent_node_execution(c: &mut Criterion) {
     group.finish();
 }
 
-/// Benchmark node configuration and parameter setting
-fn bench_node_configuration(c: &mut Criterion) {
-    let mut group = c.benchmark_group("node_configuration");
-
-    let sizes = vec![1, 10, 100, 1000];
-
-    for &size in &sizes {
-        group.bench_with_input(
-            BenchmarkId::new("parameter_setting", size),
-            &size,
-            |b, &size| {
-                let mut nodes: Vec<DoNothingNode> = (0..size)
-                    .map(|i| DoNothingNode::new(TestState::Node(i)))
-                    .collect();
-
-                let params = DefaultParams::new();
-
-                b.iter(|| {
-                    for node in &mut nodes {
-                        node.set_params(params.clone());
-                    }
-                });
-            },
-        );
-
-        group.bench_with_input(
-            BenchmarkId::new("node_config_creation", size),
-            &size,
-            |b, &size| {
-                let nodes: Vec<DoNothingNode> = (0..size)
-                    .map(|i| DoNothingNode::new(TestState::Node(i)))
-                    .collect();
-
-                b.iter(|| {
-                    for node in &nodes {
-                        let _config = node.config();
-                    }
-                });
-            },
-        );
-    }
-
-    group.finish();
-}
-
 criterion_group!(
     benches,
     bench_node_creation,
@@ -627,6 +586,5 @@ criterion_group!(
     bench_node_memory_patterns,
     bench_node_cloning,
     bench_concurrent_node_execution,
-    bench_node_configuration
 );
 criterion_main!(benches);

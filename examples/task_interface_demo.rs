@@ -44,7 +44,7 @@ impl Node<TaskState> for ProcessingNode {
         TaskConfig::minimal() // Fast execution
     }
 
-    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
         println!("🔧 Node '{}' - Prep phase: Loading data", self.name);
         Ok(format!("data_for_{}", self.name))
     }
@@ -59,9 +59,10 @@ impl Node<TaskState> for ProcessingNode {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<TaskState, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         println!("📝 Node '{}' - Post phase: Storing {}", self.name, exec_res);
         store.put("node_result", exec_res)?;
         Ok(TaskState::ProcessWithTask)
@@ -84,7 +85,9 @@ impl ProcessingTask {
 
 #[async_trait]
 impl Task<TaskState> for ProcessingTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<TaskState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<TaskState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
+
         println!(
             "🚀 Task '{}' - Single run method: doing everything",
             self.name
@@ -113,7 +116,9 @@ struct InitializerTask;
 
 #[async_trait]
 impl Task<TaskState> for InitializerTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<TaskState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<TaskState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
+
         println!("🎯 Initializer Task - Setting up workflow data");
         store.put("workflow_id", "demo_123".to_string())?;
         store.put("start_time", std::time::SystemTime::now())?;
@@ -134,9 +139,10 @@ async fn main() -> Result<(), CanoError> {
     println!();
 
     let store = MemoryStore::new();
+    let resources = Resources::new().insert("store", store.clone());
 
     // Create workflow with mixed Node and Task implementations
-    let workflow = Workflow::new(store.clone())
+    let workflow = Workflow::new(resources)
         .register(TaskState::Start, InitializerTask) // Task implementation
         .register(
             TaskState::ProcessWithNode,

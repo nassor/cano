@@ -137,7 +137,7 @@ impl Node<WorkflowPhase> for BookDownloadNode {
         TaskConfig::new().with_fixed_retry(2, Duration::from_secs(1))
     }
 
-    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
         Ok(())
     }
 
@@ -153,9 +153,10 @@ impl Node<WorkflowPhase> for BookDownloadNode {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<WorkflowPhase, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         if let Some(book) = exec_res {
             // Add book to collection
             let mut books: Vec<Book> = store.get("books").unwrap_or_else(|_| Vec::new());
@@ -220,7 +221,8 @@ impl Node<WorkflowPhase> for PrepositionAnalysisNode {
     type PrepResult = Vec<Book>;
     type ExecResult = Vec<BookAnalysis>;
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         let books: Vec<Book> = store
             .get("books")
             .map_err(|e| CanoError::preparation(format!("Failed to load books: {}", e)))?;
@@ -239,9 +241,10 @@ impl Node<WorkflowPhase> for PrepositionAnalysisNode {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<WorkflowPhase, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         if exec_res.is_empty() {
             return Err(CanoError::node_execution("No book analyses were completed"));
         }
@@ -262,7 +265,8 @@ impl Node<WorkflowPhase> for BookRankingNode {
     type PrepResult = Vec<BookAnalysis>;
     type ExecResult = Vec<BookRanking>;
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         let analyses: Vec<BookAnalysis> = store
             .get("book_analyses")
             .map_err(|e| CanoError::preparation(format!("Failed to load analyses: {}", e)))?;
@@ -288,9 +292,10 @@ impl Node<WorkflowPhase> for BookRankingNode {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<WorkflowPhase, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         store.put("book_rankings", exec_res.clone())?;
 
         println!("\n🏆 BOOK RANKINGS BY PREPOSITION DIVERSITY");
@@ -324,7 +329,7 @@ async fn main() -> CanoResult<()> {
     println!("📥 Downloading books from Project Gutenberg...\n");
 
     // Book 1: Pride and Prejudice
-    let workflow1 = Workflow::new(store.clone())
+    let workflow1 = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(
             WorkflowPhase::Download,
             BookDownloadNode::new(
@@ -338,7 +343,7 @@ async fn main() -> CanoResult<()> {
     let _ = workflow1.orchestrate(WorkflowPhase::Download).await?;
 
     // Book 2: Alice's Adventures in Wonderland
-    let workflow2 = Workflow::new(store.clone())
+    let workflow2 = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(
             WorkflowPhase::Download,
             BookDownloadNode::new(
@@ -352,7 +357,7 @@ async fn main() -> CanoResult<()> {
     let _ = workflow2.orchestrate(WorkflowPhase::Download).await?;
 
     // Book 3: A Christmas Carol
-    let workflow3 = Workflow::new(store.clone())
+    let workflow3 = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(
             WorkflowPhase::Download,
             BookDownloadNode::new(
@@ -368,7 +373,7 @@ async fn main() -> CanoResult<()> {
     // Analyze and rank the downloaded books
     println!("\n📊 Analyzing and ranking books...\n");
 
-    let analysis_workflow = Workflow::new(store.clone())
+    let analysis_workflow = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(WorkflowPhase::Analyze, PrepositionAnalysisNode)
         .register(WorkflowPhase::Rank, BookRankingNode)
         .add_exit_state(WorkflowPhase::Complete);

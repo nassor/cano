@@ -24,22 +24,73 @@
 //!
 //! ## Example
 //!
+//! When your task needs no external resources, implement [`Task::run_bare`] to avoid the
+//! unused `_res` parameter:
+//!
 //! ```rust
 //! use cano::prelude::*;
 //!
-//! // Simple Task implementation
+//! #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+//! enum Step { Process, Done }
+//!
 //! struct SimpleTask;
 //!
 //! #[async_trait]
-//! impl Task<String> for SimpleTask {
-//!     async fn run(&self, store: &MemoryStore) -> Result<TaskResult<String>, CanoError> {
-//!         // Do all your work here - load, process, store
-//!         let input: String = store.get("input")?;
-//!         let result = format!("processed: {input}");
-//!         store.put("result", result)?;
-//!         Ok(TaskResult::Single("next_state".to_string()))
+//! impl Task<Step> for SimpleTask {
+//!     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+//!         // All work happens here with no external I/O
+//!         Ok(TaskResult::Single(Step::Done))
 //!     }
 //! }
+//! ```
+//!
+//! Use [`Task::run`] when the task needs resources (store, config, HTTP client, etc.):
+//!
+//! - **`run_bare()`** — for pure computation with no external dependencies
+//! - **`run()`** — for tasks that read from or write to [`Resources`] (store, params, clients)
+//!
+//! ## Using Params and Store as Resources
+//!
+//! A common pattern is to pass both a data store and typed configuration as resources:
+//!
+//! ```rust
+//! use cano::prelude::*;
+//!
+//! #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+//! enum Step { Fetch, Done }
+//!
+//! struct FetchParams { limit: usize }
+//!
+//! #[async_trait]
+//! impl Resource for FetchParams {}
+//!
+//! struct FetchTask;
+//!
+//! #[async_trait]
+//! impl Task<Step> for FetchTask {
+//!     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+//!         let store = res.get::<MemoryStore, str>("store")?;
+//!         let params = res.get::<FetchParams, str>("params")?;
+//!         let data: Vec<u32> = (0..params.limit as u32).collect();
+//!         store.put("data", data)?;
+//!         Ok(TaskResult::Single(Step::Done))
+//!     }
+//! }
+//!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), CanoError> {
+//! let store = MemoryStore::new();
+//! let resources = Resources::new()
+//!     .insert("store".to_owned(), store)
+//!     .insert("params".to_owned(), FetchParams { limit: 10 });
+//! let result = Workflow::new(resources)
+//!     .register(Step::Fetch, FetchTask)
+//!     .add_exit_state(Step::Done)
+//!     .orchestrate(Step::Fetch)
+//!     .await?;
+//! assert_eq!(result, Step::Done);
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! ## Interoperability
@@ -48,10 +99,11 @@
 //! wherever tasks are expected. This provides a smooth upgrade path and backward compatibility.
 
 use crate::error::CanoError;
-use crate::store::MemoryStore;
+use crate::resource::Resources;
 use async_trait::async_trait;
 use rand::RngExt;
-use std::collections::HashMap;
+use std::fmt;
+use std::hash::Hash;
 use std::time::Duration;
 
 #[cfg(feature = "tracing")]
@@ -318,11 +370,6 @@ where
     }
 }
 
-/// Simple key-value parameters for task configuration
-///
-/// This is a convenience type alias for the most common parameter format used in workflows.
-pub type DefaultTaskParams = HashMap<String, String>;
-
 /// Result type for task execution that supports both single and split transitions
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskResult<TState> {
@@ -348,8 +395,7 @@ pub enum TaskResult<TState> {
 /// # Generic Types
 ///
 /// - **`TState`**: The return type that determines workflow routing (typically an enum)
-/// - **`TStore`**: The store backend type (e.g., `MemoryStore`)
-/// - **`TParams`**: The parameter type for this task (e.g., `HashMap<String, String>`)
+/// - **`TResourceKey`**: The key type used to look up resources (defaults to `String`)
 ///
 /// # Benefits
 ///
@@ -361,7 +407,7 @@ pub enum TaskResult<TState> {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```rust,ignore
 /// use cano::prelude::*;
 ///
 /// struct DataProcessor {
@@ -370,16 +416,17 @@ pub enum TaskResult<TState> {
 ///
 /// #[async_trait]
 /// impl Task<String> for DataProcessor {
-///     async fn run(&self, store: &MemoryStore) -> Result<TaskResult<String>, CanoError> {
+///     async fn run(&self, res: &Resources) -> Result<TaskResult<String>, CanoError> {
+///         let store = res.get::<MemoryStore, str>("store")?;
 ///         // Load data
 ///         let input: i32 = store.get("input").unwrap_or(1);
-///         
+///
 ///         // Process
 ///         let result = input * self.multiplier;
-///         
+///
 ///         // Store result
 ///         store.put("output", result)?;
-///         
+///
 ///         // Determine next state
 ///         if result > 100 {
 ///             Ok(TaskResult::Single("large_result".to_string()))
@@ -390,20 +437,11 @@ pub enum TaskResult<TState> {
 /// }
 /// ```
 #[async_trait]
-pub trait Task<TState, TStore = MemoryStore, TParams = DefaultTaskParams>: Send + Sync
+pub trait Task<TState, TResourceKey = String>: Send + Sync
 where
-    TState: Clone + std::fmt::Debug + Send + Sync + 'static,
-    TParams: Send + Sync + Clone,
-    TStore: Send + Sync + 'static,
+    TState: Clone + fmt::Debug + Send + Sync + 'static,
+    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
-    /// Set parameters for the task
-    ///
-    /// Default implementation that does nothing. Override this method if your task
-    /// needs to store or process parameters when they are set.
-    fn set_params(&mut self, _params: TParams) {
-        // Default implementation does nothing
-    }
-
     /// Get the task configuration that controls execution behavior
     ///
     /// Returns the TaskConfig that determines how this task should be executed.
@@ -418,26 +456,48 @@ where
         TaskConfig::default()
     }
 
-    /// Execute the task with the given store.
+    /// Execute the task with access to shared resources.
     ///
-    /// This method contains all the task logic in a single place. Unlike [`crate::node::Node`],
-    /// there's no separation into prep/exec/post phases — you have full control over the
-    /// execution flow.
-    ///
-    /// # Parameters
-    ///
-    /// - `store`: The store for reading and writing data shared between tasks
-    ///
-    /// # Returns
-    ///
-    /// A result containing either a single state or multiple states for parallel execution.
+    /// Override this when the task needs resources. The default implementation
+    /// delegates to [`run_bare`](Self::run_bare) — you must override one of the two.
     ///
     /// # Errors
     ///
-    /// Returns the [`CanoError`] propagated from the task's own logic. There is no automatic
-    /// retry at this level; wrap the implementation with [`crate::task::run_with_retries`] or
-    /// use [`crate::node::Node`] if retry behavior is needed.
-    async fn run(&self, store: &TStore) -> Result<TaskResult<TState>, CanoError>;
+    /// Returns a [`CanoError`] propagated from the task logic.
+    async fn run(&self, res: &Resources<TResourceKey>) -> Result<TaskResult<TState>, CanoError> {
+        let _ = res;
+        self.run_bare().await
+    }
+
+    /// Execute the task without resources.
+    ///
+    /// Override this instead of [`run`](Self::run) when the task needs no resources.
+    /// This avoids an unused `_res: &Resources` parameter.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`CanoError`] propagated from the task logic.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use cano::prelude::*;
+    ///
+    /// #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    /// enum Step { Count, Done }
+    ///
+    /// struct CountTask;
+    ///
+    /// #[async_trait]
+    /// impl Task<Step> for CountTask {
+    ///     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    ///         Ok(TaskResult::Single(Step::Done))
+    ///     }
+    /// }
+    /// ```
+    async fn run_bare(&self) -> Result<TaskResult<TState>, CanoError> {
+        unimplemented!("implement either Task::run (with resources) or Task::run_bare (without)")
+    }
 }
 
 /// Blanket implementation: Every Node is automatically a Task
@@ -463,29 +523,21 @@ where
 /// `Node::run` applies its own retry loop, so doing so would retry twice: once inside
 /// `Node::run` and again in the workflow dispatcher.
 #[async_trait]
-impl<TState, TStore, TParams, N> Task<TState, TStore, TParams> for N
+impl<TState, TResourceKey, N> Task<TState, TResourceKey> for N
 where
-    N: crate::node::Node<TState, TStore, TParams>,
-    TState: Clone + std::fmt::Debug + Send + Sync + 'static,
-    TParams: Send + Sync + Clone,
-    TStore: Send + Sync + 'static,
+    N: crate::node::Node<TState, TResourceKey>,
+    TState: Clone + fmt::Debug + Send + Sync + 'static,
+    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
-    fn set_params(&mut self, params: TParams) {
-        crate::node::Node::set_params(self, params);
-    }
-
     fn config(&self) -> TaskConfig {
-        let node_config = crate::node::Node::config(self);
-        TaskConfig {
-            retry_mode: node_config.retry_mode,
-        }
+        crate::node::Node::config(self)
     }
 
     #[cfg_attr(
         feature = "tracing",
-        instrument(skip(self, store), fields(task_type = "node_adapter"))
+        instrument(skip(self, res), fields(task_type = "node_adapter"))
     )]
-    async fn run(&self, store: &TStore) -> Result<TaskResult<TState>, CanoError> {
+    async fn run(&self, res: &Resources<TResourceKey>) -> Result<TaskResult<TState>, CanoError> {
         #[cfg(feature = "tracing")]
         debug!("Executing task through Node adapter");
 
@@ -493,44 +545,31 @@ where
         // Retries are driven by the outer `run_with_retries` in both `execute_single_task` and
         // `execute_split_join`, which use this method as the unit of work. Calling `Node::run`
         // here would double-retry nodes (inner Node::run_with_retries + outer run_with_retries).
-        let prep_res = crate::node::Node::prep(self, store).await?;
-        let exec_res = crate::node::Node::exec(self, prep_res).await;
-        let state = crate::node::Node::post(self, store, exec_res).await?;
+        let prep_result = crate::node::Node::prep(self, res).await?;
+        let exec_result = crate::node::Node::exec(self, prep_result).await;
+        let next_state = crate::node::Node::post(self, res, exec_result).await?;
 
         #[cfg(feature = "tracing")]
-        info!(next_state = ?state, "Task execution completed successfully");
+        info!(next_state = ?next_state, "Task execution completed successfully");
 
-        Ok(TaskResult::Single(state))
+        Ok(TaskResult::Single(next_state))
     }
 }
 
-/// Concrete task trait object with default types
+/// Type alias for a dynamic task trait object using the default `String` resource key.
 ///
-/// This trait provides a concrete implementation of Task using the default types,
-/// enabling dynamic dispatch and trait object usage.
-pub trait DynTask<TState>: Task<TState, MemoryStore, DefaultTaskParams>
-where
-    TState: Clone + std::fmt::Debug + Send + Sync + 'static,
-{
-}
+/// Use this when you need to store different task types in the same collection.
+pub type DynTask<TState> = dyn Task<TState, String> + Send + Sync;
 
-impl<TState, T> DynTask<TState> for T
-where
-    TState: Clone + std::fmt::Debug + Send + Sync + 'static,
-    T: Task<TState, MemoryStore, DefaultTaskParams>,
-{
-}
-
-/// Type alias for trait objects
+/// Type alias for an `Arc`-wrapped dynamic task trait object.
 ///
 /// This alias simplifies working with dynamic task collections in workflows.
-/// Use this when you need to store different task types in the same collection.
-pub type TaskObject<TState> = dyn DynTask<TState> + Send + Sync;
+pub type TaskObject<TState> = std::sync::Arc<DynTask<TState>>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::{KeyValueStore, MemoryStore};
+    use crate::resource::Resources;
     use async_trait::async_trait;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -565,48 +604,8 @@ mod tests {
 
     #[async_trait]
     impl Task<TestAction> for SimpleTask {
-        async fn run(&self, store: &MemoryStore) -> Result<TaskResult<TestAction>, CanoError> {
+        async fn run_bare(&self) -> Result<TaskResult<TestAction>, CanoError> {
             self.execution_count.fetch_add(1, Ordering::SeqCst);
-            store.put("simple_task_executed", true)?;
-            Ok(TaskResult::Single(TestAction::Complete))
-        }
-    }
-
-    // Task that uses parameters
-    struct ParameterizedTask {
-        params: DefaultTaskParams,
-        multiplier: i32,
-    }
-
-    impl ParameterizedTask {
-        fn new() -> Self {
-            Self {
-                params: HashMap::new(),
-                multiplier: 1,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Task<TestAction> for ParameterizedTask {
-        fn set_params(&mut self, params: DefaultTaskParams) {
-            self.params = params;
-            if let Some(multiplier_str) = self.params.get("multiplier")
-                && let Ok(multiplier) = multiplier_str.parse::<i32>()
-            {
-                self.multiplier = multiplier;
-            }
-        }
-
-        async fn run(&self, store: &MemoryStore) -> Result<TaskResult<TestAction>, CanoError> {
-            let base_value = self
-                .params
-                .get("base_value")
-                .and_then(|s| s.parse::<i32>().ok())
-                .unwrap_or(10);
-
-            let result = base_value * self.multiplier;
-            store.put("result", result)?;
             Ok(TaskResult::Single(TestAction::Complete))
         }
     }
@@ -624,102 +623,47 @@ mod tests {
 
     #[async_trait]
     impl Task<TestAction> for FailingTask {
-        async fn run(&self, store: &MemoryStore) -> Result<TaskResult<TestAction>, CanoError> {
+        async fn run_bare(&self) -> Result<TaskResult<TestAction>, CanoError> {
             if self.should_fail {
                 Err(CanoError::task_execution("Task intentionally failed"))
             } else {
-                store.put("failing_task_executed", true)?;
                 Ok(TaskResult::Single(TestAction::Complete))
             }
         }
     }
 
-    // Data processing task that reads, processes, and writes
-    struct DataProcessingTask {
-        input_key: String,
-        output_key: String,
-    }
-
-    impl DataProcessingTask {
-        fn new(input_key: &str, output_key: &str) -> Self {
-            Self {
-                input_key: input_key.to_string(),
-                output_key: output_key.to_string(),
-            }
-        }
-    }
+    // Task that returns Split result
+    struct SplitTask;
 
     #[async_trait]
-    impl Task<TestAction> for DataProcessingTask {
-        async fn run(&self, store: &MemoryStore) -> Result<TaskResult<TestAction>, CanoError> {
-            // Read input data
-            let input_data: String = store
-                .get(&self.input_key)
-                .map_err(|e| CanoError::task_execution(format!("Failed to read input: {e}")))?;
-
-            // Process data
-            let processed_data = format!("processed: {input_data}");
-
-            // Write output data
-            store.put(&self.output_key, processed_data)?;
-
-            Ok(TaskResult::Single(TestAction::Complete))
+    impl Task<TestAction> for SplitTask {
+        async fn run_bare(&self) -> Result<TaskResult<TestAction>, CanoError> {
+            Ok(TaskResult::Split(vec![
+                TestAction::Continue,
+                TestAction::Complete,
+            ]))
         }
     }
 
     #[tokio::test]
     async fn test_simple_task_execution() {
         let task = SimpleTask::new();
-        let store = MemoryStore::new();
 
-        let result = task.run(&store).await.unwrap();
+        let result = task.run_bare().await.unwrap();
         assert_eq!(result, TaskResult::Single(TestAction::Complete));
         assert_eq!(task.execution_count(), 1);
-
-        let executed: bool = store.get("simple_task_executed").unwrap();
-        assert!(executed);
-    }
-
-    #[tokio::test]
-    async fn test_parameterized_task() {
-        let mut task = ParameterizedTask::new();
-        let store = MemoryStore::new();
-
-        // Test with default parameters
-        let result = task.run(&store).await.unwrap();
-        assert_eq!(result, TaskResult::Single(TestAction::Complete));
-
-        let stored_result: i32 = store.get("result").unwrap();
-        assert_eq!(stored_result, 10); // base_value (10) * multiplier (1)
-
-        // Test with custom parameters
-        let mut params = HashMap::new();
-        params.insert("base_value".to_string(), "5".to_string());
-        params.insert("multiplier".to_string(), "3".to_string());
-
-        task.set_params(params);
-        let result2 = task.run(&store).await.unwrap();
-        assert_eq!(result2, TaskResult::Single(TestAction::Complete));
-
-        let stored_result2: i32 = store.get("result").unwrap();
-        assert_eq!(stored_result2, 15); // base_value (5) * multiplier (3)
     }
 
     #[tokio::test]
     async fn test_failing_task() {
-        let store = MemoryStore::new();
-
         // Test successful task
         let success_task = FailingTask::new(false);
-        let result = success_task.run(&store).await.unwrap();
+        let result = success_task.run_bare().await.unwrap();
         assert_eq!(result, TaskResult::Single(TestAction::Complete));
-
-        let executed: bool = store.get("failing_task_executed").unwrap();
-        assert!(executed);
 
         // Test failing task
         let fail_task = FailingTask::new(true);
-        let result = fail_task.run(&store).await;
+        let result = fail_task.run_bare().await;
         assert!(result.is_err());
 
         let error = result.unwrap_err();
@@ -727,33 +671,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_data_processing_task() {
-        let store = MemoryStore::new();
-        let task = DataProcessingTask::new("input_data", "output_data");
+    async fn test_split_task() {
+        let task = SplitTask;
 
-        // Setup input data
-        store.put("input_data", "test_value".to_string()).unwrap();
-
-        // Run task
-        let result = task.run(&store).await.unwrap();
-        assert_eq!(result, TaskResult::Single(TestAction::Complete));
-
-        // Verify output
-        let output: String = store.get("output_data").unwrap();
-        assert_eq!(output, "processed: test_value");
-    }
-
-    #[tokio::test]
-    async fn test_data_processing_task_missing_input() {
-        let store = MemoryStore::new();
-        let task = DataProcessingTask::new("missing_input", "output_data");
-
-        // Run task without setting input
-        let result = task.run(&store).await;
-        assert!(result.is_err());
-
-        let error = result.unwrap_err();
-        assert!(error.to_string().contains("Failed to read input"));
+        let result = task.run_bare().await.unwrap();
+        assert_eq!(
+            result,
+            TaskResult::Split(vec![TestAction::Continue, TestAction::Complete])
+        );
     }
 
     #[tokio::test]
@@ -761,16 +686,14 @@ mod tests {
         use tokio::task;
 
         let task = Arc::new(SimpleTask::new());
-        let store = Arc::new(MemoryStore::new());
 
         let mut handles = vec![];
 
         // Spawn multiple concurrent executions
         for _ in 0..10 {
             let task_clone = Arc::clone(&task);
-            let store_clone = Arc::clone(&store);
 
-            let handle = task::spawn(async move { task_clone.run(&*store_clone).await });
+            let handle = task::spawn(async move { task_clone.run_bare().await });
             handles.push(handle);
         }
 
@@ -788,66 +711,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_task_trait_object_compatibility() {
-        // Test that tasks can be used as trait objects with DynTask
-        let _store = MemoryStore::new();
-
-        // This tests the DynTask trait and TaskObject type alias
-        let task = SimpleTask::new();
-
-        // Test specific trait bounds
-        fn assert_task_traits<T>(_: &T)
-        where
-            T: Task<TestAction, MemoryStore, DefaultTaskParams>,
-        {
-        }
-
-        assert_task_traits(&task);
-    }
-
-    #[tokio::test]
     async fn test_multiple_task_executions() {
         let task = SimpleTask::new();
-        let store = MemoryStore::new();
 
         // Run the task multiple times
         for i in 1..=5 {
-            let result = task.run(&store).await.unwrap();
+            let result = task.run_bare().await.unwrap();
             assert_eq!(result, TaskResult::Single(TestAction::Complete));
             assert_eq!(task.execution_count(), i);
         }
     }
 
-    #[tokio::test]
-    async fn test_task_state_isolation() {
-        let store1 = MemoryStore::new();
-        let store2 = MemoryStore::new();
-
-        let task1 = DataProcessingTask::new("input", "output1");
-        let task2 = DataProcessingTask::new("input", "output2");
-
-        // Setup different input data for each store
-        store1.put("input", "data1".to_string()).unwrap();
-        store2.put("input", "data2".to_string()).unwrap();
-
-        // Run tasks with different store instances
-        task1.run(&store1).await.unwrap();
-        task2.run(&store2).await.unwrap();
-
-        // Verify isolation
-        let result1: String = store1.get("output1").unwrap();
-        let result2: String = store2.get("output2").unwrap();
-
-        assert_eq!(result1, "processed: data1");
-        assert_eq!(result2, "processed: data2");
-
-        // Verify cross-contamination doesn't occur
-        assert!(store1.get::<String>("output2").is_err());
-        assert!(store2.get::<String>("output1").is_err());
-    }
-
     // Test that demonstrates Node -> Task compatibility
-    // This uses the existing Node from the node module
     use crate::node::Node;
 
     struct TestNode;
@@ -857,7 +732,7 @@ mod tests {
         type PrepResult = String;
         type ExecResult = bool;
 
-        async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
             Ok("node_prepared".to_string())
         }
 
@@ -867,10 +742,9 @@ mod tests {
 
         async fn post(
             &self,
-            store: &MemoryStore,
+            _res: &Resources,
             exec_res: Self::ExecResult,
         ) -> Result<TestAction, CanoError> {
-            store.put("node_executed", exec_res)?;
             if exec_res {
                 Ok(TestAction::Complete)
             } else {
@@ -882,16 +756,13 @@ mod tests {
     #[tokio::test]
     async fn test_node_as_task_compatibility() {
         let node = TestNode;
-        let store = MemoryStore::new();
+        let res = Resources::new();
 
         // Use the node as a task - this should work due to the blanket implementation
-        let result = Task::run(&node, &store).await;
+        let result = Task::run(&node, &res).await;
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), TaskResult::Single(TestAction::Complete));
-
-        let executed: bool = store.get("node_executed").unwrap();
-        assert!(executed);
     }
 
     // Tests for RetryMode and TaskConfig
@@ -949,6 +820,119 @@ mod tests {
     }
 
     #[test]
+    fn test_retry_mode_exponential_custom() {
+        let retry_mode = RetryMode::exponential_custom(
+            2,                         // max_retries
+            Duration::from_millis(50), // base_delay
+            3.0,                       // multiplier
+            Duration::from_secs(5),    // max_delay
+            0.0,                       // no jitter
+        );
+
+        assert_eq!(retry_mode.max_attempts(), 3);
+
+        // With no jitter, delays should be predictable
+        // attempt 0: 50ms * 3^0 = 50ms
+        // attempt 1: 50ms * 3^1 = 150ms
+        // attempt 2: None (beyond max_retries)
+        assert_eq!(
+            retry_mode.delay_for_attempt(0),
+            Some(Duration::from_millis(50))
+        );
+        assert_eq!(
+            retry_mode.delay_for_attempt(1),
+            Some(Duration::from_millis(150))
+        );
+        assert_eq!(retry_mode.delay_for_attempt(2), None);
+    }
+
+    #[test]
+    fn test_retry_mode_exponential_max_delay_cap() {
+        let retry_mode = RetryMode::exponential_custom(
+            5,
+            Duration::from_millis(100), // base_delay
+            10.0,                       // high multiplier
+            Duration::from_millis(500), // low max_delay cap
+            0.0,                        // no jitter
+        );
+
+        // All delays should be capped at max_delay
+        let delay0 = retry_mode.delay_for_attempt(0).unwrap();
+        let delay1 = retry_mode.delay_for_attempt(1).unwrap();
+        let delay2 = retry_mode.delay_for_attempt(2).unwrap();
+
+        assert_eq!(delay0, Duration::from_millis(100)); // 100 * 10^0 = 100
+        assert_eq!(delay1, Duration::from_millis(500)); // 100 * 10^1 = 1000, capped to 500
+        assert_eq!(delay2, Duration::from_millis(500)); // Capped to 500
+    }
+
+    #[test]
+    fn test_retry_mode_exponential_jitter_bounds() {
+        let retry_mode = RetryMode::exponential_custom(
+            3,
+            Duration::from_millis(100),
+            2.0,
+            Duration::from_secs(30),
+            0.5, // 50% jitter
+        );
+
+        // Run multiple times to test jitter variability
+        let mut delays = Vec::new();
+        for _ in 0..20 {
+            if let Some(delay) = retry_mode.delay_for_attempt(0) {
+                delays.push(delay.as_millis());
+            }
+        }
+
+        // With 50% jitter, delays should vary between 50ms and 150ms (100ms ± 50%)
+        // Due to randomness, we'll check that we get some variation
+        let min_delay = delays.iter().min().unwrap();
+        let max_delay = delays.iter().max().unwrap();
+
+        // Should have some variation due to jitter
+        assert!(*min_delay >= 50); // 100ms - 50% = 50ms minimum
+        assert!(*max_delay <= 150); // 100ms + 50% = 150ms maximum
+    }
+
+    #[test]
+    fn test_retry_mode_jitter_clamping() {
+        // Test that jitter values outside [0, 1] are clamped
+        let retry_mode1 = RetryMode::exponential_custom(
+            1,
+            Duration::from_millis(100),
+            2.0,
+            Duration::from_secs(30),
+            -0.5, // Should be clamped to 0.0
+        );
+
+        let retry_mode2 = RetryMode::exponential_custom(
+            1,
+            Duration::from_millis(100),
+            2.0,
+            Duration::from_secs(30),
+            1.5, // Should be clamped to 1.0
+        );
+
+        // Both should work without panicking
+        assert!(retry_mode1.delay_for_attempt(0).is_some());
+        assert!(retry_mode2.delay_for_attempt(0).is_some());
+    }
+
+    #[test]
+    fn test_retry_mode_default() {
+        let retry_mode = RetryMode::default();
+
+        // Default should be exponential backoff with 3 retries
+        assert_eq!(retry_mode.max_attempts(), 4);
+
+        // Should have delays for first 3 attempts
+        assert!(retry_mode.delay_for_attempt(0).is_some());
+        assert!(retry_mode.delay_for_attempt(1).is_some());
+        assert!(retry_mode.delay_for_attempt(2).is_some());
+        assert!(retry_mode.delay_for_attempt(3).is_none());
+    }
+
+    #[test]
     fn test_task_config_creation() {
         let config = TaskConfig::new();
         assert_eq!(config.retry_mode.max_attempts(), 4);
@@ -982,7 +966,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_with_retries_success() {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let config = TaskConfig::minimal();
@@ -1005,7 +988,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_with_retries_failure() {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let config = TaskConfig::new().with_fixed_retry(2, Duration::from_millis(1));
@@ -1032,7 +1014,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_run_with_retries_exhausted() {
-        use std::sync::Arc;
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let config = TaskConfig::new().with_fixed_retry(2, Duration::from_millis(1));
@@ -1077,6 +1058,57 @@ mod tests {
             "expected original TaskExecution variant when retries disabled, got: {err}"
         );
         assert!(err.to_string().contains("immediate fail"));
+    }
+
+    // ------------------------------------------------------------------
+    // run_bare delegation tests
+    // ------------------------------------------------------------------
+
+    struct BareTask;
+
+    #[async_trait]
+    impl Task<TestAction> for BareTask {
+        async fn run_bare(&self) -> Result<TaskResult<TestAction>, CanoError> {
+            Ok(TaskResult::Single(TestAction::Complete))
+        }
+    }
+
+    struct ExplicitRunTask {
+        bare_called: Arc<AtomicU32>,
+    }
+
+    #[async_trait]
+    impl Task<TestAction> for ExplicitRunTask {
+        async fn run(&self, _res: &Resources) -> Result<TaskResult<TestAction>, CanoError> {
+            Ok(TaskResult::Single(TestAction::Continue))
+        }
+
+        async fn run_bare(&self) -> Result<TaskResult<TestAction>, CanoError> {
+            self.bare_called.fetch_add(1, Ordering::SeqCst);
+            Ok(TaskResult::Single(TestAction::Error))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_bare_called_when_run_not_overridden() {
+        let task = BareTask;
+        let res = Resources::new();
+        let result = task.run(&res).await.unwrap();
+        assert_eq!(result, TaskResult::Single(TestAction::Complete));
+    }
+
+    #[tokio::test]
+    async fn test_run_overrides_bypass_bare() {
+        let bare_called = Arc::new(AtomicU32::new(0));
+        let task = ExplicitRunTask {
+            bare_called: Arc::clone(&bare_called),
+        };
+        let res = Resources::new();
+        let result = task.run(&res).await.unwrap();
+        // run() override returns Continue, not Error from run_bare
+        assert_eq!(result, TaskResult::Single(TestAction::Continue));
+        // run_bare must never have been called
+        assert_eq!(bare_called.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

@@ -32,7 +32,8 @@ struct DataLoader;
 
 #[async_trait]
 impl Task<DataProcessingState> for DataLoader {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<DataProcessingState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<DataProcessingState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         println!("Loading initial data...");
 
         // Simulate loading data
@@ -58,7 +59,8 @@ impl ProcessorTask {
 
 #[async_trait]
 impl Task<DataProcessingState> for ProcessorTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<DataProcessingState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<DataProcessingState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         println!("Processor {} starting...", self.task_id);
 
         // Get input data
@@ -87,7 +89,8 @@ struct Aggregator;
 
 #[async_trait]
 impl Task<DataProcessingState> for Aggregator {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<DataProcessingState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<DataProcessingState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         println!("Aggregating results...");
 
         // Collect all results
@@ -129,7 +132,7 @@ async fn main() -> Result<(), CanoError> {
 
         let join_config = JoinConfig::new(JoinStrategy::All, DataProcessingState::Aggregate);
 
-        let workflow = Workflow::new(store.clone())
+        let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
             .register(DataProcessingState::Start, DataLoader)
             .register_split(
                 DataProcessingState::ParallelProcessing,
@@ -159,7 +162,7 @@ async fn main() -> Result<(), CanoError> {
 
         let join_config = JoinConfig::new(JoinStrategy::Quorum(2), DataProcessingState::Aggregate);
 
-        let workflow = Workflow::new(store.clone())
+        let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
             .register(DataProcessingState::Start, DataLoader)
             .register_split(
                 DataProcessingState::ParallelProcessing,
@@ -192,7 +195,7 @@ async fn main() -> Result<(), CanoError> {
 
         let join_config = JoinConfig::new(JoinStrategy::Any, DataProcessingState::Aggregate);
 
-        let workflow = Workflow::new(store.clone())
+        let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
             .register(DataProcessingState::Start, DataLoader)
             .register_split(
                 DataProcessingState::ParallelProcessing,
@@ -223,7 +226,7 @@ async fn main() -> Result<(), CanoError> {
             DataProcessingState::Aggregate,
         );
 
-        let workflow = Workflow::new(store.clone())
+        let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
             .register(DataProcessingState::Start, DataLoader)
             .register_split(
                 DataProcessingState::ParallelProcessing,
@@ -254,7 +257,7 @@ async fn main() -> Result<(), CanoError> {
         let join_config = JoinConfig::new(JoinStrategy::All, DataProcessingState::Aggregate)
             .with_timeout(Duration::from_millis(250)); // Will complete 2 out of 3 tasks
 
-        let workflow = Workflow::new(store.clone())
+        let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
             .register(DataProcessingState::Start, DataLoader)
             .register_split(
                 DataProcessingState::ParallelProcessing,

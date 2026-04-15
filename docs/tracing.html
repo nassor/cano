@@ -367,7 +367,7 @@ let workflow_span = info_span!(
 );
 
 let store = MemoryStore::new();
-let workflow = Workflow::new(store)
+let workflow = Workflow::new(Resources::new().insert("store", store))
     .with_tracing_span(workflow_span)
     .register(MyState::Start, MyProcessorNode)
     .add_exit_state(MyState::Complete);</code></pre>
@@ -386,7 +386,8 @@ struct PaymentTask;
 
 #[async_trait]
 impl Task&lt;AppState&gt; for PaymentTask {
-    async fn run(&self, store: &MemoryStore) -> Result&lt;TaskResult&lt;AppState&gt;, CanoError&gt; {
+    async fn run(&self, res: &Resources) -> Result&lt;TaskResult&lt;AppState&gt;, CanoError&gt; {
+        let store = res.get::&lt;MemoryStore, str&gt;("store")?;
         let order_id: String = store.get("order_id")?;
         info!(order_id = %order_id, "Processing payment");
 
@@ -418,8 +419,9 @@ impl Node&lt;PipelineState&gt; for DataEnrichmentNode {
     type PrepResult = Vec&lt;String&gt;;
     type ExecResult = Vec&lt;String&gt;;
 
-    #[instrument(skip(self, store), fields(source = %self.source))]
-    async fn prep(&self, store: &MemoryStore) -> Result&lt;Self::PrepResult, CanoError&gt; {
+    #[instrument(skip(self, res), fields(source = %self.source))]
+    async fn prep(&self, res: &Resources) -> Result&lt;Self::PrepResult, CanoError&gt; {
+        let store = res.get::&lt;MemoryStore, str&gt;("store")?;
         let keys: Vec&lt;String&gt; = store.get("pending_keys")?;
         debug!(count = keys.len(), "Loaded keys for enrichment");
         Ok(keys)
@@ -433,10 +435,11 @@ impl Node&lt;PipelineState&gt; for DataEnrichmentNode {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         results: Self::ExecResult,
     ) -> Result&lt;PipelineState, CanoError&gt; {
         info!(enriched = results.len(), "Enrichment complete");
+        let store = res.get::&lt;MemoryStore, str&gt;("store")?;
         store.put("enriched_data", results)?;
         Ok(PipelineState::Validate)
     }
@@ -469,7 +472,7 @@ struct ProcessOrderNode;
 
 #[async_trait]
 impl Task&lt;State&gt; for ProcessOrderNode {
-    async fn run(&self, _store: &MemoryStore) -> Result&lt;TaskResult&lt;State&gt;, CanoError&gt; {
+    async fn run(&self, _res: &Resources) -> Result&lt;TaskResult&lt;State&gt;, CanoError&gt; {
         info!("Processing order...");
         Ok(TaskResult::Single(State::Complete))
     }
@@ -494,7 +497,7 @@ async fn main() -> Result&lt;(), CanoError&gt; {
         customer = "Acme Corp"
     );
 
-    let workflow = Workflow::new(store)
+    let workflow = Workflow::new(Resources::new().insert("store", store))
         .register(State::Start, ProcessOrderNode)
         .add_exit_state(State::Complete)
         .with_tracing_span(workflow_span); // Attach span

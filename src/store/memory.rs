@@ -199,12 +199,22 @@ impl KeyValueStore for MemoryStore {
     }
 }
 
+impl crate::resource::Resource for MemoryStore {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::Resource;
     use std::sync::Arc;
     use std::thread;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn test_memory_store_resource_lifecycle() {
+        let store = MemoryStore::new();
+        assert!(store.setup().await.is_ok());
+        assert!(store.teardown().await.is_ok());
+    }
 
     #[test]
     fn test_new_store() {

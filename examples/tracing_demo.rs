@@ -4,7 +4,7 @@
 //! This example demonstrates the tracing feature in Cano workflows and schedulers.
 //! It shows how to:
 //! 1. Enable tracing with spans for workflows
-//! 2. Use custom tracing spans for better observability  
+//! 2. Use custom tracing spans for better observability
 //! 3. Track workflow execution through the scheduler
 //! 4. Monitor node execution phases (prep, exec, post)
 //!
@@ -57,7 +57,9 @@ impl Node<WorkflowState> for TracedDataProcessor {
         TaskConfig::default()
     }
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
+
         info!(processor_id = %self.processor_id, "Starting data preparation");
 
         // Simulate some prep work
@@ -97,9 +99,11 @@ impl Node<WorkflowState> for TracedDataProcessor {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_result: Self::ExecResult,
     ) -> Result<WorkflowState, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
+
         info!(processor_id = %self.processor_id, "Starting post-processing");
 
         // Store results
@@ -132,7 +136,7 @@ impl Node<WorkflowState> for ValidationNode {
     type PrepResult = String;
     type ExecResult = bool;
 
-    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
         info!("Preparing validation");
         Ok("validation_data".to_string())
     }
@@ -145,7 +149,7 @@ impl Node<WorkflowState> for ValidationNode {
 
     async fn post(
         &self,
-        _store: &MemoryStore,
+        _res: &Resources,
         exec_result: Self::ExecResult,
     ) -> Result<WorkflowState, CanoError> {
         if exec_result {
@@ -180,7 +184,9 @@ impl Task<WorkflowState> for SimpleMathTask {
         TaskConfig::default().with_fixed_retry(2, Duration::from_millis(100))
     }
 
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<WorkflowState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
+
         info!(task_id = %self.task_id, operation = %self.operation, "Starting math task");
 
         // Simulate some computation work
@@ -238,7 +244,8 @@ async fn main() -> CanoResult<()> {
         info!("📋 Example 1: Basic Workflow with Tracing");
 
         let store = MemoryStore::new();
-        let workflow = Workflow::new(store.clone())
+        let resources = Resources::new().insert("store", store.clone());
+        let workflow = Workflow::new(resources)
             .register(WorkflowState::Start, ValidationNode::new(true))
             .register(
                 WorkflowState::Processing,
@@ -258,16 +265,17 @@ async fn main() -> CanoResult<()> {
         info!("📋 Example 2: Task-based Workflow with Tracing and Retry");
 
         let store = MemoryStore::new();
-        let task_workflow = Workflow::new(store.clone())
+        // Set some operands for the math task
+        store.put("operand_a", 7)?;
+        store.put("operand_b", 6)?;
+
+        let resources = Resources::new().insert("store", store.clone());
+        let task_workflow = Workflow::new(resources)
             .register(
                 WorkflowState::Start,
                 SimpleMathTask::new("math_task_1", "multiply"),
             )
             .add_exit_state(WorkflowState::Complete);
-
-        // Set some operands for the math task
-        store.put("operand_a", 7)?;
-        store.put("operand_b", 6)?;
 
         info!("Starting task-based workflow execution...");
         let result = task_workflow.orchestrate(WorkflowState::Start).await?;
@@ -295,9 +303,10 @@ async fn main() -> CanoResult<()> {
 
         let mut scheduler = Scheduler::new();
         let store = MemoryStore::new();
+        let resources = Resources::new().insert("store", store.clone());
 
         // Create a workflow for scheduled execution
-        let scheduled_workflow = Workflow::new(store.clone())
+        let scheduled_workflow = Workflow::new(resources)
             .register(WorkflowState::Start, ValidationNode::new(true))
             .register(
                 WorkflowState::Processing,
@@ -346,7 +355,8 @@ async fn main() -> CanoResult<()> {
         info!("📋 Example 4: Error Handling with Tracing");
 
         let store = MemoryStore::new();
-        let error_workflow = Workflow::new(store)
+        let resources = Resources::new().insert("store", store);
+        let error_workflow = Workflow::new(resources)
             .register(WorkflowState::Start, ValidationNode::new(false)) // This will fail
             .register(
                 WorkflowState::Processing,

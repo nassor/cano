@@ -35,7 +35,9 @@ struct GeneratorTask;
 
 #[async_trait]
 impl Task<Action> for GeneratorTask {
-    async fn run(&self, store: &MemoryStore) -> CanoResult<TaskResult<Action>> {
+    async fn run(&self, res: &Resources) -> CanoResult<TaskResult<Action>> {
+        let store = res.get::<MemoryStore, str>("store")?;
+
         println!("🎲 GeneratorTask: Creating random numbers...");
 
         // Generate random numbers (combining what would be prep + exec in a Node)
@@ -60,7 +62,9 @@ struct CounterTask;
 
 #[async_trait]
 impl Task<Action> for CounterTask {
-    async fn run(&self, store: &MemoryStore) -> CanoResult<TaskResult<Action>> {
+    async fn run(&self, res: &Resources) -> CanoResult<TaskResult<Action>> {
+        let store = res.get::<MemoryStore, str>("store")?;
+
         println!("🔢 CounterTask: Counting numbers...");
 
         // Get the numbers and count them (all in one method)
@@ -84,9 +88,10 @@ async fn main() -> CanoResult<()> {
     println!("🚀 Starting Task-based workflow example\n");
 
     let store = MemoryStore::new();
+    let resources = Resources::new().insert("store", store.clone());
 
-    // Create workflow with store
-    let workflow = Workflow::new(store.clone())
+    // Create workflow with resources
+    let workflow = Workflow::new(resources)
         .register(Action::Generate, GeneratorTask)
         .register(Action::Count, CounterTask)
         .add_exit_states(vec![Action::Complete]);

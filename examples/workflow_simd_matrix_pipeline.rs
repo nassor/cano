@@ -218,7 +218,7 @@ impl Node<PipelineState> for MatrixGenerator {
         TaskConfig::minimal()
     }
 
-    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
         println!(
             "🔢 Preparing to generate {} {}x{} matrices...",
             self.count, self.size, self.size
@@ -252,9 +252,10 @@ impl Node<PipelineState> for MatrixGenerator {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<PipelineState, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         store.put("matrices", exec_res)?;
         println!("✅ Matrix generation complete!");
         Ok(PipelineState::Multiply)
@@ -274,7 +275,8 @@ impl Node<PipelineState> for SimdMatrixMultiplier {
         TaskConfig::minimal()
     }
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         println!("🧮 Loading matrices for SIMD multiplication...");
         let matrices: Vec<SimdMatrix> = store.get("matrices")?;
         Ok(matrices)
@@ -306,9 +308,10 @@ impl Node<PipelineState> for SimdMatrixMultiplier {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<PipelineState, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         store.put("multiplied_matrices", exec_res)?;
         Ok(PipelineState::Transform)
     }
@@ -335,7 +338,8 @@ impl Node<PipelineState> for SimdMatrixTransformer {
         TaskConfig::minimal()
     }
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         println!("🔄 Loading matrices for SIMD transformations...");
         let matrices: Vec<SimdMatrix> = store.get("multiplied_matrices")?;
         Ok(matrices)
@@ -376,9 +380,10 @@ impl Node<PipelineState> for SimdMatrixTransformer {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<PipelineState, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         store.put("transformed_matrices", exec_res)?;
         Ok(PipelineState::Statistics)
     }
@@ -397,7 +402,8 @@ impl Node<PipelineState> for SimdStatisticsCalculator {
         TaskConfig::minimal()
     }
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         println!("📊 Loading matrices for statistics calculation...");
         let matrices: Vec<SimdMatrix> = store.get("transformed_matrices")?;
         Ok(matrices)
@@ -461,9 +467,10 @@ impl Node<PipelineState> for SimdStatisticsCalculator {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<PipelineState, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         store.put("statistics", exec_res.clone())?;
 
         for (i, (sum, mean, variance)) in exec_res.iter().enumerate() {
@@ -527,7 +534,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = MemoryStore::default();
 
     // Create the workflow with SIMD-accelerated nodes using new API
-    let workflow = Workflow::new(store.clone())
+    let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(PipelineState::Generate, MatrixGenerator::new(64, 20)) // 64x64 matrices, 20 of them
         .register(PipelineState::Multiply, SimdMatrixMultiplier)
         .register(PipelineState::Transform, SimdMatrixTransformer::new(1.5))

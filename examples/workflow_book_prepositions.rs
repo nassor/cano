@@ -262,7 +262,7 @@ impl Node<BookPrepositionAction> for BookDownloaderNode {
     }
 
     /// Preparation: Get the list of books to download
-    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
         let book_list = Self::get_book_list();
         println!("📋 Prepared {} books for download", book_list.len());
         Ok(book_list)
@@ -309,9 +309,10 @@ impl Node<BookPrepositionAction> for BookDownloaderNode {
     /// Post-processing: Store downloaded books in memory
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<BookPrepositionAction, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         if exec_res.is_empty() {
             return Err(CanoError::node_execution(
                 "No books were successfully downloaded",
@@ -394,7 +395,8 @@ impl Node<BookPrepositionAction> for PrepositionNode {
     }
 
     /// Preparation: Load downloaded books from memory
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         let books: Vec<Book> = store
             .get("downloaded_books")
             .map_err(|e| CanoError::preparation(format!("Failed to load books: {e}")))?;
@@ -433,9 +435,10 @@ impl Node<BookPrepositionAction> for PrepositionNode {
     /// Post-processing: Store analysis results
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<BookPrepositionAction, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         if exec_res.is_empty() {
             return Err(CanoError::node_execution("No book analyses were completed"));
         }
@@ -472,7 +475,8 @@ impl Node<BookPrepositionAction> for BookRankingByPrepositionNode {
     }
 
     /// Preparation: Load book analyses from memory
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         let analyses: Vec<BookAnalysis> = store
             .get("book_analyses")
             .map_err(|e| CanoError::preparation(format!("Failed to load analyses: {e}")))?;
@@ -516,9 +520,10 @@ impl Node<BookPrepositionAction> for BookRankingByPrepositionNode {
     /// Post-processing: Store final rankings and display results
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<BookPrepositionAction, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         store.put("book_rankings", exec_res.clone())?;
 
         // Display results
@@ -594,7 +599,7 @@ async fn run_workflow() -> Result<(), CanoError> {
     let store = MemoryStore::new();
 
     // Create a Workflow that handles all three different node types
-    let workflow = Workflow::new(store.clone())
+    let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(BookPrepositionAction::Download, BookDownloaderNode::new())
         .register(BookPrepositionAction::Analyze, PrepositionNode::new())
         .register(
@@ -686,8 +691,9 @@ mod tests {
     async fn test_book_downloader_prep() {
         let downloader = BookDownloaderNode::new();
         let store = MemoryStore::new();
+        let res = Resources::new().insert("store", store.clone());
 
-        let book_list = downloader.prep(&store).await.unwrap();
+        let book_list = downloader.prep(&res).await.unwrap();
 
         assert_eq!(book_list.len(), 12);
         assert!(book_list.iter().all(|(id, title, url)| {
@@ -744,7 +750,8 @@ mod tests {
         store.put("downloaded_books", mock_books).unwrap();
 
         let analyzer = PrepositionNode::new();
-        let result = analyzer.run(&store).await.unwrap();
+        let res = Resources::new().insert("store", store.clone());
+        let result = analyzer.run(&res).await.unwrap();
 
         assert_eq!(result, BookPrepositionAction::Rank);
 
@@ -794,7 +801,8 @@ mod tests {
         store.put("book_analyses", mock_analyses).unwrap();
 
         let ranker = BookRankingByPrepositionNode::new();
-        let result = ranker.run(&store).await.unwrap();
+        let res = Resources::new().insert("store", store.clone());
+        let result = ranker.run(&res).await.unwrap();
 
         assert_eq!(result, BookPrepositionAction::Complete);
 

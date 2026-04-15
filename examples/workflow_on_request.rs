@@ -5,11 +5,11 @@
 //!
 //! ## Key Concepts
 //!
-//! - **Per-request store isolation**: Each request gets its own `MemoryStore`
-//!   so concurrent requests never interfere with each other.
+//! - **Per-request resource isolation**: Each request gets its own `MemoryStore`
+//!   and `Resources` so concurrent requests never interfere with each other.
 //! - **Workflow factory function**: The workflow structure is cheap to build —
 //!   tasks are small `Clone` structs wrapped in `Arc` internally.
-//! - **Data flow via store**: Request data is written to the store before
+//! - **Data flow via Resources**: Request data is inserted into `Resources` before
 //!   orchestration; results are read from the store after it completes.
 //!
 //! ## Running
@@ -70,29 +70,35 @@ struct ProcessResponse {
     uppercased: String,
 }
 
+/// Carries the incoming request text as a typed resource.
+struct RequestParams {
+    text: String,
+}
+
+impl Resource for RequestParams {}
+
 // ============================================================================
 // Tasks
 // ============================================================================
 
-/// Reads "input_text" from the store, validates it is non-empty, and copies it
-/// through so downstream tasks can consume it.
+/// Reads the request params from Resources, validates the text is non-empty,
+/// and writes it to the store so downstream tasks can consume it.
 #[derive(Clone)]
 struct ParseTask;
 
 #[async_trait]
 impl Task<TextPipelineState> for ParseTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<TextPipelineState>, CanoError> {
-        let text: String = store
-            .get("input_text")
-            .map_err(|e| CanoError::task_execution(format!("missing input_text: {e}")))?;
+    async fn run(&self, res: &Resources) -> Result<TaskResult<TextPipelineState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
+        let params = res.get::<RequestParams, str>("request")?;
 
-        if text.trim().is_empty() {
+        if params.text.trim().is_empty() {
             return Err(CanoError::task_execution("input text is empty"));
         }
 
         // Store the validated text for the next stage
         store
-            .put("validated_text", text)
+            .put("validated_text", params.text.clone())
             .map_err(|e| CanoError::store(format!("{e}")))?;
 
         Ok(TaskResult::Single(TextPipelineState::Transform))
@@ -106,7 +112,9 @@ struct TransformTask;
 
 #[async_trait]
 impl Task<TextPipelineState> for TransformTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<TextPipelineState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<TextPipelineState>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
+
         let text: String = store
             .get("validated_text")
             .map_err(|e| CanoError::task_execution(format!("missing validated_text: {e}")))?;
@@ -129,12 +137,9 @@ impl Task<TextPipelineState> for TransformTask {
 // Workflow factory
 // ============================================================================
 
-/// Build a fresh workflow with its own store.
-///
-/// Because `Workflow::new` takes ownership of the store, we return both the
-/// workflow and a clone of the store so the caller can read results afterwards.
-fn build_workflow(store: MemoryStore) -> Workflow<TextPipelineState> {
-    Workflow::new(store)
+/// Build a fresh workflow with its own resources.
+fn build_workflow(resources: Resources) -> Workflow<TextPipelineState> {
+    Workflow::new(resources)
         .register(TextPipelineState::Parse, ParseTask)
         .register(TextPipelineState::Transform, TransformTask)
         .add_exit_state(TextPipelineState::Done)
@@ -148,15 +153,16 @@ fn build_workflow(store: MemoryStore) -> Workflow<TextPipelineState> {
 async fn process_handler(
     Json(payload): Json<ProcessRequest>,
 ) -> Result<Json<ProcessResponse>, StatusCode> {
-    // Each request gets its own store — full isolation.
+    // Each request gets its own store and resources — full isolation.
     let store = MemoryStore::new();
+    let resources = Resources::new().insert("store", store.clone()).insert(
+        "request",
+        RequestParams {
+            text: payload.text.clone(),
+        },
+    );
 
-    // Inject request data into the store before running the workflow.
-    store
-        .put("input_text", payload.text.clone())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let workflow = build_workflow(store.clone());
+    let workflow = build_workflow(resources);
 
     // Run the FSM to completion.
     workflow

@@ -419,7 +419,7 @@
             <div class="page-toc-title">On this page</div>
             <ol>
                 <li><a href="#implementing">Implementing a Task</a></li>
-                <li><a href="#closures">Closure Tasks</a></li>
+                <li><a href="#resource-free">Resource-Free Tasks</a></li>
                 <li><a href="#config-retries">Configuration &amp; Retries</a></li>
                 <li><a href="#patterns">Real-World Task Patterns</a></li>
                 <li><a href="#task-vs-node">Task vs Node</a></li>
@@ -450,40 +450,63 @@ impl Task<Action> for GeneratorTask {
         TaskConfig::default().with_fixed_retry(3, std::time::Duration::from_secs(1))
     }
 
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<Action>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<Action>, CanoError> {
         println!("🎲 GeneratorTask: Creating random numbers...");
 
-        // 1. Perform logic
+        // 1. Look up the shared store from resources
+        let store = res.get::<MemoryStore, str>("store")?;
+
+        // 2. Perform logic
         let mut rng = rand::rng();
         let numbers: Vec<u32> = (0..10).map(|_| rng.random_range(1..=100)).collect();
 
-        // 2. Store results
+        // 3. Store results
         store.put("numbers", numbers)?;
         println!("✅ Stored numbers");
 
-        // 3. Return next state
+        // 4. Return next state
         Ok(TaskResult::Single(Action::Count))
     }
 }</code></pre>
         </div>
 
-        <!-- Section: Closure Tasks -->
+        <!-- Section: Resource-Free Tasks -->
         <hr class="section-divider">
-        <h2 id="closures">Closure Tasks</h2>
-        <p>For very simple logic, you can register a closure directly as a task without defining a struct.</p>
+        <h2 id="resource-free">Resource-Free Tasks</h2>
+        <p>
+            When a task performs pure computation and needs no resources, override <code>run_bare()</code> instead of
+            <code>run()</code>. This skips the <code>Resources</code> parameter entirely, giving you a cleaner signature
+            for self-contained logic.
+        </p>
 
         <div class="code-block">
-            <span class="code-block-label"><span class="label-icon">&#955;</span> Closure as a Task</span>
-            <pre><code class="language-rust">workflow.register(Action::Count, |store: &MemoryStore| async move {
-    let numbers: Vec<u32> = store.get("numbers")?;
-    println!("Count: {}", numbers.len());
-    Ok(TaskResult::Single(Action::Complete))
-});</code></pre>
+            <span class="code-block-label"><span class="label-icon">&#9889;</span> Task using run_bare</span>
+            <pre><code class="language-rust">use async_trait::async_trait;
+use cano::prelude::*;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Step { Compute, Done }
+
+struct PureTask;
+
+#[async_trait]
+impl Task<Step> for PureTask {
+    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+        // No resources needed — pure computation
+        let answer = 40 + 2;
+        println!("Computed answer: {}", answer);
+        Ok(TaskResult::Single(Step::Done))
+    }
+}</code></pre>
         </div>
 
         <div class="callout callout-tip">
             <div class="callout-label">Tip</div>
-            <p>Closures are great for prototyping and simple logic. When your closure starts growing beyond a few lines, consider refactoring into a named struct with the <code>Task</code> trait.</p>
+            <p>
+                Pair <code>run_bare()</code> with <code>Workflow::bare()</code> (or <code>Resources::empty()</code>)
+                when building workflows where no tasks need shared state — for example, pure pipelines or
+                computational benchmarks.
+            </p>
         </div>
 
         <!-- Section: Configuration & Retries -->
@@ -558,8 +581,10 @@ impl Task<State> for ApiClientTask {
             .with_exponential_retry(5)
     }
 
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<State>, CanoError> {
         println!("📡 Calling API: {}", self.endpoint);
+
+        let store = res.get::<MemoryStore, str>("store")?;
 
         // Simulate API call that might fail
         let response = reqwest::get(&self.endpoint)
@@ -595,7 +620,8 @@ struct DataTransformer;
 
 #[async_trait]
 impl Task<State> for DataTransformer {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<State>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         let raw_data: Vec<i32> = store.get("raw_data")?;
 
         // Transform: filter and multiply
@@ -625,7 +651,8 @@ struct ValidatorTask;
 
 #[async_trait]
 impl Task<State> for ValidatorTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<State>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         let data: Vec<f64> = store.get("processed_data")?;
 
         let mut errors = Vec::new();
@@ -663,7 +690,8 @@ struct RoutingTask;
 
 #[async_trait]
 impl Task<State> for RoutingTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<State>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         let item_count: usize = store.get("item_count")?;
         let priority: String = store.get("priority")?;
 
@@ -696,7 +724,8 @@ struct AggregatorTask;
 
 #[async_trait]
 impl Task<State> for AggregatorTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<State>, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         println!("Aggregating results...");
 
         let mut total = 0;
@@ -734,7 +763,7 @@ impl Task<State> for AggregatorTask {
                 <ul>
                     <li>Single <code>run()</code> method</li>
                     <li>Direct control over flow</li>
-                    <li>Can be a closure</li>
+                    <li>Supports <code>run_bare()</code> for resource-free tasks</li>
                 </ul>
             </div>
             <div class="comparison-col">
@@ -751,12 +780,10 @@ impl Task<State> for AggregatorTask {
         <div class="code-block">
             <span class="code-block-label"><span class="label-icon">&#128260;</span> Mixing Tasks and Nodes</span>
             <pre><code class="language-rust">// Mixing Tasks and Nodes in one workflow
-let workflow = Workflow::new(store.clone())
-    .register(State::Init, SimpleTask)           // Task
+let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+    .register(State::Init, SimpleTask)            // Task
     .register(State::Process, ComplexNode::new()) // Node
-    .register(State::Finish, |_: &MemoryStore| async { // Closure Task
-        Ok(TaskResult::Single(State::Done))
-    });</code></pre>
+    .register(State::Finish, FinishTask);         // Another Task</code></pre>
         </div>
 
         <!-- Section: When to Use -->

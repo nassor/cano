@@ -183,6 +183,12 @@ pub enum CanoError {
     /// Use this for errors that don't fit the other categories.
     /// Try to be specific in the error message.
     Generic(String),
+
+    /// A resource key was not found in the Resources map
+    ResourceNotFound(String),
+
+    /// A resource was found under the key but its stored type did not match the requested type
+    ResourceTypeMismatch(String),
 }
 
 impl CanoError {
@@ -226,6 +232,16 @@ impl CanoError {
         CanoError::Generic(msg.into())
     }
 
+    /// Create a new resource not found error
+    pub fn resource_not_found<S: Into<String>>(msg: S) -> Self {
+        CanoError::ResourceNotFound(msg.into())
+    }
+
+    /// Create a new resource type mismatch error
+    pub fn resource_type_mismatch<S: Into<String>>(msg: S) -> Self {
+        CanoError::ResourceTypeMismatch(msg.into())
+    }
+
     /// Get the error message as a string slice
     pub fn message(&self) -> &str {
         match self {
@@ -237,6 +253,8 @@ impl CanoError {
             CanoError::Configuration(msg) => msg,
             CanoError::RetryExhausted(msg) => msg,
             CanoError::Generic(msg) => msg,
+            CanoError::ResourceNotFound(msg) => msg,
+            CanoError::ResourceTypeMismatch(msg) => msg,
         }
     }
 
@@ -251,6 +269,8 @@ impl CanoError {
             CanoError::Configuration(_) => "configuration",
             CanoError::RetryExhausted(_) => "retry_exhausted",
             CanoError::Generic(_) => "generic",
+            CanoError::ResourceNotFound(_) => "resource_not_found",
+            CanoError::ResourceTypeMismatch(_) => "resource_type_mismatch",
         }
     }
 }
@@ -266,6 +286,8 @@ impl std::fmt::Display for CanoError {
             CanoError::Configuration(msg) => write!(f, "Configuration error: {msg}"),
             CanoError::RetryExhausted(msg) => write!(f, "Retry exhausted: {msg}"),
             CanoError::Generic(msg) => write!(f, "Error: {msg}"),
+            CanoError::ResourceNotFound(msg) => write!(f, "Resource not found: {msg}"),
+            CanoError::ResourceTypeMismatch(msg) => write!(f, "Resource type mismatch: {msg}"),
         }
     }
 }
@@ -283,6 +305,8 @@ impl PartialEq for CanoError {
             (CanoError::Configuration(a), CanoError::Configuration(b)) => a == b,
             (CanoError::RetryExhausted(a), CanoError::RetryExhausted(b)) => a == b,
             (CanoError::Generic(a), CanoError::Generic(b)) => a == b,
+            (CanoError::ResourceNotFound(a), CanoError::ResourceNotFound(b)) => a == b,
+            (CanoError::ResourceTypeMismatch(a), CanoError::ResourceTypeMismatch(b)) => a == b,
             _ => false,
         }
     }
@@ -450,5 +474,44 @@ mod tests {
         let a = CanoError::NodeExecution("msg".to_string());
         let b = CanoError::TaskExecution("msg".to_string());
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_resource_not_found_constructor_and_category() {
+        let err = CanoError::resource_not_found("missing key");
+        assert_eq!(err.message(), "missing key");
+        assert_eq!(err.category(), "resource_not_found");
+        assert_eq!(format!("{err}"), "Resource not found: missing key");
+    }
+
+    #[test]
+    fn test_resource_type_mismatch_constructor_and_category() {
+        let err = CanoError::resource_type_mismatch("wrong type");
+        assert_eq!(err.message(), "wrong type");
+        assert_eq!(err.category(), "resource_type_mismatch");
+        assert_eq!(format!("{err}"), "Resource type mismatch: wrong type");
+    }
+
+    #[test]
+    fn test_resource_variants_partial_eq() {
+        let a = CanoError::ResourceNotFound("k".to_string());
+        let b = CanoError::ResourceNotFound("k".to_string());
+        assert_eq!(a, b);
+
+        let c = CanoError::ResourceNotFound("k".to_string());
+        let d = CanoError::ResourceTypeMismatch("k".to_string());
+        assert_ne!(c, d);
+
+        let e = CanoError::ResourceTypeMismatch("t".to_string());
+        let f = CanoError::ResourceTypeMismatch("t".to_string());
+        assert_eq!(e, f);
+    }
+
+    #[test]
+    fn test_resource_not_found_distinct_from_resource_type_mismatch() {
+        let not_found = CanoError::resource_not_found("key");
+        let mismatch = CanoError::resource_type_mismatch("key");
+        // Same message, different variants — must not be equal
+        assert_ne!(not_found, mismatch);
     }
 }

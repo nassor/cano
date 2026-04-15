@@ -3,7 +3,7 @@
 //! This module provides the core [`Workflow`] type for building async workflow systems
 //! with support for parallel task execution through split/join patterns.
 //!
-//! ## 🎯 Core Concepts
+//! ## Core Concepts
 //!
 //! ### Split/Join Workflows
 //!
@@ -25,7 +25,7 @@
 //! - **PartialTimeout**: Accept whatever completes before timeout, cancel incomplete tasks,
 //!   and proceed with completed tasks (requires timeout configuration)
 //!
-//! ## 📊 Partial Results Strategy
+//! ## Partial Results Strategy
 //!
 //! The `PartialResults` strategy is designed for scenarios where you want to:
 //! - Optimize for latency by cancelling slow tasks
@@ -38,7 +38,6 @@
 //! - **Early Cancellation**: Once the minimum number of tasks complete successfully,
 //!   remaining tasks are cancelled
 //! - **Result Tracking**: Tracks successful, failed, and cancelled tasks separately
-//! - **Store Integration**: Optionally stores result summaries in the workflow store
 //! - **Flexible Thresholds**: Configure minimum number of completions needed
 //!
 //! ### Example
@@ -52,21 +51,20 @@
 //! # struct MyTask;
 //! # #[async_trait]
 //! # impl Task<State> for MyTask {
-//! #     async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+//! #     async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> {
 //! #         Ok(TaskResult::Single(State::Complete))
 //! #     }
 //! # }
 //! # async fn example() -> Result<(), CanoError> {
-//! let store = MemoryStore::new();
 //! let tasks = vec![MyTask, MyTask, MyTask, MyTask];
 //!
 //! // Wait for 2 tasks to complete, then cancel the rest
 //! let join_config = JoinConfig::new(
 //!     JoinStrategy::PartialResults(2),
 //!     State::Process
-//! ).with_store_partial_results(true);
+//! );
 //!
-//! let workflow = Workflow::new(store)
+//! let workflow = Workflow::bare()
 //!     .register_split(State::Start, tasks, join_config)
 //!     .add_exit_state(State::Complete);
 //! # Ok(())
@@ -74,12 +72,13 @@
 //! ```
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::error::CanoError;
-use crate::store::{KeyValueStore, MemoryStore};
-use crate::task::{DefaultTaskParams, Task, TaskResult};
+use crate::resource::Resources;
+use crate::task::{Task, TaskResult};
 
 #[cfg(feature = "tracing")]
 use tracing::{Span, debug, info, info_span, warn};
@@ -223,9 +222,6 @@ pub struct JoinConfig<TState> {
     pub timeout: Option<Duration>,
     /// State to transition to after join condition is met
     pub join_state: TState,
-    /// Whether to store partial results in the store (for PartialResults strategy)
-    /// Results will be stored under the key "split_results"
-    pub store_partial_results: bool,
 }
 
 impl<TState> JoinConfig<TState>
@@ -238,7 +234,6 @@ where
             strategy,
             timeout: None,
             join_state,
-            store_partial_results: false,
         }
     }
 
@@ -248,48 +243,34 @@ where
         self
     }
 
-    /// Enable or disable writing split-execution summaries to the workflow store.
-    ///
-    /// When `true`, the following keys are written after each split execution:
-    ///
-    /// | Key | Type | Description |
-    /// |-----|------|-------------|
-    /// | `split_results_summary` | `String` | Human-readable summary of the split results |
-    /// | `split_successes_count` | `usize` | Number of tasks that completed successfully |
-    /// | `split_errors_count` | `usize` | Number of tasks that returned an error |
-    /// | `split_cancelled_count` | `usize` | Number of tasks that were cancelled |
-    ///
-    /// All keys are overwritten on each split execution. Downstream states can read these
-    /// counts directly from the store after the join completes.
-    ///
-    /// Defaults to `false`.
-    pub fn with_store_partial_results(mut self, store: bool) -> Self {
-        self.store_partial_results = store;
+    /// Set the state to transition to after the join condition is met
+    pub fn with_join_state(mut self, state: TState) -> Self {
+        self.join_state = state;
         self
     }
 }
 
 /// Entry in the workflow state machine
-pub enum StateEntry<TState, TStore = MemoryStore>
+pub enum StateEntry<TState, TResourceKey = String>
 where
     TState: Clone + Send + Sync + 'static,
-    TStore: Send + Sync + 'static,
+    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// Single task execution
     Single {
-        task: Arc<dyn Task<TState, TStore, DefaultTaskParams> + Send + Sync>,
+        task: Arc<dyn Task<TState, TResourceKey> + Send + Sync>,
     },
     /// Split into parallel tasks with join configuration
     Split {
-        tasks: Vec<Arc<dyn Task<TState, TStore, DefaultTaskParams> + Send + Sync>>,
+        tasks: Vec<Arc<dyn Task<TState, TResourceKey> + Send + Sync>>,
         join_config: Arc<JoinConfig<TState>>,
     },
 }
 
-impl<TState, TStore> Clone for StateEntry<TState, TStore>
+impl<TState, TResourceKey> Clone for StateEntry<TState, TResourceKey>
 where
     TState: Clone + Send + Sync + 'static,
-    TStore: Send + Sync + 'static,
+    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     fn clone(&self) -> Self {
         match self {
@@ -304,24 +285,24 @@ where
 
 /// State machine workflow orchestration with split/join support
 ///
-/// The store type defaults to [`MemoryStore`]. To use a custom store backend,
-/// specify the store type explicitly:
+/// The resource key type defaults to [`String`]. To use a custom key type,
+/// specify it explicitly:
 ///
 /// ```rust,ignore
-/// let workflow = Workflow::<MyState, MyCustomStore>::new(my_store);
+/// let workflow = Workflow::<MyState, MyKeyType>::new(resources);
 /// ```
 #[must_use]
-pub struct Workflow<TState, TStore = MemoryStore>
+pub struct Workflow<TState, TResourceKey = String>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    TStore: KeyValueStore + 'static,
+    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// State machine with support for split/join.
     /// Arc-wrapped so the FSM loop clones the entry as a cheap refcount bump
     /// rather than cloning the inner Vec<Arc<dyn Task>> on every iteration.
-    states: HashMap<TState, Arc<StateEntry<TState, TStore>>>,
-    /// Shared store for all tasks
-    store: Arc<TStore>,
+    states: HashMap<TState, Arc<StateEntry<TState, TResourceKey>>>,
+    /// Shared resources for all tasks
+    pub(crate) resources: Arc<Resources<TResourceKey>>,
     /// Global workflow timeout
     workflow_timeout: Option<Duration>,
     /// Exit states that terminate workflow
@@ -331,16 +312,16 @@ where
     tracing_span: Option<Span>,
 }
 
-impl<TState, TStore> Workflow<TState, TStore>
+impl<TState, TResourceKey> Workflow<TState, TResourceKey>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    TStore: KeyValueStore + 'static,
+    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
-    /// Create a new workflow with the given store
-    pub fn new(store: TStore) -> Self {
+    /// Create a new workflow with the given resources
+    pub fn new(resources: Resources<TResourceKey>) -> Self {
         Self {
             states: HashMap::new(),
-            store: Arc::new(store),
+            resources: Arc::new(resources),
             workflow_timeout: None,
             exit_states: std::collections::HashSet::new(),
             #[cfg(feature = "tracing")]
@@ -360,7 +341,7 @@ where
     /// it is replaced. This method is infallible.
     pub fn register<T>(mut self, state: TState, task: T) -> Self
     where
-        T: Task<TState, TStore, DefaultTaskParams> + Send + Sync + 'static,
+        T: Task<TState, TResourceKey> + Send + Sync + 'static,
     {
         self.states.insert(
             state,
@@ -379,9 +360,9 @@ where
         join_config: JoinConfig<TState>,
     ) -> Self
     where
-        T: Task<TState, TStore, DefaultTaskParams> + Send + Sync + 'static,
+        T: Task<TState, TResourceKey> + Send + Sync + 'static,
     {
-        let arc_tasks: Vec<Arc<dyn Task<TState, TStore, DefaultTaskParams> + Send + Sync>> =
+        let arc_tasks: Vec<Arc<dyn Task<TState, TResourceKey> + Send + Sync>> =
             tasks.into_iter().map(|t| Arc::new(t) as Arc<_>).collect();
 
         self.states.insert(
@@ -438,11 +419,11 @@ where
     /// # struct MyTask;
     /// # #[async_trait]
     /// # impl Task<State> for MyTask {
-    /// #     async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+    /// #     async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> {
     /// #         Ok(TaskResult::Single(State::Done))
     /// #     }
     /// # }
-    /// let workflow = Workflow::new(MemoryStore::new())
+    /// let workflow = Workflow::bare()
     ///     .register(State::Start, MyTask)
     ///     .add_exit_state(State::Done);
     ///
@@ -495,11 +476,11 @@ where
     /// # struct MyTask;
     /// # #[async_trait]
     /// # impl Task<State> for MyTask {
-    /// #     async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<State>, CanoError> {
+    /// #     async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> {
     /// #         Ok(TaskResult::Single(State::Done))
     /// #     }
     /// # }
-    /// let workflow = Workflow::new(MemoryStore::new())
+    /// let workflow = Workflow::bare()
     ///     .register(State::Start, MyTask)
     ///     .add_exit_state(State::Done);
     ///
@@ -518,9 +499,7 @@ where
 
     /// Drive the workflow FSM from `initial_state` until an exit state is reached.
     ///
-    /// The engine repeatedly executes the handler registered for the current state and
-    /// transitions to the returned next state. Execution stops when the current state is
-    /// found in the exit-states set.
+    /// Runs lifecycle setup before execution and teardown after, regardless of outcome.
     ///
     /// # Errors
     ///
@@ -538,6 +517,15 @@ where
         #[cfg(feature = "tracing")]
         let _enter = workflow_span.enter();
 
+        self.resources.setup_all().await?;
+        let result = self.run_workflow(initial_state).await;
+        self.resources
+            .teardown_range(0..self.resources.lifecycle_len())
+            .await;
+        result
+    }
+
+    async fn run_workflow(&self, initial_state: TState) -> Result<TState, CanoError> {
         let workflow_future = self.execute_workflow(initial_state);
 
         if let Some(timeout_duration) = self.workflow_timeout {
@@ -550,7 +538,10 @@ where
         }
     }
 
-    async fn execute_workflow(&self, initial_state: TState) -> Result<TState, CanoError> {
+    pub(crate) async fn execute_workflow(
+        &self,
+        initial_state: TState,
+    ) -> Result<TState, CanoError> {
         let mut current_state = initial_state;
 
         #[cfg(feature = "tracing")]
@@ -585,7 +576,7 @@ where
 
     async fn execute_single_task(
         &self,
-        task: Arc<dyn Task<TState, TStore, DefaultTaskParams> + Send + Sync>,
+        task: Arc<dyn Task<TState, TResourceKey> + Send + Sync>,
     ) -> Result<TState, CanoError> {
         use crate::task::run_with_retries;
 
@@ -599,8 +590,8 @@ where
             let _enter = task_span.enter();
             run_with_retries(&config, || {
                 let task_clone = task.clone();
-                let store_clone = self.store.clone();
-                async move { task_clone.run(&*store_clone).await }
+                let resources_clone = Arc::clone(&self.resources);
+                async move { task_clone.run(&*resources_clone).await }
             })
             .await
         };
@@ -608,8 +599,8 @@ where
         #[cfg(not(feature = "tracing"))]
         let result = run_with_retries(&config, || {
             let task_clone = task.clone();
-            let store_clone = self.store.clone();
-            async move { task_clone.run(&*store_clone).await }
+            let resources_clone = Arc::clone(&self.resources);
+            async move { task_clone.run(&*resources_clone).await }
         })
         .await;
 
@@ -627,10 +618,10 @@ where
 
     async fn execute_split_join(
         &self,
-        tasks: Vec<Arc<dyn Task<TState, TStore, DefaultTaskParams> + Send + Sync>>,
+        tasks: Vec<Arc<dyn Task<TState, TResourceKey> + Send + Sync>>,
         join_config: Arc<JoinConfig<TState>>,
     ) -> Result<TState, CanoError> {
-        let store = self.store.clone();
+        let resources = Arc::clone(&self.resources);
         let total_tasks = tasks.len();
 
         #[cfg(feature = "tracing")]
@@ -663,7 +654,7 @@ where
             use crate::task::run_with_retries;
 
             let config = task.config();
-            let store_clone = store.clone();
+            let resources_clone = Arc::clone(&resources);
 
             #[cfg(feature = "tracing")]
             let task_span = info_span!("split_task", task_id = idx);
@@ -677,8 +668,8 @@ where
 
                 let result = run_with_retries(&config, || {
                     let t = task.clone();
-                    let s = store_clone.clone();
-                    async move { t.run(&*s).await }
+                    let r = Arc::clone(&resources_clone);
+                    async move { t.run(&*r).await }
                 })
                 .await;
 
@@ -694,44 +685,27 @@ where
         }
 
         // Collect results using the unified strategy handler
-        // This handles timeouts, cancellation, and strategy logic
         let split_result = self
             .collect_results(handles, &join_config, total_tasks)
             .await?;
 
         let successful = split_result.successes.len();
-        let failed = split_result.errors.len();
-        let cancelled = split_result.cancelled.len();
+        let _failed = split_result.errors.len();
+        let _cancelled = split_result.cancelled.len();
 
         #[cfg(feature = "tracing")]
         info!(
             successful = successful,
-            failed = failed,
-            cancelled = cancelled,
+            failed = _failed,
+            cancelled = _cancelled,
             total = total_tasks,
             "Split execution completed"
         );
-
-        // Store partial results if requested
-        if join_config.store_partial_results {
-            // Store the split result for later access
-            let summary = format!(
-                "Split results: {} succeeded, {} failed, {} cancelled",
-                successful, failed, cancelled
-            );
-            self.store.put("split_results_summary", summary)?;
-
-            // Store individual results
-            self.store.put("split_successes_count", successful)?;
-            self.store.put("split_errors_count", failed)?;
-            self.store.put("split_cancelled_count", cancelled)?;
-        }
 
         // Check if join condition is met
         match &join_config.strategy {
             JoinStrategy::PartialResults(_) => {
                 // For PartialResults, we always continue if minimum tasks completed successfully
-                // We've already collected the required minimum
                 if join_config.strategy.is_satisfied(successful, total_tasks) {
                     Ok(join_config.join_state.clone())
                 } else {
@@ -868,15 +842,15 @@ where
     }
 }
 
-impl<TState, TStore> Clone for Workflow<TState, TStore>
+impl<TState, TResourceKey> Clone for Workflow<TState, TResourceKey>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    TStore: KeyValueStore + 'static,
+    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     fn clone(&self) -> Self {
         Self {
             states: self.states.clone(),
-            store: self.store.clone(),
+            resources: Arc::clone(&self.resources),
             workflow_timeout: self.workflow_timeout,
             exit_states: self.exit_states.clone(),
             #[cfg(feature = "tracing")]
@@ -885,10 +859,52 @@ where
     }
 }
 
-impl<TState, TStore> std::fmt::Debug for Workflow<TState, TStore>
+impl<TState> Workflow<TState, String>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    TStore: KeyValueStore + 'static,
+{
+    /// Construct a workflow with no resources.
+    ///
+    /// Use when the workflow needs no external dependencies.
+    /// Equivalent to `Workflow::new(Resources::new())`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use cano::prelude::*;
+    ///
+    /// #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    /// enum Step { Start, Done }
+    ///
+    /// struct NoopTask;
+    ///
+    /// #[async_trait]
+    /// impl Task<Step> for NoopTask {
+    ///     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    ///         Ok(TaskResult::Single(Step::Done))
+    ///     }
+    /// }
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), CanoError> {
+    /// let result = Workflow::bare()
+    ///     .register(Step::Start, NoopTask)
+    ///     .add_exit_state(Step::Done)
+    ///     .orchestrate(Step::Start)
+    ///     .await?;
+    /// assert_eq!(result, Step::Done);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn bare() -> Self {
+        Self::new(Resources::new())
+    }
+}
+
+impl<TState, TResourceKey> std::fmt::Debug for Workflow<TState, TResourceKey>
+where
+    TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
+    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Workflow")
@@ -902,9 +918,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::resource::Resources;
     use crate::store::KeyValueStore;
     use crate::task::Task;
     use async_trait::async_trait;
+    use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
     use tokio;
 
@@ -943,13 +961,13 @@ mod tests {
 
     #[async_trait]
     impl Task<TestState> for SimpleTask {
-        async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
             self.counter.fetch_add(1, Ordering::SeqCst);
             Ok(TaskResult::Single(self.next_state.clone()))
         }
     }
 
-    // Task that stores data
+    // Task that stores data using a MemoryStore from resources
     #[derive(Clone)]
     struct DataTask {
         key: String,
@@ -969,7 +987,8 @@ mod tests {
 
     #[async_trait]
     impl Task<TestState> for DataTask {
-        async fn run(&self, store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+        async fn run(&self, res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
+            let store: Arc<crate::store::MemoryStore> = res.get("store")?;
             store.put(&self.key, self.value.clone())?;
             Ok(TaskResult::Single(self.next_state.clone()))
         }
@@ -989,7 +1008,7 @@ mod tests {
 
     #[async_trait]
     impl Task<TestState> for FailTask {
-        async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
             if self.should_fail {
                 Err(CanoError::task_execution("Task intentionally failed"))
             } else {
@@ -1000,8 +1019,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_workflow_creation() {
-        let store = MemoryStore::new();
-        let workflow = Workflow::<TestState>::new(store);
+        let workflow = Workflow::<TestState>::bare();
 
         assert_eq!(workflow.states.len(), 0);
         assert_eq!(workflow.exit_states.len(), 0);
@@ -1009,8 +1027,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_workflow() {
-        let store = MemoryStore::new();
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete);
 
@@ -1020,8 +1037,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_multi_step_workflow() {
-        let store = MemoryStore::new();
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Process))
             .register(TestState::Process, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete);
@@ -1032,8 +1048,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_workflow_with_data() {
-        let store = MemoryStore::new();
-        let workflow = Workflow::new(store.clone())
+        let store = crate::store::MemoryStore::new();
+        let resources = Resources::new().insert("store", store.clone());
+        let workflow = Workflow::new(resources)
             .register(
                 TestState::Start,
                 DataTask::new("test_key", "test_value", TestState::Complete),
@@ -1049,8 +1066,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_split_all_strategy() {
-        let store = MemoryStore::new();
-
         let tasks = vec![
             SimpleTask::new(TestState::Join),
             SimpleTask::new(TestState::Join),
@@ -1059,7 +1074,7 @@ mod tests {
 
         let join_config = JoinConfig::new(JoinStrategy::All, TestState::Complete);
 
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
@@ -1069,8 +1084,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_split_any_strategy() {
-        let store = MemoryStore::new();
-
         let tasks = vec![
             SimpleTask::new(TestState::Join),
             SimpleTask::new(TestState::Join),
@@ -1079,7 +1092,7 @@ mod tests {
 
         let join_config = JoinConfig::new(JoinStrategy::Any, TestState::Complete);
 
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
@@ -1089,8 +1102,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_split_quorum_strategy() {
-        let store = MemoryStore::new();
-
         let tasks = vec![
             SimpleTask::new(TestState::Join),
             SimpleTask::new(TestState::Join),
@@ -1100,7 +1111,7 @@ mod tests {
 
         let join_config = JoinConfig::new(JoinStrategy::Quorum(3), TestState::Complete);
 
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
@@ -1110,8 +1121,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_split_percentage_strategy() {
-        let store = MemoryStore::new();
-
         let tasks = vec![
             SimpleTask::new(TestState::Join),
             SimpleTask::new(TestState::Join),
@@ -1122,7 +1131,7 @@ mod tests {
         // 75% of 4 tasks = 3 tasks
         let join_config = JoinConfig::new(JoinStrategy::Percentage(0.75), TestState::Complete);
 
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
@@ -1132,8 +1141,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_split_with_failures_all_strategy() {
-        let store = MemoryStore::new();
-
         let tasks = vec![
             FailTask::new(false),
             FailTask::new(true), // This will fail
@@ -1142,7 +1149,7 @@ mod tests {
 
         let join_config = JoinConfig::new(JoinStrategy::All, TestState::Complete);
 
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
@@ -1152,8 +1159,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_split_with_failures_quorum_strategy() {
-        let store = MemoryStore::new();
-
         let tasks = vec![
             FailTask::new(false),
             FailTask::new(false),
@@ -1163,7 +1168,7 @@ mod tests {
         // Quorum of 2, so should succeed despite one failure
         let join_config = JoinConfig::new(JoinStrategy::Quorum(2), TestState::Complete);
 
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
@@ -1173,15 +1178,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_split_with_timeout() {
-        let store = MemoryStore::new();
-
         // Task that sleeps longer than timeout
         #[derive(Clone)]
         struct SlowTask;
 
         #[async_trait]
         impl Task<TestState> for SlowTask {
-            async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 Ok(TaskResult::Single(TestState::Complete))
             }
@@ -1192,7 +1195,7 @@ mod tests {
         let join_config = JoinConfig::new(JoinStrategy::All, TestState::Complete)
             .with_timeout(Duration::from_millis(50));
 
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
@@ -1203,21 +1206,19 @@ mod tests {
 
     #[tokio::test]
     async fn test_workflow_timeout() {
-        let store = MemoryStore::new();
-
         // Task that sleeps longer than workflow timeout
         #[derive(Clone)]
         struct SlowTask;
 
         #[async_trait]
         impl Task<TestState> for SlowTask {
-            async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
                 tokio::time::sleep(Duration::from_millis(200)).await;
                 Ok(TaskResult::Single(TestState::Complete))
             }
         }
 
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::bare()
             .with_timeout(Duration::from_millis(50))
             .register(TestState::Start, SlowTask)
             .add_exit_state(TestState::Complete);
@@ -1229,7 +1230,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_split_with_data_sharing() {
-        let store = MemoryStore::new();
+        let store = crate::store::MemoryStore::new();
+        let resources = Resources::new().insert("store", store.clone());
 
         let tasks = vec![
             DataTask::new("task1", "value1", TestState::Join),
@@ -1239,7 +1241,7 @@ mod tests {
 
         let join_config = JoinConfig::new(JoinStrategy::All, TestState::Complete);
 
-        let workflow = Workflow::new(store.clone())
+        let workflow = Workflow::new(resources)
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
@@ -1258,7 +1260,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_complex_workflow_with_split_join() {
-        let store = MemoryStore::new();
+        let store = crate::store::MemoryStore::new();
+        let resources = Resources::new().insert("store", store.clone());
 
         let split_tasks = vec![
             DataTask::new("parallel1", "data1", TestState::Join),
@@ -1267,7 +1270,7 @@ mod tests {
 
         let join_config = JoinConfig::new(JoinStrategy::All, TestState::Process);
 
-        let workflow = Workflow::new(store.clone())
+        let workflow = Workflow::new(resources)
             .register(
                 TestState::Start,
                 DataTask::new("init", "initialized", TestState::Split),
@@ -1316,8 +1319,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_partial_results_strategy() {
-        let store = MemoryStore::new();
-
         // Create tasks with varying delays - some will be cancelled
         #[derive(Clone)]
         struct DelayedTask {
@@ -1328,7 +1329,7 @@ mod tests {
 
         #[async_trait]
         impl Task<TestState> for DelayedTask {
-            async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
                 tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
                 Ok(TaskResult::Single(TestState::Complete))
             }
@@ -1354,28 +1355,18 @@ mod tests {
         ];
 
         // Wait for 2 tasks to complete, then cancel the rest
-        let join_config = JoinConfig::new(JoinStrategy::PartialResults(2), TestState::Complete)
-            .with_store_partial_results(true);
+        let join_config = JoinConfig::new(JoinStrategy::PartialResults(2), TestState::Complete);
 
-        let workflow = Workflow::new(store.clone())
+        let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
         let result = workflow.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
-
-        // Check stored results
-        let successes: usize = store.get("split_successes_count").unwrap();
-        let cancelled: usize = store.get("split_cancelled_count").unwrap();
-
-        assert_eq!(successes, 2);
-        assert_eq!(cancelled, 2);
     }
 
     #[tokio::test]
     async fn test_partial_results_with_failures() {
-        let store = MemoryStore::new();
-
         // Mix of fast success, fast failure, and slow tasks
         #[derive(Clone)]
         struct MixedTask {
@@ -1389,7 +1380,7 @@ mod tests {
                 crate::task::TaskConfig::minimal()
             }
 
-            async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
                 tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
                 if self.should_fail {
                     Err(CanoError::task_execution("Task failed"))
@@ -1419,38 +1410,25 @@ mod tests {
         ];
 
         // Wait for 2 tasks to complete (success or failure), then cancel rest
-        let join_config = JoinConfig::new(JoinStrategy::PartialResults(2), TestState::Complete)
-            .with_store_partial_results(true);
+        let join_config = JoinConfig::new(JoinStrategy::PartialResults(2), TestState::Complete);
 
-        let workflow = Workflow::new(store.clone())
+        let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
         let result = workflow.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
-
-        // Check stored results
-        let successes: usize = store.get("split_successes_count").unwrap();
-        let errors: usize = store.get("split_errors_count").unwrap();
-        let cancelled: usize = store.get("split_cancelled_count").unwrap();
-
-        // Should have 2 successes (one fast, one slow), 1 error, and 1 cancelled
-        assert_eq!(successes, 2);
-        assert_eq!(errors, 1);
-        assert_eq!(cancelled, 1);
     }
 
     #[tokio::test]
     async fn test_partial_results_minimum_not_met() {
-        let store = MemoryStore::new();
-
         // All tasks will timeout before minimum is reached
         #[derive(Clone)]
         struct SlowTask;
 
         #[async_trait]
         impl Task<TestState> for SlowTask {
-            async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 Ok(TaskResult::Single(TestState::Complete))
             }
@@ -1462,7 +1440,7 @@ mod tests {
         let join_config = JoinConfig::new(JoinStrategy::PartialResults(3), TestState::Complete)
             .with_timeout(Duration::from_millis(100));
 
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
@@ -1473,8 +1451,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_partial_timeout_strategy() {
-        let store = MemoryStore::new();
-
         // Create tasks with varying delays
         #[derive(Clone)]
         struct DelayedTask {
@@ -1485,7 +1461,7 @@ mod tests {
 
         #[async_trait]
         impl Task<TestState> for DelayedTask {
-            async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
                 tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
                 Ok(TaskResult::Single(TestState::Complete))
             }
@@ -1512,28 +1488,18 @@ mod tests {
 
         // Timeout after 200ms - should get 2 completions
         let join_config = JoinConfig::new(JoinStrategy::PartialTimeout, TestState::Complete)
-            .with_timeout(Duration::from_millis(200))
-            .with_store_partial_results(true);
+            .with_timeout(Duration::from_millis(200));
 
-        let workflow = Workflow::new(store.clone())
+        let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
         let result = workflow.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
-
-        // Check stored results
-        let successes: usize = store.get("split_successes_count").unwrap();
-        let cancelled: usize = store.get("split_cancelled_count").unwrap();
-
-        assert_eq!(successes, 2);
-        assert_eq!(cancelled, 2);
     }
 
     #[tokio::test]
     async fn test_partial_timeout_with_failures() {
-        let store = MemoryStore::new();
-
         // Mix of fast success, fast failure, and slow tasks
         #[derive(Clone)]
         struct MixedTask {
@@ -1547,7 +1513,7 @@ mod tests {
                 crate::task::TaskConfig::minimal()
             }
 
-            async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
                 tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
                 if self.should_fail {
                     Err(CanoError::task_execution("Task failed"))
@@ -1578,30 +1544,18 @@ mod tests {
 
         // Timeout after 200ms
         let join_config = JoinConfig::new(JoinStrategy::PartialTimeout, TestState::Complete)
-            .with_timeout(Duration::from_millis(200))
-            .with_store_partial_results(true);
+            .with_timeout(Duration::from_millis(200));
 
-        let workflow = Workflow::new(store.clone())
+        let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
         let result = workflow.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
-
-        // Check stored results
-        let successes: usize = store.get("split_successes_count").unwrap();
-        let errors: usize = store.get("split_errors_count").unwrap();
-        let cancelled: usize = store.get("split_cancelled_count").unwrap();
-
-        assert_eq!(successes, 2);
-        assert_eq!(errors, 1);
-        assert_eq!(cancelled, 1);
     }
 
     #[tokio::test]
     async fn test_partial_timeout_all_complete() {
-        let store = MemoryStore::new();
-
         // All tasks complete before timeout
         #[derive(Clone)]
         struct FastTask {
@@ -1610,7 +1564,7 @@ mod tests {
 
         #[async_trait]
         impl Task<TestState> for FastTask {
-            async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
                 tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
                 Ok(TaskResult::Single(TestState::Complete))
             }
@@ -1624,44 +1578,34 @@ mod tests {
 
         // Generous timeout
         let join_config = JoinConfig::new(JoinStrategy::PartialTimeout, TestState::Complete)
-            .with_timeout(Duration::from_millis(500))
-            .with_store_partial_results(true);
+            .with_timeout(Duration::from_millis(500));
 
-        let workflow = Workflow::new(store.clone())
+        let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
         let result = workflow.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
-
-        // All should complete
-        let successes: usize = store.get("split_successes_count").unwrap();
-        let cancelled: usize = store.get("split_cancelled_count").unwrap();
-
-        assert_eq!(successes, 3);
-        assert_eq!(cancelled, 0);
     }
 
     #[tokio::test]
     async fn test_partial_timeout_no_timeout_configured() {
-        let store = MemoryStore::new();
-
         #[derive(Clone)]
-        struct SimpleTask;
+        struct SimpleTaskLocal;
 
         #[async_trait]
-        impl Task<TestState> for SimpleTask {
-            async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+        impl Task<TestState> for SimpleTaskLocal {
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
                 Ok(TaskResult::Single(TestState::Complete))
             }
         }
 
-        let tasks = vec![SimpleTask, SimpleTask];
+        let tasks = vec![SimpleTaskLocal, SimpleTaskLocal];
 
         // PartialTimeout without timeout should fail
         let join_config = JoinConfig::new(JoinStrategy::PartialTimeout, TestState::Complete);
 
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
@@ -1677,8 +1621,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_unregistered_state_error() {
-        let store = MemoryStore::new();
-        let workflow = Workflow::<TestState>::new(store).add_exit_state(TestState::Complete);
+        let workflow =
+            Workflow::<TestState>::bare().add_exit_state(TestState::Complete);
 
         let result = workflow.orchestrate(TestState::Start).await;
         assert!(result.is_err());
@@ -1694,7 +1638,7 @@ mod tests {
 
     #[test]
     fn test_validate_empty_workflow() {
-        let workflow = Workflow::<TestState>::new(MemoryStore::new());
+        let workflow = Workflow::<TestState>::bare();
         let result = workflow.validate();
         assert!(result.is_err());
         assert!(
@@ -1707,7 +1651,7 @@ mod tests {
 
     #[test]
     fn test_validate_no_exit_states() {
-        let workflow = Workflow::new(MemoryStore::new())
+        let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Complete));
         let result = workflow.validate();
         assert!(result.is_err());
@@ -1721,7 +1665,7 @@ mod tests {
 
     #[test]
     fn test_validate_valid_workflow() {
-        let workflow = Workflow::new(MemoryStore::new())
+        let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete);
         assert!(workflow.validate().is_ok());
@@ -1730,7 +1674,7 @@ mod tests {
     #[test]
     fn test_validate_split_join_state_unregistered() {
         // join_state points to a state that is neither registered nor an exit state
-        let workflow = Workflow::new(MemoryStore::new())
+        let workflow = Workflow::bare()
             .register_split(
                 TestState::Start,
                 vec![SimpleTask::new(TestState::Join)],
@@ -1745,7 +1689,7 @@ mod tests {
     #[test]
     fn test_validate_split_join_state_as_exit_state() {
         // join_state that is an exit state (valid)
-        let workflow = Workflow::new(MemoryStore::new())
+        let workflow = Workflow::bare()
             .register_split(
                 TestState::Start,
                 vec![SimpleTask::new(TestState::Complete)],
@@ -1757,7 +1701,7 @@ mod tests {
 
     #[test]
     fn test_validate_initial_state() {
-        let workflow = Workflow::new(MemoryStore::new())
+        let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete);
 
@@ -1782,14 +1726,13 @@ mod tests {
         );
     }
 
-    // ── Edge case coverage tests ──────────────────────────────────────────
+    // Edge case coverage tests
 
     #[tokio::test]
     async fn test_empty_split_task_list() {
-        let store = MemoryStore::new();
         let tasks: Vec<SimpleTask> = vec![];
         let join_config = JoinConfig::new(JoinStrategy::All, TestState::Complete);
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
         let result = workflow.orchestrate(TestState::Start).await.unwrap();
@@ -1799,10 +1742,9 @@ mod tests {
     #[tokio::test]
     async fn test_percentage_zero() {
         // Invalid percentage (0.0) should return a configuration error
-        let store = MemoryStore::new();
         let tasks = vec![FailTask::new(true), FailTask::new(true)];
         let join_config = JoinConfig::new(JoinStrategy::Percentage(0.0), TestState::Complete);
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
         let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
@@ -1814,13 +1756,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_percentage_one() {
-        let store = MemoryStore::new();
         let tasks = vec![
             SimpleTask::new(TestState::Join),
             SimpleTask::new(TestState::Join),
         ];
         let join_config = JoinConfig::new(JoinStrategy::Percentage(1.0), TestState::Complete);
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
         assert_eq!(
@@ -1828,10 +1769,9 @@ mod tests {
             TestState::Complete
         );
 
-        let store2 = MemoryStore::new();
         let tasks_fail = vec![FailTask::new(false), FailTask::new(true)];
         let join_config2 = JoinConfig::new(JoinStrategy::Percentage(1.0), TestState::Complete);
-        let workflow2 = Workflow::new(store2)
+        let workflow2 = Workflow::bare()
             .register_split(TestState::Start, tasks_fail, join_config2)
             .add_exit_state(TestState::Complete);
         assert!(workflow2.orchestrate(TestState::Start).await.is_err());
@@ -1840,13 +1780,12 @@ mod tests {
     #[tokio::test]
     async fn test_percentage_over_one() {
         // Invalid percentage (>1.0) should return a configuration error
-        let store = MemoryStore::new();
         let tasks = vec![
             FailTask::new(false), // One task succeeds
             FailTask::new(true),  // One task fails
         ];
         let join_config = JoinConfig::new(JoinStrategy::Percentage(1.5), TestState::Complete);
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
         let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
@@ -1858,10 +1797,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_quorum_zero() {
-        let store = MemoryStore::new();
         let tasks = vec![FailTask::new(true), FailTask::new(true)];
         let join_config = JoinConfig::new(JoinStrategy::Quorum(0), TestState::Complete);
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
         let result = workflow.orchestrate(TestState::Start).await.unwrap();
@@ -1870,10 +1808,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_single_task_register_split() {
-        let store = MemoryStore::new();
         let tasks = vec![SimpleTask::new(TestState::Complete)];
         let join_config = JoinConfig::new(JoinStrategy::All, TestState::Complete);
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
         let result = workflow.orchestrate(TestState::Start).await.unwrap();
@@ -1882,9 +1819,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_workflow_no_exit_states() {
-        let store = MemoryStore::new();
-        let workflow =
-            Workflow::new(store).register(TestState::Start, SimpleTask::new(TestState::Complete));
+        let workflow = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Complete));
         let result = workflow.orchestrate(TestState::Start).await;
         assert!(result.is_err());
         assert!(
@@ -1902,13 +1838,12 @@ mod tests {
 
         #[async_trait]
         impl Task<TestState> for SplitReturningTask {
-            async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
                 Ok(TaskResult::Split(vec![TestState::Complete]))
             }
         }
 
-        let store = MemoryStore::new();
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::bare()
             .register(TestState::Start, SplitReturningTask)
             .add_exit_state(TestState::Complete);
         let result = workflow.orchestrate(TestState::Start).await;
@@ -1938,14 +1873,14 @@ mod tests {
                 crate::task::TaskConfig::new().with_fixed_retry(2, Duration::from_millis(1))
             }
 
-            async fn prep(&self, _store: &MemoryStore) -> Result<(), CanoError> {
+            async fn prep(&self, _res: &Resources) -> Result<(), CanoError> {
                 self.call_count.fetch_add(1, Ordering::SeqCst);
                 Err(CanoError::preparation("always fails"))
             }
 
             async fn exec(&self, _: ()) -> () {}
 
-            async fn post(&self, _store: &MemoryStore, _: ()) -> Result<TestState, CanoError> {
+            async fn post(&self, _res: &Resources, _: ()) -> Result<TestState, CanoError> {
                 Ok(TestState::Complete)
             }
         }
@@ -1955,8 +1890,7 @@ mod tests {
             call_count: Arc::clone(&call_count),
         };
 
-        let store = MemoryStore::new();
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::bare()
             .register(TestState::Start, node)
             .add_exit_state(TestState::Complete);
 
@@ -1993,7 +1927,7 @@ mod tests {
                     .with_fixed_retry(4, std::time::Duration::from_millis(1))
             }
 
-            async fn run(&self, _store: &MemoryStore) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
                 let count = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
                 if count >= self.succeed_after {
                     Ok(TaskResult::Single(TestState::Complete))
@@ -2010,8 +1944,7 @@ mod tests {
         }];
 
         let join_config = JoinConfig::new(JoinStrategy::All, TestState::Complete);
-        let store = MemoryStore::new();
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
@@ -2022,5 +1955,29 @@ mod tests {
             3,
             "task should have been called exactly 3 times (2 failures + 1 success)"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Workflow::bare() + Task::run_bare() integration
+    // ------------------------------------------------------------------
+
+    struct BareWorkflowTask;
+
+    #[async_trait]
+    impl Task<TestState> for BareWorkflowTask {
+        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            Ok(TaskResult::Single(TestState::Complete))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_workflow_bare_runs_task_with_run_bare() {
+        let result = Workflow::bare()
+            .register(TestState::Start, BareWorkflowTask)
+            .add_exit_state(TestState::Complete)
+            .orchestrate(TestState::Start)
+            .await
+            .unwrap();
+        assert_eq!(result, TestState::Complete);
     }
 }

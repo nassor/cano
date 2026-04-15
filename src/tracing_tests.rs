@@ -27,7 +27,7 @@ mod tests {
         type PrepResult = String;
         type ExecResult = String;
 
-        async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+        async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
             Ok(format!("prep_{}", self.id))
         }
 
@@ -37,7 +37,7 @@ mod tests {
 
         async fn post(
             &self,
-            _store: &MemoryStore,
+            _res: &Resources,
             exec_result: Self::ExecResult,
         ) -> Result<TestState, CanoError> {
             if exec_result.contains("processing") {
@@ -52,8 +52,7 @@ mod tests {
     async fn test_workflow_with_tracing_span() {
         let span = info_span!("test_workflow", test_id = "workflow_span_test");
 
-        let store = MemoryStore::new();
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::new(Resources::new())
             .with_tracing_span(span)
             .register(TestState::Start, TestNode::new("start"))
             .register(TestState::Processing, TestNode::new("processing"))
@@ -66,13 +65,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_concurrent_workflow_with_tracing_span() {
-        // ConcurrentWorkflow is replaced by split/join functionality in the new Workflow API
         let span = info_span!("test_concurrent_workflow", test_id = "concurrent_span_test");
 
-        let store = MemoryStore::new();
-
         // Using split/join with JoinStrategy::All
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::new(Resources::new())
             .with_tracing_span(span)
             .register_split(
                 TestState::Start,
@@ -94,8 +90,7 @@ mod tests {
         let result = tokio::time::timeout(timeout, async {
             let span = info_span!("test_scheduler_workflow", test_id = "scheduler_span_test");
 
-            let store = MemoryStore::new();
-            let workflow = Workflow::new(store)
+            let workflow = Workflow::new(Resources::new())
                 .with_tracing_span(span)
                 .register(TestState::Start, TestNode::new("start"))
                 .register(TestState::Processing, TestNode::new("processing"))
@@ -142,8 +137,7 @@ mod tests {
     #[tokio::test]
     async fn test_workflow_tracing_without_custom_span() {
         // Test that workflows work fine without custom spans when tracing is enabled
-        let store = MemoryStore::new();
-        let workflow = Workflow::new(store)
+        let workflow = Workflow::new(Resources::new())
             .register(TestState::Start, TestNode::new("start"))
             .register(TestState::Processing, TestNode::new("processing"))
             .add_exit_state(TestState::Complete);

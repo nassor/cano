@@ -71,7 +71,7 @@ impl Node<TestState> for SimpleNode {
     type PrepResult = String;
     type ExecResult = String;
 
-    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
         tokio::time::sleep(self.duration / 4).await;
         Ok("prepared".to_string())
     }
@@ -83,7 +83,7 @@ impl Node<TestState> for SimpleNode {
 
     async fn post(
         &self,
-        _store: &MemoryStore,
+        _res: &Resources,
         _exec_res: Self::ExecResult,
     ) -> Result<TestState, CanoError> {
         tokio::time::sleep(self.duration / 4).await;
@@ -96,10 +96,11 @@ impl Node<TestState> for IOBoundNode {
     type PrepResult = String;
     type ExecResult = String;
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
         // Simulate database connection or file opening
         tokio::time::sleep(self.io_duration / 8).await;
 
+        let store = res.get::<MemoryStore, str>("store")?;
         // Store some metadata about the operation
         let metadata = format!("io_prep_{}", self.operation_type);
         let _ = store.put("io_metadata", metadata);
@@ -115,12 +116,13 @@ impl Node<TestState> for IOBoundNode {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<TestState, CanoError> {
         // Simulate cleanup and result storage
         tokio::time::sleep(self.io_duration / 16).await;
 
+        let store = res.get::<MemoryStore, str>("store")?;
         // Store the result for potential downstream nodes
         let result_key = format!("io_result_{}", self.operation_type);
         let _ = store.put(&result_key, exec_res);
@@ -134,10 +136,11 @@ impl Node<TestState> for CPUBoundNode {
     type PrepResult = Vec<u64>;
     type ExecResult = u64;
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
         // Prepare data for CPU-intensive computation
         let data: Vec<u64> = (0..self.iterations as u64).collect();
 
+        let store = res.get::<MemoryStore, str>("store")?;
         // Store computation metadata
         let metadata = format!("cpu_prep_{}_{}", self.operation_type, self.iterations);
         let _ = store.put("cpu_metadata", metadata);
@@ -169,9 +172,10 @@ impl Node<TestState> for CPUBoundNode {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<TestState, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         // Store computation result
         let result_key = format!("cpu_result_{}", self.operation_type);
         let _ = store.put(&result_key, exec_res);
@@ -217,11 +221,11 @@ fn bench_node_performance(c: &mut Criterion) {
             &duration,
             |b, &duration| {
                 let node = SimpleNode::new(TestState::Complete, duration);
-                let store = MemoryStore::new();
+                let resources = Resources::new().insert("store", MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let result = cano::Node::run(&node, &store).await;
+                        let result = cano::Node::run(&node, &resources).await;
                         assert!(result.is_ok());
                     });
             },
@@ -245,13 +249,13 @@ fn bench_concurrent_node_execution(c: &mut Criterion) {
                 let nodes: Vec<SimpleNode> = (0..count)
                     .map(|_| SimpleNode::new(TestState::Complete, duration))
                     .collect();
-                let store = MemoryStore::new();
+                let resources = Resources::new().insert("store", MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
                         let tasks: Vec<_> = nodes
                             .iter()
-                            .map(|node| cano::Node::run(node, &store))
+                            .map(|node| cano::Node::run(node, &resources))
                             .collect();
 
                         let results = futures_util::future::join_all(tasks).await;
@@ -269,12 +273,12 @@ fn bench_concurrent_node_execution(c: &mut Criterion) {
                 let nodes: Vec<SimpleNode> = (0..count)
                     .map(|_| SimpleNode::new(TestState::Complete, duration))
                     .collect();
-                let store = MemoryStore::new();
+                let resources = Resources::new().insert("store", MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
                         for node in &nodes {
-                            let result = cano::Node::run(node, &store).await;
+                            let result = cano::Node::run(node, &resources).await;
                             assert!(result.is_ok());
                         }
                     });
@@ -392,12 +396,12 @@ fn bench_io_bound_workflows(c: &mut Criterion) {
                             )
                         })
                         .collect();
-                    let store = MemoryStore::new();
+                    let resources = Resources::new().insert("store", MemoryStore::new());
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
                             for node in &nodes {
-                                let result = cano::Node::run(node, &store).await;
+                                let result = cano::Node::run(node, &resources).await;
                                 assert!(result.is_ok());
                             }
                         });
@@ -421,13 +425,13 @@ fn bench_io_bound_workflows(c: &mut Criterion) {
                             )
                         })
                         .collect();
-                    let store = MemoryStore::new();
+                    let resources = Resources::new().insert("store", MemoryStore::new());
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
                             let tasks: Vec<_> = nodes
                                 .iter()
-                                .map(|node| cano::Node::run(node, &store))
+                                .map(|node| cano::Node::run(node, &resources))
                                 .collect();
 
                             let results = futures_util::future::join_all(tasks).await;
@@ -474,12 +478,12 @@ fn bench_cpu_bound_workflows(c: &mut Criterion) {
                             )
                         })
                         .collect();
-                    let store = MemoryStore::new();
+                    let resources = Resources::new().insert("store", MemoryStore::new());
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
                             for node in &nodes {
-                                let result = <_ as Node<TestState>>::run(node, &store).await;
+                                let result = <_ as Node<TestState>>::run(node, &resources).await;
                                 assert!(result.is_ok());
                             }
                         });
@@ -503,13 +507,13 @@ fn bench_cpu_bound_workflows(c: &mut Criterion) {
                             )
                         })
                         .collect();
-                    let store = MemoryStore::new();
+                    let resources = Resources::new().insert("store", MemoryStore::new());
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
                             let tasks: Vec<_> = nodes
                                 .iter()
-                                .map(|node| <_ as Node<TestState>>::run(node, &store))
+                                .map(|node| <_ as Node<TestState>>::run(node, &resources))
                                 .collect();
 
                             let results = futures_util::future::join_all(tasks).await;
@@ -542,14 +546,14 @@ fn bench_mixed_workload_workflows(c: &mut Criterion) {
             |b, &(io_duration, cpu_iterations)| {
                 let io_node = IOBoundNode::new(TestState::Step1, io_duration, "database");
                 let cpu_node = CPUBoundNode::new(TestState::Complete, cpu_iterations, "processing");
-                let store = MemoryStore::new();
+                let resources = Resources::new().insert("store", MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let io_result = <_ as Node<TestState>>::run(&io_node, &store).await;
+                        let io_result = <_ as Node<TestState>>::run(&io_node, &resources).await;
                         assert!(io_result.is_ok());
 
-                        let cpu_result = <_ as Node<TestState>>::run(&cpu_node, &store).await;
+                        let cpu_result = <_ as Node<TestState>>::run(&cpu_node, &resources).await;
                         assert!(cpu_result.is_ok());
                     });
             },
@@ -562,12 +566,12 @@ fn bench_mixed_workload_workflows(c: &mut Criterion) {
             |b, &(io_duration, cpu_iterations)| {
                 let io_node = IOBoundNode::new(TestState::Complete, io_duration, "api_service");
                 let cpu_node = CPUBoundNode::new(TestState::Complete, cpu_iterations, "analytics");
-                let store = MemoryStore::new();
+                let resources = Resources::new().insert("store", MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let io_task = <_ as Node<TestState>>::run(&io_node, &store);
-                        let cpu_task = <_ as Node<TestState>>::run(&cpu_node, &store);
+                        let io_task = <_ as Node<TestState>>::run(&io_node, &resources);
+                        let cpu_task = <_ as Node<TestState>>::run(&cpu_node, &resources);
 
                         let (io_result, cpu_result) =
                             futures_util::future::join(io_task, cpu_task).await;

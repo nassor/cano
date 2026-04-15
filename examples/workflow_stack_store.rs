@@ -56,7 +56,8 @@ impl Node<RequestState> for MetricsNode {
     type PrepResult = (String, String);
     type ExecResult = (f64, String, u32);
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         // Get request data from store
         let request_id: String = store.get("request_id")?;
         let request_body: String = store.get("request_body")?;
@@ -93,9 +94,10 @@ impl Node<RequestState> for MetricsNode {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         (revenue, customer_id, transaction_count): Self::ExecResult,
     ) -> Result<RequestState, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         // Store metrics in the shared store
         store.put("revenue", revenue)?;
         store.put("customer_id", customer_id)?;
@@ -119,7 +121,8 @@ impl Node<RequestState> for ResponseNode {
     type PrepResult = (f64, String, u32, u64);
     type ExecResult = (String, u16);
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         // Read metrics from shared store
         let revenue: f64 = store.get("revenue")?;
         let customer_id: String = store.get("customer_id")?;
@@ -163,9 +166,10 @@ impl Node<RequestState> for ResponseNode {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         (response_message, status_code): Self::ExecResult,
     ) -> Result<RequestState, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         // Store response in shared store
         store.put("response_message", response_message.clone())?;
         store.put("status_code", status_code)?;
@@ -195,7 +199,7 @@ async fn main() -> CanoResult<()> {
         store.put("request_body", "purchase: laptop".to_string())?;
 
         // Create workflow
-        let workflow = Workflow::new(store.clone())
+        let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
             .register(RequestState::Start, MetricsNode)
             .register(RequestState::MetricsExtracted, ResponseNode)
             .add_exit_state(RequestState::Complete);
@@ -234,7 +238,7 @@ async fn main() -> CanoResult<()> {
         store.put("request_body", "subscription: premium plan".to_string())?;
 
         // Create workflow
-        let workflow = Workflow::new(store.clone())
+        let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
             .register(RequestState::Start, MetricsNode)
             .register(RequestState::MetricsExtracted, ResponseNode)
             .add_exit_state(RequestState::Complete);
@@ -273,7 +277,7 @@ async fn main() -> CanoResult<()> {
         store.put("request_body", "query: account balance".to_string())?;
 
         // Create workflow
-        let workflow = Workflow::new(store.clone())
+        let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
             .register(RequestState::Start, MetricsNode)
             .register(RequestState::MetricsExtracted, ResponseNode)
             .add_exit_state(RequestState::Complete);

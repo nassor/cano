@@ -181,8 +181,9 @@ impl Node<ConversationState> for Actor1Node {
     type PrepResult = String;
     type ExecResult = String;
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
-        get_conversation_history(store)
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
+        get_conversation_history(&store)
     }
 
     async fn exec(&self, prep_result: Self::PrepResult) -> Self::ExecResult {
@@ -215,16 +216,18 @@ impl Node<ConversationState> for Actor1Node {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_result: Self::ExecResult,
     ) -> Result<ConversationState, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
+
         store
             .append("chat", exec_result.clone())
             .map_err(|e| CanoError::Store(format!("Failed to append to chat: {e}")))?;
 
         println!("🎭 Actor1: {exec_result}\n");
 
-        let interaction_count = update_interaction_count(store)?;
+        let interaction_count = update_interaction_count(&store)?;
 
         if interaction_count >= MAX_INTERACTIONS {
             Ok(ConversationState::End)
@@ -267,8 +270,9 @@ impl Node<ConversationState> for Actor2Node {
     type PrepResult = String;
     type ExecResult = String;
 
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
-        get_conversation_history(store)
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
+        get_conversation_history(&store)
     }
 
     async fn exec(&self, prep_result: Self::PrepResult) -> Self::ExecResult {
@@ -285,14 +289,16 @@ impl Node<ConversationState> for Actor2Node {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_result: Self::ExecResult,
     ) -> Result<ConversationState, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
+
         store
             .append("chat", exec_result.clone())
             .map_err(|e| CanoError::Store(format!("Failed to append to chat: {e}")))?;
 
-        update_interaction_count(store)?;
+        update_interaction_count(&store)?;
 
         println!("🎪 Actor2: {exec_result}\n");
 
@@ -320,9 +326,10 @@ async fn main() -> Result<(), CanoError> {
     let actor2 = Actor2Node::new().await?;
 
     let store = MemoryStore::new();
+    let resources = Resources::new().insert("store", store.clone());
 
     // Setup workflow with new API
-    let workflow = Workflow::new(store.clone())
+    let workflow = Workflow::new(resources)
         .register(ConversationState::Start, actor1.clone())
         .register(ConversationState::Actor1Turn, actor1)
         .register(ConversationState::Actor2Turn, actor2)

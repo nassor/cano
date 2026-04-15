@@ -144,24 +144,29 @@ struct SimpleTask;
 
 #[async_trait]
 impl Task<WorkflowState> for SimpleTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<WorkflowState>, CanoError> {
+    async fn run_bare(&self) -> Result<TaskResult<WorkflowState>, CanoError> {
         println!("Processing task...");
         // Return the next state wrapped in TaskResult
         Ok(TaskResult::Single(WorkflowState::Process))
     }
 }
 
+struct DoneTask;
+
+#[async_trait]
+impl Task<WorkflowState> for DoneTask {
+    async fn run_bare(&self) -> Result<TaskResult<WorkflowState>, CanoError> {
+        println!("Done!");
+        Ok(TaskResult::Single(WorkflowState::Complete))
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let store = MemoryStore::new();
-
-    // Create workflow with initial store
-    let workflow = Workflow::new(store.clone())
+    // No resources needed — use Workflow::bare()
+    let workflow = Workflow::bare()
         .register(WorkflowState::Start, SimpleTask)
-        .register(WorkflowState::Process, |_: &MemoryStore| async {
-            println!("Done!");
-            Ok(TaskResult::Single(WorkflowState::Complete))
-        })
+        .register(WorkflowState::Process, DoneTask)
         .add_exit_state(WorkflowState::Complete);
 
     // Run workflow starting at 'Start' state

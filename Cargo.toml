@@ -144,3 +144,7 @@ harness = false
 [[bench]]
 name = "store_shared_performance"
 harness = false
+
+[[bench]]
+name = "resource_performance"
+harness = false

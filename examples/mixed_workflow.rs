@@ -50,7 +50,9 @@ impl DataGeneratorTask {
 
 #[async_trait]
 impl Task<WorkflowState> for DataGeneratorTask {
-    async fn run(&self, store: &MemoryStore) -> CanoResult<TaskResult<WorkflowState>> {
+    async fn run(&self, res: &Resources) -> CanoResult<TaskResult<WorkflowState>> {
+        let store = res.get::<MemoryStore, str>("store")?;
+
         println!(
             "📊 DataGeneratorTask: Generating {} data points...",
             self.size
@@ -90,7 +92,9 @@ impl Node<WorkflowState> for ProcessorNode {
     type PrepResult = Vec<f64>;
     type ExecResult = (Vec<f64>, DataStats);
 
-    async fn prep(&self, store: &MemoryStore) -> CanoResult<Self::PrepResult> {
+    async fn prep(&self, res: &Resources) -> CanoResult<Self::PrepResult> {
+        let store = res.get::<MemoryStore, str>("store")?;
+
         println!("🔧 ProcessorNode::prep - Loading and validating data...");
 
         let data: Vec<f64> = store.get("raw_data")?;
@@ -137,11 +141,9 @@ impl Node<WorkflowState> for ProcessorNode {
         (processed_data, stats)
     }
 
-    async fn post(
-        &self,
-        store: &MemoryStore,
-        exec_res: Self::ExecResult,
-    ) -> CanoResult<WorkflowState> {
+    async fn post(&self, res: &Resources, exec_res: Self::ExecResult) -> CanoResult<WorkflowState> {
+        let store = res.get::<MemoryStore, str>("store")?;
+
         println!("📋 ProcessorNode::post - Finalizing processing...");
 
         let (processed_data, stats) = exec_res;
@@ -167,7 +169,9 @@ struct ValidatorTask;
 
 #[async_trait]
 impl Task<WorkflowState> for ValidatorTask {
-    async fn run(&self, store: &MemoryStore) -> CanoResult<TaskResult<WorkflowState>> {
+    async fn run(&self, res: &Resources) -> CanoResult<TaskResult<WorkflowState>> {
+        let store = res.get::<MemoryStore, str>("store")?;
+
         println!("✅ ValidatorTask: Running validation checks...");
 
         let stats: DataStats = store.get("stats")?;
@@ -217,7 +221,9 @@ impl Node<WorkflowState> for ReportNode {
     type PrepResult = ();
     type ExecResult = ();
 
-    async fn prep(&self, store: &MemoryStore) -> CanoResult<Self::PrepResult> {
+    async fn prep(&self, res: &Resources) -> CanoResult<Self::PrepResult> {
+        let store = res.get::<MemoryStore, str>("store")?;
+
         println!("📊 ReportNode::prep - Gathering report data...");
 
         // Ensure we have all required data
@@ -236,9 +242,11 @@ impl Node<WorkflowState> for ReportNode {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         _exec_res: Self::ExecResult,
     ) -> CanoResult<WorkflowState> {
+        let store = res.get::<MemoryStore, str>("store")?;
+
         println!("📋 ReportNode::post - Finalizing report...");
 
         let stats: DataStats = store.get("stats")?;
@@ -285,9 +293,10 @@ async fn main() -> CanoResult<()> {
     println!("🚀 Starting Mixed Task/Node workflow example\n");
 
     let store = MemoryStore::new();
+    let resources = Resources::new().insert("store", store.clone());
 
     // Create workflow
-    let workflow = Workflow::new(store.clone())
+    let workflow = Workflow::new(resources)
         .register(WorkflowState::GenerateData, DataGeneratorTask::new(20))
         .register(WorkflowState::ProcessData, ProcessorNode::new(25.0))
         .register(WorkflowState::ValidateResults, ValidatorTask)

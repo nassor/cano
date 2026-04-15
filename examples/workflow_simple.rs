@@ -51,7 +51,7 @@ impl Node<WorkflowAction> for GeneratorNode {
     }
 
     /// Preparation phase: Generate a random vector of u32 numbers (25 to 150 elements)
-    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
         let mut rng = rand::rng();
 
         // Generate random size between 25 and 150
@@ -82,9 +82,10 @@ impl Node<WorkflowAction> for GeneratorNode {
     /// Post-processing phase: Store the filtered vector in memory
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<WorkflowAction, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         // Store the filtered vector in memory
         store.put("filtered_numbers", exec_res)?;
 
@@ -114,7 +115,8 @@ impl Node<WorkflowAction> for CounterNode {
     }
 
     /// Preparation phase: Load the filtered numbers from memory
-    async fn prep(&self, store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         let numbers: Vec<u32> = store
             .get("filtered_numbers")
             .map_err(|e| CanoError::preparation(format!("Failed to load filtered numbers: {e}")))?;
@@ -136,9 +138,10 @@ impl Node<WorkflowAction> for CounterNode {
     /// Post-processing phase: Store count and clean up the original vector
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<WorkflowAction, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         // Store the count
         store.put("number_count", exec_res)?;
 
@@ -162,7 +165,7 @@ async fn run_simple_workflow_with_flow() -> Result<(), CanoError> {
     let store = MemoryStore::new();
 
     // Create a Workflow that can handle different node types
-    let workflow = Workflow::new(store.clone())
+    let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(WorkflowAction::Generate, GeneratorNode::new())
         .register(WorkflowAction::Count, CounterNode::new())
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
@@ -243,8 +246,9 @@ mod tests {
     async fn test_generator_node() {
         let generator = GeneratorNode::new();
         let store = MemoryStore::new();
+        let res = Resources::new().insert("store", store.clone());
 
-        let result = generator.run(&store).await.unwrap();
+        let result = generator.run(&res).await.unwrap();
         assert_eq!(result, WorkflowAction::Count);
 
         // Verify data was stored
@@ -270,7 +274,8 @@ mod tests {
         store.put("filtered_numbers", test_numbers.clone()).unwrap();
 
         let counter = CounterNode::new();
-        let result = counter.run(&store).await.unwrap();
+        let res = Resources::new().insert("store", store.clone());
+        let result = counter.run(&res).await.unwrap();
 
         assert_eq!(result, WorkflowAction::Complete);
 
@@ -296,10 +301,11 @@ mod tests {
     async fn test_generator_number_range() {
         let generator = GeneratorNode::new();
         let store = MemoryStore::new();
+        let res = Resources::new().insert("store", store.clone());
 
         // Run multiple times to test size variance
         for _ in 0..5 {
-            let prep_result = generator.prep(&store).await.unwrap();
+            let prep_result = generator.prep(&res).await.unwrap();
 
             // Check that generated vector is within expected range
             assert!(
@@ -340,9 +346,10 @@ mod tests {
     async fn test_counter_node_error_handling() {
         let counter = CounterNode::new();
         let store = MemoryStore::new();
+        let res = Resources::new().insert("store", store.clone());
 
         // Try to run counter without data in store
-        let result = counter.run(&store).await;
+        let result = counter.run(&res).await;
         assert!(result.is_err());
 
         let error = result.unwrap_err();
@@ -356,10 +363,11 @@ mod tests {
     #[tokio::test]
     async fn test_workflow_error_state() {
         let store = MemoryStore::new();
+        let res = Resources::new().insert("store", store.clone());
 
         // Create counter node without any data in store (should fail)
         let counter = CounterNode::new();
-        let result = counter.run(&store).await;
+        let result = counter.run(&res).await;
         assert!(result.is_err());
 
         println!("Error handling test passed");

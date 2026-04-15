@@ -16,20 +16,29 @@
 //! #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 //! enum Step { Fetch, Process, Done }
 //!
+//! // A typed configuration struct shared with tasks via Resources.
+//! struct FetchConfig { batch_size: usize }
+//! impl Resource for FetchConfig {}
+//!
 //! struct FetchTask;
 //! struct ProcessTask;
 //!
 //! #[async_trait]
 //! impl Task<Step> for FetchTask {
-//!     async fn run(&self, store: &MemoryStore) -> Result<TaskResult<Step>, CanoError> {
-//!         store.put("data", vec![1u32, 2, 3])?;
+//!     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+//!         let config = res.get::<FetchConfig, str>("config")?;
+//!         let store = res.get::<MemoryStore, str>("store")?;
+//!         // Produce `batch_size` items and store them for the next task.
+//!         let data: Vec<u32> = (1..=(config.batch_size as u32)).collect();
+//!         store.put("data", data)?;
 //!         Ok(TaskResult::Single(Step::Process))
 //!     }
 //! }
 //!
 //! #[async_trait]
 //! impl Task<Step> for ProcessTask {
-//!     async fn run(&self, store: &MemoryStore) -> Result<TaskResult<Step>, CanoError> {
+//!     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+//!         let store = res.get::<MemoryStore, str>("store")?;
 //!         let data: Vec<u32> = store.get("data")?;
 //!         store.put("sum", data.iter().sum::<u32>())?;
 //!         Ok(TaskResult::Single(Step::Done))
@@ -39,12 +48,53 @@
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), CanoError> {
 //! let store = MemoryStore::new();
-//! let workflow = Workflow::new(store.clone())
+//! let resources = Resources::<String>::new()
+//!     .insert("config", FetchConfig { batch_size: 3 })
+//!     .insert("store", store.clone());
+//! let workflow = Workflow::new(resources)
 //!     .register(Step::Fetch, FetchTask)
 //!     .register(Step::Process, ProcessTask)
 //!     .add_exit_state(Step::Done);
 //!
 //! let final_state = workflow.orchestrate(Step::Fetch).await?;
+//! assert_eq!(final_state, Step::Done);
+//!
+//! // The sum of 1..=3 is 6.
+//! assert_eq!(store.get::<u32>("sum")?, 6);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## Resource-Free Workflows
+//!
+//! When tasks do not need shared resources, use [`Workflow::bare`] and implement
+//! [`run_bare`](task::Task::run_bare) instead of `run`:
+//!
+//! ```rust
+//! use cano::prelude::*;
+//!
+//! #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+//! enum Step { Compute, Done }
+//!
+//! struct ComputeTask;
+//!
+//! #[async_trait]
+//! impl Task<Step> for ComputeTask {
+//!     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+//!         // Pure computation — no resource lookup needed.
+//!         let result: u32 = (1..=100).sum();
+//!         assert_eq!(result, 5050);
+//!         Ok(TaskResult::Single(Step::Done))
+//!     }
+//! }
+//!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), CanoError> {
+//! let workflow = Workflow::bare()
+//!     .register(Step::Compute, ComputeTask)
+//!     .add_exit_state(Step::Done);
+//!
+//! let final_state = workflow.orchestrate(Step::Compute).await?;
 //! assert_eq!(final_state, Step::Done);
 //! # Ok(())
 //! # }
@@ -92,7 +142,8 @@
 //! - [`node`]: The [`Node`] trait — three-phase lifecycle with retry via [`TaskConfig`]
 //! - [`workflow`]: [`Workflow`] — FSM orchestration with Split/Join support
 //! - [`scheduler`] (requires `scheduler` feature): [`Scheduler`] — cron and interval scheduling
-//! - [`store`]: [`MemoryStore`] and the [`KeyValueStore`] trait
+//! - [`resource`]: [`Resource`] trait and [`Resources`] dictionary — lifecycle-aware resource management
+//! - [`store`]: [`MemoryStore`] and the [`KeyValueStore`] trait — [`MemoryStore`] implements [`Resource`]
 //! - [`error`]: [`CanoError`] variants and the [`CanoResult`] alias
 //!
 //! ## Getting Started
@@ -103,6 +154,7 @@
 
 pub mod error;
 pub mod node;
+pub mod resource;
 pub mod store;
 pub mod task;
 pub mod workflow;
@@ -115,9 +167,10 @@ mod tracing_tests;
 
 // Core public API - simplified imports
 pub use error::{CanoError, CanoResult};
-pub use node::{DefaultNodeResult, DefaultParams, DynNode, Node, NodeObject};
+pub use node::{DefaultNodeResult, DynNode, Node, NodeObject};
+pub use resource::{Resource, Resources};
 pub use store::{KeyValueStore, MemoryStore};
-pub use task::{DefaultTaskParams, DynTask, RetryMode, Task, TaskConfig, TaskObject, TaskResult};
+pub use task::{DynTask, RetryMode, Task, TaskConfig, TaskObject, TaskResult};
 pub use workflow::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult, StateEntry, Workflow};
 
 #[cfg(feature = "scheduler")]
@@ -130,8 +183,8 @@ pub mod prelude {
     //! Use `use cano::prelude::*;` to import the most commonly used types and traits.
 
     pub use crate::{
-        CanoError, CanoResult, DefaultNodeResult, DefaultParams, DefaultTaskParams, JoinConfig,
-        JoinStrategy, KeyValueStore, MemoryStore, Node, RetryMode, SplitResult, SplitTaskResult,
+        CanoError, CanoResult, DefaultNodeResult, JoinConfig, JoinStrategy, KeyValueStore,
+        MemoryStore, Node, Resource, Resources, RetryMode, SplitResult, SplitTaskResult,
         StateEntry, Task, TaskConfig, TaskObject, TaskResult, Workflow,
     };
 

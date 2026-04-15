@@ -50,7 +50,7 @@ impl Node<TaskState> for SimpleTask {
     type PrepResult = String;
     type ExecResult = String;
 
-    async fn prep(&self, _store: &MemoryStore) -> Result<Self::PrepResult, CanoError> {
+    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
         Ok(format!("Task {} prepared", self.task_id))
     }
 
@@ -65,9 +65,10 @@ impl Node<TaskState> for SimpleTask {
 
     async fn post(
         &self,
-        store: &MemoryStore,
+        res: &Resources,
         exec_result: Self::ExecResult,
     ) -> Result<TaskState, CanoError> {
+        let store = res.get::<MemoryStore, str>("store")?;
         store.put("last_execution", exec_result)?;
         Ok(TaskState::Complete)
     }
@@ -88,7 +89,7 @@ async fn main() -> CanoResult<()> {
     let task1 = SimpleTask::new("ManualTask1");
     let task1_clone = task1.clone();
 
-    let workflow1 = Workflow::new(store.clone())
+    let workflow1 = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(TaskState::Start, task1)
         .add_exit_state(TaskState::Complete);
 
@@ -102,7 +103,7 @@ async fn main() -> CanoResult<()> {
     let task2 = SimpleTask::new("ScheduledTask2");
     let task2_clone = task2.clone();
 
-    let workflow2 = Workflow::new(store.clone())
+    let workflow2 = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(TaskState::Start, task2)
         .add_exit_state(TaskState::Complete);
 
@@ -111,7 +112,7 @@ async fn main() -> CanoResult<()> {
     let task3 = SimpleTask::new("ScheduledTask3");
     let task3_clone = task3.clone();
 
-    let workflow3 = Workflow::new(store.clone())
+    let workflow3 = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(TaskState::Start, task3)
         .add_exit_state(TaskState::Complete);
 
