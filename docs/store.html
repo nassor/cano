@@ -7,6 +7,9 @@
     <meta name="description" content="Learn how to use the Store in Cano - thread-safe shared state for pipeline data passing between workflow stages.">
     <meta property="og:title" content="Store - Cano Documentation">
     <meta property="og:description" content="Thread-safe shared state for pipeline data passing between workflow stages.">
+    <meta property="og:type" content="website">
+    <meta property="og:image" content="logo.png">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;700&family=Fira+Code&display=swap" rel="stylesheet">
@@ -14,350 +17,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-rust.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-toml.min.js"></script>
-    <script src="./script.js" defer></script>
-    <style>
-        /* ── Page-specific styles for store.html ── */
-
-        /* Table of Contents */
-        .page-toc {
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 0.75rem;
-            padding: 1.5rem 2rem;
-            margin-bottom: 3rem;
-        }
-
-        .page-toc-title {
-            font-size: 0.75rem;
-            font-weight: 700;
-            letter-spacing: 0.1em;
-            text-transform: uppercase;
-            color: var(--primary-color);
-            margin-bottom: 0.75rem;
-        }
-
-        .page-toc ol {
-            list-style: none;
-            counter-reset: toc-counter;
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-            gap: 0.25rem 2rem;
-            padding: 0;
-            margin: 0;
-        }
-
-        .page-toc li {
-            counter-increment: toc-counter;
-        }
-
-        .page-toc li a {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            padding: 0.35rem 0;
-            color: #94a3b8;
-            font-size: 0.925rem;
-            font-weight: 500;
-            text-decoration: none;
-            transition: color 0.2s;
-        }
-
-        .page-toc li a::before {
-            content: counter(toc-counter, decimal-leading-zero);
-            font-size: 0.75rem;
-            font-weight: 700;
-            color: var(--border-color);
-            font-family: 'Fira Code', monospace;
-            transition: color 0.2s;
-        }
-
-        .page-toc li a:hover {
-            color: var(--primary-color);
-        }
-
-        .page-toc li a:hover::before {
-            color: var(--primary-color);
-        }
-
-        /* Section dividers */
-        .section-divider {
-            border: none;
-            height: 1px;
-            background: linear-gradient(to right, var(--border-color), transparent);
-            margin: 3rem 0 0;
-        }
-
-        /* Callout boxes */
-        .callout {
-            padding: 1.25rem 1.5rem;
-            border-radius: 0.75rem;
-            margin: 1.5rem 0 2rem;
-            border-left: 4px solid;
-            font-size: 1rem;
-        }
-
-        .callout p {
-            margin: 0;
-            font-size: 1rem;
-            line-height: 1.6;
-        }
-
-        .callout-label {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            font-weight: 700;
-            font-size: 0.8rem;
-            letter-spacing: 0.05em;
-            text-transform: uppercase;
-            margin-bottom: 0.5rem;
-        }
-
-        .callout-info {
-            background: rgba(56, 189, 248, 0.08);
-            border-color: var(--primary-color);
-        }
-
-        .callout-info .callout-label {
-            color: var(--primary-color);
-        }
-
-        .callout-tip {
-            background: rgba(52, 211, 153, 0.08);
-            border-color: #34d399;
-        }
-
-        .callout-tip .callout-label {
-            color: #34d399;
-        }
-
-        .callout-warning {
-            background: rgba(251, 191, 36, 0.08);
-            border-color: #fbbf24;
-        }
-
-        .callout-warning .callout-label {
-            color: #fbbf24;
-        }
-
-        /* Code block labels */
-        .code-block {
-            position: relative;
-            margin: 1.5rem 0;
-        }
-
-        .code-block-label {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.4rem;
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-bottom: 1px solid var(--code-bg);
-            border-radius: 0.5rem 0.5rem 0 0;
-            padding: 0.4rem 1rem;
-            font-size: 0.78rem;
-            font-weight: 600;
-            color: #94a3b8;
-            letter-spacing: 0.02em;
-            position: relative;
-            top: 1px;
-            z-index: 1;
-        }
-
-        .code-block-label .label-icon {
-            font-size: 0.85rem;
-            opacity: 0.7;
-        }
-
-        .code-block pre {
-            margin-top: 0 !important;
-            border-top-left-radius: 0 !important;
-        }
-
-        /* Styled table */
-        .styled-table {
-            width: 100%;
-            border-collapse: separate;
-            border-spacing: 0;
-            margin: 2rem 0;
-            background: var(--card-bg);
-            border-radius: 0.75rem;
-            overflow: hidden;
-            border: 1px solid var(--border-color);
-            font-size: 0.95rem;
-        }
-
-        .styled-table thead tr {
-            background: rgba(255, 255, 255, 0.04);
-        }
-
-        .styled-table th {
-            padding: 1rem 1.25rem;
-            text-align: left;
-            font-weight: 600;
-            color: #e2e8f0;
-            font-size: 0.85rem;
-            letter-spacing: 0.03em;
-            text-transform: uppercase;
-            border-bottom: 1px solid var(--border-color);
-        }
-
-        .styled-table td {
-            padding: 0.875rem 1.25rem;
-            border-top: 1px solid rgba(255, 255, 255, 0.04);
-            color: #94a3b8;
-        }
-
-        .styled-table tbody tr:first-child td {
-            border-top: none;
-        }
-
-        .styled-table tbody tr:hover {
-            background: rgba(255, 255, 255, 0.02);
-        }
-
-        /* API method signature styling */
-        .styled-table td code {
-            font-size: 0.82rem;
-        }
-
-        /* Error card grid with colored borders */
-        .error-cards .card {
-            border-top: 3px solid;
-            transition: transform 0.2s, border-color 0.2s;
-        }
-
-        .error-cards .card:nth-child(1) {
-            border-top-color: var(--primary-color);
-        }
-
-        .error-cards .card:nth-child(2) {
-            border-top-color: var(--secondary-color);
-        }
-
-        .error-cards .card:nth-child(3) {
-            border-top-color: #fbbf24;
-        }
-
-        .error-cards .card:nth-child(4) {
-            border-top-color: var(--accent-color);
-        }
-
-        .error-cards .card h3 {
-            font-family: 'Fira Code', monospace;
-            font-size: 1.1rem;
-        }
-
-        /* get vs get_shared comparison */
-        .method-comparison {
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 0;
-            margin: 2rem 0;
-            border-radius: 0.75rem;
-            overflow: hidden;
-            border: 1px solid var(--border-color);
-        }
-
-        .method-col {
-            padding: 1.5rem;
-            background: var(--card-bg);
-        }
-
-        .method-col:first-child {
-            border-right: 1px solid var(--border-color);
-        }
-
-        .method-col h4 {
-            margin-top: 0;
-            margin-bottom: 0.5rem;
-            font-family: 'Fira Code', monospace;
-            font-size: 1rem;
-        }
-
-        .method-col:first-child h4 {
-            color: var(--primary-color);
-        }
-
-        .method-col:last-child h4 {
-            color: #34d399;
-        }
-
-        .method-col p {
-            font-size: 0.9rem;
-            margin-bottom: 0;
-        }
-
-        .method-badge {
-            display: inline-block;
-            font-size: 0.7rem;
-            font-weight: 600;
-            letter-spacing: 0.05em;
-            text-transform: uppercase;
-            padding: 0.15rem 0.5rem;
-            border-radius: 0.25rem;
-            margin-bottom: 0.5rem;
-        }
-
-        .method-badge-clone {
-            background: rgba(56, 189, 248, 0.12);
-            color: var(--primary-color);
-        }
-
-        .method-badge-zerocopy {
-            background: rgba(52, 211, 153, 0.12);
-            color: #34d399;
-        }
-
-        /* Responsive */
-        @media (max-width: 768px) {
-            .page-toc ol {
-                grid-template-columns: 1fr;
-            }
-
-            .page-toc {
-                padding: 1.25rem 1.25rem;
-            }
-
-            .method-comparison {
-                grid-template-columns: 1fr;
-            }
-
-            .method-col:first-child {
-                border-right: none;
-                border-bottom: 1px solid var(--border-color);
-            }
-
-            .method-col {
-                padding: 1.25rem;
-            }
-
-            .callout {
-                padding: 1rem 1.25rem;
-            }
-
-            .styled-table {
-                font-size: 0.85rem;
-                display: block;
-                overflow-x: auto;
-                -webkit-overflow-scrolling: touch;
-            }
-
-            .styled-table th,
-            .styled-table td {
-                padding: 0.625rem 0.75rem;
-                white-space: nowrap;
-            }
-        }
-
-        @media (max-width: 480px) {
-            .styled-table th,
-            .styled-table td {
-                padding: 0.5rem 0.625rem;
-                font-size: 0.8rem;
-            }
-        }
-    </style>
+    <script src="script.js" defer></script>
 </head>
 <body>
     <button id="menu-toggle" class="menu-toggle" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
@@ -365,7 +25,7 @@
 
     <nav class="sidebar" role="navigation" aria-label="Main navigation">
         <a href="index.html" class="logo">
-            <img src="logo.png" alt="" style="height: 24px; vertical-align: middle; margin-right: 8px;">
+            <img src="logo.png" alt="">
             Cano
         </a>
         <ul class="nav-links">
@@ -373,7 +33,8 @@
             <li><a href="task.html">Tasks</a></li>
             <li><a href="nodes.html">Nodes</a></li>
             <li><a href="workflows.html">Workflows</a></li>
-            <li><a href="store.html" class="active">Store</a></li>
+            <li><a href="resources.html">Resources</a></li>
+            <li><a href="store.html">Store</a></li>
             <li><a href="scheduler.html">Scheduler</a></li>
             <li><a href="tracing.html">Tracing</a></li>
         </ul>
@@ -388,6 +49,7 @@
     </nav>
 
     <main class="main-content">
+        <div class="content-wrapper">
         <h1>Store</h1>
         <p class="subtitle">Thread-safe shared state for pipeline data passing between workflow stages.</p>
 
@@ -400,12 +62,13 @@
         </p>
 
         <p>
-            Starting with the resources-based API, <code>MemoryStore</code> is no longer passed
-            directly into tasks. Instead, you register it inside a <code>Resources</code> dictionary
-            and retrieve it from tasks and nodes with
-            <code>res.get::&lt;MemoryStore, str&gt;("store")?</code>. This makes the store just one
+            <code>MemoryStore</code> is registered inside a <a href="resources.html"><code>Resources</code></a>
+            dictionary and retrieved in tasks and nodes with
+            <code>res.get::&lt;MemoryStore, str&gt;("store")?</code>. This makes the store one
             of many named dependencies a workflow can carry, alongside database pools, HTTP clients,
-            configuration, or any other type that implements the <code>Resource</code> trait.
+            configuration, or any other type that implements the <code>Resource</code> trait. See
+            <a href="resources.html">Resources</a> for lifecycle semantics, key-type options, and
+            the full <code>insert</code> / <code>get</code> API.
         </p>
 
         <div class="callout callout-info">
@@ -432,7 +95,7 @@
 
         <!-- Section: Thread Safety Model -->
         <hr class="section-divider">
-        <h2 id="thread-safety">Thread Safety Model</h2>
+        <h2 id="thread-safety"><a href="#thread-safety" class="anchor-link" aria-hidden="true">#</a>Thread Safety Model</h2>
 
         <div class="mermaid">
             graph LR
@@ -461,7 +124,7 @@ let val: i32 = store2.get("key")?; // returns 42</code></pre>
 
         <!-- Section: API Reference -->
         <hr class="section-divider">
-        <h2 id="api-reference">API Reference</h2>
+        <h2 id="api-reference"><a href="#api-reference" class="anchor-link" aria-hidden="true">#</a>API Reference</h2>
 
         <table class="styled-table">
             <thead>
@@ -527,7 +190,7 @@ let val: i32 = store2.get("key")?; // returns 42</code></pre>
 
         <!-- Section: Basic Usage -->
         <hr class="section-divider">
-        <h2 id="basic-usage">Basic Usage</h2>
+        <h2 id="basic-usage"><a href="#basic-usage" class="anchor-link" aria-hidden="true">#</a>Basic Usage</h2>
 
         <div class="code-block">
             <span class="code-block-label"><span class="label-icon">&#128204;</span> Common store operations</span>
@@ -568,7 +231,7 @@ store.remove("scratch")?;</code></pre>
 
         <!-- Section: Zero-Copy Reads -->
         <hr class="section-divider">
-        <h2 id="zero-copy">Zero-Copy Reads with get_shared()</h2>
+        <h2 id="zero-copy"><a href="#zero-copy" class="anchor-link" aria-hidden="true">#</a>Zero-Copy Reads with get_shared()</h2>
 
         <p>
             <code>get_shared()</code> returns an <code>Arc&lt;T&gt;</code> pointing to the value
@@ -613,7 +276,7 @@ assert!(Arc::ptr_eq(&handle_a, &handle_b));</code></pre>
 
         <!-- Section: Store in a Workflow -->
         <hr class="section-divider">
-        <h2 id="workflow-usage">Store in a Workflow</h2>
+        <h2 id="workflow-usage"><a href="#workflow-usage" class="anchor-link" aria-hidden="true">#</a>Store in a Workflow</h2>
 
         <p>
             Register the store inside a <code>Resources</code> dictionary and pass it to
@@ -666,7 +329,7 @@ async fn main() -> Result<(), CanoError> {
 
         <!-- Section: Custom Store Backends -->
         <hr class="section-divider">
-        <h2 id="custom-backends">Custom Store Backends</h2>
+        <h2 id="custom-backends"><a href="#custom-backends" class="anchor-link" aria-hidden="true">#</a>Custom Store Backends</h2>
 
         <p>
             Implement <code>KeyValueStore</code> to plug in any storage backend: a database,
@@ -771,7 +434,7 @@ let workflow = Workflow::new(
 
         <!-- Section: Error Handling -->
         <hr class="section-divider">
-        <h2 id="error-handling">Error Handling</h2>
+        <h2 id="error-handling"><a href="#error-handling" class="anchor-link" aria-hidden="true">#</a>Error Handling</h2>
 
         <p>
             Store operations return <code>StoreResult&lt;T&gt;</code>, which is
@@ -797,6 +460,7 @@ let workflow = Workflow::new(
                 <h3>AppendTypeMismatch</h3>
                 <p>The key exists but holds a non-<code>Vec</code> value. Mixing scalar and collection writes to the same key is a logic error.</p>
             </div>
+        </div>
         </div>
     </main>
 </body>

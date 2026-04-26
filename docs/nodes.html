@@ -7,6 +7,9 @@
     <meta name="description" content="Learn how to use Nodes in Cano - structured, resilient processing units with a three-phase lifecycle.">
     <meta property="og:title" content="Nodes - Cano Documentation">
     <meta property="og:description" content="Structured, resilient processing units with a three-phase lifecycle.">
+    <meta property="og:type" content="website">
+    <meta property="og:image" content="logo.png">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;700&family=Fira+Code&display=swap" rel="stylesheet">
@@ -14,411 +17,6 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-rust.min.js"></script>
     <script src="script.js" defer></script>
-    <style>
-        /* ── Page-specific styles for nodes.html ── */
-
-        /* Table of Contents */
-        .page-toc {
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 0.75rem;
-            padding: 1.5rem 2rem;
-            margin-bottom: 3rem;
-        }
-
-        .page-toc-title {
-            font-size: 0.75rem;
-            font-weight: 700;
-            letter-spacing: 0.1em;
-            text-transform: uppercase;
-            color: var(--primary-color);
-            margin-bottom: 0.75rem;
-        }
-
-        .page-toc ol {
-            list-style: none;
-            counter-reset: toc-counter;
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
-            gap: 0.25rem 2rem;
-            padding: 0;
-            margin: 0;
-        }
-
-        .page-toc li {
-            counter-increment: toc-counter;
-        }
-
-        .page-toc li a {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            padding: 0.35rem 0;
-            color: #94a3b8;
-            font-size: 0.925rem;
-            font-weight: 500;
-            text-decoration: none;
-            transition: color 0.2s;
-        }
-
-        .page-toc li a::before {
-            content: counter(toc-counter, decimal-leading-zero);
-            font-size: 0.75rem;
-            font-weight: 700;
-            color: var(--border-color);
-            font-family: 'Fira Code', monospace;
-            transition: color 0.2s;
-        }
-
-        .page-toc li a:hover {
-            color: var(--primary-color);
-        }
-
-        .page-toc li a:hover::before {
-            color: var(--primary-color);
-        }
-
-        /* Section dividers */
-        .section-divider {
-            border: none;
-            height: 1px;
-            background: linear-gradient(to right, var(--border-color), transparent);
-            margin: 3rem 0 0;
-        }
-
-        /* Callout boxes */
-        .callout {
-            padding: 1.25rem 1.5rem;
-            border-radius: 0.75rem;
-            margin: 1.5rem 0 2rem;
-            border-left: 4px solid;
-            font-size: 1rem;
-        }
-
-        .callout p {
-            margin: 0;
-            font-size: 1rem;
-            line-height: 1.6;
-        }
-
-        .callout-label {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            font-weight: 700;
-            font-size: 0.8rem;
-            letter-spacing: 0.05em;
-            text-transform: uppercase;
-            margin-bottom: 0.5rem;
-        }
-
-        .callout-info {
-            background: rgba(56, 189, 248, 0.08);
-            border-color: var(--primary-color);
-        }
-
-        .callout-info .callout-label {
-            color: var(--primary-color);
-        }
-
-        .callout-tip {
-            background: rgba(52, 211, 153, 0.08);
-            border-color: #34d399;
-        }
-
-        .callout-tip .callout-label {
-            color: #34d399;
-        }
-
-        .callout-warning {
-            background: rgba(251, 191, 36, 0.08);
-            border-color: #fbbf24;
-        }
-
-        .callout-warning .callout-label {
-            color: #fbbf24;
-        }
-
-        /* Code block labels */
-        .code-block {
-            position: relative;
-            margin: 1.5rem 0;
-        }
-
-        .code-block-label {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.4rem;
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-bottom: 1px solid var(--code-bg);
-            border-radius: 0.5rem 0.5rem 0 0;
-            padding: 0.4rem 1rem;
-            font-size: 0.78rem;
-            font-weight: 600;
-            color: #94a3b8;
-            letter-spacing: 0.02em;
-            position: relative;
-            top: 1px;
-            z-index: 1;
-        }
-
-        .code-block-label .label-icon {
-            font-size: 0.85rem;
-            opacity: 0.7;
-        }
-
-        .code-block pre {
-            margin-top: 0 !important;
-            border-top-left-radius: 0 !important;
-        }
-
-        /* Lifecycle flow */
-        .lifecycle-flow {
-            display: grid;
-            grid-template-columns: 1fr auto 1fr auto 1fr;
-            gap: 0;
-            align-items: stretch;
-            margin: 2rem 0;
-        }
-
-        .lifecycle-phase {
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 0.75rem;
-            padding: 1.5rem;
-            position: relative;
-            transition: border-color 0.2s, transform 0.2s;
-        }
-
-        .lifecycle-phase:hover {
-            border-color: var(--primary-color);
-            transform: translateY(-2px);
-        }
-
-        .phase-step {
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            margin-bottom: 0.75rem;
-        }
-
-        .phase-number {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            width: 1.75rem;
-            height: 1.75rem;
-            border-radius: 50%;
-            font-weight: 700;
-            font-size: 0.8rem;
-            font-family: 'Fira Code', monospace;
-            flex-shrink: 0;
-        }
-
-        .phase-prep .phase-number {
-            background: rgba(56, 189, 248, 0.15);
-            color: var(--primary-color);
-        }
-
-        .phase-exec .phase-number {
-            background: rgba(129, 140, 248, 0.15);
-            color: var(--secondary-color);
-        }
-
-        .phase-post .phase-number {
-            background: rgba(52, 211, 153, 0.15);
-            color: #34d399;
-        }
-
-        .phase-step h3 {
-            margin: 0;
-            font-size: 1.15rem;
-        }
-
-        .phase-prep h3 { color: var(--primary-color); }
-        .phase-exec h3 { color: var(--secondary-color); }
-        .phase-post h3 { color: #34d399; }
-
-        .lifecycle-phase p {
-            font-size: 0.95rem;
-            margin: 0;
-            color: #94a3b8;
-        }
-
-        .phase-tag {
-            display: inline-block;
-            font-size: 0.7rem;
-            font-weight: 600;
-            letter-spacing: 0.05em;
-            text-transform: uppercase;
-            padding: 0.15rem 0.5rem;
-            border-radius: 0.25rem;
-            margin-top: 0.75rem;
-        }
-
-        .phase-prep .phase-tag {
-            background: rgba(56, 189, 248, 0.1);
-            color: var(--primary-color);
-        }
-
-        .phase-exec .phase-tag {
-            background: rgba(129, 140, 248, 0.1);
-            color: var(--secondary-color);
-        }
-
-        .phase-post .phase-tag {
-            background: rgba(52, 211, 153, 0.1);
-            color: #34d399;
-        }
-
-        .lifecycle-arrow {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 0 0.5rem;
-            color: var(--border-color);
-            font-size: 1.25rem;
-        }
-
-        .lifecycle-arrow svg {
-            width: 24px;
-            height: 24px;
-            fill: none;
-            stroke: var(--border-color);
-            stroke-width: 2;
-            stroke-linecap: round;
-            stroke-linejoin: round;
-        }
-
-        /* Styled table */
-        .styled-table {
-            width: 100%;
-            border-collapse: separate;
-            border-spacing: 0;
-            margin: 2rem 0;
-            background: var(--card-bg);
-            border-radius: 0.75rem;
-            overflow: hidden;
-            border: 1px solid var(--border-color);
-            font-size: 0.95rem;
-        }
-
-        .styled-table thead tr {
-            background: rgba(255, 255, 255, 0.04);
-        }
-
-        .styled-table th {
-            padding: 1rem 1.25rem;
-            text-align: left;
-            font-weight: 600;
-            color: #e2e8f0;
-            font-size: 0.85rem;
-            letter-spacing: 0.03em;
-            text-transform: uppercase;
-            border-bottom: 1px solid var(--border-color);
-        }
-
-        .styled-table td {
-            padding: 0.875rem 1.25rem;
-            border-top: 1px solid rgba(255, 255, 255, 0.04);
-            color: #94a3b8;
-        }
-
-        .styled-table tbody tr:first-child td {
-            border-top: none;
-        }
-
-        .styled-table tbody tr:hover {
-            background: rgba(255, 255, 255, 0.02);
-        }
-
-        /* Pattern sections */
-        .pattern-section {
-            margin: 2rem 0;
-        }
-
-        .pattern-header {
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-            margin-bottom: 0.5rem;
-        }
-
-        .pattern-number {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            width: 2rem;
-            height: 2rem;
-            border-radius: 0.5rem;
-            background: rgba(129, 140, 248, 0.12);
-            color: var(--secondary-color);
-            font-weight: 700;
-            font-size: 0.85rem;
-            font-family: 'Fira Code', monospace;
-            flex-shrink: 0;
-        }
-
-        .pattern-header h3 {
-            margin: 0;
-        }
-
-        /* Config best practices cards */
-        .config-cards .card {
-            border-left: 3px solid var(--secondary-color);
-        }
-
-        /* Responsive */
-        @media (max-width: 768px) {
-            .page-toc ol {
-                grid-template-columns: 1fr;
-            }
-
-            .page-toc {
-                padding: 1.25rem 1.25rem;
-            }
-
-            .lifecycle-flow {
-                grid-template-columns: 1fr;
-                gap: 0;
-            }
-
-            .lifecycle-phase {
-                padding: 1.25rem;
-            }
-
-            .lifecycle-arrow {
-                padding: 0.5rem 0;
-                transform: rotate(90deg);
-            }
-
-            .callout {
-                padding: 1rem 1.25rem;
-            }
-
-            .styled-table {
-                font-size: 0.85rem;
-                display: block;
-                overflow-x: auto;
-                -webkit-overflow-scrolling: touch;
-            }
-
-            .styled-table th,
-            .styled-table td {
-                padding: 0.625rem 0.75rem;
-                white-space: nowrap;
-            }
-        }
-
-        @media (max-width: 480px) {
-            .styled-table th,
-            .styled-table td {
-                padding: 0.5rem 0.625rem;
-                font-size: 0.8rem;
-            }
-        }
-    </style>
 </head>
 <body>
     <button id="menu-toggle" class="menu-toggle" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
@@ -426,14 +24,15 @@
 
     <nav class="sidebar" role="navigation" aria-label="Main navigation">
         <a href="index.html" class="logo">
-            <img src="logo.png" alt="" style="height: 24px; vertical-align: middle; margin-right: 8px;">
+            <img src="logo.png" alt="">
             Cano
         </a>
         <ul class="nav-links">
             <li><a href="index.html">Home</a></li>
             <li><a href="task.html">Tasks</a></li>
-            <li><a href="nodes.html" class="active">Nodes</a></li>
+            <li><a href="nodes.html">Nodes</a></li>
             <li><a href="workflows.html">Workflows</a></li>
+            <li><a href="resources.html">Resources</a></li>
             <li><a href="store.html">Store</a></li>
             <li><a href="scheduler.html">Scheduler</a></li>
             <li><a href="tracing.html">Tracing</a></li>
@@ -449,6 +48,7 @@
     </nav>
 
     <main class="main-content">
+        <div class="content-wrapper">
         <h1>Nodes</h1>
         <p class="subtitle">Structured, resilient processing units with a three-phase lifecycle.</p>
 
@@ -462,7 +62,8 @@
             <p>
                 Nodes separate <em>what data to load</em> (prep), <em>how to process it</em> (exec), and <em>where to store results</em> (post).
                 On any phase failure the entire <code>prep</code> &rarr; <code>exec</code> &rarr; <code>post</code> pipeline is retried from scratch,
-                so all three phases must be idempotent.
+                so all three phases must be idempotent. <code>prep</code> and <code>post</code> both receive
+                <code>&amp;Resources</code> — see <a href="resources.html">Resources</a> for how to register and retrieve typed dependencies.
             </p>
         </div>
 
@@ -480,7 +81,7 @@
 
         <!-- Section: The Three Phases -->
         <hr class="section-divider">
-        <h2 id="three-phases">The Three Phases</h2>
+        <h2 id="three-phases"><a href="#three-phases" class="anchor-link" aria-hidden="true">#</a>The Three Phases</h2>
 
         <div class="mermaid">
             graph LR
@@ -539,7 +140,7 @@
 
         <!-- Section: Implementing a Node -->
         <hr class="section-divider">
-        <h2 id="implementing">Implementing a Node</h2>
+        <h2 id="implementing"><a href="#implementing" class="anchor-link" aria-hidden="true">#</a>Implementing a Node</h2>
         <p>
             Here is a complete example of a Node that generates random numbers and filters them.
             This demonstrates the three-phase lifecycle: <code>prep</code> (generate), <code>exec</code> (filter), and <code>post</code> (store).
@@ -607,7 +208,7 @@ impl Node<WorkflowAction> for GeneratorNode {
 
         <!-- Section: Nodes vs Tasks -->
         <hr class="section-divider">
-        <h2 id="nodes-vs-tasks">Nodes vs Tasks</h2>
+        <h2 id="nodes-vs-tasks"><a href="#nodes-vs-tasks" class="anchor-link" aria-hidden="true">#</a>Nodes vs Tasks</h2>
         <p>
             Every <code>Node</code> automatically implements <code>Task</code>, so you can use them interchangeably.
         </p>
@@ -655,7 +256,7 @@ impl Node<WorkflowAction> for GeneratorNode {
 
         <!-- Section: Real-World Patterns -->
         <hr class="section-divider">
-        <h2 id="patterns">Real-World Node Patterns</h2>
+        <h2 id="patterns"><a href="#patterns" class="anchor-link" aria-hidden="true">#</a>Real-World Node Patterns</h2>
         <p>Nodes provide structure for complex workflows. Here are proven patterns from production systems.</p>
 
         <section class="pattern-section">
@@ -959,7 +560,7 @@ let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
 
         <!-- Section: Configuration Best Practices -->
         <hr class="section-divider">
-        <h2 id="config">Node Configuration Best Practices</h2>
+        <h2 id="config"><a href="#config" class="anchor-link" aria-hidden="true">#</a>Node Configuration Best Practices</h2>
         <p>Choose the right configuration for your node's reliability requirements.</p>
 
         <table class="styled-table">
@@ -1001,6 +602,7 @@ let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
                 restarts from the beginning. All three phases must be idempotent — side effects in <code>prep</code> or
                 <code>exec</code> (e.g. writing to an external system) will be repeated on every retry attempt.
             </p>
+        </div>
         </div>
     </main>
 </body>

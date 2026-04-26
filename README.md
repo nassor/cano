@@ -11,9 +11,13 @@
 [![Rust Version](https://img.shields.io/badge/rust-1.89%2B-blue.svg)](https://www.rust-lang.org)
 
 <em>**Orchestrate complex async processes with finite state machines, parallel execution, and built-in scheduling.**</em>
+
+<em>Cano still far from 1.0 release. The API is subject to changes and breaking changes.</em>
+
 </div>
 
 # Overview
+
 Cano is a high-performance orchestration engine designed for building resilient, self-healing systems in Rust. Unlike simple task queues, Cano uses **Finite State Machines (FSM)** to define strict, type-safe transitions between processing steps.
 
 It excels at managing complex lifecycles where state transitions matter:

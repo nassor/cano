@@ -1,9 +1,15 @@
 <!DOCTYPE html>
-<html lang="en" style="scroll-behavior: smooth;">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Workflows - Cano</title>
+    <title>Workflows - Cano Documentation</title>
+    <meta name="description" content="Build state-machine workflows in Cano with split/join, parallel processing, and pluggable join strategies.">
+    <meta property="og:title" content="Workflows - Cano Documentation">
+    <meta property="og:description" content="Orchestrate complex processes with state machine semantics.">
+    <meta property="og:type" content="website">
+    <meta property="og:image" content="logo.png">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;700&family=Fira+Code&display=swap" rel="stylesheet">
@@ -11,225 +17,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-rust.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-toml.min.js"></script>
-    <script src="./script.js" defer></script>
-    <style>
-        /* ── Table of Contents ── */
-        .page-toc {
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 0.75rem;
-            padding: 1.5rem 2rem;
-            margin: 2rem 0 3rem;
-            position: relative;
-        }
-        .page-toc::before {
-            content: '';
-            position: absolute;
-            left: 0; top: 0; bottom: 0;
-            width: 3px;
-            background: linear-gradient(to bottom, var(--primary-color), var(--secondary-color));
-            border-radius: 3px 0 0 3px;
-        }
-        .page-toc summary {
-            font-weight: 600;
-            font-size: 1.1rem;
-            color: #fff;
-            cursor: pointer;
-            list-style: none;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            user-select: none;
-        }
-        .page-toc summary::-webkit-details-marker { display: none; }
-        .page-toc summary::before {
-            content: '';
-            display: inline-block;
-            width: 6px; height: 6px;
-            border-right: 2px solid var(--primary-color);
-            border-bottom: 2px solid var(--primary-color);
-            transform: rotate(-45deg);
-            transition: transform 0.2s ease;
-            flex-shrink: 0;
-        }
-        .page-toc[open] summary::before { transform: rotate(45deg); }
-        .page-toc ol {
-            list-style: none;
-            padding: 0;
-            margin: 1rem 0 0;
-            columns: 2;
-            column-gap: 2rem;
-        }
-        .page-toc li {
-            break-inside: avoid;
-            margin-bottom: 0.35rem;
-        }
-        .page-toc a {
-            color: var(--text-color);
-            text-decoration: none;
-            font-size: 0.95rem;
-            display: block;
-            padding: 0.25rem 0.5rem;
-            border-radius: 0.25rem;
-            transition: all 0.15s ease;
-        }
-        .page-toc a:hover {
-            color: var(--primary-color);
-            background: rgba(56, 189, 248, 0.07);
-        }
-        .page-toc .toc-sub { padding-left: 1.25rem; font-size: 0.9rem; opacity: 0.8; }
-
-        /* ── Section anchors ── */
-        .main-content h2[id],
-        .main-content h3[id] { scroll-margin-top: 2rem; position: relative; }
-        .main-content h2[id] a.anchor-link,
-        .main-content h3[id] a.anchor-link {
-            position: absolute;
-            left: -1.5rem;
-            color: var(--border-color);
-            font-weight: 400;
-            opacity: 0;
-            text-decoration: none;
-            transition: opacity 0.15s ease;
-        }
-        .main-content h2[id]:hover a.anchor-link,
-        .main-content h3[id]:hover a.anchor-link {
-            opacity: 1;
-            color: var(--primary-color);
-        }
-
-        /* ── Diagram frame ── */
-        .diagram-frame {
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 0.75rem;
-            margin: 2rem 0;
-            overflow: hidden;
-        }
-        .diagram-frame .diagram-label {
-            font-size: 0.78rem;
-            font-weight: 600;
-            letter-spacing: 0.06em;
-            text-transform: uppercase;
-            color: var(--secondary-color);
-            padding: 0.75rem 1.25rem 0;
-            margin: 0;
-        }
-        .diagram-frame .mermaid {
-            margin: 0;
-            border: none;
-            border-radius: 0;
-            background: transparent;
-        }
-
-        /* ── Strategy grid ── */
-        .strategy-grid {
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
-            gap: 1.25rem;
-            margin: 2rem 0;
-        }
-        .strategy-card {
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 0.75rem;
-            padding: 1.5rem;
-            transition: border-color 0.2s ease, transform 0.2s ease;
-        }
-        .strategy-card:hover {
-            border-color: var(--primary-color);
-            transform: translateY(-3px);
-        }
-        .strategy-card .strategy-name {
-            font-size: 1.15rem;
-            font-weight: 600;
-            color: #fff;
-            margin: 0 0 0.5rem;
-        }
-        .strategy-card p { font-size: 0.95rem; margin-bottom: 0.75rem; }
-        .strategy-card pre { margin: 0.75rem 0 0 !important; font-size: 0.85rem; }
-
-        /* ── Comparison table ── */
-        .comparison-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin: 2rem 0;
-            background: var(--card-bg);
-            border-radius: 0.75rem;
-            overflow: hidden;
-            border: 1px solid var(--border-color);
-        }
-        .comparison-table thead tr { background: rgba(255, 255, 255, 0.05); text-align: left; }
-        .comparison-table th {
-            padding: 1rem 1.25rem;
-            font-weight: 600;
-            color: #fff;
-            font-size: 0.9rem;
-        }
-        .comparison-table td {
-            padding: 0.85rem 1.25rem;
-            border-top: 1px solid var(--border-color);
-            font-size: 0.95rem;
-        }
-        .comparison-table tbody tr { transition: background 0.15s ease; }
-        .comparison-table tbody tr:hover { background: rgba(56, 189, 248, 0.04); }
-
-        /* ── Callout boxes ── */
-        .callout {
-            border-radius: 0.75rem;
-            padding: 1.25rem 1.5rem;
-            margin: 1.5rem 0;
-            border: 1px solid;
-        }
-        .callout-warn {
-            background: rgba(248, 113, 113, 0.08);
-            border-color: rgba(248, 113, 113, 0.25);
-        }
-        .callout-warn .callout-title { color: #f87171; }
-        .callout-info {
-            background: rgba(56, 189, 248, 0.08);
-            border-color: rgba(56, 189, 248, 0.25);
-        }
-        .callout-info .callout-title { color: var(--primary-color); }
-        .callout-tip {
-            background: rgba(56, 189, 248, 0.08);
-            border-left: 3px solid var(--primary-color);
-            border-top: none; border-right: none; border-bottom: none;
-        }
-        .callout .callout-title { font-weight: 600; margin-bottom: 0.5rem; }
-        .callout p:last-child { margin-bottom: 0; }
-
-        /* ── Responsive ── */
-        @media (max-width: 768px) {
-            .page-toc ol { columns: 1; }
-            .page-toc { padding: 1.25rem 1.25rem; }
-            .main-content h2[id] a.anchor-link,
-            .main-content h3[id] a.anchor-link { display: none; }
-            .strategy-grid { grid-template-columns: 1fr; }
-            .strategy-card { padding: 1.25rem; }
-            .callout { padding: 1rem 1.25rem; }
-            .diagram-frame { overflow-x: auto; -webkit-overflow-scrolling: touch; }
-            .comparison-table {
-                display: block;
-                overflow-x: auto;
-                -webkit-overflow-scrolling: touch;
-            }
-            .comparison-table th,
-            .comparison-table td {
-                padding: 0.625rem 0.75rem;
-                white-space: nowrap;
-                font-size: 0.85rem;
-            }
-        }
-
-        @media (max-width: 480px) {
-            .comparison-table th,
-            .comparison-table td {
-                padding: 0.5rem 0.625rem;
-                font-size: 0.8rem;
-            }
-        }
-    </style>
+    <script src="script.js" defer></script>
 </head>
 <body>
     <button id="menu-toggle" class="menu-toggle" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
@@ -237,14 +25,15 @@
 
     <nav class="sidebar" role="navigation" aria-label="Main navigation">
         <a href="index.html" class="logo">
-            <img src="logo.png" alt="" style="height: 24px; vertical-align: middle; margin-right: 8px;">
+            <img src="logo.png" alt="">
             Cano
         </a>
         <ul class="nav-links">
             <li><a href="index.html">Home</a></li>
             <li><a href="task.html">Tasks</a></li>
             <li><a href="nodes.html">Nodes</a></li>
-            <li><a href="workflows.html" class="active">Workflows</a></li>
+            <li><a href="workflows.html">Workflows</a></li>
+            <li><a href="resources.html">Resources</a></li>
             <li><a href="store.html">Store</a></li>
             <li><a href="scheduler.html">Scheduler</a></li>
             <li><a href="tracing.html">Tracing</a></li>
@@ -265,8 +54,8 @@
         <h1>Workflows</h1>
         <p class="subtitle">Orchestrate complex processes with state machine semantics.</p>
 
-        <details class="page-toc" open>
-            <summary>On this page</summary>
+        <nav class="page-toc" aria-label="Table of contents">
+            <div class="page-toc-title">On this page</div>
             <ol>
                 <li><a href="#defining-states">Defining States</a></li>
                 <li><a href="#building-a-workflow">Building a Workflow</a></li>
@@ -282,12 +71,13 @@
                 <li><a href="#workflow-on-request">Common: Workflow per HTTP Request</a></li>
                 <li><a href="#ad-exchange">Advanced: Ad Exchange</a></li>
             </ol>
-        </details>
+        </nav>
 
         <p>
             Workflows in Cano are state machines. You define a set of states (usually an enum) and register a <code>Task</code> or <code>Node</code> for each state. 
             The workflow engine manages the transitions between these states until an exit state is reached.
         </p>
+        <hr class="section-divider">
 
         <h2 id="defining-states"><a href="#defining-states" class="anchor-link" aria-hidden="true">#</a>Defining States</h2>
         <pre><code class="language-rust">#[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -298,10 +88,12 @@ enum OrderState {
     Complete,
     Failed,
 }</code></pre>
+        <hr class="section-divider">
 
         <h2 id="building-a-workflow"><a href="#building-a-workflow" class="anchor-link" aria-hidden="true">#</a>Building a Workflow</h2>
         <p>
-            A workflow is constructed with a <code>Resources</code> dictionary that its tasks can look up during execution.
+            A workflow is constructed with a <a href="resources.html"><code>Resources</code></a> dictionary
+            that its tasks can look up during execution.
             Use <code>Workflow::new(resources)</code> when tasks need shared state (such as a <code>MemoryStore</code>,
             configuration, or clients), or <code>Workflow::bare()</code> when every task is self-contained and uses
             <code>run_bare()</code>. <code>Workflow::bare()</code> is equivalent to
@@ -356,6 +148,7 @@ async fn main() -> Result<(), CanoError> {
     println!("Final State: {:?}", result);
     Ok(())
 }</code></pre>
+        <hr class="section-divider">
 
         <h2 id="builder-pattern"><a href="#builder-pattern" class="anchor-link" aria-hidden="true">#</a>Builder Pattern and #[must_use]</h2>
         <p>
@@ -365,9 +158,9 @@ async fn main() -> Result<(), CanoError> {
             will warn you if you discard the return value. If you forget to capture it, the registration is silently lost.
         </p>
 
-        <div class="callout callout-warn">
-            <p class="callout-title">Warning: Do not discard the return value</p>
-            <pre style="margin: 0 !important;"><code class="language-rust">// WRONG — registration is lost!
+        <div class="callout callout-warning">
+            <div class="callout-label">Warning: Do not discard the return value</div>
+            <pre><code class="language-rust">// WRONG — registration is lost!
 let workflow = Workflow::new(Resources::new().insert("store", store.clone()));
 workflow.register(State::Start, my_task);  // returns a new Workflow, but it is discarded
 
@@ -380,6 +173,7 @@ let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
     .register(State::Start, my_task)
     .add_exit_state(State::Complete);</code></pre>
         </div>
+        <hr class="section-divider">
 
         <h2 id="validation"><a href="#validation" class="anchor-link" aria-hidden="true">#</a>Workflow Validation</h2>
         <p>
@@ -418,6 +212,7 @@ workflow.validate_initial_state(&State::Start)?;
 
 // Safe to orchestrate
 let result = workflow.orchestrate(State::Start).await?;</code></pre>
+        <hr class="section-divider">
 
         <h2 id="error-handling"><a href="#error-handling" class="anchor-link" aria-hidden="true">#</a>Error Handling</h2>
         <p>
@@ -425,7 +220,7 @@ let result = workflow.orchestrate(State::Start).await?;</code></pre>
             during execution. Understanding these errors helps you build robust error recovery logic.
         </p>
 
-        <table class="comparison-table">
+        <table class="styled-table">
             <thead>
                 <tr>
                     <th>Error Variant</th>
@@ -474,6 +269,7 @@ let result = workflow.orchestrate(State::Start).await?;</code></pre>
     Err(CanoError::RetryExhausted(msg)) => eprintln!("Retries exhausted: {}", msg),
     Err(e) => eprintln!("Task error: {}", e),
 }</code></pre>
+        <hr class="section-divider">
 
         <h2 id="split-join"><a href="#split-join" class="anchor-link" aria-hidden="true">#</a>Split/Join Workflows</h2>
         <p>
@@ -669,6 +465,7 @@ async fn main() -> Result<(), CanoError> {
     
     Ok(())
 }</code></pre>
+        <hr class="section-divider">
 
         <h2 id="join-strategy-examples"><a href="#join-strategy-examples" class="anchor-link" aria-hidden="true">#</a>Join Strategy Examples</h2>
         <p>Each strategy handles parallel task completion differently. Here are detailed examples for each strategy.</p>
@@ -878,8 +675,7 @@ let join_config = JoinConfig::new(
     JoinStrategy::PartialResults(2),  // Proceed after any 2 succeed
     DataState::Aggregate
 )
-.with_timeout(Duration::from_secs(5))
-.with_store_partial_results(true);  // Store detailed results
+.with_timeout(Duration::from_secs(5));
 
 // Example: Call multiple services, use fastest 3 responses
 let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
@@ -896,14 +692,6 @@ let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
     )
     .register(DataState::Aggregate, MergePartialResults)
     .add_exit_state(DataState::Complete);
-
-// After execution, check stored result counts
-let successes: usize = store.get("split_successes_count")?;
-let errors: usize = store.get("split_errors_count")?;
-let cancelled: usize = store.get("split_cancelled_count")?;
-println!("Successes: {}", successes);
-println!("Errors: {}", errors);
-println!("Cancelled: {}", cancelled);
 </code></pre>
 
         <h3 id="strategy-partial-timeout"><a href="#strategy-partial-timeout" class="anchor-link" aria-hidden="true">#</a>6. PartialTimeout Strategy - Deadline-Based Completion</h3>
@@ -936,8 +724,7 @@ let join_config = JoinConfig::new(
     JoinStrategy::PartialTimeout,  // Must specify timeout
     DataState::Aggregate
 )
-.with_timeout(Duration::from_millis(500))  // 500ms deadline
-.with_store_partial_results(true);
+.with_timeout(Duration::from_millis(500));  // 500ms deadline
 
 // Example: Real-time recommendation system with 500ms SLA
 let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
@@ -955,9 +742,10 @@ let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
     .register(DataState::Aggregate, AggregateWithinSla)
     .add_exit_state(DataState::Complete);
 </code></pre>
+        <hr class="section-divider">
 
         <h2 id="comparison-table"><a href="#comparison-table" class="anchor-link" aria-hidden="true">#</a>Comparison Table</h2>
-        <table class="comparison-table">
+        <table class="styled-table">
             <thead>
                 <tr>
                     <th>Strategy</th>
@@ -1005,6 +793,7 @@ let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
                 </tr>
             </tbody>
         </table>
+        <hr class="section-divider">
 
         <h2 id="parallel-patterns"><a href="#parallel-patterns" class="anchor-link" aria-hidden="true">#</a>Common Parallel Processing Patterns</h2>
         <p>
@@ -1369,6 +1158,7 @@ async fn main() -> Result<(), CanoError> {
             the same parallelism as running multiple concurrent workflow instances, but with simpler mental model, 
             better resource control, and type-safe state management.</p>
         </div>
+        <hr class="section-divider">
 
         <h2 id="workflow-on-request"><a href="#workflow-on-request" class="anchor-link" aria-hidden="true">#</a>Common Example: Workflow per HTTP Request</h2>
         <p>
@@ -1545,6 +1335,7 @@ async fn main() {
         <p>
             Run the full example with <code>cargo run --example workflow_on_request</code>.
         </p>
+        <hr class="section-divider">
 
         <h2 id="ad-exchange"><a href="#ad-exchange" class="anchor-link" aria-hidden="true">#</a>Advanced Example: Real-Time Ad Exchange Workflow</h2>
         <p>
@@ -2168,10 +1959,9 @@ fn create_ad_exchange_workflow(store: MemoryStore) -> Workflow<AdExchangeState> 
                 JoinStrategy::PartialTimeout,
                 AdExchangeState::ScoreBids,
             )
-            .with_timeout(Duration::from_millis(200))
-            .with_store_partial_results(true),
+            .with_timeout(Duration::from_millis(200)),
         )
-        
+
         // Phase 4: Bid Scoring - SPLIT 3 (All Strategy)
         // Score all received bids within 50ms timeout
         // If timeout or any scoring fails, workflow will error and transition to NoFill

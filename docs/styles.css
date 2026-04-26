@@ -22,6 +22,14 @@
     --accent-color: hsl(330, 81%, 70%);
     --accent-muted: hsl(330, 81%, 70%, 0.10);
 
+    /* Semantic status colors */
+    --success-color: hsl(160, 64%, 58%);
+    --success-muted: hsla(160, 64%, 58%, 0.10);
+    --warning-color: hsl(43, 96%, 62%);
+    --warning-muted: hsla(43, 96%, 62%, 0.10);
+    --danger-color: hsl(0, 91%, 71%);
+    --danger-muted: hsla(0, 91%, 71%, 0.10);
+
     --sidebar-bg: hsl(217, 33%, 14%);
     --card-bg: hsl(217, 33%, 17%);
     --border-color: hsl(217, 24%, 24%);
@@ -178,6 +186,8 @@ img {
 
 .logo img {
     display: inline-block;
+    height: 24px;
+    width: auto;
 }
 
 .nav-section-label {
@@ -194,6 +204,8 @@ img {
     display: flex;
     flex-direction: column;
     gap: 2px;
+    padding: 0;
+    margin: 0;
 }
 
 .nav-links a {
@@ -215,6 +227,12 @@ img {
 
 .nav-links a:hover {
     background-color: var(--primary-muted);
+    color: var(--text-color);
+}
+
+.nav-links a:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -2px;
     color: var(--text-color);
 }
 
@@ -263,7 +281,8 @@ img {
     font-size: var(--text-xs);
     color: var(--text-muted);
     text-decoration: none;
-    transition: color 0.2s ease;
+    transition: color var(--duration-fast) ease,
+                background-color var(--duration-fast) ease;
     padding: var(--space-2) var(--space-3);
     border-radius: var(--radius-sm);
     display: inline-block;
@@ -390,6 +409,33 @@ a:hover {
     color: var(--secondary-color);
 }
 
+/* Heading anchor links (visible on hover) */
+.main-content h2[id],
+.main-content h3[id] {
+    scroll-margin-top: var(--space-8);
+    position: relative;
+}
+
+.main-content h2[id] a.anchor-link,
+.main-content h3[id] a.anchor-link {
+    position: absolute;
+    left: -1.5rem;
+    color: var(--border-color);
+    font-weight: 400;
+    opacity: 0;
+    text-decoration: none;
+    transition: opacity var(--duration-fast) ease,
+                color var(--duration-fast) ease;
+}
+
+.main-content h2[id]:hover a.anchor-link,
+.main-content h3[id]:hover a.anchor-link,
+.main-content h2[id] a.anchor-link:focus-visible,
+.main-content h3[id] a.anchor-link:focus-visible {
+    opacity: 1;
+    color: var(--primary-color);
+}
+
 /* --------------------------------------------------------------------------
    6. Cards
    -------------------------------------------------------------------------- */
@@ -454,6 +500,10 @@ a:hover {
     color: var(--text-muted);
 }
 
+.card p + p {
+    margin-top: var(--space-3);
+}
+
 /* Card link variant — entire card is clickable */
 a.card {
     display: block;
@@ -464,6 +514,34 @@ a.card:hover {
     color: inherit;
 }
 
+/* Accent variants — coloured left border for emphasis */
+.retry-cards .card {
+    border-left: 3px solid var(--secondary-color);
+}
+
+.retry-cards .card:nth-child(1) { border-left-color: var(--primary-color); }
+.retry-cards .card:nth-child(2) { border-left-color: var(--secondary-color); }
+.retry-cards .card:nth-child(3) { border-left-color: var(--success-color); }
+
+.config-cards .card {
+    border-left: 3px solid var(--secondary-color);
+}
+
+/* Error card grid — coloured top border marks severity */
+.error-cards .card {
+    border-top: 3px solid var(--border-color);
+}
+
+.error-cards .card:nth-child(1) { border-top-color: var(--primary-color); }
+.error-cards .card:nth-child(2) { border-top-color: var(--secondary-color); }
+.error-cards .card:nth-child(3) { border-top-color: var(--warning-color); }
+.error-cards .card:nth-child(4) { border-top-color: var(--accent-color); }
+
+.error-cards .card h3 {
+    font-family: 'Fira Code', monospace;
+    font-size: var(--text-lg);
+}
+
 /* --------------------------------------------------------------------------
    7. Code Blocks & Inline Code
    -------------------------------------------------------------------------- */
@@ -472,7 +550,13 @@ pre {
     border-radius: var(--radius-md);
     margin: var(--space-6) 0 !important;
     border: 1px solid var(--border-color);
+    /* Defensive padding so layout stays correct even if the Prism CDN CSS
+       fails to load. Prism's prism-tomorrow theme also sets padding via
+       pre[class*="language-"] — these values keep the visual weight in sync. */
+    padding: var(--space-4) var(--space-5);
     overflow-x: auto;
+    /* iOS momentum scrolling for code blocks that exceed viewport width */
+    -webkit-overflow-scrolling: touch;
     position: relative;
     box-shadow: var(--shadow-sm);
 }
@@ -481,6 +565,25 @@ pre code {
     font-size: var(--text-sm);
     line-height: 1.7;
     tab-size: 4;
+}
+
+/* Custom scrollbar inside code blocks — visible on dark backgrounds */
+pre::-webkit-scrollbar {
+    height: 8px;
+    width: 8px;
+}
+
+pre::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+pre::-webkit-scrollbar-thumb {
+    background: var(--border-color);
+    border-radius: 4px;
+}
+
+pre::-webkit-scrollbar-thumb:hover {
+    background: var(--text-faint);
 }
 
 code {
@@ -497,7 +600,42 @@ code {
     border: 1px solid hsla(199, 89%, 56%, 0.12);
 }
 
-/* Code block header (for labeled code blocks) */
+/* Labelled code block — wraps <pre> with a caption tab */
+.code-block {
+    position: relative;
+    margin: var(--space-6) 0;
+}
+
+.code-block-label {
+    display: inline-flex;
+    align-items: center;
+    gap: var(--space-2);
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-bottom: 1px solid var(--code-bg);
+    border-radius: var(--radius-md) var(--radius-md) 0 0;
+    padding: var(--space-2) var(--space-4);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    color: var(--text-muted);
+    letter-spacing: 0.02em;
+    font-family: 'Inter', system-ui, sans-serif;
+    position: relative;
+    top: 1px;
+    z-index: 1;
+}
+
+.code-block-label .label-icon {
+    font-size: 0.95em;
+    opacity: 0.75;
+}
+
+.code-block pre {
+    margin-top: 0 !important;
+    border-top-left-radius: 0 !important;
+}
+
+/* Legacy inline label helper kept for backwards compatibility */
 .code-label {
     display: block;
     font-size: var(--text-xs);
@@ -508,8 +646,27 @@ code {
     background: hsla(0, 0%, 100%, 0.02);
 }
 
+/* Trace / log output blocks */
+.trace-output pre {
+    border-left: 3px solid var(--secondary-color);
+}
+
+.trace-output pre::before {
+    content: 'output';
+    position: absolute;
+    top: var(--space-2);
+    right: var(--space-3);
+    font-size: var(--text-xs);
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--secondary-color);
+    opacity: 0.65;
+    font-family: 'Inter', system-ui, sans-serif;
+}
+
 /* --------------------------------------------------------------------------
-   8. Mermaid Diagrams
+   8. Mermaid Diagrams & Diagram Frames
    -------------------------------------------------------------------------- */
 .mermaid {
     background-color: var(--card-bg);
@@ -524,6 +681,33 @@ code {
 .mermaid svg {
     max-width: 100%;
     height: auto;
+}
+
+/* Labelled diagram wrapper — pairs a caption with a mermaid block */
+.diagram-frame {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    margin: var(--space-8) 0;
+    overflow: hidden;
+}
+
+.diagram-frame .diagram-label {
+    font-size: var(--text-xs);
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--secondary-color);
+    padding: var(--space-3) var(--space-5) 0;
+    margin: 0;
+}
+
+.diagram-frame .mermaid {
+    margin: 0;
+    border: none;
+    border-radius: 0;
+    background: transparent;
+    padding: var(--space-6);
 }
 
 /* --------------------------------------------------------------------------
@@ -542,7 +726,647 @@ code {
 }
 
 /* --------------------------------------------------------------------------
-   10. Hero Section (index.html)
+   10. Page Table of Contents
+   -------------------------------------------------------------------------- */
+.page-toc {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    padding: var(--space-6) var(--space-8);
+    margin: var(--space-8) 0 var(--space-12);
+}
+
+.page-toc-title {
+    font-size: var(--text-xs);
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--primary-color);
+    margin-bottom: var(--space-3);
+    font-family: 'Inter', system-ui, sans-serif;
+}
+
+.page-toc ol {
+    list-style: none;
+    counter-reset: toc-counter;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: var(--space-1) var(--space-8);
+    padding: 0;
+    margin: 0;
+}
+
+.page-toc li {
+    counter-increment: toc-counter;
+    margin: 0;
+}
+
+/* Sub-items don't get numbered — skip the counter to avoid gaps in the visible numbering */
+.page-toc .toc-sub {
+    counter-increment: none;
+}
+
+.page-toc li a {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-2) 0;
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+    font-weight: 500;
+    text-decoration: none;
+    transition: color var(--duration-fast) ease;
+}
+
+.page-toc li a::before {
+    content: counter(toc-counter, decimal-leading-zero);
+    font-size: var(--text-xs);
+    font-weight: 700;
+    color: var(--border-color);
+    font-family: 'Fira Code', monospace;
+    transition: color var(--duration-fast) ease;
+    flex-shrink: 0;
+}
+
+.page-toc li a:hover,
+.page-toc li a:focus-visible {
+    color: var(--primary-color);
+}
+
+.page-toc li a:hover::before,
+.page-toc li a:focus-visible::before {
+    color: var(--primary-color);
+}
+
+.page-toc .toc-sub a {
+    padding-left: var(--space-5);
+    font-size: var(--text-xs);
+    opacity: 0.85;
+}
+
+.page-toc .toc-sub a::before {
+    display: none;
+}
+
+/* --------------------------------------------------------------------------
+   11. Section dividers
+   -------------------------------------------------------------------------- */
+.section-divider {
+    border: none;
+    height: 1px;
+    background: linear-gradient(to right, var(--border-color), transparent);
+    margin: var(--space-12) 0 0;
+}
+
+/* --------------------------------------------------------------------------
+   12. Callouts
+   -------------------------------------------------------------------------- */
+.callout {
+    padding: var(--space-5) var(--space-6);
+    border-radius: var(--radius-lg);
+    margin: var(--space-6) 0 var(--space-8);
+    border-left: 4px solid var(--border-color);
+    background: var(--bg-surface);
+    font-size: var(--text-base);
+}
+
+.callout p {
+    margin: 0;
+    font-size: var(--text-base);
+    line-height: 1.65;
+    max-width: none;
+}
+
+.callout p + p {
+    margin-top: var(--space-3);
+}
+
+.callout pre {
+    margin: var(--space-3) 0 0 !important;
+}
+
+.callout-label {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    font-family: 'Inter', system-ui, sans-serif;
+    font-weight: 700;
+    font-size: var(--text-xs);
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    margin-bottom: var(--space-2);
+    color: var(--text-muted);
+}
+
+.callout-info {
+    background: hsla(199, 89%, 56%, 0.08);
+    border-left-color: var(--primary-color);
+}
+
+.callout-info .callout-label {
+    color: var(--primary-color);
+}
+
+.callout-tip {
+    background: var(--success-muted);
+    border-left-color: var(--success-color);
+}
+
+.callout-tip .callout-label {
+    color: var(--success-color);
+}
+
+.callout-warning {
+    background: var(--warning-muted);
+    border-left-color: var(--warning-color);
+}
+
+.callout-warning .callout-label {
+    color: var(--warning-color);
+}
+
+.callout-danger {
+    background: var(--danger-muted);
+    border-left-color: var(--danger-color);
+}
+
+.callout-danger .callout-label {
+    color: var(--danger-color);
+}
+
+/* --------------------------------------------------------------------------
+   13. Styled data table
+   -------------------------------------------------------------------------- */
+.styled-table {
+    width: 100%;
+    border-collapse: separate;
+    border-spacing: 0;
+    margin: var(--space-8) 0;
+    background: var(--card-bg);
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    border: 1px solid var(--border-color);
+    font-size: var(--text-sm);
+}
+
+.styled-table thead tr {
+    background: hsla(0, 0%, 100%, 0.04);
+}
+
+.styled-table th {
+    padding: var(--space-4) var(--space-5);
+    text-align: left;
+    font-weight: 600;
+    color: var(--text-color);
+    font-size: var(--text-xs);
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    border-bottom: 1px solid var(--border-color);
+    font-family: 'Inter', system-ui, sans-serif;
+}
+
+.styled-table td {
+    padding: var(--space-3) var(--space-5);
+    border-top: 1px solid hsla(0, 0%, 100%, 0.04);
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+    vertical-align: top;
+}
+
+.styled-table tbody tr:first-child td {
+    border-top: none;
+}
+
+.styled-table tbody tr {
+    transition: background-color var(--duration-fast) ease;
+}
+
+.styled-table tbody tr:hover {
+    background: hsla(0, 0%, 100%, 0.02);
+}
+
+.styled-table td code {
+    font-size: var(--text-xs);
+}
+
+/* --------------------------------------------------------------------------
+   14. Two-column comparison panel
+   -------------------------------------------------------------------------- */
+.comparison-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    margin: var(--space-8) 0;
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    border: 1px solid var(--border-color);
+}
+
+.comparison-col {
+    padding: var(--space-8);
+    background: var(--card-bg);
+}
+
+.comparison-col:first-child {
+    border-right: 1px solid var(--border-color);
+}
+
+.comparison-grid-stacked {
+    grid-template-columns: 1fr;
+}
+
+.comparison-grid-stacked .comparison-col:first-child {
+    border-right: none;
+    border-bottom: 1px solid var(--border-color);
+}
+
+.comparison-col h3,
+.comparison-col h4 {
+    margin-top: 0;
+    margin-bottom: var(--space-3);
+}
+
+.comparison-col ul {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.comparison-col ul li {
+    padding: var(--space-2) 0;
+    color: var(--text-muted);
+    font-size: var(--text-sm);
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-2);
+}
+
+.comparison-col ul li::before {
+    content: "";
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--primary-color);
+    margin-top: 0.55rem;
+    flex-shrink: 0;
+}
+
+.comparison-col:last-child ul li::before {
+    background: var(--secondary-color);
+}
+
+/* Method-level comparison variant (used on store.html for get vs get_shared) */
+.method-comparison {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+    margin: var(--space-8) 0;
+    border-radius: var(--radius-lg);
+    overflow: hidden;
+    border: 1px solid var(--border-color);
+}
+
+.method-col {
+    padding: var(--space-6);
+    background: var(--card-bg);
+}
+
+.method-col:first-child {
+    border-right: 1px solid var(--border-color);
+}
+
+.method-col h4 {
+    margin-top: 0;
+    margin-bottom: var(--space-2);
+    font-family: 'Fira Code', monospace;
+    font-size: var(--text-base);
+}
+
+.method-col:first-child h4 {
+    color: var(--primary-color);
+}
+
+.method-col:last-child h4 {
+    color: var(--success-color);
+}
+
+.method-col p {
+    font-size: var(--text-sm);
+    margin-bottom: 0;
+}
+
+.method-badge {
+    display: inline-block;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-sm);
+    margin-bottom: var(--space-2);
+    font-family: 'Inter', system-ui, sans-serif;
+}
+
+.method-badge-clone {
+    background: var(--primary-muted);
+    color: var(--primary-color);
+}
+
+.method-badge-zerocopy {
+    background: var(--success-muted);
+    color: var(--success-color);
+}
+
+/* --------------------------------------------------------------------------
+   15. Numbered pattern sections
+   -------------------------------------------------------------------------- */
+.pattern-section {
+    margin: var(--space-8) 0;
+}
+
+.pattern-header {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
+    margin-bottom: var(--space-2);
+}
+
+.pattern-number {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2rem;
+    height: 2rem;
+    border-radius: var(--radius-sm);
+    background: var(--primary-muted);
+    color: var(--primary-color);
+    font-weight: 700;
+    font-size: var(--text-sm);
+    font-family: 'Fira Code', monospace;
+    flex-shrink: 0;
+}
+
+.pattern-header h3 {
+    margin: 0;
+}
+
+/* --------------------------------------------------------------------------
+   16. Node lifecycle flow (nodes.html)
+   -------------------------------------------------------------------------- */
+.lifecycle-flow {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr auto 1fr;
+    gap: 0;
+    align-items: stretch;
+    margin: var(--space-8) 0;
+}
+
+.lifecycle-phase {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    padding: var(--space-6);
+    transition: border-color var(--duration-normal) ease,
+                transform var(--duration-normal) var(--ease-out);
+}
+
+.lifecycle-phase:hover {
+    border-color: var(--primary-color);
+    transform: translateY(-2px);
+}
+
+.phase-step {
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    margin-bottom: var(--space-3);
+}
+
+.phase-number {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 50%;
+    font-weight: 700;
+    font-size: var(--text-xs);
+    font-family: 'Fira Code', monospace;
+    flex-shrink: 0;
+}
+
+.phase-prep .phase-number {
+    background: var(--primary-muted);
+    color: var(--primary-color);
+}
+
+.phase-exec .phase-number {
+    background: var(--secondary-muted);
+    color: var(--secondary-color);
+}
+
+.phase-post .phase-number {
+    background: var(--success-muted);
+    color: var(--success-color);
+}
+
+.phase-step h3 {
+    margin: 0;
+    font-size: var(--text-lg);
+}
+
+.phase-prep h3 { color: var(--primary-color); }
+.phase-exec h3 { color: var(--secondary-color); }
+.phase-post h3 { color: var(--success-color); }
+
+.lifecycle-phase p {
+    font-size: var(--text-sm);
+    margin: 0;
+    color: var(--text-muted);
+}
+
+.phase-tag {
+    display: inline-block;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    padding: var(--space-1) var(--space-3);
+    border-radius: var(--radius-sm);
+    margin-top: var(--space-3);
+    font-family: 'Inter', system-ui, sans-serif;
+}
+
+.phase-prep .phase-tag {
+    background: var(--primary-muted);
+    color: var(--primary-color);
+}
+
+.phase-exec .phase-tag {
+    background: var(--secondary-muted);
+    color: var(--secondary-color);
+}
+
+.phase-post .phase-tag {
+    background: var(--success-muted);
+    color: var(--success-color);
+}
+
+.lifecycle-arrow {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 var(--space-2);
+    color: var(--border-color);
+}
+
+.lifecycle-arrow svg {
+    width: 24px;
+    height: 24px;
+    fill: none;
+    stroke: var(--border-color);
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+}
+
+/* --------------------------------------------------------------------------
+   17. Strategy grid (workflows.html)
+   -------------------------------------------------------------------------- */
+.strategy-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: var(--space-5);
+    margin: var(--space-8) 0;
+}
+
+.strategy-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    padding: var(--space-6);
+    transition: border-color var(--duration-normal) ease,
+                transform var(--duration-normal) var(--ease-out);
+}
+
+.strategy-card:hover {
+    border-color: var(--primary-color);
+    transform: translateY(-3px);
+}
+
+.strategy-card .strategy-name {
+    font-size: var(--text-lg);
+    font-weight: 600;
+    color: #fff;
+    margin: 0 0 var(--space-2);
+    font-family: 'Outfit', 'Inter', sans-serif;
+}
+
+.strategy-card p {
+    font-size: var(--text-sm);
+    margin-bottom: var(--space-3);
+    max-width: none;
+}
+
+.strategy-card pre {
+    margin: var(--space-3) 0 0 !important;
+    font-size: var(--text-xs);
+}
+
+/* --------------------------------------------------------------------------
+   18. Scheduling mode cards (scheduler.html)
+   -------------------------------------------------------------------------- */
+.mode-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: var(--space-5);
+    margin: var(--space-8) 0;
+}
+
+.mode-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-lg);
+    padding: var(--space-6);
+    text-align: center;
+    transition: border-color var(--duration-normal) ease,
+                transform var(--duration-normal) var(--ease-out);
+}
+
+.mode-card:hover {
+    border-color: var(--primary-color);
+    transform: translateY(-3px);
+}
+
+.mode-card .mode-icon {
+    font-size: 2rem;
+    margin-bottom: var(--space-3);
+    line-height: 1;
+}
+
+.mode-card h3 {
+    margin: 0 0 var(--space-2);
+    font-size: var(--text-lg);
+    color: #fff;
+}
+
+.mode-card p {
+    font-size: var(--text-sm);
+    margin-bottom: var(--space-3);
+    max-width: none;
+}
+
+.mode-card pre {
+    margin: var(--space-3) 0 0 !important;
+    text-align: left;
+}
+
+.mode-card pre code {
+    font-size: var(--text-xs);
+}
+
+/* --------------------------------------------------------------------------
+   19. Feature flag banner (tracing.html)
+   -------------------------------------------------------------------------- */
+.feature-banner {
+    background: linear-gradient(135deg, var(--secondary-muted), var(--primary-muted));
+    border: 1px solid hsla(234, 89%, 74%, 0.3);
+    border-radius: var(--radius-lg);
+    padding: var(--space-5) var(--space-6);
+    margin: 0 0 var(--space-10);
+    display: flex;
+    align-items: flex-start;
+    gap: var(--space-4);
+}
+
+.feature-banner .banner-icon {
+    font-size: var(--text-2xl);
+    line-height: 1;
+    flex-shrink: 0;
+    margin-top: 0.1rem;
+}
+
+.feature-banner .banner-content p {
+    margin-bottom: var(--space-2);
+    max-width: none;
+}
+
+.feature-banner .banner-content p:last-child {
+    margin-bottom: 0;
+}
+
+.feature-banner code {
+    background: hsla(0, 0%, 100%, 0.08);
+    font-size: var(--text-xs);
+}
+
+.feature-banner strong {
+    color: #fff;
+}
+
+/* --------------------------------------------------------------------------
+   20. Hero Section (index.html)
    -------------------------------------------------------------------------- */
 .hero {
     position: relative;
@@ -585,7 +1409,7 @@ code {
 }
 
 /* --------------------------------------------------------------------------
-   11. Feature Grid (index.html)
+   21. Feature Grid (index.html)
    -------------------------------------------------------------------------- */
 .feature-grid {
     display: grid;
@@ -667,7 +1491,7 @@ code {
 }
 
 /* --------------------------------------------------------------------------
-   12. Getting Started Section
+   22. Getting Started Section
    -------------------------------------------------------------------------- */
 .getting-started-code {
     position: relative;
@@ -680,7 +1504,7 @@ code {
 }
 
 /* --------------------------------------------------------------------------
-   13. 404 Page
+   23. 404 Page
    -------------------------------------------------------------------------- */
 .not-found-content {
     display: flex;
@@ -767,11 +1591,11 @@ code {
 }
 
 .not-found-terminal .error {
-    color: var(--accent-color);
+    color: var(--danger-color);
 }
 
 /* --------------------------------------------------------------------------
-   14. Utility Classes
+   24. Utility Classes
    -------------------------------------------------------------------------- */
 .visually-hidden {
     position: absolute;
@@ -793,7 +1617,7 @@ code {
 }
 
 /* --------------------------------------------------------------------------
-   15. Mobile Menu Toggle
+   25. Mobile Menu Toggle
    -------------------------------------------------------------------------- */
 .menu-toggle {
     display: none;
@@ -839,7 +1663,7 @@ code {
 }
 
 /* --------------------------------------------------------------------------
-   16. Animations
+   26. Animations
    -------------------------------------------------------------------------- */
 @keyframes fadeInUp {
     from {
@@ -882,7 +1706,7 @@ code {
 }
 
 /* --------------------------------------------------------------------------
-   17. Responsive Design
+   27. Responsive Design
    -------------------------------------------------------------------------- */
 
 /* Tablets and below */
@@ -892,6 +1716,10 @@ code {
     }
 
     .feature-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+
+    .mode-grid {
         grid-template-columns: repeat(2, 1fr);
     }
 }
@@ -949,6 +1777,92 @@ code {
         flex-wrap: wrap;
     }
 
+    .page-toc {
+        padding: var(--space-5);
+    }
+
+    .page-toc ol {
+        grid-template-columns: 1fr;
+    }
+
+    .callout {
+        padding: var(--space-4) var(--space-5);
+    }
+
+    .comparison-grid,
+    .method-comparison {
+        grid-template-columns: 1fr;
+    }
+
+    .comparison-col:first-child,
+    .method-col:first-child {
+        border-right: none;
+        border-bottom: 1px solid var(--border-color);
+    }
+
+    .comparison-col,
+    .method-col {
+        padding: var(--space-5);
+    }
+
+    .lifecycle-flow {
+        grid-template-columns: 1fr;
+    }
+
+    .lifecycle-phase {
+        padding: var(--space-5);
+    }
+
+    .lifecycle-arrow {
+        padding: var(--space-2) 0;
+        transform: rotate(90deg);
+    }
+
+    .strategy-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .strategy-card {
+        padding: var(--space-5);
+    }
+
+    .mode-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .mode-card {
+        padding: var(--space-5);
+    }
+
+    .feature-banner {
+        flex-direction: column;
+        gap: var(--space-2);
+        padding: var(--space-4) var(--space-5);
+    }
+
+    .main-content h2[id] a.anchor-link,
+    .main-content h3[id] a.anchor-link {
+        display: none;
+    }
+
+    .diagram-frame {
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .styled-table {
+        font-size: var(--text-xs);
+        display: block;
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+    }
+
+    .styled-table th,
+    .styled-table td {
+        padding: var(--space-2) var(--space-3);
+        white-space: nowrap;
+    }
+
     .not-found-terminal {
         max-width: 100%;
         font-size: var(--text-xs);
@@ -974,6 +1888,12 @@ code {
     }
 
     pre {
+        font-size: var(--text-xs);
+    }
+
+    .styled-table th,
+    .styled-table td {
+        padding: var(--space-2) var(--space-3);
         font-size: var(--text-xs);
     }
 }

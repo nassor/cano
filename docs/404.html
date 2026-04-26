@@ -5,6 +5,11 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Page Not Found - Cano Documentation</title>
     <meta name="description" content="The requested page could not be found in the Cano documentation.">
+    <meta property="og:title" content="Page Not Found - Cano Documentation">
+    <meta property="og:description" content="The requested page could not be found in the Cano documentation.">
+    <meta property="og:type" content="website">
+    <meta property="og:image" content="logo.png">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="styles.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;700&family=Fira+Code&display=swap" rel="stylesheet">
     <script src="script.js" defer></script>
@@ -15,7 +20,7 @@
 
     <nav class="sidebar" role="navigation" aria-label="Main navigation">
         <a href="index.html" class="logo">
-            <img src="logo.png" alt="Cano" style="height: 24px; vertical-align: middle; margin-right: 8px;">
+            <img src="logo.png" alt="">
             Cano
         </a>
         <ul class="nav-links">
@@ -23,10 +28,19 @@
             <li><a href="task.html">Tasks</a></li>
             <li><a href="nodes.html">Nodes</a></li>
             <li><a href="workflows.html">Workflows</a></li>
+            <li><a href="resources.html">Resources</a></li>
             <li><a href="store.html">Store</a></li>
             <li><a href="scheduler.html">Scheduler</a></li>
             <li><a href="tracing.html">Tracing</a></li>
         </ul>
+        <div class="sidebar-footer">
+            <span class="version-badge">v0.8.0</span>
+            <div class="sidebar-links">
+                <a href="https://github.com/nassor/cano" title="GitHub Repository" aria-label="GitHub">GitHub</a>
+                <a href="https://crates.io/crates/cano" title="Crates.io" aria-label="Crates.io">Crates.io</a>
+                <a href="https://docs.rs/cano" title="API Documentation" aria-label="API Docs">Docs.rs</a>
+            </div>
+        </div>
     </nav>
 
     <main class="main-content">

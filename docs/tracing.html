@@ -1,9 +1,15 @@
 <!DOCTYPE html>
-<html lang="en" style="scroll-behavior: smooth;">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Tracing - Cano Documentation</title>
+    <meta name="description" content="Comprehensive observability for Cano workflows via the optional tracing feature.">
+    <meta property="og:title" content="Tracing - Cano Documentation">
+    <meta property="og:description" content="Comprehensive observability for your workflows.">
+    <meta property="og:type" content="website">
+    <meta property="og:image" content="logo.png">
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
     <link rel="stylesheet" href="styles.css">
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;700&family=Fira+Code&display=swap" rel="stylesheet">
@@ -13,161 +19,6 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-toml.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js"></script>
     <script src="script.js" defer></script>
-    <style>
-        /* ── Table of Contents ── */
-        .page-toc {
-            background: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 0.75rem;
-            padding: 1.5rem 2rem;
-            margin: 2rem 0 3rem;
-            position: relative;
-        }
-        .page-toc::before {
-            content: '';
-            position: absolute;
-            left: 0; top: 0; bottom: 0;
-            width: 3px;
-            background: linear-gradient(to bottom, var(--primary-color), var(--secondary-color));
-            border-radius: 3px 0 0 3px;
-        }
-        .page-toc summary {
-            font-weight: 600;
-            font-size: 1.1rem;
-            color: #fff;
-            cursor: pointer;
-            list-style: none;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            user-select: none;
-        }
-        .page-toc summary::-webkit-details-marker { display: none; }
-        .page-toc summary::before {
-            content: '';
-            display: inline-block;
-            width: 6px; height: 6px;
-            border-right: 2px solid var(--primary-color);
-            border-bottom: 2px solid var(--primary-color);
-            transform: rotate(-45deg);
-            transition: transform 0.2s ease;
-            flex-shrink: 0;
-        }
-        .page-toc[open] summary::before { transform: rotate(45deg); }
-        .page-toc ol {
-            list-style: none;
-            padding: 0;
-            margin: 1rem 0 0;
-            columns: 2;
-            column-gap: 2rem;
-        }
-        .page-toc li {
-            break-inside: avoid;
-            margin-bottom: 0.35rem;
-        }
-        .page-toc a {
-            color: var(--text-color);
-            text-decoration: none;
-            font-size: 0.95rem;
-            display: block;
-            padding: 0.25rem 0.5rem;
-            border-radius: 0.25rem;
-            transition: all 0.15s ease;
-        }
-        .page-toc a:hover {
-            color: var(--primary-color);
-            background: rgba(56, 189, 248, 0.07);
-        }
-        .page-toc .toc-sub { padding-left: 1.25rem; font-size: 0.9rem; opacity: 0.8; }
-
-        /* ── Section anchors ── */
-        .main-content h2[id],
-        .main-content h3[id] { scroll-margin-top: 2rem; position: relative; }
-        .main-content h2[id] a.anchor-link,
-        .main-content h3[id] a.anchor-link {
-            position: absolute;
-            left: -1.5rem;
-            color: var(--border-color);
-            font-weight: 400;
-            opacity: 0;
-            text-decoration: none;
-            transition: opacity 0.15s ease;
-        }
-        .main-content h2[id]:hover a.anchor-link,
-        .main-content h3[id]:hover a.anchor-link {
-            opacity: 1;
-            color: var(--primary-color);
-        }
-
-        /* ── Feature flag banner ── */
-        .feature-banner {
-            background: linear-gradient(135deg, rgba(129, 140, 248, 0.12), rgba(56, 189, 248, 0.12));
-            border: 1px solid rgba(129, 140, 248, 0.3);
-            border-radius: 0.75rem;
-            padding: 1.25rem 1.5rem;
-            margin: 0 0 2.5rem;
-            display: flex;
-            align-items: flex-start;
-            gap: 1rem;
-        }
-        .feature-banner .banner-icon {
-            font-size: 1.5rem;
-            line-height: 1;
-            flex-shrink: 0;
-            margin-top: 0.1rem;
-        }
-        .feature-banner .banner-content p { margin-bottom: 0.5rem; }
-        .feature-banner .banner-content p:last-child { margin-bottom: 0; }
-        .feature-banner code {
-            background: rgba(255, 255, 255, 0.08);
-            font-size: 0.85rem;
-        }
-        .feature-banner strong { color: #fff; }
-
-        /* ── Callout boxes ── */
-        .callout {
-            border-radius: 0.75rem;
-            padding: 1.25rem 1.5rem;
-            margin: 1.5rem 0;
-            border: 1px solid;
-        }
-        .callout-info {
-            background: rgba(56, 189, 248, 0.08);
-            border-color: rgba(56, 189, 248, 0.25);
-        }
-        .callout-info .callout-title { color: var(--primary-color); }
-        .callout .callout-title { font-weight: 600; margin-bottom: 0.5rem; }
-        .callout p:last-child { margin-bottom: 0; }
-
-        /* ── Trace output styling ── */
-        .trace-output pre {
-            position: relative;
-            border-left: 3px solid var(--secondary-color);
-        }
-        .trace-output pre::before {
-            content: 'output';
-            position: absolute;
-            top: 0.5rem;
-            right: 0.75rem;
-            font-size: 0.7rem;
-            font-weight: 600;
-            letter-spacing: 0.06em;
-            text-transform: uppercase;
-            color: var(--secondary-color);
-            opacity: 0.6;
-            font-family: 'Inter', sans-serif;
-        }
-
-        /* ── Responsive ── */
-        @media (max-width: 768px) {
-            .page-toc ol { columns: 1; }
-            .page-toc { padding: 1.25rem 1.25rem; }
-            .feature-banner { flex-direction: column; gap: 0.5rem; padding: 1rem 1.25rem; }
-            .callout { padding: 1rem 1.25rem; }
-            .main-content h2[id] a.anchor-link,
-            .main-content h3[id] a.anchor-link { display: none; }
-        }
-    </style>
 </head>
 <body>
     <button id="menu-toggle" class="menu-toggle" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
@@ -175,7 +26,7 @@
 
     <nav class="sidebar" role="navigation" aria-label="Main navigation">
         <a href="index.html" class="logo">
-            <img src="logo.png" alt="" style="height: 24px; vertical-align: middle; margin-right: 8px;">
+            <img src="logo.png" alt="">
             Cano
         </a>
         <ul class="nav-links">
@@ -183,9 +34,10 @@
             <li><a href="task.html">Tasks</a></li>
             <li><a href="nodes.html">Nodes</a></li>
             <li><a href="workflows.html">Workflows</a></li>
+            <li><a href="resources.html">Resources</a></li>
             <li><a href="store.html">Store</a></li>
             <li><a href="scheduler.html">Scheduler</a></li>
-            <li><a href="tracing.html" class="active">Tracing</a></li>
+            <li><a href="tracing.html">Tracing</a></li>
         </ul>
         <div class="sidebar-footer">
             <span class="version-badge">v0.8.0</span>
@@ -198,6 +50,7 @@
     </nav>
 
     <main class="main-content">
+        <div class="content-wrapper">
         <h1>Tracing</h1>
         <p class="subtitle">Comprehensive observability for your workflows.</p>
 
@@ -210,8 +63,8 @@
             </div>
         </div>
 
-        <details class="page-toc" open>
-            <summary>On this page</summary>
+        <nav class="page-toc" aria-label="Table of contents">
+            <div class="page-toc-title">On this page</div>
             <ol>
                 <li><a href="#setup">Setup</a></li>
                 <li><a href="#what-gets-traced">What Gets Traced</a></li>
@@ -223,13 +76,14 @@
                 <li><a href="#example-output">Example Output</a></li>
                 <li><a href="#full-example">Full Example</a></li>
             </ol>
-        </details>
+        </nav>
 
         <p>
             Cano provides comprehensive observability through the optional <code>tracing</code> feature using the
             <a href="https://docs.rs/tracing/latest/tracing/" target="_blank">tracing</a> library.
             All tracing instrumentation is behind conditional compilation, so it adds zero overhead when disabled.
         </p>
+        <hr class="section-divider">
 
         <h2 id="setup"><a href="#setup" class="anchor-link" aria-hidden="true">#</a>Setup</h2>
         <p>Enable the <code>tracing</code> feature flag in your <code>Cargo.toml</code>. You can also use
@@ -261,6 +115,7 @@ tracing_subscriber::registry()
         .unwrap_or_else(|_| "info".into()))
     .with(tracing_subscriber::fmt::layer())
     .init();</code></pre>
+        <hr class="section-divider">
 
         <h2 id="what-gets-traced"><a href="#what-gets-traced" class="anchor-link" aria-hidden="true">#</a>What Gets Traced</h2>
         <div class="card-grid">
@@ -277,6 +132,7 @@ tracing_subscriber::registry()
                 <p>Workflow scheduling, concurrent execution, run counts, durations.</p>
             </div>
         </div>
+        <hr class="section-divider">
 
         <h2 id="error-tracing"><a href="#error-tracing" class="anchor-link" aria-hidden="true">#</a>Error Tracing</h2>
         <p>
@@ -321,6 +177,7 @@ RUST_LOG=cano::task=debug cargo run
 
 # Silence everything except errors
 RUST_LOG=error cargo run</code></pre>
+        <hr class="section-divider">
 
         <h2 id="scheduler-tracing"><a href="#scheduler-tracing" class="anchor-link" aria-hidden="true">#</a>Scheduler Tracing</h2>
         <p>
@@ -351,6 +208,7 @@ RUST_LOG=error cargo run</code></pre>
         <pre><code class="language-toml"># Enable both scheduler and tracing
 [dependencies]
 cano = { version = "0.8", features = ["all"] }</code></pre>
+        <hr class="section-divider">
 
         <h2 id="custom-spans"><a href="#custom-spans" class="anchor-link" aria-hidden="true">#</a>Custom Spans</h2>
         <p>Attach custom tracing spans to your workflows to include business-specific context.
@@ -371,6 +229,7 @@ let workflow = Workflow::new(Resources::new().insert("store", store))
     .with_tracing_span(workflow_span)
     .register(MyState::Start, MyProcessorNode)
     .add_exit_state(MyState::Complete);</code></pre>
+        <hr class="section-divider">
 
         <h2 id="custom-instrumentation"><a href="#custom-instrumentation" class="anchor-link" aria-hidden="true">#</a>Custom Instrumentation</h2>
         <p>You can add your own tracing to Task and Node implementations using the
@@ -444,6 +303,7 @@ impl Node&lt;PipelineState&gt; for DataEnrichmentNode {
         Ok(PipelineState::Validate)
     }
 }</code></pre>
+        <hr class="section-divider">
 
         <h2 id="example-output"><a href="#example-output" class="anchor-link" aria-hidden="true">#</a>Example Output</h2>
         <p>Running with <code>RUST_LOG=info</code> produces structured logs:</p>
@@ -454,6 +314,7 @@ impl Node&lt;PipelineState&gt; for DataEnrichmentNode {
     INFO user_data_processing{user_id="12345"}:task_attempt{attempt=1}: processor_id=basic_processor input_records=3: Data processing completed
   INFO user_data_processing{user_id="12345"}: Workflow completed successfully</code></pre>
         </div>
+        <hr class="section-divider">
 
         <h2 id="full-example"><a href="#full-example" class="anchor-link" aria-hidden="true">#</a>Full Example</h2>
         <pre><code class="language-rust">use cano::prelude::*;
@@ -508,6 +369,7 @@ async fn main() -> Result&lt;(), CanoError&gt; {
 
     Ok(())
 }</code></pre>
+        </div>
     </main>
 </body>
 </html>
