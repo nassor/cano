@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}{{ config.title }}{% endblock title %}</title>
+    <meta name="description" content="{% block description %}{{ config.description }}{% endblock description %}">
+    <meta property="og:title" content="{% block og_title %}{{ config.title }}{% endblock og_title %}">
+    <meta property="og:description" content="{% block og_description %}{{ config.description }}{% endblock og_description %}">
+    <meta property="og:type" content="website">
+    <meta property="og:image" content="{{ get_url(path='logo.png') }}">
+    <link rel="icon" href="{{ get_url(path='favicon.svg') }}" type="image/svg+xml">
+    <link rel="stylesheet" href="{{ get_url(path='styles.css') }}">
+    {% block head_extra %}
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
+    {% endblock head_extra %}
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;700&family=Fira+Code&display=swap" rel="stylesheet">
+    {% block scripts_head %}
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.6.1/mermaid.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-rust.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-toml.min.js"></script>
+    {% endblock scripts_head %}
+    <script src="{{ get_url(path='script.js') }}" defer></script>
+</head>
+<body>
+    <button id="menu-toggle" class="menu-toggle" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
+    <div class="sidebar-overlay"></div>
+
+    <nav class="sidebar" role="navigation" aria-label="Main navigation">
+        <a href="{{ get_url(path='@/_index.md') }}" class="logo">
+            <img src="{{ get_url(path='logo.png') }}" alt="">
+            Cano
+        </a>
+        <ul class="nav-links">
+            <li><a href="{{ get_url(path='@/_index.md') }}">Home</a></li>
+            <li><a href="{{ get_url(path='@/task.md') }}">Tasks</a></li>
+            <li><a href="{{ get_url(path='@/nodes.md') }}">Nodes</a></li>
+            <li><a href="{{ get_url(path='@/workflows.md') }}">Workflows</a></li>
+            <li><a href="{{ get_url(path='@/resources.md') }}">Resources</a></li>
+            <li><a href="{{ get_url(path='@/store.md') }}">Store</a></li>
+            <li><a href="{{ get_url(path='@/scheduler.md') }}">Scheduler</a></li>
+            <li><a href="{{ get_url(path='@/tracing.md') }}">Tracing</a></li>
+        </ul>
+        <div class="sidebar-footer">
+            <span class="version-badge">v{{ config.extra.version }}</span>
+            <div class="sidebar-links">
+                <a href="{{ config.extra.github_url | safe }}" title="GitHub Repository" aria-label="GitHub">GitHub</a>
+                <a href="{{ config.extra.crates_url | safe }}" title="Crates.io" aria-label="Crates.io">Crates.io</a>
+                <a href="{{ config.extra.docsrs_url | safe }}" title="API Documentation" aria-label="API Docs">Docs.rs</a>
+            </div>
+        </div>
+    </nav>
+
+    <main class="main-content">
+        {% block content %}{% endblock content %}
+    </main>
+</body>
+</html>

@@ -1408,6 +1408,21 @@ code {
     max-width: 52ch;
 }
 
+.hero .prerelease-notice {
+    font-size: 0.9rem;
+    color: var(--warning-color);
+    background-color: var(--warning-muted);
+    border-left: 3px solid var(--warning-color);
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-sm);
+    max-width: 52ch;
+    margin: var(--space-4) 0 var(--space-6);
+}
+
+.hero .prerelease-notice em {
+    font-style: italic;
+}
+
 /* --------------------------------------------------------------------------
    21. Feature Grid (index.html)
    -------------------------------------------------------------------------- */

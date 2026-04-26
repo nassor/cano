@@ -1,0 +1,10 @@
+{% extends "base.html" %}
+
+{% block title %}{{ page.title }} - Cano Documentation{% endblock title %}
+{% block description %}{{ page.description | default(value=config.description) }}{% endblock description %}
+{% block og_title %}{{ page.title }} - Cano Documentation{% endblock og_title %}
+{% block og_description %}{{ page.description | default(value=config.description) }}{% endblock og_description %}
+
+{% block content %}
+{{ page.content | safe }}
+{% endblock content %}

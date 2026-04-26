@@ -72,13 +72,13 @@ document.addEventListener('DOMContentLoaded', () => {
   // --------------------------------------------------------------------------
   // Active nav link highlighting
   // --------------------------------------------------------------------------
-  const currentPath = window.location.pathname;
-  const currentPage = currentPath.substring(currentPath.lastIndexOf('/') + 1) || 'index.html';
+  const normalize = (p) => p.replace(/\/+$/, '') || '/';
+  const currentPath = normalize(window.location.pathname);
 
   const navLinks = document.querySelectorAll('.nav-links a');
   navLinks.forEach((link) => {
-    const href = link.getAttribute('href');
-    if (href === currentPage) {
+    const linkPath = normalize(new URL(link.href, window.location.origin).pathname);
+    if (linkPath === currentPath) {
       link.classList.add('active');
       link.setAttribute('aria-current', 'page');
     } else {
@@ -121,6 +121,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // External link handling — open in new tab
   // --------------------------------------------------------------------------
   document.querySelectorAll('a[href^="http"]').forEach((link) => {
+    if (link.hostname === window.location.hostname) return;
     if (!link.hasAttribute('target')) {
       link.setAttribute('target', '_blank');
       link.setAttribute('rel', 'noopener noreferrer');
