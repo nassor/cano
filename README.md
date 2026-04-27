@@ -8,11 +8,11 @@
 [![Downloads](https://img.shields.io/crates/d/cano.svg)](https://crates.io/crates/cano)
 [![License](https://img.shields.io/crates/l/cano.svg)](https://github.com/nassor/cano/blob/main/LICENSE)
 [![CI](https://github.com/nassor/cano/workflows/CI/badge.svg)](https://github.com/nassor/cano/actions)
-[![Rust Version](https://img.shields.io/badge/rust-1.89%2B-blue.svg)](https://www.rust-lang.org)
+[![Rust Version](https://img.shields.io/badge/rust-1.95%2B-blue.svg)](https://www.rust-lang.org)
 
 <em>**Orchestrate complex async processes with finite state machines, parallel execution, and built-in scheduling.**</em>
 
-<em>Cano still far from 1.0 release. The API is subject to changes and breaking changes.</em>
+<em>Cano is still far from a 1.0 release. The API is subject to changes and may include breaking changes.</em>
 
 </div>
 

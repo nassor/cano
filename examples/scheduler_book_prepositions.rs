@@ -278,7 +278,7 @@ impl Node<WorkflowPhase> for BookRankingNode {
         println!("🏆 Ranking books by preposition diversity...");
 
         let mut analyses = prep_res;
-        analyses.sort_by(|a, b| b.preposition_count.cmp(&a.preposition_count));
+        analyses.sort_by_key(|b| std::cmp::Reverse(b.preposition_count));
 
         analyses
             .into_iter()

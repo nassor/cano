@@ -497,7 +497,7 @@ async fn reduce_global_results(global_results: &GlobalResults) -> Result<(), Can
         .collect();
 
     // Sort by preposition count
-    all_books.sort_by(|a, b| b.preposition_count.cmp(&a.preposition_count));
+    all_books.sort_by_key(|b| std::cmp::Reverse(b.preposition_count));
 
     // Display batch summaries
     println!("\n📦 Batch Summaries:");

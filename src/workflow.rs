@@ -813,15 +813,13 @@ where
 
                     // Check if we can return early based on strategy
                     match &join_config.strategy {
-                        JoinStrategy::Any => {
-                            if !split_result.successes.is_empty() {
-                                break;
-                            }
+                        JoinStrategy::Any if !split_result.successes.is_empty() => {
+                            break;
                         }
-                        JoinStrategy::PartialResults(min) => {
-                            if split_result.successes.len() >= *min {
-                                break;
-                            }
+                        JoinStrategy::PartialResults(min)
+                            if split_result.successes.len() >= *min =>
+                        {
+                            break;
                         }
                         _ => {} // Continue for other strategies
                     }
@@ -1621,8 +1619,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_unregistered_state_error() {
-        let workflow =
-            Workflow::<TestState>::bare().add_exit_state(TestState::Complete);
+        let workflow = Workflow::<TestState>::bare().add_exit_state(TestState::Complete);
 
         let result = workflow.orchestrate(TestState::Start).await;
         assert!(result.is_err());
@@ -1651,8 +1648,8 @@ mod tests {
 
     #[test]
     fn test_validate_no_exit_states() {
-        let workflow = Workflow::bare()
-            .register(TestState::Start, SimpleTask::new(TestState::Complete));
+        let workflow =
+            Workflow::bare().register(TestState::Start, SimpleTask::new(TestState::Complete));
         let result = workflow.validate();
         assert!(result.is_err());
         assert!(
@@ -1819,8 +1816,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_workflow_no_exit_states() {
-        let workflow = Workflow::bare()
-            .register(TestState::Start, SimpleTask::new(TestState::Complete));
+        let workflow =
+            Workflow::bare().register(TestState::Start, SimpleTask::new(TestState::Complete));
         let result = workflow.orchestrate(TestState::Start).await;
         assert!(result.is_err());
         assert!(

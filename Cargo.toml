@@ -1,9 +1,9 @@
 [package]
 name = "cano"
-version = "0.8.0"
+version = "0.9.0"
 homepage = "https://nassor.github.io/cano/"
 edition = "2024"
-rust-version = "1.89.0"
+rust-version = "1.95.0"
 description = "High-performance orchestration engine for building resilient, self-healing systems in Rust. Uses Finite State Machines (FSM) for strict, type-safe transitions."
 license = "MIT"
 repository = "https://github.com/nassor/cano"
@@ -14,7 +14,7 @@ authors = ["Nassor Frazier-Silva"]
 
 [dependencies]
 async-trait = "0.1"
-tokio = { version = "1.51.1", features = ["macros", "sync", "time", "rt-multi-thread"] }
+tokio = { version = "1.52.1", features = ["macros", "sync", "time", "rt-multi-thread"] }
 rand = "0.10"
 chrono = { version = "0.4", features = ["serde"], optional = true }
 cron = { version = "0.16", optional = true }
@@ -27,16 +27,16 @@ tracing = ["dep:tracing"]
 all = ["scheduler", "tracing"]
 
 [dev-dependencies]
-axum = "0.8"
+axum = "0.8.9"
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 reqwest = { version = "0.13", features = ["json"] }
-rig-core = "0.34"
+rig-core = "0.35"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 wide = "1.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 chrono = { version = "0.4", features = ["serde"] }
-tokio = { version = "1.51.1", features = ["macros", "sync", "time", "rt-multi-thread", "signal"] }
+tokio = { version = "1.52.1", features = ["macros", "sync", "time", "rt-multi-thread", "signal"] }
 
 [[example]]
 name = "ai_workflow_yes_and"

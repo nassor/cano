@@ -112,25 +112,22 @@ async fn main() -> Result<(), CanoError> {
         duration, result
     );
 
-    // Check individual results stored by successful tasks
-    let result_1 = store.get::<String>("result_1").ok();
-    let result_2 = store.get::<String>("result_2").ok();
+    // Check results stored by every spawned task — order of completion is not guaranteed,
+    // so iterate over all task IDs rather than hardcoding the expected pair.
+    let task_ids = [1usize, 2, 3, 4];
+    let results: Vec<(usize, Option<String>)> = task_ids
+        .iter()
+        .map(|&id| (id, store.get::<String>(&format!("result_{id}")).ok()))
+        .collect();
 
     println!("\nResults:");
-    println!("- Task 1: {:?}", result_1);
-    println!("- Task 2: {:?}", result_2);
+    for (id, value) in &results {
+        println!("- Task {}: {:?}", id, value);
+    }
 
-    // Verify results
-    // We expect Task 1 (success) and Task 2 (success) to complete.
-    // Task 3 (failure) will complete but not count towards the threshold.
-    // Task 4 should be cancelled because we only asked for 2 successful completions.
-    // Task 1 succeeds at 100ms.
-    // Task 3 fails at 150ms.
-    // Task 2 succeeds at 500ms.
-    // So at 500ms we have 2 successes.
-    // The workflow should proceed.
-
-    let successes = [result_1, result_2].iter().filter(|r| r.is_some()).count();
+    // PartialResults(2) waits for 2 successful completions (failures don't count).
+    // Task 3 fails so never stores; whichever 2 successes finish first satisfy the join.
+    let successes = results.iter().filter(|(_, r)| r.is_some()).count();
     if successes >= 2 {
         println!("\nSUCCESS: Workflow behaved as expected (waited for successes).");
     } else {

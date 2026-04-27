@@ -600,24 +600,14 @@ async fn main() -> Result<(), CanoError> {
     let result = match workflow.orchestrate(AdExchangeState::Start).await {
         Ok(state) => state,
         Err(e) => {
-            // If workflow fails due to split timeout/error, handle as NoFill
+            // If workflow fails due to split timeout/error, handle as NoFill.
+            // Reuse the original workflow/store so error tracking sees the real
+            // request and any context produced before the failure.
             eprintln!("❌ Workflow error: {}", e);
+            store.put("error_reason", e.to_string())?;
             println!("\n⚠️  Handling as No Fill due to error\n");
 
-            // Build a fresh workflow for the error recovery path
-            let store2 = MemoryStore::new();
-            store2.put(
-                "ad_request",
-                AdRequest {
-                    request_id: "req_abc123".to_string(),
-                    placement_id: "placement_728x90_top".to_string(),
-                    floor_price: 1.50,
-                },
-            )?;
-            let workflow2 = create_ad_exchange_workflow(store2);
-            workflow2
-                .orchestrate(AdExchangeState::ErrorTracking)
-                .await?
+            workflow.orchestrate(AdExchangeState::ErrorTracking).await?
         }
     };
 

@@ -725,10 +725,10 @@ fn bench_task_run_bare(c: &mut Criterion) {
             &count,
             |b, &count| {
                 let task = DirectRunTask;
+                let res = Resources::new();
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let res = Resources::new();
                         for _i in 0..count {
                             let _result = task.run(&res).await;
                         }
@@ -741,10 +741,10 @@ fn bench_task_run_bare(c: &mut Criterion) {
             &count,
             |b, &count| {
                 let task = ViaRunBareTask;
+                let res = Resources::new();
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let res = Resources::new();
                         for _i in 0..count {
                             let _result = task.run(&res).await;
                         }

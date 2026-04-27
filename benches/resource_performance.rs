@@ -68,15 +68,19 @@ fn bench_lifecycle_n_resources(c: &mut Criterion) {
 
     for n in [1usize, 5, 10, 50] {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
-            b.iter(|| {
-                let mut resources: Resources<String> = Resources::new();
-                for i in 0..n {
-                    resources = resources.insert(format!("r{i}"), Noop);
-                }
-                runtime.block_on(async {
-                    resources.setup_all().await.unwrap();
-                    resources.teardown_all().await;
-                });
+            // Build the dictionary once per parameter — key allocation and insert
+            // chaining are not part of what we want to measure. setup_all and
+            // teardown_all take &self and Noop's hooks are no-ops, so the same
+            // instance is reused across iterations.
+            let mut resources: Resources<String> = Resources::new();
+            for i in 0..n {
+                resources = resources.insert(format!("r{i}"), Noop);
+            }
+            b.to_async(&runtime).iter(|| async {
+                resources.setup_all().await.unwrap();
+                // teardown_all returns (); per-resource errors are logged
+                // internally. Noop never fails, so nothing to assert here.
+                resources.teardown_all().await;
             });
         });
     }

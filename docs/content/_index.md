@@ -8,7 +8,7 @@ template = "index.html"
 <h1 class="animate-in">Cano</h1>
 <p class="subtitle animate-in">Type-safe async workflow engine with built-in scheduling, retry logic, and state machine semantics.</p>
 
-<p class="prerelease-notice animate-in"><em>Cano still far from 1.0 release. The API is subject to changes and breaking changes.</em></p>
+<p class="prerelease-notice animate-in"><em>Cano is still far from a 1.0 release; the API is subject to change and may include breaking changes.</em></p>
 
 <div class="badges animate-in">
 <a href="https://crates.io/crates/cano" title="Crates.io">
