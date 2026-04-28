@@ -573,7 +573,7 @@ where
 ///
 /// Use this when you need to store different task types in the same collection.
 /// `TResourceKey` defaults to [`Cow<'static, str>`](std::borrow::Cow) to match
-/// [`Resources`](crate::resource::Resources); pass an enum key type for typed
+/// [`Resources`]; pass an enum key type for typed
 /// resource lookups.
 ///
 /// ```

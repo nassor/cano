@@ -44,12 +44,12 @@ All tracing instrumentation is behind conditional compilation, so it adds zero o
 <code>features = ["all"]</code> to enable both <code>tracing</code> and <code>scheduler</code> at once.</p>
 
 <pre><code class="language-toml">[dependencies]
-cano = { version = "0.8", features = ["tracing"] }
+cano = { version = "0.10", features = ["tracing"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 <!--blank-->
 # Or enable everything (tracing + scheduler):
-# cano = { version = "0.8", features = ["all"] }</code></pre>
+# cano = { version = "0.10", features = ["all"] }</code></pre>
 
 <h3 id="basic-init"><a href="#basic-init" class="anchor-link" aria-hidden="true">#</a>Basic Initialization</h3>
 <p>For quick setup during development, use the default formatter.</p>
@@ -161,7 +161,7 @@ execution in log output.</p>
 
 <pre><code class="language-toml"># Enable both scheduler and tracing
 [dependencies]
-cano = { version = "0.8", features = ["all"] }</code></pre>
+cano = { version = "0.10", features = ["all"] }</code></pre>
 <hr class="section-divider">
 
 <h2 id="custom-spans"><a href="#custom-spans" class="anchor-link" aria-hidden="true">#</a>Custom Spans</h2>

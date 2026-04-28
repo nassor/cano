@@ -1,6 +1,6 @@
 +++
-title = "Cano - Async Data & AI Workflows in Rust"
-description = "Cano is a high-performance async workflow orchestration engine for Rust using Finite State Machines for type-safe processing pipelines."
+title = "Cano - Type-safe async workflow engine for Rust"
+description = "Cano is a high-performance orchestration engine designed for building resilient, self-healing systems in Rust. Unlike simple task queues, Cano uses Finite State Machines (FSM) to define strict, type-safe transitions between processing steps."
 template = "index.html"
 +++
 
@@ -79,9 +79,11 @@ It excels at managing complex lifecycles where state transitions matter:
 
 <div class="getting-started-code">
 <pre><code class="language-toml">[dependencies]
-cano = { version = "0.8", features = ["all"] }
-tokio = { version = "1", features = ["full"] }</code></pre>
+cano = { version = "0.10", features = ["all"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }</code></pre>
 </div>
+
+<p>Cano runs on the Tokio runtime, so <code>tokio</code> is a required direct dependency — you launch the runtime via <code>#[tokio::main]</code> or <code>tokio::runtime::Builder</code>. The two features above are the minimum to do that; add <code>"time"</code>, <code>"sync"</code>, etc. only if your own code calls into them. Use <code>"full"</code> if you prefer convenience over compile time.</p>
 
 <h3>Basic Example</h3>
 <div class="getting-started-code">

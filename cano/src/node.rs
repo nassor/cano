@@ -5,12 +5,12 @@
 //!
 //! ## Task vs Node - Choose the Right Tool
 //!
-//! - **Use [`Task`]** for simple processing with a single `run()` method.
+//! - **Use [`Task`](crate::task::Task)** for simple processing with a single `run()` method.
 //! - **Use [`Node`]** for structured processing with a three-phase lifecycle.
 //!
 //! Both `Task` and `Node` support retry strategies.
 //!
-//! **Every [`Node`] automatically implements [`Task`]**, so you can mix and match in the same workflow.
+//! **Every [`Node`] automatically implements [`Task`](crate::task::Task)**, so you can mix and match in the same workflow.
 //!
 //! ## Unified API Benefits
 //!
@@ -434,7 +434,7 @@ where
 ///
 /// Use this when you need to store different node types in the same collection.
 /// `TResourceKey` defaults to [`Cow<'static, str>`](std::borrow::Cow) to match
-/// [`Resources`](crate::resource::Resources); pass an enum key type for typed
+/// [`Resources`]; pass an enum key type for typed
 /// resource lookups.
 pub type DynNode<TState, TResourceKey = Cow<'static, str>> = dyn Node<TState, TResourceKey, PrepResult = DefaultNodeResult, ExecResult = DefaultNodeResult>
     + Send

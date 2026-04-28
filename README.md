@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="docs/logo.png" alt="Cano Logo" width="200">
+  <img src="docs/static/logo.png" alt="Cano Logo" width="200">
   <h1>Cano: Type-Safe Async Workflow Engine</h1>
 
 [![Crates.io](https://img.shields.io/crates/v/cano.svg)](https://crates.io/crates/cano)
