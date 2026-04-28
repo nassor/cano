@@ -139,11 +139,11 @@
 //!
 //! ## Module Overview
 //!
-//! - [`task`]: The [`Task`] trait — single `run()` method
-//! - [`node`]: The [`Node`] trait — three-phase lifecycle with retry via [`TaskConfig`]
+//! - [`mod@task`]: The [`Task`] trait — single `run()` method
+//! - [`mod@node`]: The [`Node`] trait — three-phase lifecycle with retry via [`TaskConfig`]
 //! - [`workflow`]: [`Workflow`] — FSM orchestration with Split/Join support
 //! - [`scheduler`] (requires `scheduler` feature): [`Scheduler`] — cron and interval scheduling
-//! - [`resource`]: [`Resource`] trait and [`Resources`] dictionary — lifecycle-aware resource management
+//! - [`mod@resource`]: [`Resource`] trait and [`Resources`] dictionary — lifecycle-aware resource management
 //! - [`store`]: [`MemoryStore`] and the [`KeyValueStore`] trait — [`MemoryStore`] implements [`Resource`]
 //! - [`error`]: [`CanoError`] variants and the [`CanoResult`] alias
 //!
@@ -181,7 +181,7 @@ pub use scheduler::{FlowInfo, Scheduler};
 /// to rewrite `async fn` methods into ones returning
 /// `Pin<Box<dyn Future<Output = ...> + Send + 'async_trait>>`.
 ///
-/// Functionally identical to [`node`] and [`resource`]; the separate name makes
+/// Functionally identical to [`macro@node`] and [`macro@resource`]; the separate name makes
 /// `#[cano::task]` self-documenting at impl sites. The implementation lives in
 /// the [`cano-macros`] sibling crate.
 ///
@@ -190,19 +190,19 @@ pub use cano_macros::task;
 
 /// Attribute macro applied to the `Node` trait definition and `impl Node` blocks.
 ///
-/// See [`task`] for the rewrite shape; this macro is functionally identical and
+/// See [`macro@task`] for the rewrite shape; this macro is functionally identical and
 /// differs only in name.
 pub use cano_macros::node;
 
 /// Attribute macro applied to the `Resource` trait definition and `impl Resource` blocks.
 ///
-/// See [`task`] for the rewrite shape; this macro is functionally identical and
+/// See [`macro@task`] for the rewrite shape; this macro is functionally identical and
 /// differs only in name.
 pub use cano_macros::resource;
 
 /// Derive macro that generates a `from_resources` associated function for a struct.
 ///
-/// See [`cano_macros::derive_from_resources`] for the full specification. Each
+/// See [`FromResources`] for the full specification. Each
 /// field must be `Arc<T>`; annotate it with `#[res("key")]` or
 /// `#[res(EnumKey::Variant)]`.
 pub use cano_macros::FromResources;
@@ -213,9 +213,8 @@ pub use cano_macros::FromResources;
 /// but derived directly from the struct definition. The trait's no-op `setup`
 /// and `teardown` defaults take effect automatically.
 ///
-/// In the prelude, this is exported as [`Resource`](crate::prelude::Resource)
-/// alongside the trait of the same name — Rust's separate macro and type
-/// namespaces let them coexist.
+/// In the prelude, this is exported as [`Resource`] alongside the trait of the
+/// same name — Rust's separate macro and type namespaces let them coexist.
 pub use cano_macros::Resource;
 
 // Convenience re-exports for common patterns

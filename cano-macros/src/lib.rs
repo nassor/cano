@@ -29,7 +29,7 @@ mod resource_derive;
 mod task_impl;
 
 /// Derive a `from_resources(&Resources<_>) -> CanoResult<Self>` constructor that
-/// pulls each field out of a [`cano::Resources`] map.
+/// pulls each field out of a `cano::Resources` map.
 ///
 /// Each field must be `Arc<T>`. Use `#[res("key")]` for string-literal lookups
 /// or `#[res(EnumType::Variant)]` for enum-path lookups. Use

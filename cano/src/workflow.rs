@@ -304,7 +304,7 @@ where
 {
     /// State machine with support for split/join.
     /// Arc-wrapped so the FSM loop clones the entry as a cheap refcount bump
-    /// rather than cloning the inner Vec<Arc<dyn Task>> on every iteration.
+    /// rather than cloning the inner `Vec<Arc<dyn Task>>` on every iteration.
     states: HashMap<TState, Arc<StateEntry<TState, TResourceKey>>>,
     /// Shared resources for all tasks
     pub(crate) resources: Arc<Resources<TResourceKey>>,
