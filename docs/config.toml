@@ -1,0 +1,13 @@
+base_url = "https://nassor.github.io/cano"
+title = "Cano"
+description = "Async workflow orchestration engine for Rust built on Finite State Machines."
+default_language = "en"
+compile_sass = false
+build_search_index = false
+generate_feeds = false
+
+[extra]
+version = "0.9.0"
+github_url = "https://github.com/nassor/cano"
+crates_url = "https://crates.io/crates/cano"
+docsrs_url = "https://docs.rs/cano"
