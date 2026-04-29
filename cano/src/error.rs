@@ -29,6 +29,7 @@
 //! | `Workflow` | Workflow orchestration fails | Verify node registration and routing |
 //! | `Configuration` | Invalid node/workflow config | Check parameters and settings |
 //! | `RetryExhausted` | All retries exhausted | Increase retries or fix root cause |
+//! | `Timeout` | Per-attempt timeout reached | Increase `attempt_timeout` or speed up the task |
 //! | `Generic` | General errors | Check the specific error message |
 //!
 //! ## Using Errors in Your Nodes
@@ -178,6 +179,16 @@ pub enum CanoError {
     /// all configured retry attempts have been used up.
     RetryExhausted(String),
 
+    /// A bounded operation exceeded its deadline.
+    ///
+    /// Emitted by per-attempt task timeouts (see
+    /// [`crate::task::TaskConfig::with_attempt_timeout`]). The retry loop treats
+    /// this as a recoverable failure: each attempt that times out is retried
+    /// (subject to the configured `RetryMode`), and if all attempts time out
+    /// the loop wraps the final timeout error in
+    /// [`CanoError::RetryExhausted`].
+    Timeout(String),
+
     /// General-purpose error for other scenarios
     ///
     /// Use this for errors that don't fit the other categories.
@@ -230,6 +241,11 @@ impl CanoError {
         CanoError::RetryExhausted(msg.into())
     }
 
+    /// Create a new timeout error
+    pub fn timeout<S: Into<String>>(msg: S) -> Self {
+        CanoError::Timeout(msg.into())
+    }
+
     /// Create a new generic error
     pub fn generic<S: Into<String>>(msg: S) -> Self {
         CanoError::Generic(msg.into())
@@ -260,6 +276,7 @@ impl CanoError {
             CanoError::Workflow(msg) => msg,
             CanoError::Configuration(msg) => msg,
             CanoError::RetryExhausted(msg) => msg,
+            CanoError::Timeout(msg) => msg,
             CanoError::Generic(msg) => msg,
             CanoError::ResourceNotFound(msg) => msg,
             CanoError::ResourceTypeMismatch(msg) => msg,
@@ -277,6 +294,7 @@ impl CanoError {
             CanoError::Workflow(_) => "workflow",
             CanoError::Configuration(_) => "configuration",
             CanoError::RetryExhausted(_) => "retry_exhausted",
+            CanoError::Timeout(_) => "timeout",
             CanoError::Generic(_) => "generic",
             CanoError::ResourceNotFound(_) => "resource_not_found",
             CanoError::ResourceTypeMismatch(_) => "resource_type_mismatch",
@@ -295,6 +313,7 @@ impl std::fmt::Display for CanoError {
             CanoError::Workflow(msg) => write!(f, "Workflow error: {msg}"),
             CanoError::Configuration(msg) => write!(f, "Configuration error: {msg}"),
             CanoError::RetryExhausted(msg) => write!(f, "Retry exhausted: {msg}"),
+            CanoError::Timeout(msg) => write!(f, "Timeout error: {msg}"),
             CanoError::Generic(msg) => write!(f, "Error: {msg}"),
             CanoError::ResourceNotFound(msg) => write!(f, "Resource not found: {msg}"),
             CanoError::ResourceTypeMismatch(msg) => write!(f, "Resource type mismatch: {msg}"),
@@ -315,6 +334,7 @@ impl PartialEq for CanoError {
             (CanoError::Workflow(a), CanoError::Workflow(b)) => a == b,
             (CanoError::Configuration(a), CanoError::Configuration(b)) => a == b,
             (CanoError::RetryExhausted(a), CanoError::RetryExhausted(b)) => a == b,
+            (CanoError::Timeout(a), CanoError::Timeout(b)) => a == b,
             (CanoError::Generic(a), CanoError::Generic(b)) => a == b,
             (CanoError::ResourceNotFound(a), CanoError::ResourceNotFound(b)) => a == b,
             (CanoError::ResourceTypeMismatch(a), CanoError::ResourceTypeMismatch(b)) => a == b,
@@ -517,6 +537,30 @@ mod tests {
         let e = CanoError::ResourceTypeMismatch("t".to_string());
         let f = CanoError::ResourceTypeMismatch("t".to_string());
         assert_eq!(e, f);
+    }
+
+    #[test]
+    fn test_timeout_constructor_and_category() {
+        let err = CanoError::timeout("attempt deadline reached");
+        assert_eq!(err.message(), "attempt deadline reached");
+        assert_eq!(err.category(), "timeout");
+        assert_eq!(format!("{err}"), "Timeout error: attempt deadline reached");
+    }
+
+    #[test]
+    fn test_timeout_partial_eq() {
+        let a = CanoError::timeout("d");
+        let b = CanoError::timeout("d");
+        assert_eq!(a, b);
+
+        let c = CanoError::timeout("x");
+        let d = CanoError::timeout("y");
+        assert_ne!(c, d);
+
+        // Distinct from same-message variants
+        let timeout = CanoError::timeout("k");
+        let workflow = CanoError::workflow("k");
+        assert_ne!(timeout, workflow);
     }
 
     #[test]

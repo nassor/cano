@@ -74,12 +74,26 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::Hash;
+use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+
+use futures_util::FutureExt;
 
 use crate::error::CanoError;
 use crate::resource::Resources;
 use crate::task::{Task, TaskResult};
+
+/// Best-effort extraction of a human-readable message from a panic payload.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
+}
 
 #[cfg(feature = "tracing")]
 use tracing::{Span, debug, info, info_span, warn};
@@ -211,6 +225,13 @@ pub struct JoinConfig<TState> {
     pub timeout: Option<Duration>,
     /// State to transition to after join condition is met
     pub join_state: TState,
+    /// Optional bulkhead: maximum number of split tasks allowed to run
+    /// concurrently. When `None` (default) all tasks run as soon as the
+    /// runtime can schedule them. When `Some(n)`, a `tokio::sync::Semaphore`
+    /// with `n` permits gates each task body, so excess tasks queue until
+    /// a permit is free. `Some(0)` is rejected at execution time with
+    /// [`CanoError::Configuration`].
+    pub bulkhead: Option<usize>,
 }
 
 impl<TState> JoinConfig<TState>
@@ -223,6 +244,7 @@ where
             strategy,
             timeout: None,
             join_state,
+            bulkhead: None,
         }
     }
 
@@ -235,6 +257,13 @@ where
     /// Set the state to transition to after the join condition is met
     pub fn with_join_state(mut self, state: TState) -> Self {
         self.join_state = state;
+        self
+    }
+
+    /// Cap concurrent split task execution at `n`. `0` is rejected when the
+    /// split runs.
+    pub fn with_bulkhead(mut self, n: usize) -> Self {
+        self.bulkhead = Some(n);
         self
     }
 }
@@ -629,10 +658,14 @@ where
             tracing::Span::none()
         };
 
-        // Use cached config (captured at registration), don't recompute.
-        #[cfg(feature = "tracing")]
-        let result = {
-            let _enter = task_span.enter();
+        // Wrap the retry-driving future in `catch_unwind` so a panic inside
+        // the task body becomes a `CanoError::TaskExecution` instead of
+        // unwinding through the workflow loop and aborting the runtime
+        // worker. Splits already isolate panics through tokio's `JoinSet`
+        // (a panicked split task surfaces as a `JoinError` to
+        // `collect_results`), so panic safety is added only on the single
+        // path here.
+        let run_future = async {
             run_with_retries(&config, || {
                 let task_clone = task.clone();
                 let resources_clone = Arc::clone(&self.resources);
@@ -641,13 +674,27 @@ where
             .await
         };
 
+        #[cfg(feature = "tracing")]
+        let unwind_result = {
+            let _enter = task_span.enter();
+            AssertUnwindSafe(run_future).catch_unwind().await
+        };
+
         #[cfg(not(feature = "tracing"))]
-        let result = run_with_retries(&config, || {
-            let task_clone = task.clone();
-            let resources_clone = Arc::clone(&self.resources);
-            async move { task_clone.run(&*resources_clone).await }
-        })
-        .await;
+        let unwind_result = AssertUnwindSafe(run_future).catch_unwind().await;
+
+        let result = match unwind_result {
+            Ok(inner) => inner,
+            Err(payload) => {
+                // Forward the inner trait object so `downcast_ref` inspects
+                // the actual panic payload type rather than the surrounding
+                // `Box<dyn Any>`.
+                let payload_str = panic_payload_message(&*payload);
+                #[cfg(feature = "tracing")]
+                tracing::error!(panic = %payload_str, "Single task panicked");
+                Err(CanoError::task_execution(format!("panic: {payload_str}")))
+            }
+        };
 
         match result? {
             TaskResult::Single(next_state) => {
@@ -692,6 +739,17 @@ where
                 "Percentage strategy requires a value in (0.0, 1.0], got {p}"
             )));
         }
+        if let Some(0) = join_config.bulkhead {
+            return Err(CanoError::configuration(
+                "bulkhead requires a positive permit count, got 0",
+            ));
+        }
+
+        // Optional bulkhead: gate task bodies on a shared semaphore so at
+        // most `n` split tasks execute concurrently.
+        let bulkhead = join_config
+            .bulkhead
+            .map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
 
         let mut join_set: tokio::task::JoinSet<(usize, Result<TaskResult<TState>, CanoError>)> =
             tokio::task::JoinSet::new();
@@ -703,6 +761,7 @@ where
             // Use cached config from registration time, not task.config().
             let config = Arc::clone(&configs[idx]);
             let resources_clone = Arc::clone(&resources);
+            let bulkhead_clone = bulkhead.clone();
 
             #[cfg(feature = "tracing")]
             let task_span = if tracing::enabled!(tracing::Level::INFO) {
@@ -717,6 +776,25 @@ where
 
                 #[cfg(feature = "tracing")]
                 debug!(task_id = idx, "Executing split task");
+
+                // Hold the permit (if any) until this future returns. The
+                // semaphore is never closed here, so `acquire_owned` only
+                // fails if it has been closed elsewhere — treat that as a
+                // task-execution error rather than panicking.
+                let _permit = match bulkhead_clone {
+                    Some(sem) => match sem.acquire_owned().await {
+                        Ok(p) => Some(p),
+                        Err(e) => {
+                            return (
+                                idx,
+                                Err(CanoError::task_execution(format!(
+                                    "bulkhead semaphore closed: {e}"
+                                ))),
+                            );
+                        }
+                    },
+                    None => None,
+                };
 
                 let result = run_with_retries(&config, || {
                     let t = task.clone();
@@ -2014,5 +2092,144 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, TestState::Complete);
+    }
+
+    // ------------------------------------------------------------------
+    // Resilience primitives: panic safety + bulkhead
+    // ------------------------------------------------------------------
+
+    struct PanickingTask;
+
+    #[task]
+    impl Task<TestState> for PanickingTask {
+        fn config(&self) -> crate::task::TaskConfig {
+            crate::task::TaskConfig::minimal()
+        }
+
+        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            panic!("boom");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_single_task_panic_caught() {
+        let workflow = Workflow::bare()
+            .register(TestState::Start, PanickingTask)
+            .add_exit_state(TestState::Complete);
+
+        let err = workflow
+            .orchestrate(TestState::Start)
+            .await
+            .expect_err("panic must surface as Err");
+        match err {
+            CanoError::TaskExecution(msg) => {
+                assert!(msg.contains("panic"), "expected 'panic' in: {msg}");
+                assert!(msg.contains("boom"), "expected 'boom' in: {msg}");
+            }
+            other => panic!("expected TaskExecution, got {other:?}"),
+        }
+    }
+
+    #[derive(Clone)]
+    struct ConcurrencyProbe {
+        live: Arc<std::sync::atomic::AtomicUsize>,
+        max: Arc<std::sync::atomic::AtomicUsize>,
+        sleep: Duration,
+    }
+
+    #[task]
+    impl Task<TestState> for ConcurrencyProbe {
+        fn config(&self) -> crate::task::TaskConfig {
+            crate::task::TaskConfig::minimal()
+        }
+
+        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            let now = self.live.fetch_add(1, Ordering::SeqCst) + 1;
+            // Update peak via a CAS loop.
+            let mut peak = self.max.load(Ordering::SeqCst);
+            while now > peak {
+                match self
+                    .max
+                    .compare_exchange(peak, now, Ordering::SeqCst, Ordering::SeqCst)
+                {
+                    Ok(_) => break,
+                    Err(actual) => peak = actual,
+                }
+            }
+            tokio::time::sleep(self.sleep).await;
+            self.live.fetch_sub(1, Ordering::SeqCst);
+            Ok(TaskResult::Single(TestState::Complete))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_split_bulkhead_caps_concurrency() {
+        let live = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let max = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tasks: Vec<ConcurrencyProbe> = (0..10)
+            .map(|_| ConcurrencyProbe {
+                live: Arc::clone(&live),
+                max: Arc::clone(&max),
+                sleep: Duration::from_millis(50),
+            })
+            .collect();
+
+        let join_config = JoinConfig::new(JoinStrategy::All, TestState::Complete).with_bulkhead(2);
+        let workflow = Workflow::bare()
+            .register_split(TestState::Start, tasks, join_config)
+            .add_exit_state(TestState::Complete);
+
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        assert_eq!(result, TestState::Complete);
+        let observed = max.load(Ordering::SeqCst);
+        assert!(
+            observed <= 2,
+            "bulkhead breached: observed concurrency = {observed}"
+        );
+        assert!(observed >= 1, "no tasks ran?");
+    }
+
+    #[tokio::test]
+    async fn test_split_bulkhead_zero_rejected() {
+        let tasks = vec![SimpleTask::new(TestState::Complete)];
+        let join_config = JoinConfig::new(JoinStrategy::All, TestState::Complete).with_bulkhead(0);
+        let workflow = Workflow::bare()
+            .register_split(TestState::Start, tasks, join_config)
+            .add_exit_state(TestState::Complete);
+
+        let err = workflow
+            .orchestrate(TestState::Start)
+            .await
+            .expect_err("bulkhead=0 must error");
+        assert!(matches!(err, CanoError::Configuration(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn test_attempt_timeout_via_workflow_retries() {
+        // Sanity check: per-attempt timeout integrates with the workflow's
+        // single-task path through TaskConfig.
+        struct SlowTask;
+
+        #[task]
+        impl Task<TestState> for SlowTask {
+            fn config(&self) -> crate::task::TaskConfig {
+                crate::task::TaskConfig::new()
+                    .with_fixed_retry(1, Duration::from_millis(1))
+                    .with_attempt_timeout(Duration::from_millis(20))
+            }
+
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                Ok(TaskResult::Single(TestState::Complete))
+            }
+        }
+
+        let err = Workflow::bare()
+            .register(TestState::Start, SlowTask)
+            .add_exit_state(TestState::Complete)
+            .orchestrate(TestState::Start)
+            .await
+            .expect_err("expected attempt timeout to exhaust retries");
+        assert!(matches!(err, CanoError::RetryExhausted(_)), "got {err:?}");
     }
 }

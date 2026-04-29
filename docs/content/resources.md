@@ -39,7 +39,7 @@ for the <code>run</code> / <code>prep</code> / <code>post</code> signatures that
 <nav class="page-toc" aria-label="Table of contents">
 <div class="page-toc-title">On this page</div>
 <ol>
-<li><a href="#derive-macros">Derive Macros: <code>#[derive(Resource)]</code> and <code>#[derive(FromResources)]</code></a></li>
+<li><a href="#derive-macros">Derive Macros for Resources</a></li>
 <li><a href="#resource-trait">The Resource Trait</a></li>
 <li><a href="#resources-container">Resources Container</a></li>
 <li><a href="#key-types">Key Types: String vs Enum</a></li>
