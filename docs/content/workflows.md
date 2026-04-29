@@ -204,9 +204,19 @@ during execution. Understanding these errors helps you build robust error recove
 <td>Add <code>.with_timeout(duration)</code> to <code>JoinConfig</code></td>
 </tr>
 <tr>
+<td><code>CanoError::Timeout</code></td>
+<td>Per-attempt timeout from <code>TaskConfig::attempt_timeout</code> elapsed</td>
+<td>Increase <code>with_attempt_timeout()</code> or speed up the task; combine with a <code>RetryMode</code> if transient</td>
+</tr>
+<tr>
 <td><code>CanoError::RetryExhausted</code></td>
 <td>All retry attempts exhausted by a Node</td>
 <td>Increase retry count or fix the underlying transient failure</td>
+</tr>
+<tr>
+<td><code>CanoError::TaskExecution</code></td>
+<td>Single task panicked (message is prefixed with <code>"panic:"</code>)</td>
+<td>Inspect the panic payload in the message; fix the underlying invariant in the task body</td>
 </tr>
 <tr>
 <td><code>CanoError::*</code></td>
@@ -216,10 +226,21 @@ during execution. Understanding these errors helps you build robust error recove
 </tbody>
 </table>
 
+<div class="callout callout-info">
+<div class="callout-label">Panic safety</div>
+<p>
+Single-task execution is wrapped in <code>catch_unwind</code>: a panicking task surfaces as
+<code>CanoError::TaskExecution("panic: …")</code> rather than aborting the workflow. Split tasks are
+already isolated by <code>tokio::task::JoinSet</code>, so panics there propagate as task failures
+through the join strategy.
+</p>
+</div>
+
 <pre><code class="language-rust">match workflow.orchestrate(State::Start).await {
     Ok(final_state) => println!("Completed: {:?}", final_state),
     Err(CanoError::Workflow(msg)) => eprintln!("Workflow error: {}", msg),
     Err(CanoError::Configuration(msg)) => eprintln!("Config error: {}", msg),
+    Err(CanoError::Timeout(msg)) => eprintln!("Attempt timed out: {}", msg),
     Err(CanoError::RetryExhausted(msg)) => eprintln!("Retries exhausted: {}", msg),
     Err(e) => eprintln!("Task error: {}", e),
 }</code></pre>
@@ -280,6 +301,30 @@ E -->|Failed/Timeout| G[Error State]
 <p>Accept whatever completes before <strong>timeout</strong> expires. Requires <code>.with_timeout()</code>.</p>
 <pre><code class="language-rust">JoinStrategy::PartialTimeout</code></pre>
 </div>
+</div>
+
+<h3 id="bulkhead"><a href="#bulkhead" class="anchor-link" aria-hidden="true">#</a>Bounding Concurrency with a Bulkhead</h3>
+<p>
+A split fans out as many tasks as the runtime can schedule. When you need to cap concurrent in-flight
+work — to bound resource use, protect a downstream service, or stabilise tail latency — set a
+<strong>bulkhead</strong> on the <code>JoinConfig</code>. Internally this gates each spawned task body on
+a shared <code>tokio::sync::Semaphore</code>; excess tasks queue until a permit is free, but the join
+strategy still applies once results come in.
+</p>
+
+<div class="code-block">
+<span class="code-block-label">Bulkhead config</span>
+<pre><code class="language-rust">let join_config = JoinConfig::new(JoinStrategy::All, State::Aggregate)
+    .with_bulkhead(4); // at most 4 split tasks run at once</code></pre>
+</div>
+
+<div class="callout callout-warning">
+<div class="callout-label">Validation</div>
+<p>
+<code>with_bulkhead(0)</code> is rejected at execution time with <code>CanoError::Configuration</code>.
+Leave the bulkhead unset (<code>None</code>) for unbounded concurrency. Bulkheads compose with
+<code>PartialTimeout</code> and any other join strategy.
+</p>
 </div>
 
 <h3 id="complete-example"><a href="#complete-example" class="anchor-link" aria-hidden="true">#</a>Complete Example</h3>

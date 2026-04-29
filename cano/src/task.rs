@@ -259,6 +259,12 @@ impl Default for RetryMode {
 pub struct TaskConfig {
     /// Retry strategy for failed executions
     pub retry_mode: RetryMode,
+    /// Optional per-attempt timeout. When set, each attempt inside
+    /// [`run_with_retries`] is wrapped with [`tokio::time::timeout`]; an
+    /// expired attempt produces a [`CanoError::Timeout`] and the retry loop
+    /// continues per `retry_mode`. `None` (the default) preserves the
+    /// previous behavior of letting attempts run unbounded.
+    pub attempt_timeout: Option<Duration>,
 }
 
 impl TaskConfig {
@@ -273,6 +279,7 @@ impl TaskConfig {
     pub fn minimal() -> Self {
         Self {
             retry_mode: RetryMode::None,
+            attempt_timeout: None,
         }
     }
 
@@ -290,6 +297,12 @@ impl TaskConfig {
     /// Convenience method for exponential backoff retry configuration
     pub fn with_exponential_retry(self, max_retries: usize) -> Self {
         self.with_retry(RetryMode::exponential(max_retries))
+    }
+
+    /// Apply a per-attempt timeout. Each retry attempt gets a fresh deadline.
+    pub fn with_attempt_timeout(mut self, timeout: Duration) -> Self {
+        self.attempt_timeout = Some(timeout);
+        self
     }
 }
 
@@ -326,7 +339,19 @@ where
         #[cfg(feature = "tracing")]
         debug!(attempt = attempt + 1, "Executing task attempt");
 
-        match run_fn().await {
+        let attempt_outcome = match config.attempt_timeout {
+            Some(d) => match tokio::time::timeout(d, run_fn()).await {
+                Ok(inner) => inner,
+                Err(_) => Err(CanoError::timeout(format!(
+                    "Task attempt {} exceeded attempt_timeout of {:?}",
+                    attempt + 1,
+                    d
+                ))),
+            },
+            None => run_fn().await,
+        };
+
+        match attempt_outcome {
             Ok(result) => {
                 #[cfg(feature = "tracing")]
                 info!(attempt = attempt + 1, "Task execution successful");
@@ -1167,6 +1192,83 @@ mod tests {
         assert_eq!(result, TaskResult::Single(TestAction::Continue));
         // run_bare must never have been called
         assert_eq!(bare_called.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_attempt_timeout_triggers_retry() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let config = TaskConfig::new()
+            .with_fixed_retry(2, Duration::from_millis(1))
+            .with_attempt_timeout(Duration::from_millis(20));
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&counter);
+
+        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+            let counter = Arc::clone(&counter_clone);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(200)).await;
+                Ok::<TaskResult<String>, CanoError>(TaskResult::Single("never".to_string()))
+            }
+        })
+        .await;
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CanoError::RetryExhausted(_)),
+            "expected RetryExhausted, got: {err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Timeout error") || msg.contains("attempt_timeout"),
+            "expected timeout context in error, got: {msg}"
+        );
+        // 1 initial + 2 retries — every attempt times out before the sleep returns.
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn test_attempt_timeout_none_unchanged() {
+        let config = TaskConfig::new();
+        assert!(config.attempt_timeout.is_none());
+
+        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || async {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+            Ok::<TaskResult<String>, CanoError>(TaskResult::Single("ok".to_string()))
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, TaskResult::Single("ok".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_attempt_timeout_resets_per_attempt() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // First attempt sleeps long enough to trip the timeout; second attempt
+        // returns immediately. Verifies each attempt gets a fresh deadline.
+        let config = TaskConfig::new()
+            .with_fixed_retry(1, Duration::from_millis(1))
+            .with_attempt_timeout(Duration::from_millis(30));
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&counter);
+
+        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+            let counter = Arc::clone(&counter_clone);
+            async move {
+                let n = counter.fetch_add(1, Ordering::SeqCst);
+                if n == 0 {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                Ok::<TaskResult<String>, CanoError>(TaskResult::Single("ok".to_string()))
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, TaskResult::Single("ok".to_string()));
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

@@ -167,6 +167,27 @@ T-->>W: Success ✓
 <pre><code class="language-rust">TaskConfig::minimal()</code></pre>
 </div>
 </div>
+<div class="card">
+<h3>Per-Attempt Timeout</h3>
+<p>Bound each attempt with a fresh deadline. Composes with any retry mode.</p>
+<div class="code-block">
+<span class="code-block-label">Attempt timeout config</span>
+<pre><code class="language-rust">TaskConfig::default()
+    .with_exponential_retry(3)
+    .with_attempt_timeout(Duration::from_secs(2))</code></pre>
+</div>
+</div>
+</div>
+
+<div class="callout callout-info">
+<div class="callout-label">How attempt timeouts compose with retries</div>
+<p>
+When <code>attempt_timeout</code> is set, each attempt inside <code>run_with_retries</code> is wrapped in
+<code>tokio::time::timeout</code>. An expired attempt produces a <code>CanoError::Timeout</code>, which is
+fed through the same retry path as any other failure — so the configured <code>RetryMode</code> decides
+whether to retry. The deadline resets on every attempt, and retry exhaustion still surfaces as
+<code>CanoError::RetryExhausted</code> wrapping the underlying timeout context.
+</p>
 </div>
 
 <h3>Real-World Example: API Client with Retry</h3>

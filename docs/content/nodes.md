@@ -28,7 +28,7 @@ so all three phases must be idempotent. <code>prep</code> and <code>post</code> 
 <div class="page-toc-title">On this page</div>
 <ol>
 <li><a href="#three-phases">The Three Phases</a></li>
-<li><a href="#quick-start">Quick Start with <code>#[node(state = ...)]</code></a></li>
+<li><a href="#quick-start">Quick Start with Nodes</a></li>
 <li><a href="#implementing">Implementing a Node (Explicit Form)</a></li>
 <li><a href="#nodes-vs-tasks">Nodes vs Tasks</a></li>
 <li><a href="#patterns">Real-World Node Patterns</a></li>
@@ -620,6 +620,11 @@ let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
 <td>Rate-limited APIs</td>
 <td>External API calls</td>
 </tr>
+<tr>
+<td><code>with_attempt_timeout(d)</code></td>
+<td>Bound each prep&rarr;exec&rarr;post attempt</td>
+<td>Slow downstreams, hung connections</td>
+</tr>
 </tbody>
 </table>
 
@@ -629,6 +634,16 @@ let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
 On any phase failure, the entire <code>prep</code> &rarr; <code>exec</code> &rarr; <code>post</code> pipeline
 restarts from the beginning. All three phases must be idempotent — side effects in <code>prep</code> or
 <code>exec</code> (e.g. writing to an external system) will be repeated on every retry attempt.
+</p>
+</div>
+
+<div class="callout callout-info">
+<div class="callout-label">Per-attempt timeout</div>
+<p>
+Nodes share <code>TaskConfig</code> with tasks, so <code>.with_attempt_timeout(d)</code> applies to the
+full <code>prep</code> &rarr; <code>exec</code> &rarr; <code>post</code> attempt. If the deadline elapses,
+the in-flight phase is dropped, a <code>CanoError::Timeout</code> is fed into the retry loop, and the
+configured <code>RetryMode</code> decides whether to restart the pipeline.
 </p>
 </div>
 </div>

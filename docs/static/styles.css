@@ -65,7 +65,7 @@
     /* Layout */
     --nav-height: 60px;
     --sidebar-width: 272px;
-    --content-max-width: 900px;
+    --content-max-width: 1600px;
 
     /* Border radius */
     --radius-sm: 6px;
@@ -312,6 +312,7 @@ img {
 
 .content-wrapper {
     max-width: var(--content-max-width);
+    width: 100%;
 }
 
 /* --------------------------------------------------------------------------
@@ -1917,5 +1918,12 @@ code {
 @media (min-width: 1400px) {
     .main-content {
         padding: var(--space-16) var(--space-20);
+    }
+}
+
+/* Ultrawide displays */
+@media (min-width: 1800px) {
+    .main-content {
+        padding: var(--space-16) var(--space-24);
     }
 }
