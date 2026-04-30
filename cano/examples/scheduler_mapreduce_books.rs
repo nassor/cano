@@ -38,7 +38,6 @@
 use cano::error::CanoError;
 use cano::prelude::*;
 use cano::scheduler::Status;
-use cano::store::{KeyValueStore, MemoryStore};
 use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;

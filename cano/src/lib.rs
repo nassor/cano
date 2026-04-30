@@ -126,7 +126,7 @@
 //! ### Store
 //!
 //! [`MemoryStore`] provides a thread-safe `Arc<RwLock<HashMap>>` for sharing typed data
-//! between states. Implement [`KeyValueStore`] to plug in a custom backend.
+//! between states. For custom backends, register a concrete storage resource in [`Resources`].
 //!
 //! ## Processing Lifecycle
 //!
@@ -144,7 +144,7 @@
 //! - [`workflow`]: [`Workflow`] — FSM orchestration with Split/Join support
 //! - `scheduler` (requires `scheduler` feature): `Scheduler` — cron and interval scheduling
 //! - [`mod@resource`]: [`Resource`] trait and [`Resources`] dictionary — lifecycle-aware resource management
-//! - [`store`]: [`MemoryStore`] and the [`KeyValueStore`] trait — [`MemoryStore`] implements [`Resource`]
+//! - [`store`]: [`MemoryStore`] — a typed in-memory store that implements [`Resource`]
 //! - [`error`]: [`CanoError`] variants and the [`CanoResult`] alias
 //!
 //! ## Getting Started
@@ -153,6 +153,7 @@
 //! 2. Read the module docs — each module has detailed documentation and examples
 //! 3. Run benchmarks: `cargo bench --bench node_performance`
 
+pub mod circuit;
 pub mod error;
 pub mod node;
 pub mod resource;
@@ -167,15 +168,16 @@ pub mod scheduler;
 mod tracing_tests;
 
 // Core public API - simplified imports
+pub use circuit::{CircuitBreaker, CircuitPolicy, CircuitState, Permit as CircuitPermit};
 pub use error::{CanoError, CanoResult};
 pub use node::{DefaultNodeResult, DynNode, Node, NodeObject};
 pub use resource::{Resource, Resources};
-pub use store::{KeyValueStore, MemoryStore};
+pub use store::MemoryStore;
 pub use task::{DynTask, RetryMode, Task, TaskConfig, TaskObject, TaskResult};
 pub use workflow::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult, StateEntry, Workflow};
 
 #[cfg(feature = "scheduler")]
-pub use scheduler::{FlowInfo, Scheduler};
+pub use scheduler::{FlowInfo, Schedule, Scheduler, Status};
 
 /// Attribute macro applied to `Task` trait definitions and `impl Task` blocks
 /// to rewrite `async fn` methods into ones returning
@@ -224,13 +226,14 @@ pub mod prelude {
     //! Use `use cano::prelude::*;` to import the most commonly used types and traits.
 
     pub use crate::{
-        CanoError, CanoResult, DefaultNodeResult, JoinConfig, JoinStrategy, KeyValueStore,
-        MemoryStore, Node, Resource, Resources, RetryMode, SplitResult, SplitTaskResult,
-        StateEntry, Task, TaskConfig, TaskObject, TaskResult, Workflow,
+        CanoError, CanoResult, CircuitBreaker, CircuitPermit, CircuitPolicy, CircuitState,
+        DefaultNodeResult, JoinConfig, JoinStrategy, MemoryStore, Node, Resource, Resources,
+        RetryMode, SplitResult, SplitTaskResult, StateEntry, Task, TaskConfig, TaskObject,
+        TaskResult, Workflow,
     };
 
     #[cfg(feature = "scheduler")]
-    pub use crate::{FlowInfo, Scheduler};
+    pub use crate::{FlowInfo, Schedule, Scheduler, Status};
 
     // Re-export the cano async-trait macros for convenience.
     pub use crate::{node, resource, task};

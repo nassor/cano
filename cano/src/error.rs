@@ -30,6 +30,7 @@
 //! | `Configuration` | Invalid node/workflow config | Check parameters and settings |
 //! | `RetryExhausted` | All retries exhausted | Increase retries or fix root cause |
 //! | `Timeout` | Per-attempt timeout reached | Increase `attempt_timeout` or speed up the task |
+//! | `CircuitOpen` | Circuit breaker rejected the call | Wait for the breaker's `reset_timeout` or fix the upstream dependency |
 //! | `Generic` | General errors | Check the specific error message |
 //!
 //! ## Using Errors in Your Nodes
@@ -45,7 +46,7 @@
 //! Store operations propagate seamlessly into the broader error system:
 //!
 //! ```rust
-//! use cano::{CanoResult, store::{KeyValueStore, MemoryStore}};
+//! use cano::{CanoResult, MemoryStore};
 //!
 //! fn example_function() -> CanoResult<String> {
 //!     let store = MemoryStore::new();
@@ -189,6 +190,14 @@ pub enum CanoError {
     /// [`CanoError::RetryExhausted`].
     Timeout(String),
 
+    /// A call was rejected because the circuit breaker is open.
+    ///
+    /// Emitted by [`crate::circuit::CircuitBreaker::try_acquire`] (and surfaced through the
+    /// retry loop in [`crate::task::run_with_retries`]). Unlike most failures this error
+    /// short-circuits the retry loop: the breaker is signalling that the underlying
+    /// dependency is unhealthy, and immediate retries would only add load.
+    CircuitOpen(String),
+
     /// General-purpose error for other scenarios
     ///
     /// Use this for errors that don't fit the other categories.
@@ -246,6 +255,11 @@ impl CanoError {
         CanoError::Timeout(msg.into())
     }
 
+    /// Create a new circuit-open error
+    pub fn circuit_open<S: Into<String>>(msg: S) -> Self {
+        CanoError::CircuitOpen(msg.into())
+    }
+
     /// Create a new generic error
     pub fn generic<S: Into<String>>(msg: S) -> Self {
         CanoError::Generic(msg.into())
@@ -277,6 +291,7 @@ impl CanoError {
             CanoError::Configuration(msg) => msg,
             CanoError::RetryExhausted(msg) => msg,
             CanoError::Timeout(msg) => msg,
+            CanoError::CircuitOpen(msg) => msg,
             CanoError::Generic(msg) => msg,
             CanoError::ResourceNotFound(msg) => msg,
             CanoError::ResourceTypeMismatch(msg) => msg,
@@ -295,6 +310,7 @@ impl CanoError {
             CanoError::Configuration(_) => "configuration",
             CanoError::RetryExhausted(_) => "retry_exhausted",
             CanoError::Timeout(_) => "timeout",
+            CanoError::CircuitOpen(_) => "circuit_open",
             CanoError::Generic(_) => "generic",
             CanoError::ResourceNotFound(_) => "resource_not_found",
             CanoError::ResourceTypeMismatch(_) => "resource_type_mismatch",
@@ -314,6 +330,7 @@ impl std::fmt::Display for CanoError {
             CanoError::Configuration(msg) => write!(f, "Configuration error: {msg}"),
             CanoError::RetryExhausted(msg) => write!(f, "Retry exhausted: {msg}"),
             CanoError::Timeout(msg) => write!(f, "Timeout error: {msg}"),
+            CanoError::CircuitOpen(msg) => write!(f, "Circuit open: {msg}"),
             CanoError::Generic(msg) => write!(f, "Error: {msg}"),
             CanoError::ResourceNotFound(msg) => write!(f, "Resource not found: {msg}"),
             CanoError::ResourceTypeMismatch(msg) => write!(f, "Resource type mismatch: {msg}"),
@@ -335,6 +352,7 @@ impl PartialEq for CanoError {
             (CanoError::Configuration(a), CanoError::Configuration(b)) => a == b,
             (CanoError::RetryExhausted(a), CanoError::RetryExhausted(b)) => a == b,
             (CanoError::Timeout(a), CanoError::Timeout(b)) => a == b,
+            (CanoError::CircuitOpen(a), CanoError::CircuitOpen(b)) => a == b,
             (CanoError::Generic(a), CanoError::Generic(b)) => a == b,
             (CanoError::ResourceNotFound(a), CanoError::ResourceNotFound(b)) => a == b,
             (CanoError::ResourceTypeMismatch(a), CanoError::ResourceTypeMismatch(b)) => a == b,
@@ -561,6 +579,30 @@ mod tests {
         let timeout = CanoError::timeout("k");
         let workflow = CanoError::workflow("k");
         assert_ne!(timeout, workflow);
+    }
+
+    #[test]
+    fn test_circuit_open_constructor_and_category() {
+        let err = CanoError::circuit_open("breaker tripped");
+        assert_eq!(err.message(), "breaker tripped");
+        assert_eq!(err.category(), "circuit_open");
+        assert_eq!(format!("{err}"), "Circuit open: breaker tripped");
+    }
+
+    #[test]
+    fn test_circuit_open_partial_eq() {
+        let a = CanoError::circuit_open("x");
+        let b = CanoError::circuit_open("x");
+        assert_eq!(a, b);
+
+        let c = CanoError::circuit_open("x");
+        let d = CanoError::circuit_open("y");
+        assert_ne!(c, d);
+
+        // Different variant with same message must not compare equal.
+        let timeout = CanoError::timeout("x");
+        let circuit = CanoError::circuit_open("x");
+        assert_ne!(timeout, circuit);
     }
 
     #[test]

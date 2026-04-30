@@ -13,7 +13,7 @@ keywords = ["ai", "async", "workflow", "data-processing", "scheduler"]
 categories = ["finance", "development-tools", "concurrency", "asynchronous", "science"]
 
 [dependencies]
-cano-macros = { version = "0.10", path = "../cano-macros" }
+cano-macros = { version = "0.11", path = "../cano-macros" }
 tokio = { version = "1.52.1", features = ["macros", "sync", "time", "rt-multi-thread"] }
 rand = "0.10"
 chrono = { version = "0.4", features = ["serde"], optional = true }
@@ -126,6 +126,10 @@ path = "examples/workflow_split_join.rs"
 name = "workflow_on_request"
 path = "examples/workflow_on_request.rs"
 
+[[example]]
+name = "circuit_breaker"
+path = "examples/circuit_breaker.rs"
+
 [[bench]]
 name = "workflow_performance"
 harness = false
@@ -148,4 +152,8 @@ harness = false
 
 [[bench]]
 name = "resource_performance"
+harness = false
+
+[[bench]]
+name = "circuit_performance"
 harness = false

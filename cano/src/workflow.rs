@@ -95,6 +95,28 @@ fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     }
 }
 
+fn split_error_summary<TState>(errors: &[SplitTaskResult<TState>]) -> String {
+    const MAX_ERRORS_TO_REPORT: usize = 3;
+
+    let mut parts: Vec<String> = errors
+        .iter()
+        .take(MAX_ERRORS_TO_REPORT)
+        .map(|err| match &err.result {
+            Ok(_) => format!("task {}: unexpected success in error list", err.task_index),
+            Err(e) => format!("task {}: {}", err.task_index, e),
+        })
+        .collect();
+
+    if errors.len() > MAX_ERRORS_TO_REPORT {
+        parts.push(format!(
+            "... and {} more error(s)",
+            errors.len() - MAX_ERRORS_TO_REPORT
+        ));
+    }
+
+    parts.join("; ")
+}
+
 #[cfg(feature = "tracing")]
 use tracing::{Span, debug, info, info_span, warn};
 
@@ -444,6 +466,33 @@ where
         self
     }
 
+    fn validate_join_config(
+        join_config: &JoinConfig<TState>,
+        _total_tasks: usize,
+    ) -> Result<(), CanoError> {
+        if matches!(join_config.strategy, JoinStrategy::PartialTimeout)
+            && join_config.timeout.is_none()
+        {
+            return Err(CanoError::configuration(
+                "PartialTimeout strategy requires a timeout to be configured",
+            ));
+        }
+        if let JoinStrategy::Percentage(p) = join_config.strategy
+            && (!p.is_finite() || p <= 0.0 || p > 1.0)
+        {
+            return Err(CanoError::configuration(format!(
+                "Percentage strategy requires a finite value in (0.0, 1.0], got {p}"
+            )));
+        }
+        if let Some(0) = join_config.bulkhead {
+            return Err(CanoError::configuration(
+                "bulkhead requires a positive permit count, got 0",
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Validate the workflow configuration.
     ///
     /// Checks:
@@ -493,7 +542,11 @@ where
         // Each join_state in a Split entry must either be registered or an exit state;
         // otherwise orchestration will always error at runtime after the split completes.
         for entry in self.states.values() {
-            if let StateEntry::Split { join_config, .. } = entry.as_ref() {
+            if let StateEntry::Split {
+                tasks, join_config, ..
+            } = entry.as_ref()
+            {
+                Self::validate_join_config(join_config, tasks.len())?;
                 let js = &join_config.join_state;
                 if !self.states.contains_key(js) && !self.exit_states.contains(js) {
                     return Err(CanoError::configuration(format!(
@@ -661,10 +714,8 @@ where
         // Wrap the retry-driving future in `catch_unwind` so a panic inside
         // the task body becomes a `CanoError::TaskExecution` instead of
         // unwinding through the workflow loop and aborting the runtime
-        // worker. Splits already isolate panics through tokio's `JoinSet`
-        // (a panicked split task surfaces as a `JoinError` to
-        // `collect_results`), so panic safety is added only on the single
-        // path here.
+        // worker. Split tasks apply the same catch-unwind pattern inside each
+        // spawned task so their task index and panic payload are preserved.
         let run_future = async {
             run_with_retries(&config, || {
                 let task_clone = task.clone();
@@ -724,26 +775,10 @@ where
             "Starting split execution"
         );
 
-        // Validate strategy configuration before spawning tasks
-        if matches!(join_config.strategy, JoinStrategy::PartialTimeout)
-            && join_config.timeout.is_none()
-        {
-            return Err(CanoError::configuration(
-                "PartialTimeout strategy requires a timeout to be configured",
-            ));
-        }
-        if let JoinStrategy::Percentage(p) = join_config.strategy
-            && (p <= 0.0 || p > 1.0)
-        {
-            return Err(CanoError::configuration(format!(
-                "Percentage strategy requires a value in (0.0, 1.0], got {p}"
-            )));
-        }
-        if let Some(0) = join_config.bulkhead {
-            return Err(CanoError::configuration(
-                "bulkhead requires a positive permit count, got 0",
-            ));
-        }
+        // Validate strategy configuration before spawning tasks. `validate()`
+        // catches these at build/start time; keep the execution-time check as
+        // defense-in-depth for internal callers that bypass public orchestration.
+        Self::validate_join_config(join_config.as_ref(), total_tasks)?;
 
         // Optional bulkhead: gate task bodies on a shared semaphore so at
         // most `n` split tasks execute concurrently.
@@ -771,45 +806,62 @@ where
             };
 
             join_set.spawn(async move {
-                #[cfg(feature = "tracing")]
-                let _enter = task_span.enter();
+                let run_future = async {
+                    #[cfg(feature = "tracing")]
+                    let _enter = task_span.enter();
 
-                #[cfg(feature = "tracing")]
-                debug!(task_id = idx, "Executing split task");
+                    #[cfg(feature = "tracing")]
+                    debug!(task_id = idx, "Executing split task");
 
-                // Hold the permit (if any) until this future returns. The
-                // semaphore is never closed here, so `acquire_owned` only
-                // fails if it has been closed elsewhere — treat that as a
-                // task-execution error rather than panicking.
-                let _permit = match bulkhead_clone {
-                    Some(sem) => match sem.acquire_owned().await {
-                        Ok(p) => Some(p),
-                        Err(e) => {
-                            return (
-                                idx,
-                                Err(CanoError::task_execution(format!(
-                                    "bulkhead semaphore closed: {e}"
-                                ))),
-                            );
-                        }
-                    },
-                    None => None,
+                    // Hold the permit (if any) until this future returns. The
+                    // semaphore is never closed here, so `acquire_owned` only
+                    // fails if it has been closed elsewhere — treat that as a
+                    // task-execution error rather than panicking.
+                    let _permit = match bulkhead_clone {
+                        Some(sem) => match sem.acquire_owned().await {
+                            Ok(p) => Some(p),
+                            Err(e) => {
+                                return (
+                                    idx,
+                                    Err(CanoError::task_execution(format!(
+                                        "bulkhead semaphore closed: {e}"
+                                    ))),
+                                );
+                            }
+                        },
+                        None => None,
+                    };
+
+                    let result = run_with_retries(&config, || {
+                        let t = task.clone();
+                        let r = Arc::clone(&resources_clone);
+                        async move { t.run(&*r).await }
+                    })
+                    .await;
+
+                    #[cfg(feature = "tracing")]
+                    match &result {
+                        Ok(_) => debug!(task_id = idx, "Split task completed successfully"),
+                        Err(e) => warn!(task_id = idx, error = %e, "Split task failed"),
+                    }
+
+                    (idx, result)
                 };
 
-                let result = run_with_retries(&config, || {
-                    let t = task.clone();
-                    let r = Arc::clone(&resources_clone);
-                    async move { t.run(&*r).await }
-                })
-                .await;
-
-                #[cfg(feature = "tracing")]
-                match &result {
-                    Ok(_) => debug!(task_id = idx, "Split task completed successfully"),
-                    Err(e) => warn!(task_id = idx, error = %e, "Split task failed"),
+                match AssertUnwindSafe(run_future).catch_unwind().await {
+                    Ok(outcome) => outcome,
+                    Err(payload) => {
+                        let payload_str = panic_payload_message(&*payload);
+                        #[cfg(feature = "tracing")]
+                        tracing::error!(task_id = idx, panic = %payload_str, "Split task panicked");
+                        (
+                            idx,
+                            Err(CanoError::task_execution(format!(
+                                "panic in split task {idx}: {payload_str}"
+                            ))),
+                        )
+                    }
                 }
-
-                (idx, result)
             });
         }
 
@@ -838,14 +890,19 @@ where
                 if join_config.strategy.is_satisfied(successful, total_tasks) {
                     Ok(join_config.join_state.clone())
                 } else {
-                    Err(CanoError::workflow(format!(
+                    let mut message = format!(
                         "Partial results condition not met: {} completed successfully, {} required",
                         successful,
                         match &join_config.strategy {
                             JoinStrategy::PartialResults(min) => *min,
                             _ => 0,
                         }
-                    )))
+                    );
+                    if !split_result.errors.is_empty() {
+                        message.push_str("; errors: ");
+                        message.push_str(&split_error_summary(&split_result.errors));
+                    }
+                    Err(CanoError::workflow(message))
                 }
             }
             JoinStrategy::PartialTimeout => {
@@ -863,10 +920,15 @@ where
                 if join_config.strategy.is_satisfied(successful, total_tasks) {
                     Ok(join_config.join_state.clone())
                 } else {
-                    Err(CanoError::workflow(format!(
+                    let mut message = format!(
                         "Join condition not met: {} of {} tasks completed successfully, strategy: {:?}",
                         successful, total_tasks, join_config.strategy
-                    )))
+                    );
+                    if !split_result.errors.is_empty() {
+                        message.push_str("; errors: ");
+                        message.push_str(&split_error_summary(&split_result.errors));
+                    }
+                    Err(CanoError::workflow(message))
                 }
             }
         }
@@ -1038,7 +1100,6 @@ where
 mod tests {
     use super::*;
     use crate::resource::Resources;
-    use crate::store::KeyValueStore;
     use crate::task::Task;
     use cano_macros::{node, task};
     use std::sync::Arc;
@@ -1816,6 +1877,59 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_rejects_partial_timeout_without_timeout() {
+        let workflow = Workflow::bare()
+            .register_split(
+                TestState::Start,
+                vec![SimpleTask::new(TestState::Complete)],
+                JoinConfig::new(JoinStrategy::PartialTimeout, TestState::Complete),
+            )
+            .add_exit_state(TestState::Complete);
+
+        let err = workflow
+            .validate()
+            .expect_err("PartialTimeout without timeout must fail validation");
+        assert!(matches!(err, CanoError::Configuration(_)), "got {err:?}");
+        assert!(err.to_string().contains("requires a timeout"));
+    }
+
+    #[test]
+    fn test_validate_rejects_invalid_percentage() {
+        for value in [0.0, 1.5, f64::NAN] {
+            let workflow = Workflow::bare()
+                .register_split(
+                    TestState::Start,
+                    vec![SimpleTask::new(TestState::Complete)],
+                    JoinConfig::new(JoinStrategy::Percentage(value), TestState::Complete),
+                )
+                .add_exit_state(TestState::Complete);
+
+            let err = workflow
+                .validate()
+                .expect_err("invalid Percentage strategy must fail validation");
+            assert!(matches!(err, CanoError::Configuration(_)), "got {err:?}");
+            assert!(err.to_string().contains("Percentage strategy"));
+        }
+    }
+
+    #[test]
+    fn test_validate_rejects_zero_bulkhead() {
+        let workflow = Workflow::bare()
+            .register_split(
+                TestState::Start,
+                vec![SimpleTask::new(TestState::Complete)],
+                JoinConfig::new(JoinStrategy::All, TestState::Complete).with_bulkhead(0),
+            )
+            .add_exit_state(TestState::Complete);
+
+        let err = workflow
+            .validate()
+            .expect_err("bulkhead=0 must fail validation");
+        assert!(matches!(err, CanoError::Configuration(_)), "got {err:?}");
+        assert!(err.to_string().contains("bulkhead"));
+    }
+
+    #[test]
     fn test_validate_initial_state() {
         let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
@@ -2130,6 +2244,31 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_split_task_panic_reports_index_and_payload() {
+        let workflow = Workflow::bare()
+            .register_split(
+                TestState::Start,
+                vec![PanickingTask],
+                JoinConfig::new(JoinStrategy::All, TestState::Complete),
+            )
+            .add_exit_state(TestState::Complete);
+
+        let err = workflow
+            .orchestrate(TestState::Start)
+            .await
+            .expect_err("split panic must surface as Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("task 0"),
+            "expected split error to include task index, got: {msg}"
+        );
+        assert!(
+            msg.contains("boom"),
+            "expected split error to include panic payload, got: {msg}"
+        );
+    }
+
     #[derive(Clone)]
     struct ConcurrencyProbe {
         live: Arc<std::sync::atomic::AtomicUsize>,
@@ -2231,5 +2370,57 @@ mod tests {
             .await
             .expect_err("expected attempt timeout to exhaust retries");
         assert!(matches!(err, CanoError::RetryExhausted(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn test_split_tasks_share_circuit_breaker() {
+        // N parallel split tasks share one Arc<CircuitBreaker>. They all fail
+        // in the same workflow run; the breaker — protected by a std Mutex —
+        // must record every failure correctly across the JoinSet workers and
+        // end up Open.
+        use crate::circuit::{CircuitBreaker, CircuitPolicy, CircuitState};
+
+        struct FailingTask {
+            breaker: Arc<CircuitBreaker>,
+        }
+
+        #[task]
+        impl Task<TestState> for FailingTask {
+            fn config(&self) -> crate::task::TaskConfig {
+                crate::task::TaskConfig::minimal().with_circuit_breaker(Arc::clone(&self.breaker))
+            }
+
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+                Err(CanoError::task_execution("always fails"))
+            }
+        }
+
+        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+            failure_threshold: 4,
+            reset_timeout: Duration::from_secs(60),
+            half_open_max_calls: 1,
+        }));
+
+        let tasks: Vec<FailingTask> = (0..4)
+            .map(|_| FailingTask {
+                breaker: Arc::clone(&breaker),
+            })
+            .collect();
+
+        // `All` waits for every task to run to completion (and record its failure
+        // against the shared breaker) before the workflow returns. We discard the
+        // workflow result — `All` propagates an Err when any task fails — because
+        // we only care about the breaker side-effect.
+        let join_config = JoinConfig::new(JoinStrategy::All, TestState::Complete);
+        let workflow = Workflow::bare()
+            .register_split(TestState::Start, tasks, join_config)
+            .add_exit_state(TestState::Complete);
+
+        let _ = workflow.orchestrate(TestState::Start).await;
+        assert!(
+            matches!(breaker.state(), CircuitState::Open { .. }),
+            "shared breaker must trip after 4 concurrent failures, got {:?}",
+            breaker.state()
+        );
     }
 }

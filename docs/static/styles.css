@@ -366,7 +366,6 @@ p {
     font-size: var(--text-md);
     color: var(--text-muted);
     line-height: 1.7;
-    max-width: 68ch;
 }
 
 .subtitle {

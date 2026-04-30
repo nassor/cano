@@ -1,4 +1,4 @@
-use super::{KeyValueStore, StoreResult, error::StoreError};
+use super::{StoreResult, error::StoreError};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -69,10 +69,11 @@ impl MemoryStore {
             None => Err(StoreError::key_not_found(key)),
         }
     }
-}
-
-impl KeyValueStore for MemoryStore {
-    fn get<TState: 'static + Clone>(&self, key: &str) -> StoreResult<TState> {
+    /// Retrieve a typed value by key.
+    ///
+    /// Returns a clone of the stored value if the key exists and the value can be
+    /// downcast to `TState`.
+    pub fn get<TState: 'static + Clone>(&self, key: &str) -> StoreResult<TState> {
         let data = self.data.read();
 
         match data.get(key) {
@@ -85,33 +86,33 @@ impl KeyValueStore for MemoryStore {
         }
     }
 
-    /// Get a value wrapped in an `Arc` for zero-copy shared access
+    /// Store a typed value by key.
     ///
-    /// Returns a reference-counted pointer to the stored value. The Arc is
-    /// cloned (cheap reference-count bump) rather than creating a new allocation.
-    fn get_shared<TState: 'static + Send + Sync>(&self, key: &str) -> StoreResult<Arc<TState>> {
-        MemoryStore::get_shared(self, key)
-    }
-
-    fn put<TState: 'static + Send + Sync + Clone>(
-        &self,
-        key: &str,
-        value: TState,
-    ) -> StoreResult<()> {
+    /// Inserts or replaces the value at `key`. The stored value must be safe to
+    /// share across async tasks, but it does not need to implement `Clone`.
+    pub fn put<TState: 'static + Send + Sync>(&self, key: &str, value: TState) -> StoreResult<()> {
         let mut data = self.data.write();
 
         data.insert(key.to_string(), Arc::new(value));
         Ok(())
     }
 
-    fn remove(&self, key: &str) -> StoreResult<()> {
+    /// Remove a value by key.
+    ///
+    /// Removing a missing key is a silent no-op.
+    pub fn remove(&self, key: &str) -> StoreResult<()> {
         let mut data = self.data.write();
 
         data.remove(key);
         Ok(())
     }
 
-    fn append<TState: 'static + Send + Sync + Clone>(
+    /// Append an item to an existing `Vec<TState>` value.
+    ///
+    /// If the key does not exist, creates a new `Vec<TState>` with `item` as
+    /// its first element. Returns an error if the key exists but holds a
+    /// different type.
+    pub fn append<TState: 'static + Send + Sync + Clone>(
         &self,
         key: &str,
         item: TState,
@@ -150,22 +151,31 @@ impl KeyValueStore for MemoryStore {
         }
     }
 
-    fn contains_key(&self, key: &str) -> StoreResult<bool> {
+    /// Check whether the store contains the given key.
+    pub fn contains_key(&self, key: &str) -> StoreResult<bool> {
         let data = self.data.read();
         Ok(data.contains_key(key))
     }
 
-    fn keys(&self) -> StoreResult<Vec<Arc<str>>> {
+    /// Get all keys currently stored.
+    pub fn keys(&self) -> StoreResult<Vec<Arc<str>>> {
         let data = self.data.read();
         Ok(data.keys().map(|k| Arc::from(k.as_str())).collect())
     }
 
-    fn len(&self) -> StoreResult<usize> {
+    /// Get the number of key-value pairs in the store.
+    pub fn len(&self) -> StoreResult<usize> {
         let data = self.data.read();
         Ok(data.len())
     }
 
-    fn clear(&self) -> StoreResult<()> {
+    /// Check whether the store is empty.
+    pub fn is_empty(&self) -> StoreResult<bool> {
+        self.len().map(|len| len == 0)
+    }
+
+    /// Clear all data from the store.
+    pub fn clear(&self) -> StoreResult<()> {
         let mut data = self.data.write();
         data.clear();
         Ok(())
@@ -756,33 +766,18 @@ mod tests {
     }
 
     #[test]
-    fn test_get_shared_trait_bound_no_clone_required() {
-        // A generic helper that only requires `Send + Sync` (no `Clone`) on the
-        // stored type. This function would fail to compile if the
-        // `KeyValueStore::get_shared` trait method still carried a `Clone` bound.
-        fn shared_via_trait<T: 'static + Send + Sync, S: KeyValueStore>(
-            store: &S,
-            key: &str,
-        ) -> StoreResult<Arc<T>> {
-            store.get_shared::<T>(key)
-        }
-
-        // Positive path: for a `Clone` type we already put, the relaxed bound
-        // still retrieves the value correctly through the generic helper.
+    fn test_get_shared_and_put_do_not_require_clone() {
+        // Positive path: store and retrieve a Clone type through the zero-copy API.
         let store = MemoryStore::new();
         store.put("n", 42u32).unwrap();
-        let got: Arc<u32> = shared_via_trait::<u32, _>(&store, "n").unwrap();
+        let got: Arc<u32> = store.get_shared("n").unwrap();
         assert_eq!(*got, 42);
 
-        // Explicit non-`Clone` type: proves the trait bound is truly relaxed,
-        // not just "works for Clone types by coincidence". We cannot `put` a
-        // bare non-`Clone` value (put still requires Clone), so we assert the
-        // compile-time call is well-formed and the runtime returns KeyNotFound.
+        // Explicit non-`Clone` type: proves `put` and `get_shared` only require
+        // values that can safely be shared across tasks.
         struct NotClone(#[allow(dead_code)] u32);
-        match shared_via_trait::<NotClone, _>(&store, "missing") {
-            Err(StoreError::KeyNotFound(_)) => (),
-            Err(e) => panic!("expected KeyNotFound for non-Clone type, got: {e:?}"),
-            Ok(_) => panic!("expected error for missing key"),
-        }
+        store.put("not_clone", NotClone(7)).unwrap();
+        let got: Arc<NotClone> = store.get_shared("not_clone").unwrap();
+        assert_eq!(got.0, 7);
     }
 }

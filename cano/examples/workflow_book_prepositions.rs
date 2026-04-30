@@ -17,7 +17,6 @@
 
 use cano::error::CanoError;
 use cano::prelude::*;
-use cano::store::{KeyValueStore, MemoryStore};
 use futures_util::future::join_all;
 use std::collections::HashSet;
 use tokio::time::{Duration, timeout};
