@@ -1,4 +1,4 @@
-use cano::{MemoryStore, store::KeyValueStore};
+use cano::MemoryStore;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::sync::Arc;
 

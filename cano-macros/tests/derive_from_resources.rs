@@ -3,7 +3,7 @@
 //! Covers single and multiple string-literal keys, enum-path keys, and
 //! the `#[from_resources(key = MyType)]` override.
 
-use cano::{KeyValueStore, MemoryStore, Resource, Resources};
+use cano::{MemoryStore, Resource, Resources};
 use cano_macros::{FromResources, Resource as ResourceDerive};
 use std::sync::Arc;
 

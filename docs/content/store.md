@@ -12,8 +12,8 @@ template = "page.html"
 The store is the shared data layer that connects workflow stages. Tasks and nodes write
 values during their execution and read values produced by upstream stages. The default
 implementation, <code>MemoryStore</code>, is an <code>Arc&lt;RwLock&lt;HashMap&gt;&gt;</code>
-that is safe to clone and share across async tasks. Custom backends implement the
-<code>KeyValueStore</code> trait.
+that is safe to clone and share across async tasks. Custom backends can be registered
+as typed <code>Resource</code> values and retrieved by concrete type.
 </p>
 
 <p>
@@ -97,13 +97,13 @@ let val: i32 = store2.get("key")?; // returns 42</code></pre>
 </tr>
 <tr>
 <td><code>get_shared</code></td>
-<td><code>get_shared&lt;T: Send + Sync + Clone&gt;(&amp;self, key: &amp;str) -&gt; StoreResult&lt;Arc&lt;T&gt;&gt;</code></td>
+<td><code>get_shared&lt;T: Send + Sync&gt;(&amp;self, key: &amp;str) -&gt; StoreResult&lt;Arc&lt;T&gt;&gt;</code></td>
 <td>Zero-copy read. Returns the stored <code>Arc</code> pointer directly when possible.</td>
 </tr>
 <tr>
 <td><code>put</code></td>
-<td><code>put&lt;T: Send + Sync + Clone&gt;(&amp;self, key: &amp;str, value: T) -&gt; StoreResult&lt;()&gt;</code></td>
-<td>Inserts or replaces. Accepts any type.</td>
+<td><code>put&lt;T: Send + Sync&gt;(&amp;self, key: &amp;str, value: T) -&gt; StoreResult&lt;()&gt;</code></td>
+<td>Inserts or replaces. Values do not need to implement <code>Clone</code>.</td>
 </tr>
 <tr>
 <td><code>remove</code></td>
@@ -122,7 +122,7 @@ let val: i32 = store2.get("key")?; // returns 42</code></pre>
 </tr>
 <tr>
 <td><code>keys</code></td>
-<td><code>keys(&amp;self) -&gt; StoreResult&lt;Vec&lt;String&gt;&gt;</code></td>
+<td><code>keys(&amp;self) -&gt; StoreResult&lt;Vec&lt;Arc&lt;str&gt;&gt;&gt;</code></td>
 <td>Returns all keys. Order is unspecified (HashMap).</td>
 </tr>
 <tr>
@@ -283,20 +283,20 @@ async fn main() -> Result<(), CanoError> {
 
 <!-- Section: Custom Store Backends -->
 <hr class="section-divider">
-<h2 id="custom-backends"><a href="#custom-backends" class="anchor-link" aria-hidden="true">#</a>Custom Store Backends</h2>
+<h2 id="custom-backends"><a href="#custom-backends" class="anchor-link" aria-hidden="true">#</a>Custom Store Resources</h2>
 
 <p>
-Implement <code>KeyValueStore</code> to plug in any storage backend: a database,
-a distributed cache, a file-backed store, or an in-process channel. The trait
-requires <code>Send + Sync</code>, so implementations typically use interior mutability.
+For custom storage, define a concrete type with the API your workflow needs and
+implement <code>Resource</code> for it. Register that type in <code>Resources</code>, then retrieve it by
+concrete type inside tasks or nodes. This keeps storage dependencies explicit and avoids
+an unnecessary storage trait layer now that <code>Resources</code> provides typed dependency lookup.
 </p>
 
 <div class="code-block">
-<span class="code-block-label"><span class="label-icon">&#128295;</span> Custom namespaced store backend</span>
-<pre><code class="language-rust">use cano::store::{KeyValueStore, StoreResult, StoreError};
-use std::any::Any;
-use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
+<span class="code-block-label"><span class="label-icon">&#128295;</span> Custom namespaced store resource</span>
+<pre><code class="language-rust">use cano::prelude::*;
+use cano::store::StoreResult;
+use std::sync::Arc;
 <!--blank-->
 /// Example: a store that prefixes all keys with a namespace.
 #[derive(Clone)]
@@ -316,30 +316,28 @@ impl NamespacedStore {
     fn ns_key(&self, key: &str) -> String {
         format!("{}::{}", self.namespace, key)
     }
-}
-<!--blank-->
-impl KeyValueStore for NamespacedStore {
-    fn get&lt;T: 'static + Clone&gt;(&self, key: &str) -> StoreResult&lt;T&gt; {
+
+    pub fn get&lt;T: 'static + Clone&gt;(&self, key: &str) -> StoreResult&lt;T&gt; {
         self.inner.get(&self.ns_key(key))
     }
 <!--blank-->
-    fn put&lt;T: 'static + Send + Sync + Clone&gt;(&self, key: &str, value: T) -> StoreResult&lt;()&gt; {
+    pub fn put&lt;T: 'static + Send + Sync&gt;(&self, key: &str, value: T) -> StoreResult&lt;()&gt; {
         self.inner.put(&self.ns_key(key), value)
     }
 <!--blank-->
-    fn remove(&self, key: &str) -> StoreResult&lt;()&gt; {
+    pub fn remove(&self, key: &str) -> StoreResult&lt;()&gt; {
         self.inner.remove(&self.ns_key(key))
     }
 <!--blank-->
-    fn append&lt;T: 'static + Send + Sync + Clone&gt;(&self, key: &str, item: T) -> StoreResult&lt;()&gt; {
+    pub fn append&lt;T: 'static + Send + Sync + Clone&gt;(&self, key: &str, item: T) -> StoreResult&lt;()&gt; {
         self.inner.append(&self.ns_key(key), item)
     }
 <!--blank-->
-    fn contains_key(&self, key: &str) -> StoreResult&lt;bool&gt; {
+    pub fn contains_key(&self, key: &str) -> StoreResult&lt;bool&gt; {
         self.inner.contains_key(&self.ns_key(key))
     }
 <!--blank-->
-    fn keys(&self) -> StoreResult&lt;Vec&lt;String&gt;&gt; {
+    pub fn keys(&self) -> StoreResult&lt;Vec&lt;String&gt;&gt; {
         // Strip the namespace prefix before returning keys to callers
         let prefix = format!("{}::", self.namespace);
         let raw_keys = self.inner.keys()?;
@@ -349,12 +347,12 @@ impl KeyValueStore for NamespacedStore {
             .collect())
     }
 <!--blank-->
-    fn len(&self) -> StoreResult&lt;usize&gt; {
+    pub fn len(&self) -> StoreResult&lt;usize&gt; {
         // Count only keys in this namespace
         Ok(self.keys()?.len())
     }
 <!--blank-->
-    fn clear(&self) -> StoreResult&lt;()&gt; {
+    pub fn clear(&self) -> StoreResult&lt;()&gt; {
         // Remove only keys in this namespace
         for key in self.keys()? {
             self.remove(&key)?;
@@ -362,6 +360,8 @@ impl KeyValueStore for NamespacedStore {
         Ok(())
     }
 }
+<!--blank-->
+impl Resource for NamespacedStore {}
 <!--blank-->
 // Use it like any other store — register it in Resources with your own key
 let store = NamespacedStore::new("pipeline_v2");
@@ -375,14 +375,12 @@ let workflow = Workflow::new(
     ;</code></pre>
 </div>
 
-<div class="callout callout-warning">
-<div class="callout-label">Trait object note</div>
+<div class="callout callout-tip">
+<div class="callout-label">Typed resources keep it simple</div>
 <p>
-<code>KeyValueStore</code> is not object-safe due to its generic methods.
-You cannot store it as <code>Box&lt;dyn KeyValueStore&gt;</code> directly. Register a
-concrete store type in <code>Resources</code> and retrieve it with its concrete type
-(<code>res.get::&lt;MyStore, _&gt;("my_store")?</code>), or wrap the store in a newtype
-that exposes a non-generic API.
+Because <code>Resources</code> retrieves dependencies by concrete type, your custom store can expose
+the exact methods it needs. If you need dynamic dispatch, wrap your backend in a concrete
+resource type that owns an object-safe client or repository trait.
 </p>
 </div>
 

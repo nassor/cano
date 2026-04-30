@@ -32,7 +32,8 @@ The engine is built on three core concepts: **Tasks/Nodes** for logic, **Workflo
 - **Type-Safe State Machines**: Enum-driven transitions with compile-time guarantees.
 - **Flexible Processing Units**: Choose between simple `Task`s or structured `Node`s (Prep/Exec/Post lifecycle).
 - **Parallel Execution (Split/Join)**: Run tasks concurrently and join results with strategies like `All`, `Any`, `Quorum`, or `PartialResults`.
-- **Robust Retry Logic**: Configurable strategies including exponential backoff with jitter.
+- **Robust Retry Logic**: Configurable strategies including exponential backoff with jitter and per-attempt timeouts.
+- **Circuit Breaker**: Shared `CircuitBreaker` short-circuits calls to failing dependencies before the retry loop, with configurable failure threshold, cool-down, and half-open probing.
 - **Built-in Scheduling**: Cron-based, interval, and manual triggers for background jobs.
 - **Observability**: Integrated `tracing` support for deep insights into workflow execution.
 - **Performance-Focused**: Minimizes heap allocations by leveraging stack-based objects wherever possible, giving you control over where allocations occur.
@@ -63,58 +64,55 @@ enum FlowState {
     Complete,
 }
 
-// A task that simulates fetching data from a source
+// A task that simulates fetching data from a source.
 #[derive(Clone)]
 struct FetchSourceTask {
     source_id: u32,
 }
 
-#[cano::task]
+#[task]
 impl Task<FlowState> for FetchSourceTask {
-    async fn run(&self, store: &MemoryStore) -> Result<TaskResult<FlowState>, CanoError> {
-        // Simulate async work
+    async fn run(&self, res: &Resources) -> Result<TaskResult<FlowState>, CanoError> {
+        // Look up the shared store from the workflow's resources.
+        let store = res.get::<MemoryStore, str>("store")?;
+
+        // Simulate async work.
         tokio::time::sleep(Duration::from_millis(100)).await;
-        
-        // Store result
+
+        // Store the per-source result for downstream aggregation.
         let key = format!("source_{}", self.source_id);
         store.put(&key, format!("data_from_{}", self.source_id))?;
-        
+
         Ok(TaskResult::Single(FlowState::Complete))
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let store = MemoryStore::new();
+    // 1. Register shared resources (the store is one resource among many).
+    let resources = Resources::new().insert("store", MemoryStore::new());
 
-    // 1. Define parallel tasks
+    // 2. Define parallel tasks.
     let sources = vec![
         FetchSourceTask { source_id: 1 },
         FetchSourceTask { source_id: 2 },
         FetchSourceTask { source_id: 3 },
     ];
 
-    // 2. Configure join strategy
-    // Wait for ALL tasks to complete successfully before moving to Complete
-    let join_config = JoinConfig::new(
-        JoinStrategy::All,
-        FlowState::Complete
-    ).with_timeout(Duration::from_secs(5));
+    // 3. Configure the join strategy.
+    // Wait for ALL tasks to complete successfully before moving to Complete.
+    let join_config = JoinConfig::new(JoinStrategy::All, FlowState::Complete)
+        .with_timeout(Duration::from_secs(5));
 
-    // 3. Build Workflow
-    let workflow = Workflow::new(store)
-        // Start -> Split into parallel tasks -> Complete
-        .register_split(
-            FlowState::Start,
-            sources,
-            join_config
-        )
+    // 4. Build the workflow: Start -> Split into parallel tasks -> Complete.
+    let workflow = Workflow::new(resources)
+        .register_split(FlowState::Start, sources, join_config)
         .add_exit_state(FlowState::Complete);
 
-    // 4. Run
+    // 5. Run.
     let result = workflow.orchestrate(FlowState::Start).await?;
     println!("Workflow finished: {:?}", result);
-    
+
     Ok(())
 }
 ```

@@ -214,6 +214,11 @@ during execution. Understanding these errors helps you build robust error recove
 <td>Increase retry count or fix the underlying transient failure</td>
 </tr>
 <tr>
+<td><code>CanoError::CircuitOpen</code></td>
+<td>Call rejected by an open <code>CircuitBreaker</code> attached to <code>TaskConfig</code></td>
+<td>Wait for the breaker's <code>reset_timeout</code> or fix the upstream dependency; the retry loop short-circuits — no attempts are consumed</td>
+</tr>
+<tr>
 <td><code>CanoError::TaskExecution</code></td>
 <td>Single task panicked (message is prefixed with <code>"panic:"</code>)</td>
 <td>Inspect the panic payload in the message; fix the underlying invariant in the task body</td>

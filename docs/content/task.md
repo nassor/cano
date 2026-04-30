@@ -167,6 +167,9 @@ T-->>W: Success ✓
 <pre><code class="language-rust">TaskConfig::minimal()</code></pre>
 </div>
 </div>
+</div>
+
+<div class="card-stack retry-cards">
 <div class="card">
 <h3>Per-Attempt Timeout</h3>
 <p>Bound each attempt with a fresh deadline. Composes with any retry mode.</p>
@@ -176,11 +179,7 @@ T-->>W: Success ✓
     .with_exponential_retry(3)
     .with_attempt_timeout(Duration::from_secs(2))</code></pre>
 </div>
-</div>
-</div>
-
-<div class="callout callout-info">
-<div class="callout-label">How attempt timeouts compose with retries</div>
+<h4>How attempt timeouts compose with retries</h4>
 <p>
 When <code>attempt_timeout</code> is set, each attempt inside <code>run_with_retries</code> is wrapped in
 <code>tokio::time::timeout</code>. An expired attempt produces a <code>CanoError::Timeout</code>, which is
@@ -188,6 +187,84 @@ fed through the same retry path as any other failure — so the configured <code
 whether to retry. The deadline resets on every attempt, and retry exhaustion still surfaces as
 <code>CanoError::RetryExhausted</code> wrapping the underlying timeout context.
 </p>
+</div>
+</div>
+
+<div class="card-stack retry-cards">
+<div class="card">
+<h3>Circuit Breaker</h3>
+<p>Share one breaker across tasks; an open breaker short-circuits the call before the retry loop runs.</p>
+<div class="code-block">
+<span class="code-block-label">Circuit breaker config</span>
+<pre><code class="language-rust">let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+    failure_threshold: 5,
+    reset_timeout: Duration::from_secs(30),
+    half_open_max_calls: 1,
+}));
+<!--blank-->
+TaskConfig::default()
+    .with_exponential_retry(3)
+    .with_circuit_breaker(Arc::clone(&breaker))</code></pre>
+</div>
+<h4>How the circuit breaker composes with retries</h4>
+<p>
+The breaker is consulted <em>before</em> each attempt. While <code>Closed</code>, calls flow through and
+consecutive failures are counted toward <code>failure_threshold</code>; when the threshold trips the
+breaker to <code>Open</code>, <code>run_with_retries</code> returns <code>CanoError::CircuitOpen</code>
+immediately — without invoking the task body and without consuming a retry attempt — so the
+underlying dependency is not hammered while it is unhealthy. After <code>reset_timeout</code> elapses,
+the next call lazily transitions to <code>HalfOpen</code>, which admits up to
+<code>half_open_max_calls</code> trial calls; that many consecutive successes close the breaker, and
+any failure reopens it with a fresh cool-down (so to reach the close-threshold every admitted
+trial must succeed — setting <code>half_open_max_calls</code> &gt; 1 means "admit up to N concurrent
+probes, close only after N of them all succeed"). A timed-out attempt
+(<code>CanoError::Timeout</code> from <code>attempt_timeout</code>) is recorded as a circuit failure
+just like any other error, so the breaker also protects against slow upstreams. The same
+<code>Arc&lt;CircuitBreaker&gt;</code> can be shared across multiple tasks (or across parallel split
+tasks) so a trip from any caller protects every caller — see
+<code>examples/circuit_breaker.rs</code> for an end-to-end demo.
+</p>
+<h4>Recovery requires a fresh call</h4>
+<p>
+A breaker tripped <em>mid-loop</em> ends the retry loop immediately, even when remaining retry
+attempts could outlast the breaker's <code>reset_timeout</code>. Recovery requires a fresh
+<code>run_with_retries</code> call after the cool-down — the loop will not silently re-probe the
+breaker on its own. Retries against an open breaker would only add load to a dependency the
+breaker is already protecting.
+</p>
+<h4>Default integration vs. <code>Resource</code> registration</h4>
+<p>
+<code>TaskConfig::with_circuit_breaker(...)</code> is the recommended path: the retry loop both
+short-circuits on <code>CircuitOpen</code> and guarantees the breaker observes each call's outcome
+before/after the task body. <code>CircuitBreaker</code> also implements
+<code>Resource</code>, so it can be registered in <code>Resources</code> and looked up by key —
+but that pattern bypasses both the retry-loop short-circuit and the
+before-call/after-call ordering guarantee, since the caller drives <code>try_acquire</code> /
+<code>record_success</code> / <code>record_failure</code> manually. Reach for the
+<code>Resource</code> path only when one task body needs to share one breaker across several
+internal sub-calls.
+</p>
+<h4>Stale outcomes are ignored across state transitions</h4>
+<p>
+Permits issued by <code>try_acquire</code> are tagged with the breaker's current
+<em>epoch</em> — a counter bumped on every <code>Closed → Open</code>,
+<code>Open → HalfOpen</code>, <code>HalfOpen → Open</code>, and <code>HalfOpen → Closed</code>
+transition. When a permit is consumed (success, failure, or RAII drop) the breaker checks the
+permit's epoch against the current one and discards stale outcomes silently. This means a slow
+caller whose call straddles a state-machine session — for example, a request that started in
+<code>Closed</code> and only returned after the breaker tripped, cooled down, and entered a new
+<code>HalfOpen</code> probe — cannot accidentally close the breaker on the strength of a result
+that was never meant to be a probe.
+</p>
+<h4>Policy validation</h4>
+<p>
+<code>CircuitBreaker::new</code> panics on misconfigured policy at construction —
+<code>half_open_max_calls == 0</code> would deadlock the breaker permanently in
+<code>HalfOpen</code> (no probe could ever be admitted), and values approaching
+<code>u32::MAX</code> would either saturate the success counter before reaching the threshold or
+take effectively forever to close. Treat both as programmer errors caught before any task runs.
+</p>
+</div>
 </div>
 
 <h3>Real-World Example: API Client with Retry</h3>

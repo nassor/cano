@@ -98,6 +98,7 @@
 //! Every [`crate::node::Node`] automatically implements [`Task`], so you can use existing nodes
 //! wherever tasks are expected. This provides a smooth upgrade path and backward compatibility.
 
+use crate::circuit::CircuitBreaker;
 use crate::error::CanoError;
 use crate::resource::Resources;
 use cano_macros::task;
@@ -105,6 +106,7 @@ use rand::RngExt;
 use std::borrow::Cow;
 use std::fmt;
 use std::hash::Hash;
+use std::sync::Arc;
 use std::time::Duration;
 
 #[cfg(feature = "tracing")]
@@ -265,6 +267,12 @@ pub struct TaskConfig {
     /// continues per `retry_mode`. `None` (the default) preserves the
     /// previous behavior of letting attempts run unbounded.
     pub attempt_timeout: Option<Duration>,
+    /// Optional shared [`CircuitBreaker`] consulted before each attempt inside
+    /// [`run_with_retries`]. When the breaker is open the call short-circuits
+    /// with [`CanoError::CircuitOpen`] without running the task or burning a
+    /// retry slot. Share one breaker across multiple tasks to make a trip from
+    /// any caller protect every caller.
+    pub circuit_breaker: Option<Arc<CircuitBreaker>>,
 }
 
 impl TaskConfig {
@@ -280,6 +288,7 @@ impl TaskConfig {
         Self {
             retry_mode: RetryMode::None,
             attempt_timeout: None,
+            circuit_breaker: None,
         }
     }
 
@@ -304,6 +313,30 @@ impl TaskConfig {
         self.attempt_timeout = Some(timeout);
         self
     }
+
+    /// Attach a shared [`CircuitBreaker`] to this configuration.
+    ///
+    /// This is the recommended way to integrate a breaker — the retry loop calls
+    /// [`CircuitBreaker::try_acquire`] **before** every attempt and records the
+    /// outcome **after** it returns, so the breaker observes the call's
+    /// success/failure before the workflow propagates it.
+    ///
+    /// Pass the same `Arc<CircuitBreaker>` to every task that depends on the same
+    /// flaky resource so the breaker protects them collectively.
+    ///
+    /// # Short-circuit behavior
+    ///
+    /// An `Open` breaker short-circuits the call with [`CanoError::CircuitOpen`] —
+    /// no retries are consumed, the task body is not invoked. A breaker tripped
+    /// **mid-loop** ends the retry loop immediately even when remaining retry
+    /// attempts could outlast the breaker's `reset_timeout`; recovery requires a
+    /// fresh `run_with_retries` call after the cool-down. This is intentional:
+    /// retries against an open breaker would only add load to a dependency the
+    /// breaker is already protecting.
+    pub fn with_circuit_breaker(mut self, breaker: Arc<CircuitBreaker>) -> Self {
+        self.circuit_breaker = Some(breaker);
+        self
+    }
 }
 
 /// Default implementation for retry logic that can be used by any task
@@ -325,6 +358,9 @@ where
 {
     let max_attempts = config.retry_mode.max_attempts();
     let mut attempt = 0;
+    // Hoisted: the breaker reference is immutable for the lifetime of this call,
+    // so re-reading the `Option` every iteration is wasted work on the hot path.
+    let breaker = config.circuit_breaker.as_ref();
 
     #[cfg(feature = "tracing")]
     info!(max_attempts, "Starting task execution with retry logic");
@@ -339,17 +375,35 @@ where
         #[cfg(feature = "tracing")]
         debug!(attempt = attempt + 1, "Executing task attempt");
 
+        // An open breaker short-circuits the entire retry loop: we do not invoke
+        // the task and we do not consume a retry attempt — immediate retries
+        // would only add load to a dependency the breaker is already protecting.
+        let permit = match breaker {
+            Some(b) => match b.try_acquire() {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    #[cfg(feature = "tracing")]
+                    warn!(error = %e, "Circuit breaker open; short-circuiting task");
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
+
         let attempt_outcome = match config.attempt_timeout {
             Some(d) => match tokio::time::timeout(d, run_fn()).await {
                 Ok(inner) => inner,
-                Err(_) => Err(CanoError::timeout(format!(
-                    "Task attempt {} exceeded attempt_timeout of {:?}",
-                    attempt + 1,
-                    d
-                ))),
+                Err(_) => Err(CanoError::timeout("task attempt exceeded attempt_timeout")),
             },
             None => run_fn().await,
         };
+
+        if let (Some(b), Some(p)) = (breaker, permit) {
+            match &attempt_outcome {
+                Ok(_) => b.record_success(p),
+                Err(_) => b.record_failure(p),
+            }
+        }
 
         match attempt_outcome {
             Ok(result) => {
@@ -1296,6 +1350,282 @@ mod tests {
         assert!(
             matches!(err, CanoError::RetryExhausted(_)),
             "expected RetryExhausted after retry exhaustion, got: {err}"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Circuit breaker integration tests
+    // ------------------------------------------------------------------
+
+    use crate::circuit::{CircuitBreaker, CircuitPolicy, CircuitState};
+
+    fn cb_policy(threshold: u32) -> CircuitPolicy {
+        CircuitPolicy {
+            failure_threshold: threshold,
+            reset_timeout: Duration::from_millis(20),
+            half_open_max_calls: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_circuit_open_short_circuits_without_invoking_task() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Threshold = 3, no retries, so the first three failing calls trip the breaker
+        // and the fourth call must return CircuitOpen *without* invoking the task body.
+        let breaker = Arc::new(CircuitBreaker::new(cb_policy(3)));
+        let config = TaskConfig::minimal().with_circuit_breaker(Arc::clone(&breaker));
+        let counter = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..3 {
+            let counter = Arc::clone(&counter);
+            let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+                let counter = Arc::clone(&counter);
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Err::<TaskResult<String>, CanoError>(CanoError::task_execution("boom"))
+                }
+            })
+            .await;
+            assert!(result.is_err());
+        }
+        assert_eq!(counter.load(Ordering::SeqCst), 3);
+        assert!(matches!(breaker.state(), CircuitState::Open { .. }));
+
+        // Fourth call: short-circuited.
+        let counter_before = counter.load(Ordering::SeqCst);
+        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+            let counter = Arc::clone(&counter);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok::<TaskResult<String>, CanoError>(TaskResult::Single("never".into()))
+            }
+        })
+        .await;
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CanoError::CircuitOpen(_)),
+            "expected CircuitOpen, got: {err}"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            counter_before,
+            "task body must not run when breaker is open"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_circuit_open_does_not_consume_retry_attempts() {
+        // Even with retries enabled, a CircuitOpen must short-circuit immediately —
+        // retries against an open breaker would only add load to the failing
+        // dependency. The error should surface raw, not wrapped in RetryExhausted.
+        let breaker = Arc::new(CircuitBreaker::new(cb_policy(1)));
+        let config = TaskConfig::new()
+            .with_fixed_retry(5, Duration::from_millis(1))
+            .with_circuit_breaker(Arc::clone(&breaker));
+
+        // First call: attempt 1 invokes the closure, fails, and trips the breaker
+        // (threshold = 1 reached after a single recorded failure). On the next
+        // loop iteration `try_acquire` sees the open breaker and the retry loop
+        // returns immediately with raw CircuitOpen — the remaining 4 retry slots
+        // are *not* consumed. We discard the outcome here and verify the
+        // short-circuit explicitly with the second call below.
+        let _ = run_with_retries::<TaskResult<String>, _, _>(&config, || async {
+            Err::<TaskResult<String>, CanoError>(CanoError::task_execution("boom"))
+        })
+        .await;
+        assert!(matches!(breaker.state(), CircuitState::Open { .. }));
+
+        // Second call: breaker rejects on the very first attempt — surface CircuitOpen
+        // raw, not wrapped in RetryExhausted.
+        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || async {
+            Ok::<TaskResult<String>, CanoError>(TaskResult::Single("never".into()))
+        })
+        .await;
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CanoError::CircuitOpen(_)),
+            "expected raw CircuitOpen, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_circuit_half_open_recovery_via_run_with_retries() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let breaker = Arc::new(CircuitBreaker::new(cb_policy(2)));
+        let config = TaskConfig::minimal().with_circuit_breaker(Arc::clone(&breaker));
+
+        // Trip the breaker.
+        for _ in 0..2 {
+            let _ = run_with_retries::<TaskResult<String>, _, _>(&config, || async {
+                Err::<TaskResult<String>, CanoError>(CanoError::task_execution("boom"))
+            })
+            .await;
+        }
+        assert!(matches!(breaker.state(), CircuitState::Open { .. }));
+
+        // Wait for reset_timeout, then a successful call should close the breaker
+        // (half_open_max_calls = 1).
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&counter);
+        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+            let counter = Arc::clone(&counter_clone);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Ok::<TaskResult<String>, CanoError>(TaskResult::Single("ok".into()))
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, TaskResult::Single("ok".to_string()));
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert_eq!(breaker.state(), CircuitState::Closed);
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_shared_across_tasks() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Two tasks share one Arc<CircuitBreaker>; failures from task A trip it for B.
+        let breaker = Arc::new(CircuitBreaker::new(cb_policy(3)));
+        let config_a = TaskConfig::minimal().with_circuit_breaker(Arc::clone(&breaker));
+        let config_b = TaskConfig::minimal().with_circuit_breaker(Arc::clone(&breaker));
+
+        for _ in 0..3 {
+            let _ = run_with_retries::<TaskResult<String>, _, _>(&config_a, || async {
+                Err::<TaskResult<String>, CanoError>(CanoError::task_execution("A failed"))
+            })
+            .await;
+        }
+        assert!(matches!(breaker.state(), CircuitState::Open { .. }));
+
+        let b_invocations = Arc::new(AtomicUsize::new(0));
+        let b_invocations_clone = Arc::clone(&b_invocations);
+        let result = run_with_retries::<TaskResult<String>, _, _>(&config_b, || {
+            let b = Arc::clone(&b_invocations_clone);
+            async move {
+                b.fetch_add(1, Ordering::SeqCst);
+                Ok::<TaskResult<String>, CanoError>(TaskResult::Single("B ok".into()))
+            }
+        })
+        .await;
+
+        let err = result.unwrap_err();
+        assert!(matches!(err, CanoError::CircuitOpen(_)));
+        assert_eq!(
+            b_invocations.load(Ordering::SeqCst),
+            0,
+            "task B must not run while breaker tripped by task A is open"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_circuit_open_mid_loop_with_fixed_retry_short_circuits_remaining_attempts() {
+        // Threshold=2 + 5 retries: attempt 1 fails (Closed, counter=1), attempt 2 fails
+        // (Closed→Open trip on counter=2), attempt 3's `try_acquire` returns
+        // CircuitOpen and the loop returns immediately — so only 2 invocations land
+        // even though 6 attempts (1 + 5 retries) were budgeted. The error must be
+        // raw CircuitOpen, not RetryExhausted.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let breaker = Arc::new(CircuitBreaker::new(cb_policy(2)));
+        let config = TaskConfig::new()
+            .with_fixed_retry(5, Duration::from_millis(1))
+            .with_circuit_breaker(Arc::clone(&breaker));
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&counter);
+
+        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+            let counter = Arc::clone(&counter_clone);
+            async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Err::<TaskResult<String>, CanoError>(CanoError::task_execution("boom"))
+            }
+        })
+        .await;
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CanoError::CircuitOpen(_)),
+            "expected raw CircuitOpen after mid-loop trip, got: {err}"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            2,
+            "task body must run exactly threshold times before the breaker trips short-circuits the rest of the retry budget"
+        );
+        assert!(matches!(breaker.state(), CircuitState::Open { .. }));
+    }
+
+    #[tokio::test]
+    async fn test_circuit_breaker_unused_does_not_change_behavior() {
+        // Sanity: with no breaker configured the retry loop behaves exactly as before.
+        let config = TaskConfig::new().with_fixed_retry(1, Duration::from_millis(1));
+        assert!(config.circuit_breaker.is_none());
+
+        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || async {
+            Ok::<TaskResult<String>, CanoError>(TaskResult::Single("ok".into()))
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, TaskResult::Single("ok".into()));
+    }
+
+    #[tokio::test]
+    async fn test_attempt_timeout_counts_as_circuit_failure() {
+        // A timed-out attempt produces CanoError::Timeout, which must flow through
+        // the same `record_failure` arm as any other error so the breaker counts
+        // it toward the threshold. With `failure_threshold=2` and `RetryMode::None`,
+        // two timed-out calls should trip the breaker; the third call must surface
+        // CircuitOpen without ever invoking the task body.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let breaker = Arc::new(CircuitBreaker::new(cb_policy(2)));
+        let config = TaskConfig::minimal()
+            .with_attempt_timeout(Duration::from_millis(10))
+            .with_circuit_breaker(Arc::clone(&breaker));
+        let invocations = Arc::new(AtomicUsize::new(0));
+
+        for _ in 0..2 {
+            let invocations = Arc::clone(&invocations);
+            let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+                let invocations = Arc::clone(&invocations);
+                async move {
+                    invocations.fetch_add(1, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    Ok::<TaskResult<String>, CanoError>(TaskResult::Single("never".into()))
+                }
+            })
+            .await;
+            // The attempt times out → Timeout error → record_failure on the breaker.
+            assert!(matches!(result, Err(CanoError::Timeout(_))));
+        }
+
+        assert_eq!(invocations.load(Ordering::SeqCst), 2);
+        assert!(
+            matches!(breaker.state(), CircuitState::Open { .. }),
+            "two timed-out attempts must trip the breaker, got {:?}",
+            breaker.state()
+        );
+
+        // Third call: breaker open → short-circuit, body not invoked.
+        let before = invocations.load(Ordering::SeqCst);
+        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+            let invocations = Arc::clone(&invocations);
+            async move {
+                invocations.fetch_add(1, Ordering::SeqCst);
+                Ok::<TaskResult<String>, CanoError>(TaskResult::Single("never".into()))
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(CanoError::CircuitOpen(_))));
+        assert_eq!(
+            invocations.load(Ordering::SeqCst),
+            before,
+            "task body must not run when the breaker is open"
         );
     }
 }

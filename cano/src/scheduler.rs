@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::{Notify, RwLock, mpsc};
+use tokio::sync::{Notify, RwLock, mpsc, oneshot};
 use tokio::time::{Duration, sleep};
 
 #[cfg(feature = "tracing")]
@@ -33,7 +33,10 @@ use tracing::Instrument;
 /// errors and makes the protocol self-documenting.
 enum SchedulerCommand {
     Stop,
-    Trigger(String),
+    Trigger {
+        id: String,
+        response: oneshot::Sender<CanoResult<()>>,
+    },
 }
 
 /// Simplified scheduling options
@@ -436,20 +439,33 @@ where
                     *self.command_tx.write().await = None;
                     break;
                 }
-                SchedulerCommand::Trigger(id) => {
-                    if let Some((workflow, initial_state, _schedule, info)) =
+                SchedulerCommand::Trigger { id, response } => {
+                    let outcome = if let Some((workflow, initial_state, _schedule, info)) =
                         self.workflows.get(&id)
                     {
-                        let workflow = Arc::clone(workflow);
-                        let initial_state = initial_state.clone();
-                        let info = Arc::clone(info);
-                        let handle = tokio::spawn(async move {
-                            execute_flow(workflow, initial_state, info).await;
-                        });
-                        let mut tasks = self.scheduler_tasks.write().await;
-                        tasks.retain(|h| !h.is_finished());
-                        tasks.push(handle);
-                    }
+                        if reserve_flow(Arc::clone(info)).await {
+                            let workflow = Arc::clone(workflow);
+                            let initial_state = initial_state.clone();
+                            let info = Arc::clone(info);
+                            let handle = tokio::spawn(async move {
+                                execute_reserved_flow(workflow, initial_state, info).await;
+                            });
+                            let mut tasks = self.scheduler_tasks.write().await;
+                            tasks.retain(|h| !h.is_finished());
+                            tasks.push(handle);
+                            Ok(())
+                        } else {
+                            Err(CanoError::Workflow(format!(
+                                "Flow '{id}' is already running"
+                            )))
+                        }
+                    } else {
+                        Err(CanoError::Workflow(format!(
+                            "No workflow registered with id '{id}'"
+                        )))
+                    };
+
+                    let _ = response.send(outcome);
                 }
             }
         }
@@ -523,22 +539,34 @@ where
     /// Manually trigger a workflow by ID.
     ///
     /// Sends a trigger command to the running scheduler. The workflow executes
-    /// asynchronously — this method returns as soon as the command is enqueued.
+    /// asynchronously — this method returns once the scheduler accepts or rejects
+    /// the trigger.
     ///
     /// # Errors
     ///
     /// - [`CanoError::Workflow`] — the scheduler is not running (i.e. [`Scheduler::start`]
-    ///   has not been called or has already returned), or the command queue is full
+    ///   has not been called or has already returned), `id` is unknown, the workflow
+    ///   is already running, or the command queue is full
     pub async fn trigger(&self, id: &str) -> CanoResult<()> {
-        if let Some(tx) = self.command_tx.read().await.as_ref() {
-            tx.try_send(SchedulerCommand::Trigger(id.to_string()))
-                .map_err(|e| CanoError::Workflow(format!("Failed to trigger: {}", e)))?;
-        } else {
-            return Err(CanoError::Workflow(
-                "Scheduler not running — call start() before trigger()".to_string(),
-            ));
-        }
-        Ok(())
+        let tx = self.command_tx.read().await.clone().ok_or_else(|| {
+            CanoError::Workflow("Scheduler not running — call start() before trigger()".to_string())
+        })?;
+
+        // No local `workflows.contains_key` pre-check: the caller may be a
+        // stale `Scheduler` clone that snapshotted the registry before the
+        // running instance registered `id`. The scheduler loop holds the
+        // authoritative registry and returns the same "No workflow registered"
+        // error on lookup miss — let the loop be the single source of truth.
+        let (response_tx, response_rx) = oneshot::channel();
+        tx.try_send(SchedulerCommand::Trigger {
+            id: id.to_string(),
+            response: response_tx,
+        })
+        .map_err(|e| CanoError::Workflow(format!("Failed to trigger: {}", e)))?;
+
+        response_rx.await.map_err(|_| {
+            CanoError::Workflow("Scheduler stopped before trigger was processed".to_string())
+        })?
     }
 
     /// Get status of a specific workflow
@@ -552,9 +580,11 @@ where
 
     /// List all workflows
     pub async fn list(&self) -> Vec<FlowInfo> {
-        let mut results = Vec::new();
-        for (_, _, _, info) in self.workflows.values() {
-            results.push(info.read().await.clone());
+        let mut results = Vec::with_capacity(self.flow_order.len());
+        for id in &self.flow_order {
+            if let Some((_, _, _, info)) = self.workflows.get(id) {
+                results.push(info.read().await.clone());
+            }
         }
         results
     }
@@ -588,14 +618,33 @@ async fn execute_flow<TState, TResourceKey>(
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
     TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
-    // Update status to running
-    {
-        let mut info_guard = info.write().await;
-        info_guard.status = Status::Running;
-        info_guard.last_run = Some(Utc::now());
-        info_guard.run_count += 1;
+    if !reserve_flow(Arc::clone(&info)).await {
+        return;
     }
 
+    execute_reserved_flow(workflow, initial_state, info).await;
+}
+
+async fn reserve_flow(info: Arc<RwLock<FlowInfo>>) -> bool {
+    let mut info_guard = info.write().await;
+    if matches!(info_guard.status, Status::Running) {
+        return false;
+    }
+
+    info_guard.status = Status::Running;
+    info_guard.last_run = Some(Utc::now());
+    info_guard.run_count += 1;
+    true
+}
+
+async fn execute_reserved_flow<TState, TResourceKey>(
+    workflow: Arc<Workflow<TState, TResourceKey>>,
+    initial_state: TState,
+    info: Arc<RwLock<FlowInfo>>,
+) where
+    TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
+    TResourceKey: Hash + Eq + Send + Sync + 'static,
+{
     // Execute workflow — skip lifecycle (setup/teardown handled by start/stop)
     #[cfg(feature = "tracing")]
     let result = workflow
@@ -1011,6 +1060,142 @@ mod tests {
         let scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
         let status = scheduler.status("nonexistent").await;
         assert!(status.is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_trigger_unknown_workflow_errors() {
+        let timeout = Duration::from_secs(5);
+        let result = tokio::time::timeout(timeout, async {
+            let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
+            scheduler
+                .manual("known", create_test_workflow(), TestState::Start)
+                .unwrap();
+
+            let mut scheduler_for_start = scheduler.clone();
+            let scheduler_handle = tokio::spawn(async move { scheduler_for_start.start().await });
+            sleep(Duration::from_millis(50)).await;
+
+            let err = scheduler
+                .trigger("missing")
+                .await
+                .expect_err("unknown workflow id must error");
+            assert!(
+                err.to_string().contains("No workflow registered"),
+                "expected unknown workflow error, got: {err}"
+            );
+
+            scheduler.stop().await.unwrap();
+            scheduler_handle.await.unwrap().unwrap();
+        })
+        .await;
+
+        assert!(result.is_ok(), "Test timed out");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_trigger_via_stale_clone_reaches_running_registry() {
+        // Regression: a clone of `Scheduler` snapshots the workflows HashMap,
+        // so a workflow registered after cloning is invisible to the clone.
+        // The trigger path must still succeed because the running scheduler
+        // (started via `start()`) holds the authoritative registry and the
+        // command channel is shared through the inner `Arc<RwLock<...>>`.
+        let timeout = Duration::from_secs(5);
+        let result = tokio::time::timeout(timeout, async {
+            let mut running_scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
+
+            // Take the trigger handle BEFORE registering the workflow — its
+            // local `workflows` HashMap will not contain "late_task".
+            let stale_handle = running_scheduler.clone();
+
+            running_scheduler
+                .manual("late_task", create_test_workflow(), TestState::Start)
+                .unwrap();
+            assert!(!stale_handle.workflows.contains_key("late_task"));
+
+            let mut scheduler_for_start = running_scheduler.clone();
+            let scheduler_handle = tokio::spawn(async move { scheduler_for_start.start().await });
+            sleep(Duration::from_millis(50)).await;
+
+            // Trigger via the stale clone. The running scheduler's loop sees
+            // "late_task" in its registry and accepts the trigger.
+            stale_handle
+                .trigger("late_task")
+                .await
+                .expect("stale clone trigger must reach the running registry");
+            sleep(Duration::from_millis(50)).await;
+
+            let status = running_scheduler.status("late_task").await.unwrap();
+            assert_eq!(status.run_count, 1);
+
+            running_scheduler.stop().await.unwrap();
+            scheduler_handle.await.unwrap().unwrap();
+        })
+        .await;
+
+        assert!(result.is_ok(), "Test timed out");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_manual_trigger_rejects_overlap() {
+        #[derive(Clone)]
+        struct SlowNode;
+
+        #[node]
+        impl Node<TestState> for SlowNode {
+            type PrepResult = ();
+            type ExecResult = ();
+
+            async fn prep(&self, _res: &Resources) -> CanoResult<()> {
+                Ok(())
+            }
+
+            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
+                sleep(Duration::from_millis(300)).await;
+            }
+
+            async fn post(
+                &self,
+                _res: &Resources,
+                _exec_res: Self::ExecResult,
+            ) -> CanoResult<TestState> {
+                Ok(TestState::Complete)
+            }
+        }
+
+        let timeout = Duration::from_secs(5);
+        let result = tokio::time::timeout(timeout, async {
+            let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
+            let workflow = Workflow::bare()
+                .register(TestState::Start, SlowNode)
+                .add_exit_state(TestState::Complete)
+                .add_exit_state(TestState::Error);
+            scheduler
+                .manual("slow", workflow, TestState::Start)
+                .unwrap();
+
+            let mut scheduler_for_start = scheduler.clone();
+            let scheduler_handle = tokio::spawn(async move { scheduler_for_start.start().await });
+            sleep(Duration::from_millis(50)).await;
+
+            scheduler.trigger("slow").await.unwrap();
+            let err = scheduler
+                .trigger("slow")
+                .await
+                .expect_err("overlapping manual trigger must be rejected");
+            assert!(
+                err.to_string().contains("already running"),
+                "expected overlap error, got: {err}"
+            );
+
+            let status = scheduler.status("slow").await.unwrap();
+            assert_eq!(status.run_count, 1);
+
+            scheduler.stop().await.unwrap();
+            scheduler_handle.await.unwrap().unwrap();
+        })
+        .await;
+
+        assert!(result.is_ok(), "Test timed out");
     }
 
     #[tokio::test(flavor = "multi_thread")]
