@@ -9,6 +9,15 @@ template = "page.html"
 <h1>Scheduler</h1>
 <p class="subtitle">Automate your workflows with flexible scheduling and concurrency.</p>
 
+<div class="feature-banner">
+<div class="banner-icon" aria-hidden="true">⚙️</div>
+<div class="banner-content">
+<p><strong>Feature flag required</strong> -- The scheduler is behind the <code>scheduler</code> feature gate.
+Enable it with <code>features = ["scheduler"]</code> or <code>features = ["all"]</code> in your
+<code>Cargo.toml</code>.</p>
+</div>
+</div>
+
 <nav class="page-toc" aria-label="Table of contents">
 <div class="page-toc-title">On this page</div>
 <ol>
