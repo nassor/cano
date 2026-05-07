@@ -10,7 +10,7 @@
 //!
 //! Prerequisites:
 //! - Install Ollama: <https://ollama.ai/>
-//! - `ollama pull qwen3:1.7b` and run the daemon
+//! - `ollama pull gemma4:e2b` and run the daemon
 //!
 //! Run with:
 //! ```bash
