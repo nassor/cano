@@ -290,7 +290,7 @@ struct InitBatchTask {
 #[task(state = BookAnalysisState)]
 impl InitBatchTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!(
             "\n🎯 [{0}] Initializing batch with {1} books",
             self.batch_name,
@@ -316,7 +316,7 @@ struct DownloadTask {
 #[task(state = BookAnalysisState)]
 impl DownloadTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         match download_book(
             self.book_id,
             self.title.clone(),
@@ -344,7 +344,7 @@ struct AnalyzeTask {
 #[task(state = BookAnalysisState)]
 impl AnalyzeTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let book: Book = store
             .get(&format!("book_{}", self.book_id))
             .map_err(|e| CanoError::task_execution(format!("Book not found: {e}")))?;
@@ -372,7 +372,7 @@ struct SummarizeBatchTask {
 #[task(state = BookAnalysisState)]
 impl SummarizeBatchTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let batch_name: String = store.get("batch_name")?;
         let books: Vec<BookMetadata> = store.get("book_metadata")?;
 

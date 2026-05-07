@@ -67,7 +67,7 @@ struct PersistTask;
 #[task(state = Stage)]
 impl PersistTask {
     async fn run(&self, res: &Resources) -> CanoResult<TaskResult<Stage>> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("PersistTask: writing result to store...");
         let result: i32 = 42_i32.clamp(0, 100);
         store.put("sanitized_value", result)?;

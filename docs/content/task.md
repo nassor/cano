@@ -9,20 +9,11 @@ template = "page.html"
 <p class="subtitle">Simple, flexible processing units for your workflows.</p>
 
 <p>
-A <code>Task</code> provides a simplified interface with a single <code>run</code> method.
-Use tasks when you want simplicity and direct control over the execution logic.
-Tasks are the fundamental building blocks of Cano workflows.
+A <code>Task</code> is the fundamental building block of a Cano workflow: a single <code>run</code>
+method that decides the next state. Tasks receive a <code>&amp;Resources</code> reference at
+dispatch time — see <a href="../resources/">Resources</a> for how to register and retrieve typed
+dependencies. For a structured prep / exec / post lifecycle, see <a href="../nodes/">Nodes</a>.
 </p>
-
-<div class="callout callout-info">
-<div class="callout-label">Key concept</div>
-<p>
-A Task is the simplest way to define workflow logic in Cano. Implement a single <code>run()</code> method,
-and you have a fully functional processing unit. For more structured operations, see <a href="../nodes/">Nodes</a>.
-Tasks receive a <code>&amp;Resources</code> reference at dispatch time — see <a href="../resources/">Resources</a>
-for how to register and retrieve typed dependencies.
-</p>
-</div>
 
 <!-- Table of Contents -->
 <nav class="page-toc" aria-label="Table of contents">
@@ -63,7 +54,7 @@ impl GeneratorTask {
         println!("🎲 GeneratorTask: Creating random numbers...");
 <!--blank-->
         // 1. Look up the shared store from resources
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 <!--blank-->
         // 2. Perform logic
         let mut rng = rand::rng();
@@ -289,7 +280,7 @@ impl ApiClientTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<State>, CanoError> {
         println!("📡 Calling API: {}", self.endpoint);
 <!--blank-->
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 <!--blank-->
         // Simulate API call that might fail
         let response = reqwest::get(&self.endpoint)
@@ -326,7 +317,7 @@ struct DataTransformer;
 #[task(state = State)]
 impl DataTransformer {
     async fn run(&self, res: &Resources) -> Result<TaskResult<State>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let raw_data: Vec<i32> = store.get("raw_data")?;
 <!--blank-->
         // Transform: filter and multiply
@@ -357,7 +348,7 @@ struct ValidatorTask;
 #[task(state = State)]
 impl ValidatorTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<State>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let data: Vec<f64> = store.get("processed_data")?;
 <!--blank-->
         let mut errors = Vec::new();
@@ -396,7 +387,7 @@ struct RoutingTask;
 #[task(state = State)]
 impl RoutingTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<State>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let item_count: usize = store.get("item_count")?;
         let priority: String = store.get("priority")?;
 <!--blank-->
@@ -430,7 +421,7 @@ struct AggregatorTask;
 #[task(state = State)]
 impl AggregatorTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<State>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("Aggregating results...");
 <!--blank-->
         let mut total = 0;

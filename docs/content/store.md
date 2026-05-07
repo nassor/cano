@@ -19,20 +19,12 @@ as typed <code>Resource</code> values and retrieved by concrete type.
 <p>
 <code>MemoryStore</code> is registered inside a <a href="../resources/"><code>Resources</code></a>
 dictionary and retrieved in tasks and nodes with
-<code>res.get::&lt;MemoryStore, str&gt;("store")?</code>. This makes the store one
+<code>res.get::&lt;MemoryStore, _&gt;("store")?</code>. This makes the store one
 of many named dependencies a workflow can carry, alongside database pools, HTTP clients,
 configuration, or any other type that implements the <code>Resource</code> trait. See
 <a href="../resources/">Resources</a> for lifecycle semantics, key-type options, and
 the full <code>insert</code> / <code>get</code> API.
 </p>
-
-<div class="callout callout-info">
-<div class="callout-label">Key concept</div>
-<p>
-The store is the glue between workflow stages. Each task reads input from the store and writes
-its output back, creating a natural data pipeline without tight coupling between stages.
-</p>
-</div>
 
 <!-- Table of Contents -->
 <nav class="page-toc" aria-label="Table of contents">
@@ -236,7 +228,7 @@ Prefer <code>get_shared()</code> for large or frequently-read values.
 <p>
 Register the store inside a <code>Resources</code> dictionary and pass it to
 <code>Workflow::new()</code>. Each task retrieves the store via
-<code>res.get::&lt;MemoryStore, str&gt;("store")?</code>, so the same handle is shared
+<code>res.get::&lt;MemoryStore, _&gt;("store")?</code>, so the same handle is shared
 across all registered tasks for the duration of a single <code>orchestrate()</code> call.
 </p>
 
@@ -247,6 +239,32 @@ across all registered tasks for the duration of a single <code>orchestrate()</co
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Stage { Ingest, Transform, Complete }
 <!--blank-->
+struct IngestTask;
+<!--blank-->
+#[task(state = Stage)]
+impl IngestTask {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<Stage>, CanoError> {
+        let store = res.get::<MemoryStore, _>("store")?;
+        let batch: usize = store.get("batch_size")?;
+        let records: Vec<u32> = (0..batch as u32).collect();
+        store.put("records", records)?;
+        Ok(TaskResult::Single(Stage::Transform))
+    }
+}
+<!--blank-->
+struct TransformTask;
+<!--blank-->
+#[task(state = Stage)]
+impl TransformTask {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<Stage>, CanoError> {
+        let store = res.get::<MemoryStore, _>("store")?;
+        let records: Vec<u32> = store.get("records")?;
+        let transformed: Vec<u32> = records.into_iter().map(|x| x * 2).collect();
+        store.put("result", transformed)?;
+        Ok(TaskResult::Single(Stage::Complete))
+    }
+}
+<!--blank-->
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     let store = MemoryStore::new();
@@ -255,20 +273,8 @@ async fn main() -> Result<(), CanoError> {
     store.put("batch_size", 256usize)?;
 <!--blank-->
     let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
-        .register(Stage::Ingest, |res: &Resources| async move {
-            let store = res.get::<MemoryStore, str>("store")?;
-            let batch: usize = store.get("batch_size")?;
-            let records: Vec<u32> = (0..batch as u32).collect();
-            store.put("records", records)?;
-            Ok(TaskResult::Single(Stage::Transform))
-        })
-        .register(Stage::Transform, |res: &Resources| async move {
-            let store = res.get::<MemoryStore, str>("store")?;
-            let records: Vec<u32> = store.get("records")?;
-            let transformed: Vec<u32> = records.into_iter().map(|x| x * 2).collect();
-            store.put("result", transformed)?;
-            Ok(TaskResult::Single(Stage::Complete))
-        })
+        .register(Stage::Ingest, IngestTask)
+        .register(Stage::Transform, TransformTask)
         .add_exit_state(Stage::Complete);
 <!--blank-->
     workflow.orchestrate(Stage::Ingest).await?;
@@ -371,7 +377,7 @@ let workflow = Workflow::new(
         Resources::new().insert("namespaced_store", store.clone()),
     )
     // ... register tasks that retrieve it via
-    //     res.get::<NamespacedStore, str>("namespaced_store")? ...
+    //     res.get::<NamespacedStore, _>("namespaced_store")? ...
     ;</code></pre>
 </div>
 

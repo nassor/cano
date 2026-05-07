@@ -68,7 +68,7 @@ impl Node<TaskState> for SimpleTask {
         res: &Resources,
         exec_result: Self::ExecResult,
     ) -> Result<TaskState, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         store.put("last_execution", exec_result)?;
         Ok(TaskState::Complete)
     }

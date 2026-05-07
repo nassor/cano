@@ -30,6 +30,7 @@ all = ["scheduler", "tracing"]
 [dev-dependencies]
 axum = "0.8.9"
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
+redb = "4.1"
 reqwest = { version = "0.13", features = ["json"] }
 rig-core = "0.35"
 serde = { version = "1", features = ["derive"] }
@@ -87,6 +88,11 @@ required-features = ["scheduler"]
 [[example]]
 name = "scheduler_mapreduce_books"
 path = "examples/scheduler_mapreduce_books.rs"
+required-features = ["scheduler"]
+
+[[example]]
+name = "scheduler_backoff"
+path = "examples/scheduler_backoff.rs"
 required-features = ["scheduler"]
 
 [[example]]

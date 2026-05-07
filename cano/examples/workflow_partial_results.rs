@@ -47,7 +47,7 @@ impl ApiTask {
 #[task(state = ApiState)]
 impl ApiTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<ApiState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!(
             "Task {}: Starting (latency: {}ms)",
             self.id, self.latency_ms

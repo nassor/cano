@@ -56,7 +56,7 @@ impl MetricsNode {
     type ExecResult = (f64, String, u32);
 
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         // Get request data from store
         let request_id: String = store.get("request_id")?;
         let request_body: String = store.get("request_body")?;
@@ -96,7 +96,7 @@ impl MetricsNode {
         res: &Resources,
         (revenue, customer_id, transaction_count): Self::ExecResult,
     ) -> Result<RequestState, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         // Store metrics in the shared store
         store.put("revenue", revenue)?;
         store.put("customer_id", customer_id)?;
@@ -121,7 +121,7 @@ impl ResponseNode {
     type ExecResult = (String, u16);
 
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         // Read metrics from shared store
         let revenue: f64 = store.get("revenue")?;
         let customer_id: String = store.get("customer_id")?;
@@ -168,7 +168,7 @@ impl ResponseNode {
         res: &Resources,
         (response_message, status_code): Self::ExecResult,
     ) -> Result<RequestState, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         // Store response in shared store
         store.put("response_message", response_message.clone())?;
         store.put("status_code", status_code)?;

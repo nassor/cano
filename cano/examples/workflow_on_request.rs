@@ -88,8 +88,8 @@ struct ParseTask;
 #[task(state = TextPipelineState)]
 impl ParseTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<TextPipelineState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
-        let params = res.get::<RequestParams, str>("request")?;
+        let store = res.get::<MemoryStore, _>("store")?;
+        let params = res.get::<RequestParams, _>("request")?;
 
         if params.text.trim().is_empty() {
             return Err(CanoError::task_execution("input text is empty"));
@@ -112,7 +112,7 @@ struct TransformTask;
 #[task(state = TextPipelineState)]
 impl TransformTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<TextPipelineState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 
         let text: String = store
             .get("validated_text")

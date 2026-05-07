@@ -128,23 +128,16 @@ pub type DefaultNodeResult = Result<Box<dyn std::any::Any + Send + Sync>, CanoEr
 ///
 /// The [`run`](Node::run) method orchestrates these phases automatically.
 ///
-/// # Benefits over String-based Approaches
-///
-/// - **Type Safety**: Return enum values instead of strings
-/// - **Performance**: No string conversion overhead
-/// - **IDE Support**: Autocomplete for enum variants
-/// - **Compile-Time Safety**: Impossible to have invalid state transitions
-///
 /// # Example
 ///
 /// ```rust,ignore
 /// use cano::prelude::*;
 ///
 /// // A params struct that carries node configuration as a resource.
+/// #[derive(Resource)]
 /// struct NodeParams {
 ///     batch_size: usize,
 /// }
-/// impl Resource for NodeParams {}
 ///
 /// struct MyNode;
 ///
@@ -159,8 +152,8 @@ pub type DefaultNodeResult = Result<Box<dyn std::any::Any + Send + Sync>, CanoEr
 ///
 ///     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
 ///         // Read params and previously stored data from resources.
-///         let params = res.get::<NodeParams>("params")?;
-///         let store = res.get::<MemoryStore>("store")?;
+///         let params = res.get::<NodeParams, _>("params")?;
+///         let store = res.get::<MemoryStore, _>("store")?;
 ///         let data: Vec<u32> = store.get("input")?;
 ///         // Take only up to batch_size items.
 ///         Ok(data.into_iter().take(params.batch_size).collect())
@@ -174,7 +167,7 @@ pub type DefaultNodeResult = Result<Box<dyn std::any::Any + Send + Sync>, CanoEr
 ///     async fn post(&self, res: &Resources, exec_res: Self::ExecResult)
 ///         -> Result<String, CanoError> {
 ///         // Write result back to the store so downstream nodes can read it.
-///         let store = res.get::<MemoryStore>("store")?;
+///         let store = res.get::<MemoryStore, _>("store")?;
 ///         store.put("sum", exec_res)?;
 ///         Ok("done".to_string())
 ///     }

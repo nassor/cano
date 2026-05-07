@@ -108,7 +108,7 @@ struct SimpleTask;
 #[task(state = WorkflowState)]
 impl SimpleTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowState>, CanoError> {
-        let config = res.get::<AppConfig, str>("config")?;
+        let config = res.get::<AppConfig, _>("config")?;
         println!("Processing task (batch_size={})...", config.batch_size);
         Ok(TaskResult::Single(WorkflowState::Process))
     }

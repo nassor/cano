@@ -1,20 +1,16 @@
 //! # AI "Yes, and..." Improv Workflow Example
 //!
-//! This example demonstrates an improvisational storytelling conversation between two AI nodes:
-//! 1. **Actor1Node**: Starts a story based on a random subject
-//! 2. **Actor2Node**: Continues the story using "Yes, and..." improv principles
+//! Two AI nodes carry a story forward using the "Yes, and..." improv rule:
+//! - **Actor1Node** opens with a random subject; later turns continue the thread.
+//! - **Actor2Node** continues every other turn with "Yes, and...".
 //!
-//! The workflow uses rig-core with Ollama for text generation and facilitates a
-//! collaborative storytelling session where each actor builds upon the previous contribution.
-//!
-//! The "Yes, and..." rule from improvisational comedy:
-//! - Accept what the previous actor said (the "Yes")
-//! - Add new information or details (the "and")
-//! - Keep the story flowing and building
+//! The example wraps the rig-core Ollama client in an `OllamaResource` so the
+//! HTTP client is built once at workflow setup, shared across both actors via
+//! `Resources`, and torn down in one place. Actors hold no client state.
 //!
 //! Prerequisites:
-//! - Install Ollama: https://ollama.ai/
-//! - Run Ollama locally
+//! - Install Ollama: <https://ollama.ai/>
+//! - `ollama pull qwen3:1.7b` and run the daemon
 //!
 //! Run with:
 //! ```bash
@@ -26,6 +22,7 @@ use rand::RngExt;
 use rig::client::{CompletionClient, Nothing};
 use rig::completion::Prompt;
 use rig::providers::ollama::Client;
+use std::sync::Arc;
 
 // Configuration constants
 const CONTEXT: &str = r#"
@@ -38,7 +35,7 @@ Continue talking about the subject using the 'Yes, and...' improv principle:
 - Feel free to use any object from the previous conversation
 "#;
 
-const MODEL: &str = "qwen3:1.7b";
+const MODEL: &str = "gemma4:e2b";
 const MAX_TOKEN: u64 = 2048;
 const MAX_INTERACTIONS: u32 = 12;
 
@@ -71,33 +68,69 @@ const SUBJECTS: &[&str] = &[
     "economics",
 ];
 
-/// Utility function to filter out think tags from AI responses
+// ============================================================================
+// OllamaResource — shared rig-core client
+// ============================================================================
+
+/// Wraps the rig Ollama `Client` so it lives as a workflow resource.
 ///
-/// Removes `<think>...</think>` blocks that AI models sometimes include
-/// for internal reasoning that shouldn't appear in the final output.
+/// `setup` is a no-op print today (the rig client is constructed eagerly in
+/// `new`), but real deployments could ping the model endpoint here to fail
+/// fast if Ollama is unreachable.
+struct OllamaResource {
+    client: Client,
+}
+
+impl OllamaResource {
+    fn new() -> Result<Self, CanoError> {
+        Ok(Self {
+            client: Client::new(Nothing)
+                .map_err(|e| CanoError::Generic(format!("Ollama client error: {e}")))?,
+        })
+    }
+
+    /// Build a fresh agent for one prompt round.
+    fn agent(&self) -> rig::agent::Agent<rig::providers::ollama::CompletionModel<reqwest::Client>> {
+        self.client
+            .agent(MODEL)
+            .preamble(CONTEXT)
+            .max_tokens(MAX_TOKEN)
+            .build()
+    }
+}
+
+#[resource]
+impl Resource for OllamaResource {
+    async fn setup(&self) -> Result<(), CanoError> {
+        println!("OllamaResource: ready (model={MODEL})");
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/// Removes `<think>...</think>` reasoning blocks and normalizes whitespace.
 fn filter_think_tags(text: &str) -> String {
     let mut result = text.to_string();
 
-    // Remove <think>...</think> blocks (case insensitive)
     while let Some(start) = result.to_lowercase().find("<think>") {
         if let Some(end) = result[start..].to_lowercase().find("</think>") {
             let end_pos = start + end + "</think>".len();
             result.replace_range(start..end_pos, "");
         } else {
-            // If no closing tag, remove from <think> to end
             result.replace_range(start.., "");
             break;
         }
     }
 
-    // Clean up remaining tags and normalize whitespace
     result = result
         .replace("<think>", "")
         .replace("</think>", "")
         .replace("<THINK>", "")
         .replace("</THINK>", "");
 
-    // Normalize whitespace
     result
         .lines()
         .map(|line| line.trim())
@@ -108,7 +141,7 @@ fn filter_think_tags(text: &str) -> String {
         .to_string()
 }
 
-/// Get conversation history from store as a formatted string
+/// Read the rolling chat transcript from the in-memory store.
 fn get_conversation_history(store: &MemoryStore) -> Result<String, CanoError> {
     let chat_history: Vec<String> = store
         .get::<Vec<String>>("chat")
@@ -116,7 +149,7 @@ fn get_conversation_history(store: &MemoryStore) -> Result<String, CanoError> {
     Ok(chat_history.join("\n"))
 }
 
-/// Update and check interaction count
+/// Increment the per-workflow interaction counter and return the new value.
 fn update_interaction_count(store: &MemoryStore) -> Result<u32, CanoError> {
     let current_count: u32 = store.get::<u32>("interaction_count").unwrap_or(0);
     let new_count = current_count + 1;
@@ -126,80 +159,68 @@ fn update_interaction_count(store: &MemoryStore) -> Result<u32, CanoError> {
     Ok(new_count)
 }
 
-/// Create an AI agent with standard configuration
-fn create_agent(
-    client: &Client,
-) -> rig::agent::Agent<rig::providers::ollama::CompletionModel<reqwest::Client>> {
-    client
-        .agent(MODEL)
-        .preamble(CONTEXT)
-        .max_tokens(MAX_TOKEN)
-        .build()
-}
+// ============================================================================
+// Workflow states
+// ============================================================================
 
-/// Conversation states for the "Yes, and..." improv workflow
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ConversationState {
-    Start,      // Actor1 starts the subject
-    Actor2Turn, // Actor2's turn to continue with "Yes, and..."
-    Actor1Turn, // Actor1's turn to continue with "Yes, and..."
-    End,        // End the conversation after MAX_INTERACTIONS interactions
-    Error,      // Error state
+    Start,      // Actor1 opens with a random subject
+    Actor2Turn, // Actor2's turn to extend with "Yes, and..."
+    Actor1Turn, // Actor1's turn to extend with "Yes, and..."
+    End,        // Reached MAX_INTERACTIONS
+    Error,      // Reserved for future error transitions
 }
 
-/// Actor1 node that starts stories and continues with "Yes, and..."
-struct Actor1Node {
-    client: Client,
-}
+// ============================================================================
+// Actor1Node
+// ============================================================================
 
-impl Clone for Actor1Node {
-    fn clone(&self) -> Self {
-        Self {
-            client: self.client.clone(),
-        }
-    }
-}
+/// Opens the story with a random subject; on later turns extends the thread.
+#[derive(Clone)]
+struct Actor1Node;
 
 impl Actor1Node {
-    async fn new() -> Result<Self, CanoError> {
-        Ok(Self {
-            client: Client::new(Nothing)
-                .map_err(|e| CanoError::Generic(format!("Ollama client error: {e}")))?,
-        })
-    }
-
-    fn get_random_subject(&self) -> &str {
+    fn pick_subject() -> &'static str {
         let mut rng = rand::rng();
-        let n = rng.random_range(0..SUBJECTS.len());
-        SUBJECTS[n]
+        SUBJECTS[rng.random_range(0..SUBJECTS.len())]
     }
+}
+
+/// Carry the shared `OllamaResource` plus the prompt context from `prep` to
+/// `exec`. `exec` does not receive `&Resources`, so the resource is borrowed
+/// once in `prep` and held as an `Arc` for the duration of the call.
+struct Actor1Prep {
+    ollama: Arc<OllamaResource>,
+    history: String,
 }
 
 #[node(state = ConversationState)]
 impl Actor1Node {
-    type PrepResult = String;
+    type PrepResult = Actor1Prep;
     type ExecResult = String;
 
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
-        get_conversation_history(&store)
+        let store = res.get::<MemoryStore, _>("store")?;
+        let ollama = res.get::<OllamaResource, _>("ollama")?;
+        let history = get_conversation_history(&store)?;
+        Ok(Actor1Prep { ollama, history })
     }
 
-    async fn exec(&self, prep_result: Self::PrepResult) -> Self::ExecResult {
-        let subject = self.get_random_subject();
-        let is_empty = prep_result.is_empty();
+    async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
+        let Actor1Prep { ollama, history } = prep_res;
+        let subject = Self::pick_subject();
+        let is_empty = history.is_empty();
 
         let prompt = if is_empty {
             format!(
                 "Start a creative short story about {subject}. Write 1 short sentence to set up an interesting scenario. Make it engaging and leave room for others to build upon it."
             )
         } else {
-            prep_result
+            history
         };
 
-        let agent = create_agent(&self.client);
-
-        match agent.prompt(&prompt).await {
+        match ollama.agent().prompt(&prompt).await {
             Ok(response) => filter_think_tags(&response),
             Err(e) => {
                 eprintln!("Actor1Node AI error: {e:?}");
@@ -218,7 +239,7 @@ impl Actor1Node {
         res: &Resources,
         exec_result: Self::ExecResult,
     ) -> Result<ConversationState, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 
         store
             .append("chat", exec_result.clone())
@@ -236,20 +257,16 @@ impl Actor1Node {
     }
 }
 
-/// Actor2 node that continues stories with "Yes, and..."
-struct Actor2Node {
-    client: Client,
-}
+// ============================================================================
+// Actor2Node
+// ============================================================================
+
+/// Always answers with "Yes, and..." — the improv rule guard rail.
+#[derive(Clone)]
+struct Actor2Node;
 
 impl Actor2Node {
-    async fn new() -> Result<Self, CanoError> {
-        Ok(Self {
-            client: Client::new(Nothing)
-                .map_err(|e| CanoError::Generic(format!("Ollama client error: {e}")))?,
-        })
-    }
-
-    fn ensure_yes_and_format(&self, response: &str) -> String {
+    fn ensure_yes_and_format(response: &str) -> String {
         let cleaned = filter_think_tags(response);
         if cleaned.trim().to_lowercase().starts_with("yes, and") {
             cleaned
@@ -264,21 +281,27 @@ impl Actor2Node {
     }
 }
 
+struct Actor2Prep {
+    ollama: Arc<OllamaResource>,
+    history: String,
+}
+
 #[node(state = ConversationState)]
 impl Actor2Node {
-    type PrepResult = String;
+    type PrepResult = Actor2Prep;
     type ExecResult = String;
 
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
-        get_conversation_history(&store)
+        let store = res.get::<MemoryStore, _>("store")?;
+        let ollama = res.get::<OllamaResource, _>("ollama")?;
+        let history = get_conversation_history(&store)?;
+        Ok(Actor2Prep { ollama, history })
     }
 
-    async fn exec(&self, prep_result: Self::PrepResult) -> Self::ExecResult {
-        let agent = create_agent(&self.client);
-
-        match agent.prompt(&prep_result).await {
-            Ok(response) => self.ensure_yes_and_format(&response),
+    async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
+        let Actor2Prep { ollama, history } = prep_res;
+        match ollama.agent().prompt(&history).await {
+            Ok(response) => Self::ensure_yes_and_format(&response),
             Err(e) => {
                 eprintln!("Actor2Node AI error: {e:?}");
                 "Yes, and something unexpected happened that changed everything.".to_string()
@@ -291,7 +314,7 @@ impl Actor2Node {
         res: &Resources,
         exec_result: Self::ExecResult,
     ) -> Result<ConversationState, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 
         store
             .append("chat", exec_result.clone())
@@ -304,6 +327,10 @@ impl Actor2Node {
         Ok(ConversationState::Actor1Turn)
     }
 }
+
+// ============================================================================
+// Main
+// ============================================================================
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
@@ -320,18 +347,15 @@ async fn main() -> Result<(), CanoError> {
     println!("   • {MAX_INTERACTIONS} total interactions to create a complete story");
     println!();
 
-    // Create actors
-    let actor1 = Actor1Node::new().await?;
-    let actor2 = Actor2Node::new().await?;
-
     let store = MemoryStore::new();
-    let resources = Resources::new().insert("store", store.clone());
+    let resources = Resources::new()
+        .insert("store", store.clone())
+        .insert("ollama", OllamaResource::new()?);
 
-    // Setup workflow with new API
     let workflow = Workflow::new(resources)
-        .register(ConversationState::Start, actor1.clone())
-        .register(ConversationState::Actor1Turn, actor1)
-        .register(ConversationState::Actor2Turn, actor2)
+        .register(ConversationState::Start, Actor1Node)
+        .register(ConversationState::Actor1Turn, Actor1Node)
+        .register(ConversationState::Actor2Turn, Actor2Node)
         .add_exit_states(vec![ConversationState::End, ConversationState::Error]);
 
     println!("🚀 Starting improvised story...\n");

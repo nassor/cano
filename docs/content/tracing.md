@@ -200,7 +200,7 @@ struct PaymentTask;
 #[task(state = AppState)]
 impl PaymentTask {
     async fn run(&self, res: &Resources) -> Result&lt;TaskResult&lt;AppState&gt;, CanoError&gt; {
-        let store = res.get::&lt;MemoryStore, str&gt;("store")?;
+        let store = res.get::&lt;MemoryStore, _&gt;("store")?;
         let order_id: String = store.get("order_id")?;
         info!(order_id = %order_id, "Processing payment");
 <!--blank-->
@@ -234,7 +234,7 @@ impl DataEnrichmentNode {
 <!--blank-->
     #[instrument(skip(self, res), fields(source = %self.source))]
     async fn prep(&self, res: &Resources) -> Result&lt;Self::PrepResult, CanoError&gt; {
-        let store = res.get::&lt;MemoryStore, str&gt;("store")?;
+        let store = res.get::&lt;MemoryStore, _&gt;("store")?;
         let keys: Vec&lt;String&gt; = store.get("pending_keys")?;
         debug!(count = keys.len(), "Loaded keys for enrichment");
         Ok(keys)
@@ -252,7 +252,7 @@ impl DataEnrichmentNode {
         results: Self::ExecResult,
     ) -> Result&lt;PipelineState, CanoError&gt; {
         info!(enriched = results.len(), "Enrichment complete");
-        let store = res.get::&lt;MemoryStore, str&gt;("store")?;
+        let store = res.get::&lt;MemoryStore, _&gt;("store")?;
         store.put("enriched_data", results)?;
         Ok(PipelineState::Validate)
     }

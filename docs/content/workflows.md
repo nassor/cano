@@ -14,7 +14,7 @@ template = "page.html"
 <ol>
 <li><a href="#defining-states">Defining States</a></li>
 <li><a href="#building-a-workflow">Building a Workflow</a></li>
-<li><a href="#builder-pattern">Builder Pattern and #[must_use]</a></li>
+<li><a href="#builder-pattern">Builder Pattern</a></li>
 <li><a href="#validation">Workflow Validation</a></li>
 <li><a href="#error-handling">Error Handling</a></li>
 <li><a href="#split-join">Split/Join Workflows</a></li>
@@ -355,7 +355,7 @@ struct DataLoader;
 #[task(state = DataState)]
 impl DataLoader {
     async fn run(&self, res: &Resources) -> Result<TaskResult<DataState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("Loading initial data...");
 <!--blank-->
         // Load some data to process
@@ -382,7 +382,7 @@ impl ProcessorTask {
 #[task(state = DataState)]
 impl ProcessorTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<DataState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("Processor {} starting...", self.task_id);
 <!--blank-->
         // Get input data
@@ -409,7 +409,7 @@ struct Aggregator;
 #[task(state = DataState)]
 impl Aggregator {
     async fn run(&self, res: &Resources) -> Result<TaskResult<DataState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("Aggregating results...");
 <!--blank-->
         // Collect all results
@@ -800,8 +800,8 @@ let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
 
 <h2 id="parallel-patterns"><a href="#parallel-patterns" class="anchor-link" aria-hidden="true">#</a>Common Parallel Processing Patterns</h2>
 <p>
-Split/Join is powerful for handling complex parallel processing scenarios. Here are real-world patterns 
-you can implement to replace the need for concurrent workflows.
+Split/Join handles complex parallel processing within a single workflow. Below are real-world
+patterns that fan out work across many tasks and join results back into the FSM.
 </p>
 
 <h3 id="pattern-queue"><a href="#pattern-queue" class="anchor-link" aria-hidden="true">#</a>Pattern 1: Queue Consumer with Batch Processing</h3>
@@ -835,7 +835,7 @@ struct QueuePuller {
 #[task(state = QueueState)]
 impl QueuePuller {
     async fn run(&self, res: &Resources) -> Result<TaskResult<QueueState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let mut queue = self.queue.lock().await;
 <!--blank-->
         // Pull batch from queue
@@ -871,7 +871,7 @@ struct ItemProcessor {
 #[task(state = QueueState)]
 impl ItemProcessor {
     async fn run(&self, res: &Resources) -> Result<TaskResult<QueueState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("Processing item: {}", self.item_id);
 <!--blank-->
         // Simulate processing
@@ -893,7 +893,7 @@ struct BatchSplitter {
 #[task(state = QueueState)]
 impl BatchSplitter {
     async fn run(&self, res: &Resources) -> Result<TaskResult<QueueState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let batch: Vec<String> = store.get("current_batch")?;
 <!--blank-->
         if batch.is_empty() {
@@ -978,7 +978,7 @@ struct RecordLoader;
 #[task(state = DataState)]
 impl RecordLoader {
     async fn run(&self, res: &Resources) -> Result<TaskResult<DataState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let records: Vec<i32> = (1..=100).collect();
         store.put("records", records)?;
         println!("Loaded 100 records");
@@ -995,7 +995,7 @@ struct RecordProcessor {
 #[task(state = DataState)]
 impl RecordProcessor {
     async fn run(&self, res: &Resources) -> Result<TaskResult<DataState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let records: Vec<i32> = store.get("records")?;
         let value = records[self.index];
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1042,7 +1042,7 @@ struct RateLimitedApiTask {
 #[task(state = ApiState)]
 impl RateLimitedApiTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<ApiState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         // Acquire permit (blocks if limit reached)
         let _permit = self.semaphore.acquire().await
             .map_err(|e| CanoError::task_execution(e.to_string()))?;
@@ -1080,8 +1080,8 @@ let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
 
 <h3 id="pattern-continuous"><a href="#pattern-continuous" class="anchor-link" aria-hidden="true">#</a>Pattern 4: Continuous Workflow with Split/Join</h3>
 <p>
-Combine scheduling with split/join for continuous parallel processing. 
-This replaces the need for concurrent workflow scheduling.
+Combine scheduling with split/join for continuous parallel processing within a single
+scheduled workflow.
 </p>
 
 <pre><code class="language-rust">use cano::prelude::*;
@@ -1095,7 +1095,7 @@ struct WorkProcessor {
 #[task(state = ProcessState)]
 impl WorkProcessor {
     async fn run(&self, res: &Resources) -> Result<TaskResult<ProcessState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let items: Vec<String> = store.get("work_items")?;
         if let Some(item) = items.get(self.item_index) {
             println!("Processing item: {}", item);
@@ -1113,7 +1113,7 @@ struct BatchLoaderTask;
 #[task(state = ProcessState)]
 impl BatchLoaderTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<ProcessState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let items = fetch_pending_work().await?;
         if items.is_empty() {
             println!("No work available");
@@ -1241,7 +1241,7 @@ impl ParseTask {
         &amp;self,
         res: &amp;Resources,
     ) -&gt; Result&lt;TaskResult&lt;TextPipelineState&gt;, CanoError&gt; {
-        let store = res.get::&lt;MemoryStore, str&gt;("store")?;
+        let store = res.get::&lt;MemoryStore, _&gt;("store")?;
         let text: String = store.get("input_text")
             .map_err(|e| CanoError::task_execution(format!("missing input: {e}")))?;
 <!--blank-->
@@ -1264,7 +1264,7 @@ impl TransformTask {
         &amp;self,
         res: &amp;Resources,
     ) -&gt; Result&lt;TaskResult&lt;TextPipelineState&gt;, CanoError&gt; {
-        let store = res.get::&lt;MemoryStore, str&gt;("store")?;
+        let store = res.get::&lt;MemoryStore, _&gt;("store")?;
         let text: String = store.get("validated_text")
             .map_err(|e| CanoError::task_execution(format!("{e}")))?;
 <!--blank-->
@@ -1514,7 +1514,7 @@ struct ValidateRequestTask;
 #[task(state = AdExchangeState)]
 impl ValidateRequestTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let request: AdRequest = store.get("ad_request")?;
 <!--blank-->
         println!("🔍 Validating request {}", request.request_id);
@@ -1550,7 +1550,7 @@ enum ContextTask {
 #[task(state = AdExchangeState)]
 impl ContextTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         match self {
             ContextTask::FetchUser => {
                 println!("  👤 Fetching user profile...");
@@ -1599,7 +1599,7 @@ struct ContactDSPTask {
 #[task(state = AdExchangeState)]
 impl ContactDSPTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("  📡 Requesting bid from {}...", self.partner_id);
 <!--blank-->
         // Simulate DSP bid request with varying latency
@@ -1640,7 +1640,7 @@ struct ScoreBidTask {
 #[task(state = AdExchangeState)]
 impl ScoreBidTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let bids: Vec<BidResponse> = store.get("bids")?;
 <!--blank-->
         if self.bid_index >= bids.len() {
@@ -1690,7 +1690,7 @@ struct RunAuctionTask;
 #[task(state = AdExchangeState)]
 impl RunAuctionTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("\n  🎯 Running auction...");
 <!--blank-->
         let start = tokio::time::Instant::now();
@@ -1749,7 +1749,7 @@ enum TrackingTask {
 #[task(state = AdExchangeState)]
 impl TrackingTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         match self {
             TrackingTask::LogAnalytics => {
                 println!("  📈 Logging to analytics...");
@@ -1798,7 +1798,7 @@ struct BuildResponseTask;
 #[task(state = AdExchangeState)]
 impl BuildResponseTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("\n  📦 Building response...");
 <!--blank-->
         let request: AdRequest = store.get("ad_request")?;
@@ -1867,7 +1867,7 @@ enum ErrorTrackingTask {
 #[task(state = AdExchangeState)]
 impl ErrorTrackingTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         match self {
             ErrorTrackingTask::LogError => {
                 println!("  📝 Logging error...");

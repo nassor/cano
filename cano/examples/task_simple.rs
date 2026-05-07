@@ -35,7 +35,7 @@ struct GeneratorTask;
 #[task(state = Action)]
 impl GeneratorTask {
     async fn run(&self, res: &Resources) -> CanoResult<TaskResult<Action>> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 
         println!("🎲 GeneratorTask: Creating random numbers...");
 
@@ -62,7 +62,7 @@ struct CounterTask;
 #[task(state = Action)]
 impl CounterTask {
     async fn run(&self, res: &Resources) -> CanoResult<TaskResult<Action>> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 
         println!("🔢 CounterTask: Counting numbers...");
 

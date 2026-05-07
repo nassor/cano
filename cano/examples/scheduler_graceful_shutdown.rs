@@ -66,7 +66,7 @@ impl LongProcessingNode {
     }
 
     async fn post(&self, res: &Resources, result: Self::ExecResult) -> Result<MyState, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         store.put("long_task_result", result)?;
         Ok(MyState::Processing)
     }
@@ -82,7 +82,7 @@ impl ProcessingNode {
     type ExecResult = String;
 
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let result: String = store
             .get("long_task_result")
             .unwrap_or_else(|_| "No result available".to_string());
@@ -96,7 +96,7 @@ impl ProcessingNode {
     }
 
     async fn post(&self, res: &Resources, result: Self::ExecResult) -> Result<MyState, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         store.put("processed_result", result)?;
         println!("✅ Processing completed");
         Ok(MyState::End)

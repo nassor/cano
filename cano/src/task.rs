@@ -69,8 +69,8 @@
 //! #[task]
 //! impl Task<Step> for FetchTask {
 //!     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-//!         let store = res.get::<MemoryStore, str>("store")?;
-//!         let params = res.get::<FetchParams, str>("params")?;
+//!         let store = res.get::<MemoryStore, _>("store")?;
+//!         let params = res.get::<FetchParams, _>("params")?;
 //!         let data: Vec<u32> = (0..params.limit as u32).collect();
 //!         store.put("data", data)?;
 //!         Ok(TaskResult::Single(Step::Done))
@@ -499,7 +499,7 @@ pub enum TaskResult<TState> {
 /// #[task]
 /// impl Task<String> for DataProcessor {
 ///     async fn run(&self, res: &Resources) -> Result<TaskResult<String>, CanoError> {
-///         let store = res.get::<MemoryStore, str>("store")?;
+///         let store = res.get::<MemoryStore, _>("store")?;
 ///         // Load data
 ///         let input: i32 = store.get("input").unwrap_or(1);
 ///

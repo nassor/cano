@@ -255,7 +255,7 @@ impl Node<PipelineState> for MatrixGenerator {
         res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<PipelineState, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         store.put("matrices", exec_res)?;
         println!("✅ Matrix generation complete!");
         Ok(PipelineState::Multiply)
@@ -276,7 +276,7 @@ impl Node<PipelineState> for SimdMatrixMultiplier {
     }
 
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("🧮 Loading matrices for SIMD multiplication...");
         let matrices: Vec<SimdMatrix> = store.get("matrices")?;
         Ok(matrices)
@@ -311,7 +311,7 @@ impl Node<PipelineState> for SimdMatrixMultiplier {
         res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<PipelineState, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         store.put("multiplied_matrices", exec_res)?;
         Ok(PipelineState::Transform)
     }
@@ -339,7 +339,7 @@ impl Node<PipelineState> for SimdMatrixTransformer {
     }
 
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("🔄 Loading matrices for SIMD transformations...");
         let matrices: Vec<SimdMatrix> = store.get("multiplied_matrices")?;
         Ok(matrices)
@@ -383,7 +383,7 @@ impl Node<PipelineState> for SimdMatrixTransformer {
         res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<PipelineState, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         store.put("transformed_matrices", exec_res)?;
         Ok(PipelineState::Statistics)
     }
@@ -403,7 +403,7 @@ impl Node<PipelineState> for SimdStatisticsCalculator {
     }
 
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("📊 Loading matrices for statistics calculation...");
         let matrices: Vec<SimdMatrix> = store.get("transformed_matrices")?;
         Ok(matrices)
@@ -470,7 +470,7 @@ impl Node<PipelineState> for SimdStatisticsCalculator {
         res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<PipelineState, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         store.put("statistics", exec_res.clone())?;
 
         for (i, (sum, mean, variance)) in exec_res.iter().enumerate() {

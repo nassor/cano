@@ -65,7 +65,7 @@ impl Task<Step> for CallTask {
     }
 
     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        let client = res.get::<FlakyClient, str>("client")?;
+        let client = res.get::<FlakyClient, _>("client")?;
         let payload = client.fetch().await?;
         println!("    → got: {payload}");
         Ok(TaskResult::Single(Step::Done))

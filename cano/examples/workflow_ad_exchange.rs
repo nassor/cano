@@ -86,7 +86,7 @@ struct ValidateRequestTask;
 #[task(state = AdExchangeState)]
 impl ValidateRequestTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let request: AdRequest = store.get("ad_request")?;
 
         println!("🔍 Validating request {}", request.request_id);
@@ -122,7 +122,7 @@ enum ContextTask {
 #[task(state = AdExchangeState)]
 impl ContextTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         match self {
             ContextTask::FetchUser => {
                 println!("  👤 Fetching user profile...");
@@ -171,7 +171,7 @@ struct ContactDSPTask {
 #[task(state = AdExchangeState)]
 impl ContactDSPTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("  📡 Requesting bid from {}...", self.partner_id);
 
         // Simulate DSP bid request with varying latency
@@ -212,7 +212,7 @@ struct ScoreBidTask {
 #[task(state = AdExchangeState)]
 impl ScoreBidTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let bids: Vec<BidResponse> = store.get("bids")?;
 
         if self.bid_index >= bids.len() {
@@ -262,7 +262,7 @@ struct RunAuctionTask;
 #[task(state = AdExchangeState)]
 impl RunAuctionTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("\n  🎯 Running auction...");
 
         let start = tokio::time::Instant::now();
@@ -324,7 +324,7 @@ enum TrackingTask {
 #[task(state = AdExchangeState)]
 impl TrackingTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         match self {
             TrackingTask::LogAnalytics => {
                 println!("  📈 Logging to analytics...");
@@ -373,7 +373,7 @@ struct BuildResponseTask;
 #[task(state = AdExchangeState)]
 impl BuildResponseTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("\n  📦 Building response...");
 
         let request: AdRequest = store.get("ad_request")?;
@@ -442,7 +442,7 @@ enum ErrorTrackingTask {
 #[task(state = AdExchangeState)]
 impl ErrorTrackingTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         match self {
             ErrorTrackingTask::LogError => {
                 println!("  📝 Logging error...");

@@ -33,7 +33,7 @@ struct DataLoader;
 #[task(state = DataProcessingState)]
 impl DataLoader {
     async fn run(&self, res: &Resources) -> Result<TaskResult<DataProcessingState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("Loading initial data...");
 
         // Simulate loading data
@@ -60,7 +60,7 @@ impl ProcessorTask {
 #[task(state = DataProcessingState)]
 impl ProcessorTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<DataProcessingState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("Processor {} starting...", self.task_id);
 
         // Get input data
@@ -90,7 +90,7 @@ struct Aggregator;
 #[task(state = DataProcessingState)]
 impl Aggregator {
     async fn run(&self, res: &Resources) -> Result<TaskResult<DataProcessingState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("Aggregating results...");
 
         // Collect all results

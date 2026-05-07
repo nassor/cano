@@ -19,6 +19,10 @@ template = "page.html"
 <li class="toc-sub"><a href="#cron-scheduling">Cron Scheduling</a></li>
 <li class="toc-sub"><a href="#manual-triggering">Manual Triggering</a></li>
 <li class="toc-sub"><a href="#mixed-scheduling">Mixed Scheduling</a></li>
+<li><a href="#backoff-and-trip">Backoff &amp; Trip State</a></li>
+<li class="toc-sub"><a href="#backoff-policy">Attaching a Policy</a></li>
+<li class="toc-sub"><a href="#status-variants">Status Variants</a></li>
+<li class="toc-sub"><a href="#recovery">Recovery via reset_flow</a></li>
 <li><a href="#graceful-shutdown">Graceful Shutdown</a></li>
 <li><a href="#multi-level-map-reduce">Advanced: Multi-Level Map-Reduce</a></li>
 </ol>
@@ -115,7 +119,7 @@ impl HealthCheckTask {
         println!("Running health check...");
 <!--blank-->
         // Check system health
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let status = "healthy".to_string();
         store.put("last_health_check", status)?;
 <!--blank-->
@@ -173,7 +177,7 @@ impl DailyReportNode {
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
         println!("📊 Preparing {} report...", self.report_type);
 <!--blank-->
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 <!--blank-->
         // Load data for report
         let data = vec!["metric1".to_string(), "metric2".to_string(), "metric3".to_string()];
@@ -191,7 +195,7 @@ impl DailyReportNode {
 <!--blank-->
     async fn post(&self, res: &Resources, result: Self::ExecResult) -> Result<State, CanoError> {
         println!("📊 Report completed: {}", result);
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         store.put("last_report", result)?;
 <!--blank-->
         Ok(State::Complete)
@@ -264,7 +268,7 @@ impl DataExportTask {
         println!("Starting data export...");
 <!--blank-->
         // Export data to CSV
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let export_path = "/tmp/export.csv".to_string();
         store.put("export_path", export_path)?;
 <!--blank-->
@@ -424,6 +428,114 @@ async fn main() -> Result<(), CanoError> {
 }</code></pre>
 <hr class="section-divider">
 
+<h2 id="backoff-and-trip"><a href="#backoff-and-trip" class="anchor-link" aria-hidden="true">#</a>Backoff &amp; Trip State</h2>
+<p>
+A flow that fails repeatedly can waste resources by re-firing on its base schedule.
+Attach a <code>BackoffPolicy</code> to stretch the gap between failed runs and, optionally, trip the flow
+after a streak limit so the scheduler stops dispatching it until you intervene.
+</p>
+
+<div class="callout callout-info">
+<div class="callout-label">Opt-in</div>
+<p>
+Flows registered without a policy keep the existing <code>Status::Failed(err)</code> behavior — the next
+scheduled tick fires per the base schedule. Defaults are <strong>never</strong> applied silently; you must
+call <code>set_backoff</code> to activate the new code path.
+</p>
+</div>
+
+<div class="callout callout-warning">
+<div class="callout-label">Distinct from CircuitBreaker</div>
+<p>
+Flow-level <code>Tripped</code> is scoped to the scheduler and is separate from the task-level
+<code>CanoError::CircuitOpen</code> emitted by <a href="../tasks/"><code>CircuitBreaker</code></a>.
+The breaker gates a single task's call to a dependency; this policy gates the scheduler from re-firing
+an entire flow.
+</p>
+</div>
+
+<h3 id="backoff-policy"><a href="#backoff-policy" class="anchor-link" aria-hidden="true">#</a>Attaching a Policy</h3>
+<p>
+Register the workflow normally, then call <code>set_backoff</code> <strong>before</strong> <code>start()</code>.
+The policy controls four things: the initial delay after the first failure, the multiplier applied per
+additional consecutive failure, a hard cap on the computed delay, jitter, and an optional streak limit.
+</p>
+
+<pre><code class="language-rust">use cano::prelude::*;
+use std::time::Duration;
+<!--blank-->
+let mut scheduler: Scheduler<FlowState> = Scheduler::new();
+<!--blank-->
+scheduler.every(
+    "flaky",
+    workflow,
+    FlowState::Start,
+    Duration::from_millis(200),
+)?;
+<!--blank-->
+scheduler.set_backoff(
+    "flaky",
+    BackoffPolicy {
+        initial: Duration::from_millis(300),
+        multiplier: 2.0,
+        max_delay: Duration::from_secs(2),
+        jitter: 0.1,
+        streak_limit: Some(3),
+    },
+)?;
+<!--blank-->
+scheduler.start().await?;</code></pre>
+
+<p>
+Computed delay is <code>initial * multiplier^(streak-1)</code>, capped at <code>max_delay</code>, then
+multiplied by a random factor in <code>1 ± jitter</code>. The <code>Every</code> loop's sleep extends to
+<code>max(interval, next_eligible - now)</code>, and the <code>Cron</code> loop suppresses ticks inside the
+backoff window. <code>BackoffPolicy::default()</code> gives 1s initial, 2.0× multiplier, 5min cap,
+0.1 jitter, and <strong>no trip limit</strong>. Use <code>BackoffPolicy::with_trip(n)</code> to ask for a
+trip after <code>n</code> consecutive failures.
+</p>
+
+<h3 id="status-variants"><a href="#status-variants" class="anchor-link" aria-hidden="true">#</a>Status Variants</h3>
+<p>
+<code>Status</code> is <code>#[non_exhaustive]</code> — external <code>match</code> arms must include
+a wildcard. The variants are:
+</p>
+<ul>
+<li><code>Idle</code> — registered, never run or finished cleanly.</li>
+<li><code>Running</code> — currently executing.</li>
+<li><code>Completed</code> — last run reached an exit state.</li>
+<li><code>Failed(String)</code> — last run errored. Used only when no policy is attached.</li>
+<li><code>Backoff { until, streak, last_error }</code> — flow failed and is waiting until <code>until</code>
+before its next dispatch. Set only when a policy is attached.</li>
+<li><code>Tripped { streak, last_error }</code> — streak reached <code>streak_limit</code>; the scheduler
+will not dispatch this flow again until <code>reset_flow</code> is called.</li>
+</ul>
+<p>
+Outcome writes are atomic: observers never see a transient <code>Failed</code> flicker for a flow that
+has a policy attached. <code>FlowInfo</code> exposes <code>failure_streak</code> and
+<code>next_eligible</code> for observability.
+</p>
+
+<h3 id="recovery"><a href="#recovery" class="anchor-link" aria-hidden="true">#</a>Recovery via <code>reset_flow</code></h3>
+<p>
+A <code>Tripped</code> flow stays parked until you clear it. <code>Scheduler::reset_flow(id)</code> clears
+the failure streak and <code>next_eligible</code>, and (when the flow is not currently running) sets the
+status back to <code>Idle</code>. Manual <code>trigger()</code> is rejected on a tripped flow — call
+<code>reset_flow</code> first.
+</p>
+
+<pre><code class="language-rust">let snap = scheduler.status("flaky").await.expect("flow exists");
+if matches!(snap.status, Status::Tripped { .. }) {
+    scheduler.reset_flow("flaky").await?;
+}</code></pre>
+
+<p>
+See the <code>scheduler_backoff</code> example
+(<code>cargo run --example scheduler_backoff --features scheduler</code>) for an end-to-end walk-through
+that exercises the trip and recovery path.
+</p>
+<hr class="section-divider">
+
 <h2 id="graceful-shutdown"><a href="#graceful-shutdown" class="anchor-link" aria-hidden="true">#</a>Graceful Shutdown</h2>
 <p>
 The scheduler supports graceful shutdown, allowing currently running workflows to complete before stopping.
@@ -457,11 +569,10 @@ subgraph "Scheduler Level (Map-Reduce)"
 S[Scheduler] -->|Trigger| W1[Workflow: Batch-A-Classics]
 S -->|Trigger| W2[Workflow: Batch-B-Adventure]
 end
-
 subgraph "Batch-A-Classics Workflow (Split/Join)"
 W1 --> Init1[Init: 2 Books]
 Init1 --> D1[Split: Download]
-D1 --> D1A[Download: Pride & Prejudice]
+D1 --> D1A["Download: Pride &amp; Prejudice"]
 D1 --> D1B[Download: Alice in Wonderland]
 D1A --> J1D[Join: All Downloads]
 D1B --> J1D
@@ -472,7 +583,6 @@ A1A --> J1A[Join: 75% Complete]
 A1B --> J1A
 J1A --> Sum1[Summarize Batch A]
 end
-
 subgraph "Batch-B-Adventure Workflow (Split/Join)"
 W2 --> Init2[Init: 2 Books]
 Init2 --> D2[Split: Download]
@@ -487,11 +597,9 @@ A2A --> J2A[Join: 75% Complete]
 A2B --> J2A
 J2A --> Sum2[Summarize Batch B]
 end
-
-Sum1 --> R[Global Reduce:<br/>Aggregate All Batches]
+Sum1 --> R["Global Reduce: Aggregate All Batches"]
 Sum2 --> R
-R --> F[Final Rankings &<br/>Statistics]
-
+R --> F["Final Rankings and Statistics"]
 style S fill:#4CAF50
 style R fill:#2196F3
 style F fill:#FF9800
@@ -685,7 +793,7 @@ impl InitBatchTask {
             self.books.len()
         );
 <!--blank-->
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         store.put("batch_name", self.batch_name.clone())?;
         store.put("book_metadata", self.books.clone())?;
 <!--blank-->
@@ -715,7 +823,7 @@ impl DownloadTask {
         {
             Ok(book) => {
                 // Store individual book
-                let store = res.get::<MemoryStore, str>("store")?;
+                let store = res.get::<MemoryStore, _>("store")?;
                 store.put(&format!("book_{}", self.book_id), book)?;
                 Ok(TaskResult::Single(BookAnalysisState::AnalyzeBatch))
             }
@@ -733,7 +841,7 @@ struct AnalyzeTask {
 #[task(state = BookAnalysisState)]
 impl AnalyzeTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let book: Book = store
             .get(&format!("book_{}", self.book_id))
             .map_err(|e| CanoError::task_execution(format!("Book not found: {e}")))?;
@@ -761,7 +869,7 @@ struct SummarizeBatchTask {
 #[task(state = BookAnalysisState)]
 impl SummarizeBatchTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let batch_name: String = store.get("batch_name")?;
         let books: Vec<BookMetadata> = store.get("book_metadata")?;
 <!--blank-->

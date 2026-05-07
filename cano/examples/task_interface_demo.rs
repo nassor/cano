@@ -61,7 +61,7 @@ impl ProcessingNode {
         res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<TaskState, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("📝 Node '{}' - Post phase: Storing {}", self.name, exec_res);
         store.put("node_result", exec_res)?;
         Ok(TaskState::ProcessWithTask)
@@ -85,7 +85,7 @@ impl ProcessingTask {
 #[task(state = TaskState)]
 impl ProcessingTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<TaskState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 
         println!(
             "🚀 Task '{}' - Single run method: doing everything",
@@ -116,7 +116,7 @@ struct InitializerTask;
 #[task(state = TaskState)]
 impl InitializerTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<TaskState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 
         println!("🎯 Initializer Task - Setting up workflow data");
         store.put("workflow_id", "demo_123".to_string())?;

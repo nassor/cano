@@ -57,7 +57,7 @@ impl TracedDataProcessor {
     }
 
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 
         info!(processor_id = %self.processor_id, "Starting data preparation");
 
@@ -101,7 +101,7 @@ impl TracedDataProcessor {
         res: &Resources,
         exec_result: Self::ExecResult,
     ) -> Result<WorkflowState, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 
         info!(processor_id = %self.processor_id, "Starting post-processing");
 
@@ -184,7 +184,7 @@ impl SimpleMathTask {
     }
 
     async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 
         info!(task_id = %self.task_id, operation = %self.operation, "Starting math task");
 
