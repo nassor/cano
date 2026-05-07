@@ -7,7 +7,7 @@ build_search_index = false
 generate_feeds = false
 
 [extra]
-version = "0.11.0"
+version = "0.11.1"
 github_url = "https://github.com/nassor/cano"
 crates_url = "https://crates.io/crates/cano"
 docsrs_url = "https://docs.rs/cano"
