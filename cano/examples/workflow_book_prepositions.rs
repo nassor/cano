@@ -310,7 +310,7 @@ impl BookDownloaderNode {
         res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<BookPrepositionAction, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         if exec_res.is_empty() {
             return Err(CanoError::node_execution(
                 "No books were successfully downloaded",
@@ -394,7 +394,7 @@ impl PrepositionNode {
 
     /// Preparation: Load downloaded books from memory
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let books: Vec<Book> = store
             .get("downloaded_books")
             .map_err(|e| CanoError::preparation(format!("Failed to load books: {e}")))?;
@@ -436,7 +436,7 @@ impl PrepositionNode {
         res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<BookPrepositionAction, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         if exec_res.is_empty() {
             return Err(CanoError::node_execution("No book analyses were completed"));
         }
@@ -474,7 +474,7 @@ impl BookRankingByPrepositionNode {
 
     /// Preparation: Load book analyses from memory
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let analyses: Vec<BookAnalysis> = store
             .get("book_analyses")
             .map_err(|e| CanoError::preparation(format!("Failed to load analyses: {e}")))?;
@@ -521,7 +521,7 @@ impl BookRankingByPrepositionNode {
         res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<BookPrepositionAction, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         store.put("book_rankings", exec_res.clone())?;
 
         // Display results

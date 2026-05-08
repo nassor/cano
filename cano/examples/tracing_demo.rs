@@ -57,7 +57,7 @@ impl TracedDataProcessor {
     }
 
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 
         info!(processor_id = %self.processor_id, "Starting data preparation");
 
@@ -101,7 +101,7 @@ impl TracedDataProcessor {
         res: &Resources,
         exec_result: Self::ExecResult,
     ) -> Result<WorkflowState, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 
         info!(processor_id = %self.processor_id, "Starting post-processing");
 
@@ -184,7 +184,7 @@ impl SimpleMathTask {
     }
 
     async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 
         info!(task_id = %self.task_id, operation = %self.operation, "Starting math task");
 
@@ -321,17 +321,14 @@ async fn main() -> CanoResult<()> {
         )?;
 
         info!("Starting scheduler...");
-        let scheduler_clone = scheduler.clone();
-        tokio::spawn(async move {
-            scheduler.start().await.expect("Scheduler failed");
-        });
+        let running = scheduler.start().await?;
 
         // Let it run for a few iterations
         info!("Letting scheduler run for 6 seconds...");
         tokio::time::sleep(Duration::from_secs(6)).await;
 
         // Check status
-        if let Some(flow_info) = scheduler_clone.status("traced_workflow").await {
+        if let Some(flow_info) = running.status("traced_workflow").await {
             info!(
                 workflow_id = %flow_info.id,
                 run_count = flow_info.run_count,
@@ -346,7 +343,7 @@ async fn main() -> CanoResult<()> {
         }
 
         info!("Stopping scheduler...");
-        scheduler_clone.stop().await?;
+        running.stop().await?;
     }
 
     // Example 4: Error handling with tracing

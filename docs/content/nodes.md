@@ -116,25 +116,22 @@ You can still write any of these explicitly — explicit always wins. For workfl
 use a custom resource-key type, pass it via <code>#[node(state = S, key = K)]</code>.
 </p>
 
-<p>
-The legacy form <code>#[node] impl Node&lt;S&gt; for X { ... }</code> remains supported for
-backwards compatibility.
-</p>
-
 <div class="code-block">
 <span class="code-block-label"><span class="label-icon">&#9889;</span> Inference form — no <code>type PrepResult</code>, <code>type ExecResult</code>, or <code>fn config</code> needed</span>
-<pre><code class="language-rust">use cano::prelude::*;
-use rand::RngExt;
-<!--blank-->
+
+```rust
+use cano::prelude::*;
+use rand::Rng;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum WorkflowAction { Generate, Count, Complete, Error }
-<!--blank-->
+
 #[derive(Clone)]
 struct GeneratorNode;
-<!--blank-->
+
 #[node(state = WorkflowAction)]
 impl GeneratorNode {
-    // prep: return type Vec&lt;u32&gt; is inferred as PrepResult
+    // prep: return type Vec<u32> is inferred as PrepResult
     async fn prep(&self, _res: &Resources) -> Result<Vec<u32>, CanoError> {
         let mut rng = rand::rng();
         let size = rng.random_range(25..=150);
@@ -142,26 +139,28 @@ impl GeneratorNode {
         println!("Generated {} random numbers", numbers.len());
         Ok(numbers)
     }
-<!--blank-->
-    // exec: return type Vec&lt;u32&gt; is inferred as ExecResult (infallible — no Result wrapper)
+
+    // exec: return type Vec<u32> is inferred as ExecResult (infallible — no Result wrapper)
     async fn exec(&self, prep_res: Vec<u32>) -> Vec<u32> {
         let even_numbers: Vec<u32> = prep_res.into_iter().filter(|&n| n % 2 == 0).collect();
         println!("Filtered to {} even numbers", even_numbers.len());
         even_numbers
     }
-<!--blank-->
-    // post: receives Vec&lt;u32&gt; (the ExecResult) and returns the next state
+
+    // post: receives Vec<u32> (the ExecResult) and returns the next state
     async fn post(
         &self,
         res: &Resources,
         exec_res: Vec<u32>,
     ) -> Result<WorkflowAction, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         store.put("filtered_numbers", exec_res)?;
         println!("Generator node completed");
         Ok(WorkflowAction::Count)
     }
-}</code></pre>
+}
+
+```
 </div>
 
 <div class="callout callout-tip">
@@ -185,53 +184,61 @@ inside the inherent <code>impl</code> block. The macro still synthesises the tra
 
 <div class="code-block">
 <span class="code-block-label"><span class="label-icon">&#9998;</span> Explicit form — custom retry config and explicit associated types</span>
-<pre><code class="language-rust">use cano::prelude::*;
-use rand::RngExt;
-<!--blank-->
+
+```rust
+use cano::prelude::*;
+use rand::Rng;
+use std::time::Duration;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum WorkflowAction { Generate, Count, Complete, Error }
+
 #[derive(Clone)]
 struct GeneratorNode;
-<!--blank-->
+
 #[node(state = WorkflowAction)]
 impl GeneratorNode {
     // Explicit associated types override inference
     type PrepResult = Vec<u32>;
     type ExecResult = Vec<u32>;
-<!--blank-->
+
     // Explicit config overrides the injected default
     fn config(&self) -> TaskConfig {
         TaskConfig::default().with_fixed_retry(3, Duration::from_secs(1))
     }
-<!--blank-->
+
     // Phase 1: Preparation
     async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
         let mut rng = rand::rng();
         let size = rng.random_range(25..=150);
         let numbers: Vec<u32> = (0..size).map(|_| rng.random_range(1..=1000)).collect();
-<!--blank-->
+
         println!("Generated {} random numbers", numbers.len());
         Ok(numbers)
     }
-<!--blank-->
+
     // Phase 2: Execution — infallible, returns ExecResult directly
     async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
         let even_numbers: Vec<u32> = prep_res.into_iter().filter(|&n| n % 2 == 0).collect();
         println!("Filtered to {} even numbers", even_numbers.len());
         even_numbers
     }
-<!--blank-->
+
     // Phase 3: Post-processing
     async fn post(
         &self,
         res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<WorkflowAction, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         store.put("filtered_numbers", exec_res)?;
-<!--blank-->
+
         println!("Generator node completed");
         Ok(WorkflowAction::Count)
     }
-}</code></pre>
+}
+
+```
 </div>
 
 <!-- Section: Nodes vs Tasks -->
@@ -303,62 +310,81 @@ C -->|Save to destination| D[Next State]
 
 <div class="code-block">
 <span class="code-block-label"><span class="label-icon">&#128230;</span> ETL Node (illustrative — Record, ProcessedRecord, and database helpers are application-defined)</span>
-<pre><code class="language-rust">use cano::prelude::*;
-<!--blank-->
-// Application-defined types and helpers (not part of Cano)
-// struct Record { ... }
-// struct ProcessedRecord { ... }
-// async fn load_from_database(src: &str) -> Result<Vec<Record>, CanoError> { ... }
-// async fn save_to_database(dst: &str, data: &[ProcessedRecord]) -> Result<(), CanoError> { ... }
-// fn process_record(r: Record) -> ProcessedRecord { ... }
-<!--blank-->
+
+```rust
+use cano::prelude::*;
+
+// Application-defined types and helpers — stubbed here so the example compiles
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum State { Extract, Transform, Load, Complete }
+
+#[derive(Clone)]
+struct Record;
+
+#[derive(Clone)]
+struct ProcessedRecord;
+
+async fn load_from_database(_src: &str) -> Result<Vec<Record>, CanoError> {
+    Ok(vec![Record])
+}
+
+async fn save_to_database(_dst: &str, _data: &[ProcessedRecord]) -> Result<(), CanoError> {
+    Ok(())
+}
+
+fn process_record(_r: Record) -> ProcessedRecord {
+    ProcessedRecord
+}
+
 #[derive(Clone)]
 struct ETLNode {
     source: String,
     destination: String,
 }
-<!--blank-->
+
 #[node(state = State)]
 impl ETLNode {
     type PrepResult = Vec<Record>;
     type ExecResult = Vec<ProcessedRecord>;
-<!--blank-->
+
     fn config(&self) -> TaskConfig {
         TaskConfig::default()
             .with_exponential_retry(3) // Retry failures
     }
-<!--blank-->
+
     // Extract: Load data from source
     async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
         println!("📥 Extracting from: {}", self.source);
-<!--blank-->
+
         let records = load_from_database(&self.source).await?;
         println!("Loaded {} records", records.len());
-<!--blank-->
+
         Ok(records)
     }
-<!--blank-->
+
     // Transform: Process the data
     async fn exec(&self, records: Self::PrepResult) -> Self::ExecResult {
         println!("⚙️  Transforming {} records...", records.len());
-<!--blank-->
+
         records.into_iter()
             .map(|r| process_record(r))
             .collect()
     }
-<!--blank-->
+
     // Load: Save to destination
     async fn post(&self, res: &Resources, processed: Self::ExecResult)
         -> Result<State, CanoError> {
         println!("📤 Loading to: {}", self.destination);
-<!--blank-->
+
         save_to_database(&self.destination, &processed).await?;
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         store.put("processed_count", processed.len())?;
-<!--blank-->
+
         Ok(State::Complete)
     }
-}</code></pre>
+}
+
+```
 </div>
 </section>
 
@@ -384,40 +410,61 @@ B-->>S: Accept ✓
 
 <div class="code-block">
 <span class="code-block-label"><span class="label-icon">&#128176;</span> Negotiation Node</span>
-<pre><code class="language-rust">#[derive(Clone)]
+
+```rust
+use cano::prelude::*;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum NegotiationState { SellerOffer, BuyerEvaluate, Complete }
+
+#[derive(Clone)]
+struct NegotiationData {
+    current_offer: u32,
+    budget: u32,
+    round: u32,
+}
+
+impl NegotiationData {
+    fn new(current_offer: u32, budget: u32) -> Self {
+        Self { current_offer, budget, round: 1 }
+    }
+}
+
+#[derive(Clone)]
 struct SellerNode;
-<!--blank-->
+
 #[node(state = NegotiationState)]
 impl SellerNode {
-    type PrepResult = NegotiationState;
-    type ExecResult = NegotiationState;
-<!--blank-->
+    type PrepResult = NegotiationData;
+    type ExecResult = NegotiationData;
+
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
-        // Load negotiation state or initialize
-        match store.get::<NegotiationState>("negotiation") {
-            Ok(state) => Ok(state),
-            Err(_) => Ok(NegotiationState::new(10000, 1000)), // initial price, budget
+        let store = res.get::<MemoryStore, _>("store")?;
+        // Load negotiation data or initialize
+        match store.get::<NegotiationData>("negotiation") {
+            Ok(data) => Ok(data),
+            Err(_) => Ok(NegotiationData::new(10000, 1000)), // initial price, budget
         }
     }
-<!--blank-->
-    async fn exec(&self, mut state: Self::PrepResult) -> Self::ExecResult {
+
+    async fn exec(&self, mut data: Self::PrepResult) -> Self::ExecResult {
         // Calculate new offer
-        if state.round > 1 {
+        if data.round > 1 {
             let reduction = rand::random::<u32>() % 2000 + 500;
-            state.current_offer = state.current_offer.saturating_sub(reduction);
-            println!("Seller: New offer ${}", state.current_offer);
+            data.current_offer = data.current_offer.saturating_sub(reduction);
+            println!("Seller: New offer ${}", data.current_offer);
         }
-        state
+        data
     }
-<!--blank-->
-    async fn post(&self, res: &Resources, state: Self::ExecResult)
+
+    async fn post(&self, res: &Resources, data: Self::ExecResult)
         -> Result<NegotiationState, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
-        store.put("negotiation", state.clone())?;
+        let store = res.get::<MemoryStore, _>("store")?;
+        store.put("negotiation", data.clone())?;
         Ok(NegotiationState::BuyerEvaluate)
     }
-}</code></pre>
+}
+```
 </div>
 </section>
 
@@ -430,59 +477,74 @@ impl SellerNode {
 
 <div class="code-block">
 <span class="code-block-label"><span class="label-icon">&#128269;</span> Download and analyze</span>
-<pre><code class="language-rust">#[derive(Clone)]
+
+```rust
+use cano::prelude::*;
+use std::time::Duration;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum State { Download, Complete }
+
+#[derive(Clone)]
+struct BookAnalysis {
+    word_count: usize,
+    preposition_count: usize,
+    density: f64,
+}
+
+fn count_prepositions(_words: &[&str]) -> usize { 0 }
+
+#[derive(Clone)]
 struct BookAnalyzerNode;
-<!--blank-->
+
 #[node(state = State)]
 impl BookAnalyzerNode {
     type PrepResult = String;  // Book content
     type ExecResult = BookAnalysis;
-<!--blank-->
+
     fn config(&self) -> TaskConfig {
         TaskConfig::default()
             .with_fixed_retry(2, Duration::from_secs(1))
     }
-<!--blank-->
-    // Prep: Download book
+
+    // Prep: Download book (replace this with your own HTTP client)
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
-        let url: String = store.get("book_url")?;
+        let store = res.get::<MemoryStore, _>("store")?;
+        let url: String = store.get("book_url").map_err(|e| CanoError::store(e.to_string()))?;
         println!("📥 Downloading book from: {}", url);
-<!--blank-->
-        let client = reqwest::Client::new();
-        let content = client.get(&url)
-            .send().await?
-            .text().await?;
-<!--blank-->
+
+        let content = String::new(); // imagine: reqwest::get(&url).await?.text().await?
         println!("Downloaded {} characters", content.len());
         Ok(content)
     }
-<!--blank-->
+
     // Exec: Analyze content (retried on failure)
     async fn exec(&self, content: Self::PrepResult) -> Self::ExecResult {
         println!("🔍 Analyzing content...");
-<!--blank-->
+
         let words: Vec<&str> = content.split_whitespace().collect();
         let prepositions = count_prepositions(&words);
-<!--blank-->
+
         BookAnalysis {
             word_count: words.len(),
             preposition_count: prepositions,
             density: (prepositions as f64 / words.len() as f64) * 100.0,
         }
     }
-<!--blank-->
+
     // Post: Store results
     async fn post(&self, res: &Resources, analysis: Self::ExecResult)
         -> Result<State, CanoError> {
         println!("📊 Analysis complete: {} words, {} prepositions",
                  analysis.word_count, analysis.preposition_count);
-<!--blank-->
-        let store = res.get::<MemoryStore, str>("store")?;
+
+        let store = res.get::<MemoryStore, _>("store")?;
         store.put("analysis", analysis)?;
         Ok(State::Complete)
     }
-}</code></pre>
+}
+
+```
 </div>
 </section>
 
@@ -495,72 +557,83 @@ impl BookAnalyzerNode {
 
 <div class="code-block">
 <span class="code-block-label"><span class="label-icon">&#9881;</span> Chained pipeline nodes</span>
-<pre><code class="language-rust">// Node 1: Data Generator
+
+```rust
+use cano::prelude::*;
+use rand::Rng;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum State { Start, Filter, Aggregate, Complete }
+
+#[derive(Clone)]
+struct Stats { count: usize, sum: u32, avg: f64 }
+
+// Node 1: Data Generator
 #[derive(Clone)]
 struct GeneratorNode;
-<!--blank-->
+
 #[node(state = State)]
 impl GeneratorNode {
     type PrepResult = ();
     type ExecResult = Vec<u32>;
-<!--blank-->
+
     async fn prep(&self, _: &Resources) -> Result<Self::PrepResult, CanoError> {
         Ok(())
     }
-<!--blank-->
+
     async fn exec(&self, _: Self::PrepResult) -> Self::ExecResult {
         let mut rng = rand::rng();
         (0..100).map(|_| rng.random_range(1..=1000)).collect()
     }
-<!--blank-->
+
     async fn post(&self, res: &Resources, data: Self::ExecResult)
         -> Result<State, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         store.put("generated_data", data)?;
         Ok(State::Filter)
     }
 }
-<!--blank-->
+
 // Node 2: Data Filter
 #[derive(Clone)]
 struct FilterNode;
-<!--blank-->
+
 #[node(state = State)]
 impl FilterNode {
     type PrepResult = Vec<u32>;
     type ExecResult = Vec<u32>;
-<!--blank-->
+
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
-        store.get("generated_data")
+        let store = res.get::<MemoryStore, _>("store")?;
+        store.get("generated_data").map_err(|e| CanoError::store(e.to_string()))
     }
-<!--blank-->
+
     async fn exec(&self, data: Self::PrepResult) -> Self::ExecResult {
         data.into_iter().filter(|&x| x % 2 == 0).collect()
     }
-<!--blank-->
+
     async fn post(&self, res: &Resources, filtered: Self::ExecResult)
         -> Result<State, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         store.put("filtered_data", filtered)?;
         Ok(State::Aggregate)
     }
 }
-<!--blank-->
+
 // Node 3: Aggregator
 #[derive(Clone)]
 struct AggregatorNode;
-<!--blank-->
+
 #[node(state = State)]
 impl AggregatorNode {
     type PrepResult = Vec<u32>;
     type ExecResult = Stats;
-<!--blank-->
+
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
-        store.get("filtered_data")
+        let store = res.get::<MemoryStore, _>("store")?;
+        store.get("filtered_data").map_err(|e| CanoError::store(e.to_string()))
     }
-<!--blank-->
+
     async fn exec(&self, data: Self::PrepResult) -> Self::ExecResult {
         Stats {
             count: data.len(),
@@ -568,21 +641,25 @@ impl AggregatorNode {
             avg: data.iter().sum::<u32>() as f64 / data.len() as f64,
         }
     }
-<!--blank-->
+
     async fn post(&self, res: &Resources, stats: Self::ExecResult)
         -> Result<State, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         store.put("final_stats", stats)?;
         Ok(State::Complete)
     }
 }
-<!--blank-->
+
 // Combine in workflow
-let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
-    .register(State::Start, GeneratorNode)
-    .register(State::Filter, FilterNode)
-    .register(State::Aggregate, AggregatorNode)
-    .add_exit_state(State::Complete);</code></pre>
+fn build_workflow(store: MemoryStore) -> Workflow<State> {
+    Workflow::new(Resources::new().insert("store", store))
+        .register(State::Start, GeneratorNode)
+        .register(State::Filter, FilterNode)
+        .register(State::Aggregate, AggregatorNode)
+        .add_exit_state(State::Complete)
+}
+
+```
 </div>
 </section>
 

@@ -290,7 +290,7 @@ struct InitBatchTask {
 #[task(state = BookAnalysisState)]
 impl InitBatchTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!(
             "\n🎯 [{0}] Initializing batch with {1} books",
             self.batch_name,
@@ -316,7 +316,7 @@ struct DownloadTask {
 #[task(state = BookAnalysisState)]
 impl DownloadTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         match download_book(
             self.book_id,
             self.title.clone(),
@@ -344,7 +344,7 @@ struct AnalyzeTask {
 #[task(state = BookAnalysisState)]
 impl AnalyzeTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let book: Book = store
             .get(&format!("book_{}", self.book_id))
             .map_err(|e| CanoError::task_execution(format!("Book not found: {e}")))?;
@@ -372,7 +372,7 @@ struct SummarizeBatchTask {
 #[task(state = BookAnalysisState)]
 impl SummarizeBatchTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let batch_name: String = store.get("batch_name")?;
         let books: Vec<BookMetadata> = store.get("book_metadata")?;
 
@@ -594,18 +594,14 @@ async fn main() -> Result<(), CanoError> {
 
     println!("\n🎬 Starting scheduler...\n");
 
-    // Start scheduler in background
-    let mut scheduler_clone = scheduler.clone();
-    let scheduler_handle = tokio::spawn(async move { scheduler_clone.start().await });
-
-    // Give scheduler time to initialize
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Start consumes the builder and returns a live handle.
+    let running = scheduler.start().await?;
 
     // Trigger all workflows (MAP phase at scheduler level)
     println!("🗺️  MAP PHASE: Triggering all batch workflows...\n");
     for (batch_name, _) in get_book_batches() {
         println!("  ⚡ Triggering: {}", batch_name);
-        scheduler.trigger(&batch_name).await?;
+        running.trigger(&batch_name).await?;
     }
 
     // Wait for all workflows to complete
@@ -617,7 +613,7 @@ async fn main() -> Result<(), CanoError> {
         // Wait up to 10 minutes total
         tokio::time::sleep(Duration::from_secs(5)).await;
 
-        let workflows = scheduler.list().await;
+        let workflows = running.list().await;
         let completed_count = workflows
             .iter()
             .filter(|w| w.status == Status::Completed)
@@ -647,10 +643,7 @@ async fn main() -> Result<(), CanoError> {
 
     // Stop scheduler
     println!("\n🛑 Stopping scheduler...");
-    scheduler.stop().await?;
-
-    // Wait for scheduler to finish
-    let _ = scheduler_handle.await;
+    running.stop().await?;
 
     println!("\n✅ Multi-level map-reduce analysis complete!");
 

@@ -27,8 +27,8 @@
 //! #[task]
 //! impl Task<Step> for FetchTask {
 //!     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-//!         let config = res.get::<FetchConfig, str>("config")?;
-//!         let store = res.get::<MemoryStore, str>("store")?;
+//!         let config = res.get::<FetchConfig, _>("config")?;
+//!         let store = res.get::<MemoryStore, _>("store")?;
 //!         // Produce `batch_size` items and store them for the next task.
 //!         let data: Vec<u32> = (1..=(config.batch_size as u32)).collect();
 //!         store.put("data", data)?;
@@ -39,7 +39,7 @@
 //! #[task]
 //! impl Task<Step> for ProcessTask {
 //!     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-//!         let store = res.get::<MemoryStore, str>("store")?;
+//!         let store = res.get::<MemoryStore, _>("store")?;
 //!         let data: Vec<u32> = store.get("data")?;
 //!         store.put("sum", data.iter().sum::<u32>())?;
 //!         Ok(TaskResult::Single(Step::Done))
@@ -142,7 +142,7 @@
 //! - [`mod@task`]: The [`Task`] trait — single `run()` method
 //! - [`mod@node`]: The [`Node`] trait — three-phase lifecycle with retry via [`TaskConfig`]
 //! - [`workflow`]: [`Workflow`] — FSM orchestration with Split/Join support
-//! - `scheduler` (requires `scheduler` feature): `Scheduler` — cron and interval scheduling
+//! - `scheduler` (requires `scheduler` feature): `Scheduler` (builder) and `RunningScheduler` (live handle) — cron and interval scheduling
 //! - [`mod@resource`]: [`Resource`] trait and [`Resources`] dictionary — lifecycle-aware resource management
 //! - [`store`]: [`MemoryStore`] — a typed in-memory store that implements [`Resource`]
 //! - [`error`]: [`CanoError`] variants and the [`CanoResult`] alias
@@ -177,7 +177,7 @@ pub use task::{DynTask, RetryMode, Task, TaskConfig, TaskObject, TaskResult};
 pub use workflow::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult, StateEntry, Workflow};
 
 #[cfg(feature = "scheduler")]
-pub use scheduler::{FlowInfo, Schedule, Scheduler, Status};
+pub use scheduler::{BackoffPolicy, FlowInfo, RunningScheduler, Schedule, Scheduler, Status};
 
 /// Attribute macro applied to `Task` trait definitions and `impl Task` blocks
 /// to rewrite `async fn` methods into ones returning
@@ -233,7 +233,7 @@ pub mod prelude {
     };
 
     #[cfg(feature = "scheduler")]
-    pub use crate::{FlowInfo, Schedule, Scheduler, Status};
+    pub use crate::{BackoffPolicy, FlowInfo, RunningScheduler, Schedule, Scheduler, Status};
 
     // Re-export the cano async-trait macros for convenience.
     pub use crate::{node, resource, task};

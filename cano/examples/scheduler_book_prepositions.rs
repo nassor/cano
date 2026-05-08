@@ -155,7 +155,7 @@ impl BookDownloadNode {
         res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<WorkflowPhase, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         if let Some(book) = exec_res {
             // Add book to collection
             let mut books: Vec<Book> = store.get("books").unwrap_or_else(|_| Vec::new());
@@ -221,7 +221,7 @@ impl PrepositionAnalysisNode {
     type ExecResult = Vec<BookAnalysis>;
 
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let books: Vec<Book> = store
             .get("books")
             .map_err(|e| CanoError::preparation(format!("Failed to load books: {}", e)))?;
@@ -243,7 +243,7 @@ impl PrepositionAnalysisNode {
         res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<WorkflowPhase, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         if exec_res.is_empty() {
             return Err(CanoError::node_execution("No book analyses were completed"));
         }
@@ -265,7 +265,7 @@ impl BookRankingNode {
     type ExecResult = Vec<BookRanking>;
 
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let analyses: Vec<BookAnalysis> = store
             .get("book_analyses")
             .map_err(|e| CanoError::preparation(format!("Failed to load analyses: {}", e)))?;
@@ -294,7 +294,7 @@ impl BookRankingNode {
         res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<WorkflowPhase, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         store.put("book_rankings", exec_res.clone())?;
 
         println!("\n🏆 BOOK RANKINGS BY PREPOSITION DIVERSITY");

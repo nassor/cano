@@ -50,7 +50,7 @@ impl DataGeneratorTask {
 #[task(state = WorkflowState)]
 impl DataGeneratorTask {
     async fn run(&self, res: &Resources) -> CanoResult<TaskResult<WorkflowState>> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 
         println!(
             "📊 DataGeneratorTask: Generating {} data points...",
@@ -92,7 +92,7 @@ impl ProcessorNode {
     type ExecResult = (Vec<f64>, DataStats);
 
     async fn prep(&self, res: &Resources) -> CanoResult<Self::PrepResult> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 
         println!("🔧 ProcessorNode::prep - Loading and validating data...");
 
@@ -141,7 +141,7 @@ impl ProcessorNode {
     }
 
     async fn post(&self, res: &Resources, exec_res: Self::ExecResult) -> CanoResult<WorkflowState> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 
         println!("📋 ProcessorNode::post - Finalizing processing...");
 
@@ -169,7 +169,7 @@ struct ValidatorTask;
 #[task(state = WorkflowState)]
 impl ValidatorTask {
     async fn run(&self, res: &Resources) -> CanoResult<TaskResult<WorkflowState>> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 
         println!("✅ ValidatorTask: Running validation checks...");
 
@@ -221,7 +221,7 @@ impl ReportNode {
     type ExecResult = ();
 
     async fn prep(&self, res: &Resources) -> CanoResult<Self::PrepResult> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 
         println!("📊 ReportNode::prep - Gathering report data...");
 
@@ -244,7 +244,7 @@ impl ReportNode {
         res: &Resources,
         _exec_res: Self::ExecResult,
     ) -> CanoResult<WorkflowState> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 
         println!("📋 ReportNode::post - Finalizing report...");
 

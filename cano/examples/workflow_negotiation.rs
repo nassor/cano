@@ -80,7 +80,7 @@ impl SellerNode {
 
     /// Preparation phase: Load current negotiation state or initialize if first round
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         match store.get::<NegotiationState>("negotiation_state") {
             Ok(state) => {
                 println!(
@@ -140,7 +140,7 @@ impl SellerNode {
         res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<NegotiationAction, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         // Store the current negotiation state
         store.put("negotiation_state", exec_res.clone())?;
 
@@ -189,7 +189,7 @@ impl BuyerNode {
 
     /// Preparation phase: Load the current negotiation state
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let state: NegotiationState = store.get("negotiation_state").map_err(|e| {
             CanoError::preparation(format!("Failed to load negotiation state: {e}"))
         })?;
@@ -242,7 +242,7 @@ impl BuyerNode {
         res: &Resources,
         exec_res: Self::ExecResult,
     ) -> Result<NegotiationAction, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         let (mut state, acceptable) = exec_res;
 
         if acceptable && state.current_offer <= state.buyer_budget {

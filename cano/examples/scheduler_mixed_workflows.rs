@@ -68,7 +68,7 @@ impl Node<TaskState> for SimpleTask {
         res: &Resources,
         exec_result: Self::ExecResult,
     ) -> Result<TaskState, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         store.put("last_execution", exec_result)?;
         Ok(TaskState::Complete)
     }
@@ -119,11 +119,19 @@ async fn main() -> CanoResult<()> {
     scheduler.every_seconds("scheduled_task_3", workflow3, TaskState::Start, 3)?;
     println!("✅ Added 2 scheduled workflows");
 
-    // Example 3: List all workflows
-    println!("\n📊 Workflow Summary");
-    println!("------------------");
+    // Example 3: Pre-start summary (counts + ids known on the builder).
+    println!("\n📊 Workflow Summary (pre-start)");
+    println!("-------------------------------");
+    println!("Registered: {} workflows", scheduler.len());
+    println!();
 
-    let workflows = scheduler.list().await;
+    // Example 4: Start scheduler — consumes the builder, returns a live handle.
+    println!("📊 Starting Scheduler");
+    println!("---------------------");
+    let running = scheduler.start().await?;
+
+    // Example 5: Detailed status post-start.
+    let workflows = running.list().await;
     for workflow in &workflows {
         println!("ID: {}", workflow.id);
         println!("  Status: {:?}", workflow.status);
@@ -132,28 +140,17 @@ async fn main() -> CanoResult<()> {
         println!();
     }
 
-    // Example 4: Start scheduler
-    println!("📊 Starting Scheduler");
-    println!("---------------------");
-
-    let scheduler_clone = scheduler.clone();
-    tokio::spawn(async move {
-        scheduler.start().await.expect("Scheduler failed");
-    });
-
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    // Example 5: Trigger manual workflow
+    // Example 6: Trigger manual workflow
     println!("🔄 Triggering manual workflow...");
-    scheduler_clone.trigger("manual_task_1").await?;
+    running.trigger("manual_task_1").await?;
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // Example 6: Wait for scheduled workflows to run
+    // Example 7: Wait for scheduled workflows to run
     println!("\n⏳ Waiting for scheduled workflows to run...");
     tokio::time::sleep(Duration::from_secs(5)).await;
 
-    // Example 7: Check execution counts
+    // Example 8: Check execution counts
     println!("\n📊 Execution Summary");
     println!("--------------------");
     println!(
@@ -169,9 +166,9 @@ async fn main() -> CanoResult<()> {
         task3_clone.get_execution_count()
     );
 
-    // Example 8: Stop scheduler gracefully
+    // Example 9: Stop scheduler gracefully
     println!("\n🛑 Stopping scheduler...");
-    scheduler_clone.stop().await?;
+    running.stop().await?;
     println!("✅ Scheduler stopped successfully");
 
     println!("\n✅ Scheduler example completed successfully!");

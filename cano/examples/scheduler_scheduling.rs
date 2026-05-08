@@ -54,7 +54,7 @@ impl ReportNode {
     }
 
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("📊 Preparing {} report...", self.report_type);
         store.put("report_start_time", Utc::now().to_rfc3339())?;
         Ok(format!("Preparing {} report", self.report_type))
@@ -72,7 +72,7 @@ impl ReportNode {
         res: &Resources,
         exec_result: Self::ExecResult,
     ) -> Result<WorkflowAction, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("📊 Report completed: {}", exec_result);
         store.put("report_result", exec_result)?;
         Ok(WorkflowAction::Complete)
@@ -103,7 +103,7 @@ impl CleanupNode {
     }
 
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("🧹 Scanning for {} cleanup...", self.cleanup_type);
         store.put("cleanup_start", Utc::now().to_rfc3339())?;
         // Simulate finding items to clean
@@ -126,7 +126,7 @@ impl CleanupNode {
         res: &Resources,
         exec_result: Self::ExecResult,
     ) -> Result<WorkflowAction, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("🧹 Cleanup completed: {} items removed", exec_result);
         store.put("cleanup_count", exec_result.to_string())?;
         Ok(WorkflowAction::Complete)
@@ -157,7 +157,7 @@ impl ManualTaskNode {
     }
 
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("⚡ Starting manual task: {}", self.task_name);
         store.put("manual_task_start", Utc::now().to_rfc3339())?;
         Ok(format!("Manual task: {}", self.task_name))
@@ -175,7 +175,7 @@ impl ManualTaskNode {
         res: &Resources,
         exec_result: Self::ExecResult,
     ) -> Result<WorkflowAction, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("⚡ Manual task finished: {}", exec_result);
         store.put("manual_task_result", exec_result)?;
         Ok(WorkflowAction::Complete)
@@ -206,7 +206,7 @@ impl SetupNode {
     }
 
     async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("🔧 Preparing {} setup...", self.setup_type);
         store.put("setup_start", Utc::now().to_rfc3339())?;
         Ok(vec![
@@ -228,7 +228,7 @@ impl SetupNode {
         res: &Resources,
         exec_result: Self::ExecResult,
     ) -> Result<WorkflowAction, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
         println!("🔧 Setup completed successfully: {}", exec_result);
         store.put("setup_complete", exec_result.to_string())?;
         Ok(WorkflowAction::Complete)
@@ -283,16 +283,15 @@ async fn main() -> CanoResult<()> {
     println!("  • System Setup: Manual trigger only");
     println!();
 
-    // Start the scheduler in the background
+    // Start the scheduler — consumes the builder and returns a live handle.
     println!("▶️  Starting scheduler system...");
-    let mut scheduler_handle = scheduler.clone();
-    let scheduler_task = tokio::spawn(async move { scheduler_handle.start().await });
+    let running = scheduler.start().await?;
 
     // Wait a bit and check workflow status
     sleep(Duration::from_secs(2)).await;
 
     println!("📊 Current workflow status:");
-    let flows_info = scheduler.list().await;
+    let flows_info = running.list().await;
     for info in &flows_info {
         println!(
             "  • {}: {:?} (runs: {})",
@@ -307,11 +306,11 @@ async fn main() -> CanoResult<()> {
 
     // Manually trigger the setup task
     println!("🔧 Manually triggering system setup...");
-    scheduler.trigger("system_setup").await?;
+    running.trigger("system_setup").await?;
 
     // Manually trigger the migration task
     println!("🔧 Manually triggering data migration...");
-    scheduler.trigger("manual_migration").await?;
+    running.trigger("manual_migration").await?;
 
     // Let the scheduler run for a while to see scheduled executions
     println!("⏳ Running scheduler for 20 seconds to see concurrent executions...");
@@ -319,7 +318,7 @@ async fn main() -> CanoResult<()> {
 
     // Show final status
     println!("\n📊 Final workflow status:");
-    let final_flows_info = scheduler.list().await;
+    let final_flows_info = running.list().await;
     for info in &final_flows_info {
         println!(
             "  • {}: {:?} (runs: {})",
@@ -327,14 +326,9 @@ async fn main() -> CanoResult<()> {
         );
     }
 
-    // Stop the scheduler
+    // Stop the scheduler — sends Stop and awaits graceful shutdown.
     println!("\n⏹️  Stopping scheduler...");
-    scheduler.stop().await?;
-
-    // Wait for scheduler task to finish
-    let _ = scheduler_task
-        .await
-        .map_err(|e| CanoError::task_execution(format!("Scheduler task failed: {}", e)))?;
+    running.stop().await?;
 
     println!("✅ Scheduler scheduling example completed!");
     Ok(())
