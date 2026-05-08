@@ -1,5 +1,16 @@
 document.addEventListener('DOMContentLoaded', () => {
   // --------------------------------------------------------------------------
+  // Prism.js: Zola emits <code data-lang="X">; Prism expects class="language-X".
+  // Bridge the two, then trigger highlight.
+  // --------------------------------------------------------------------------
+  document.querySelectorAll('pre > code[data-lang]').forEach((el) => {
+    el.classList.add('language-' + el.getAttribute('data-lang'));
+  });
+  if (window.Prism) {
+    Prism.highlightAll();
+  }
+
+  // --------------------------------------------------------------------------
   // Mermaid initialization
   // --------------------------------------------------------------------------
   if (window.mermaid) {

@@ -62,11 +62,15 @@ produces a second handle to the <em>same</em> underlying data -- not a copy.
 
 <div class="code-block">
 <span class="code-block-label"><span class="label-icon">&#128274;</span> Clone shares the same data</span>
-<pre><code class="language-rust">let store = MemoryStore::new();
+
+```rust
+let store = MemoryStore::new();
 let store2 = store.clone(); // same backing map — not a copy
-<!--blank-->
+
 store.put("key", 42i32)?;
-let val: i32 = store2.get("key")?; // returns 42</code></pre>
+let val: i32 = store2.get("key")?; // returns 42
+
+```
 </div>
 
 <!-- Section: API Reference -->
@@ -141,30 +145,37 @@ let val: i32 = store2.get("key")?; // returns 42</code></pre>
 
 <div class="code-block">
 <span class="code-block-label"><span class="label-icon">&#128204;</span> Common store operations</span>
-<pre><code class="language-rust">use cano::prelude::*;
-<!--blank-->
-let store = MemoryStore::new();
-<!--blank-->
-// Store primitive and composite types
-store.put("count", 42u32)?;
-store.put("labels", vec!["a".to_string(), "b".to_string()])?;
-<!--blank-->
-// Retrieve with explicit type annotation
-let count: u32 = store.get("count")?;
-let labels: Vec<String> = store.get("labels")?;
-<!--blank-->
-// Append to a Vec (creates if absent)
-store.append("log", "step 1 complete".to_string())?;
-store.append("log", "step 2 complete".to_string())?;
-let log: Vec<String> = store.get("log")?;
-<!--blank-->
-// Check existence before reading optional keys
-if store.contains_key("result")? {
-    let result: String = store.get("result")?;
+
+```rust
+use cano::prelude::*;
+
+fn main() -> Result<(), CanoError> {
+    let store = MemoryStore::new();
+
+    // Store primitive and composite types
+    store.put("count", 42u32)?;
+    store.put("labels", vec!["a".to_string(), "b".to_string()])?;
+
+    // Retrieve with explicit type annotation
+    let count: u32 = store.get("count")?;
+    let labels: Vec<String> = store.get("labels")?;
+
+    // Append to a Vec (creates if absent)
+    store.append("log", "step 1 complete".to_string())?;
+    store.append("log", "step 2 complete".to_string())?;
+    let log: Vec<String> = store.get("log")?;
+
+    // Check existence before reading optional keys
+    if store.contains_key("result")? {
+        let result: String = store.get("result")?;
+    }
+
+    // Remove a key — silent no-op if absent
+    store.remove("scratch")?;
+    Ok(())
 }
-<!--blank-->
-// Remove a key — silent no-op if absent
-store.remove("scratch")?;</code></pre>
+
+```
 </div>
 
 <div class="callout callout-tip">
@@ -190,17 +201,24 @@ values (e.g., a model's weight tensor or a large dataset) to multiple downstream
 
 <div class="code-block">
 <span class="code-block-label"><span class="label-icon">&#9889;</span> Zero-copy with Arc</span>
-<pre><code class="language-rust">use cano::prelude::*;
+
+```rust
+use cano::prelude::*;
 use std::sync::Arc;
-<!--blank-->
-let store = MemoryStore::new();
-store.put("dataset", vec![0u8; 1_000_000])?; // 1 MB
-<!--blank-->
-// Both handles point to the same allocation — no copy
-let handle_a: Arc<Vec<u8>> = store.get_shared("dataset")?;
-let handle_b: Arc<Vec<u8>> = store.get_shared("dataset")?;
-<!--blank-->
-assert!(Arc::ptr_eq(&handle_a, &handle_b));</code></pre>
+
+fn main() -> Result<(), CanoError> {
+    let store = MemoryStore::new();
+    store.put("dataset", vec![0u8; 1_000_000])?; // 1 MB
+
+    // Both handles point to the same allocation — no copy
+    let handle_a: Arc<Vec<u8>> = store.get_shared("dataset")?;
+    let handle_b: Arc<Vec<u8>> = store.get_shared("dataset")?;
+
+    assert!(Arc::ptr_eq(&handle_a, &handle_b));
+    Ok(())
+}
+
+```
 </div>
 
 <!-- get vs get_shared comparison panel -->
@@ -234,13 +252,15 @@ across all registered tasks for the duration of a single <code>orchestrate()</co
 
 <div class="code-block">
 <span class="code-block-label"><span class="label-icon">&#9881;</span> End-to-end workflow with store</span>
-<pre><code class="language-rust">use cano::prelude::*;
-<!--blank-->
+
+```rust
+use cano::prelude::*;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Stage { Ingest, Transform, Complete }
-<!--blank-->
+
 struct IngestTask;
-<!--blank-->
+
 #[task(state = Stage)]
 impl IngestTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<Stage>, CanoError> {
@@ -251,9 +271,9 @@ impl IngestTask {
         Ok(TaskResult::Single(Stage::Transform))
     }
 }
-<!--blank-->
+
 struct TransformTask;
-<!--blank-->
+
 #[task(state = Stage)]
 impl TransformTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<Stage>, CanoError> {
@@ -264,27 +284,29 @@ impl TransformTask {
         Ok(TaskResult::Single(Stage::Complete))
     }
 }
-<!--blank-->
+
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     let store = MemoryStore::new();
-<!--blank-->
+
     // Pre-populate before the workflow starts
     store.put("batch_size", 256usize)?;
-<!--blank-->
+
     let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(Stage::Ingest, IngestTask)
         .register(Stage::Transform, TransformTask)
         .add_exit_state(Stage::Complete);
-<!--blank-->
+
     workflow.orchestrate(Stage::Ingest).await?;
-<!--blank-->
+
     // Read results after the workflow completes
     let result: Vec<u32> = store.get("result")?;
     println!("Processed {} records", result.len());
-<!--blank-->
+
     Ok(())
-}</code></pre>
+}
+
+```
 </div>
 
 <!-- Section: Custom Store Backends -->
@@ -300,17 +322,19 @@ an unnecessary storage trait layer now that <code>Resources</code> provides type
 
 <div class="code-block">
 <span class="code-block-label"><span class="label-icon">&#128295;</span> Custom namespaced store resource</span>
-<pre><code class="language-rust">use cano::prelude::*;
+
+```rust
+use cano::prelude::*;
 use cano::store::StoreResult;
 use std::sync::Arc;
-<!--blank-->
+
 /// Example: a store that prefixes all keys with a namespace.
 #[derive(Clone)]
 pub struct NamespacedStore {
     namespace: String,
     inner: MemoryStore,
 }
-<!--blank-->
+
 impl NamespacedStore {
     pub fn new(namespace: impl Into<String>) -> Self {
         Self {
@@ -318,32 +342,32 @@ impl NamespacedStore {
             inner: MemoryStore::new(),
         }
     }
-<!--blank-->
+
     fn ns_key(&self, key: &str) -> String {
         format!("{}::{}", self.namespace, key)
     }
 
-    pub fn get&lt;T: 'static + Clone&gt;(&self, key: &str) -> StoreResult&lt;T&gt; {
+    pub fn get<T: 'static + Clone>(&self, key: &str) -> StoreResult<T> {
         self.inner.get(&self.ns_key(key))
     }
-<!--blank-->
-    pub fn put&lt;T: 'static + Send + Sync&gt;(&self, key: &str, value: T) -> StoreResult&lt;()&gt; {
+
+    pub fn put<T: 'static + Send + Sync>(&self, key: &str, value: T) -> StoreResult<()> {
         self.inner.put(&self.ns_key(key), value)
     }
-<!--blank-->
-    pub fn remove(&self, key: &str) -> StoreResult&lt;()&gt; {
+
+    pub fn remove(&self, key: &str) -> StoreResult<()> {
         self.inner.remove(&self.ns_key(key))
     }
-<!--blank-->
-    pub fn append&lt;T: 'static + Send + Sync + Clone&gt;(&self, key: &str, item: T) -> StoreResult&lt;()&gt; {
+
+    pub fn append<T: 'static + Send + Sync + Clone>(&self, key: &str, item: T) -> StoreResult<()> {
         self.inner.append(&self.ns_key(key), item)
     }
-<!--blank-->
-    pub fn contains_key(&self, key: &str) -> StoreResult&lt;bool&gt; {
+
+    pub fn contains_key(&self, key: &str) -> StoreResult<bool> {
         self.inner.contains_key(&self.ns_key(key))
     }
-<!--blank-->
-    pub fn keys(&self) -> StoreResult&lt;Vec&lt;String&gt;&gt; {
+
+    pub fn keys(&self) -> StoreResult<Vec<String>> {
         // Strip the namespace prefix before returning keys to callers
         let prefix = format!("{}::", self.namespace);
         let raw_keys = self.inner.keys()?;
@@ -352,13 +376,13 @@ impl NamespacedStore {
             .filter_map(|k| k.strip_prefix(&prefix).map(str::to_string))
             .collect())
     }
-<!--blank-->
-    pub fn len(&self) -> StoreResult&lt;usize&gt; {
+
+    pub fn len(&self) -> StoreResult<usize> {
         // Count only keys in this namespace
         Ok(self.keys()?.len())
     }
-<!--blank-->
-    pub fn clear(&self) -> StoreResult&lt;()&gt; {
+
+    pub fn clear(&self) -> StoreResult<()> {
         // Remove only keys in this namespace
         for key in self.keys()? {
             self.remove(&key)?;
@@ -366,19 +390,27 @@ impl NamespacedStore {
         Ok(())
     }
 }
-<!--blank-->
+
 impl Resource for NamespacedStore {}
-<!--blank-->
-// Use it like any other store — register it in Resources with your own key
-let store = NamespacedStore::new("pipeline_v2");
-store.put("status", "running".to_string())?;
-<!--blank-->
-let workflow = Workflow::new(
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum State { Start, Done }
+
+fn main() -> Result<(), CanoError> {
+    // Use it like any other store — register it in Resources with your own key
+    let store = NamespacedStore::new("pipeline_v2");
+    store.put("status", "running".to_string())?;
+
+    let _workflow: Workflow<State> = Workflow::new(
         Resources::new().insert("namespaced_store", store.clone()),
     )
     // ... register tasks that retrieve it via
     //     res.get::<NamespacedStore, _>("namespaced_store")? ...
-    ;</code></pre>
+    .add_exit_state(State::Done);
+    Ok(())
+}
+
+```
 </div>
 
 <div class="callout callout-tip">

@@ -78,17 +78,24 @@ It excels at managing complex lifecycles where state transitions matter:
 <p>Add Cano to your <code>Cargo.toml</code>:</p>
 
 <div class="getting-started-code">
-<pre><code class="language-toml">[dependencies]
+
+```toml
+[dependencies]
 cano = { version = "0.10", features = ["all"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }</code></pre>
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+```
+
 </div>
 
 <p>Cano runs on the Tokio runtime, so <code>tokio</code> is a required direct dependency — you launch the runtime via <code>#[tokio::main]</code> or <code>tokio::runtime::Builder</code>. The two features above are the minimum to do that; add <code>"time"</code>, <code>"sync"</code>, etc. only if your own code calls into them. Use <code>"full"</code> if you prefer convenience over compile time.</p>
 
 <h3>Basic Example</h3>
 <div class="getting-started-code">
-<pre><code class="language-rust">use cano::prelude::*;
-<!--blank-->
+
+```rust
+use cano::prelude::*;
+
 // Define workflow states
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum WorkflowState {
@@ -96,15 +103,15 @@ enum WorkflowState {
     Process,
     Complete,
 }
-<!--blank-->
+
 // #[derive(Resource)] generates a no-op Resource impl for stateless config structs
 #[derive(Resource)]
 struct AppConfig { batch_size: usize }
-<!--blank-->
+
 // #[task] handles the async-trait rewrite — no external async-trait crate needed
 #[derive(Clone)]
 struct SimpleTask;
-<!--blank-->
+
 #[task(state = WorkflowState)]
 impl SimpleTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowState>, CanoError> {
@@ -113,10 +120,10 @@ impl SimpleTask {
         Ok(TaskResult::Single(WorkflowState::Process))
     }
 }
-<!--blank-->
+
 #[derive(Clone)]
 struct DoneTask;
-<!--blank-->
+
 #[task(state = WorkflowState)]
 impl DoneTask {
     async fn run_bare(&self) -> Result<TaskResult<WorkflowState>, CanoError> {
@@ -124,19 +131,22 @@ impl DoneTask {
         Ok(TaskResult::Single(WorkflowState::Complete))
     }
 }
-<!--blank-->
+
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     let resources = Resources::new()
         .insert("config", AppConfig { batch_size: 64 });
-<!--blank-->
+
     let workflow = Workflow::new(resources)
         .register(WorkflowState::Start, SimpleTask)
         .register(WorkflowState::Process, DoneTask)
         .add_exit_state(WorkflowState::Complete);
-<!--blank-->
+
     workflow.orchestrate(WorkflowState::Start).await?;
     Ok(())
-}</code></pre>
+}
+
+```
+
 </div>
 

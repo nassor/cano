@@ -51,44 +51,48 @@ Define a resource, register it, retrieve it by typed key in any task. The engine
 
 <div class="code-block">
 <span class="code-block-label"><span class="label-icon">&#9889;</span> End-to-end example</span>
-<pre><code class="language-rust">use cano::prelude::*;
-<!--blank-->
+
+```rust
+use cano::prelude::*;
+
 #[derive(Debug, Hash, Eq, PartialEq)]
 enum Key { Store, Config }
-<!--blank-->
+
 // Stateless resource — derive Resource for a no-op setup/teardown impl
 #[derive(Resource)]
 struct AppConfig { multiplier: u32 }
-<!--blank-->
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step { Init, Done }
-<!--blank-->
+
 struct InitTask;
-<!--blank-->
+
 #[task(state = Step, key = Key)]
 impl InitTask {
-    async fn run(&self, res: &Resources&lt;Key&gt;) -&gt; Result&lt;TaskResult&lt;Step&gt;, CanoError&gt; {
-        let store  = res.get::&lt;MemoryStore, _&gt;(&amp;Key::Store)?;
-        let config = res.get::&lt;AppConfig, _&gt;(&amp;Key::Config)?;
-<!--blank-->
+    async fn run(&self, res: &Resources<Key>) -> Result<TaskResult<Step>, CanoError> {
+        let store  = res.get::<MemoryStore, _>(&Key::Store)?;
+        let config = res.get::<AppConfig, _>(&Key::Config)?;
+
         store.put("value", 10u32 * config.multiplier)?;
         Ok(TaskResult::Single(Step::Done))
     }
 }
-<!--blank-->
+
 #[tokio::main]
-async fn main() -&gt; Result&lt;(), CanoError&gt; {
-    let resources = Resources::&lt;Key&gt;::new()
+async fn main() -> Result<(), CanoError> {
+    let resources = Resources::<Key>::new()
         .insert(Key::Store,  MemoryStore::new())
         .insert(Key::Config, AppConfig { multiplier: 3 });
-<!--blank-->
+
     let workflow = Workflow::new(resources)
         .register(Step::Init, InitTask)
         .add_exit_state(Step::Done);
-<!--blank-->
+
     workflow.orchestrate(Step::Init).await?;
     Ok(())
-}</code></pre>
+}
+
+```
 </div>
 
 <!-- Section: Defining a Resource -->
@@ -102,10 +106,14 @@ no-ops, so most resources need no manual impl.
 
 <div class="code-block">
 <span class="code-block-label">Resource trait</span>
-<pre><code class="language-rust">pub trait Resource: Send + Sync + 'static {
-    async fn setup(&amp;self) -&gt; Result&lt;(), CanoError&gt; { Ok(()) }
-    async fn teardown(&amp;self) -&gt; Result&lt;(), CanoError&gt; { Ok(()) }
-}</code></pre>
+
+```rust
+pub trait Resource: Send + Sync + 'static {
+    async fn setup(&self) -> Result<(), CanoError> { Ok(()) }
+    async fn teardown(&self) -> Result<(), CanoError> { Ok(()) }
+}
+
+```
 </div>
 
 <h3>Stateless — <code>#[derive(Resource)]</code></h3>
@@ -116,11 +124,15 @@ read-only data — anything without lifecycle work.
 
 <div class="code-block">
 <span class="code-block-label">Stateless resource via derive</span>
-<pre><code class="language-rust">#[derive(Resource)]
+
+```rust
+#[derive(Resource)]
 struct WorkflowParams {
     batch_size: usize,
     timeout_ms: u64,
-}</code></pre>
+}
+
+```
 </div>
 
 <h3>Stateful — <code>#[resource]</code> on the impl block</h3>
@@ -133,24 +145,30 @@ via <code>Arc</code>, so mutation requires interior mutability —
 
 <div class="code-block">
 <span class="code-block-label">Resource with custom setup/teardown</span>
-<pre><code class="language-rust">use std::sync::{Arc, Mutex};
-<!--blank-->
+
+```rust
+use cano::prelude::*;
+
+use std::sync::{Arc, Mutex};
+
 struct CounterResource {
-    setup_count: Arc&lt;Mutex&lt;u32&gt;&gt;,
+    setup_count: Arc<Mutex<u32>>,
 }
-<!--blank-->
+
 #[resource]
 impl Resource for CounterResource {
-    async fn setup(&amp;self) -&gt; Result&lt;(), CanoError&gt; {
+    async fn setup(&self) -> Result<(), CanoError> {
         *self.setup_count.lock().unwrap() += 1;
         Ok(())
     }
-<!--blank-->
-    async fn teardown(&amp;self) -&gt; Result&lt;(), CanoError&gt; {
+
+    async fn teardown(&self) -> Result<(), CanoError> {
         // flush, close handles, etc.
         Ok(())
     }
-}</code></pre>
+}
+
+```
 </div>
 
 <!-- Section: Building -->
@@ -166,12 +184,16 @@ The two compose in a single chain.
 
 <div class="code-block">
 <span class="code-block-label">insert + try_insert</span>
-<pre><code class="language-rust">// Static keys — duplicates indicate buggy wiring; let it panic
+
+```rust
+// Static keys — duplicates indicate buggy wiring; let it panic
 let resources = Resources::new()
     .insert("store",  MemoryStore::new())
     .insert("config", AppConfig::default())
     // Dynamic key — handle collision as data
-    .try_insert(user_supplied_key, plugin)?;</code></pre>
+    .try_insert(user_supplied_key, plugin)?;
+
+```
 </div>
 
 <!-- Section: Retrieving -->
@@ -186,13 +208,17 @@ let resources = Resources::new()
 
 <div class="code-block">
 <span class="code-block-label">Recommended form — Q inferred</span>
-<pre><code class="language-rust">// String keys
-let store  = res.get::&lt;MemoryStore, _&gt;("store")?;
-let params = res.get::&lt;WorkflowParams, _&gt;("params")?;
-<!--blank-->
+
+```rust
+// String keys
+let store  = res.get::<MemoryStore, _>("store")?;
+let params = res.get::<WorkflowParams, _>("params")?;
+
 // Enum keys
-let store  = res.get::&lt;MemoryStore, _&gt;(&amp;Key::Store)?;
-let params = res.get::&lt;WorkflowParams, _&gt;(&amp;Key::Params)?;</code></pre>
+let store  = res.get::<MemoryStore, _>(&Key::Store)?;
+let params = res.get::<WorkflowParams, _>(&Key::Params)?;
+
+```
 </div>
 
 <table class="styled-table">
@@ -224,20 +250,33 @@ maps, enum path for enum-keyed maps. Container-level
 
 <div class="code-block">
 <span class="code-block-label">Deps struct with enum keys</span>
-<pre><code class="language-rust">#[derive(Hash, Eq, PartialEq)]
+
+```rust
+use cano::prelude::*;
+use std::sync::Arc;
+
+#[derive(Hash, Eq, PartialEq)]
 enum Key { Store, Config }
-<!--blank-->
+
+#[derive(Resource)]
+struct AppConfig { multiplier: u32 }
+
 #[derive(FromResources)]
 #[from_resources(key = Key)]
 struct InitDeps {
     #[res(Key::Store)]
-    store: Arc&lt;MemoryStore&gt;,
+    store: Arc<MemoryStore>,
     #[res(Key::Config)]
-    config: Arc&lt;AppConfig&gt;,
+    config: Arc<AppConfig>,
 }
-<!--blank-->
-// In a task:
-let InitDeps { store, config } = InitDeps::from_resources(res)?;</code></pre>
+
+fn lookup(res: &Resources<Key>) -> Result<(), CanoError> {
+    // In a task:
+    let InitDeps { store, config } = InitDeps::from_resources(res)?;
+    let _ = (store, config);
+    Ok(())
+}
+```
 </div>
 
 <!-- Section: Key Types -->
@@ -300,15 +339,41 @@ E->>R0: teardown()
 
 <div class="code-block">
 <span class="code-block-label">Partial rollback — only A and B are torn down</span>
-<pre><code class="language-rust">let resources = Resources::new()
-    .insert("a", ServiceA::new())  // position 0 — setup OK
-    .insert("b", ServiceB::new())  // position 1 — setup OK
-    .insert("c", ServiceC::new())  // position 2 — setup FAILS
-    .insert("d", ServiceD::new()); // position 3 — never reached
-<!--blank-->
-// setup_all() returns Err from C; teardown runs for B then A (LIFO)
-let result = resources.setup_all().await;
-assert!(result.is_err());</code></pre>
+
+```rust
+use cano::prelude::*;
+
+#[derive(Resource)] struct ServiceA;
+#[derive(Resource)] struct ServiceB;
+#[derive(Resource)] struct ServiceD;
+
+struct ServiceC;
+
+impl ServiceA { fn new() -> Self { Self } }
+impl ServiceB { fn new() -> Self { Self } }
+impl ServiceC { fn new() -> Self { Self } }
+impl ServiceD { fn new() -> Self { Self } }
+
+#[resource]
+impl Resource for ServiceC {
+    async fn setup(&self) -> Result<(), CanoError> {
+        Err(CanoError::Configuration("ServiceC failed".into()))
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    let resources: Resources = Resources::new()
+        .insert("a", ServiceA::new())  // position 0 — setup OK
+        .insert("b", ServiceB::new())  // position 1 — setup OK
+        .insert("c", ServiceC::new())  // position 2 — setup FAILS
+        .insert("d", ServiceD::new()); // position 3 — never reached
+
+    // setup_all() returns Err from C; teardown runs for B then A (LIFO)
+    let result = resources.setup_all().await;
+    assert!(result.is_err());
+}
+```
 </div>
 
 <!-- Section: Concurrency -->
@@ -381,23 +446,32 @@ instead of <code>run()</code>, and build the workflow with <code>Workflow::bare(
 
 <div class="code-block">
 <span class="code-block-label">Resource-free workflow</span>
-<pre><code class="language-rust">#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+
+```rust
+use cano::prelude::*;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step { Compute, Done }
-<!--blank-->
+
+#[derive(Clone)]
 struct PureTask;
-<!--blank-->
+
 #[task(state = Step)]
 impl PureTask {
-    async fn run_bare(&amp;self) -&gt; Result&lt;TaskResult&lt;Step&gt;, CanoError&gt; {
+    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
         let answer = 40 + 2;
         println!("Computed: {answer}");
         Ok(TaskResult::Single(Step::Done))
     }
 }
-<!--blank-->
-let workflow = Workflow::bare()
-    .register(Step::Compute, PureTask)
-    .add_exit_state(Step::Done);</code></pre>
+
+fn build() -> Workflow<Step> {
+    Workflow::bare()
+        .register(Step::Compute, PureTask)
+        .add_exit_state(Step::Done)
+}
+
+```
 </div>
 
 <!-- Section: API Reference -->

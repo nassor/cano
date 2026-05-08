@@ -35,14 +35,20 @@ The workflow engine manages the transitions between these states until an exit s
 <hr class="section-divider">
 
 <h2 id="defining-states"><a href="#defining-states" class="anchor-link" aria-hidden="true">#</a>Defining States</h2>
-<pre><code class="language-rust">#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+
+```rust
+use cano::prelude::*;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum OrderState {
     Start,
     Validate,
     Process,
     Complete,
     Failed,
-}</code></pre>
+}
+
+```
 <hr class="section-divider">
 
 <h2 id="building-a-workflow"><a href="#building-a-workflow" class="anchor-link" aria-hidden="true">#</a>Building a Workflow</h2>
@@ -66,8 +72,10 @@ C --> E[Complete]
 </div>
 
 <h3 id="linear-example"><a href="#linear-example" class="anchor-link" aria-hidden="true">#</a>Linear Workflow Example</h3>
-<pre><code class="language-rust">use cano::prelude::*;
-<!--blank-->
+
+```rust
+use cano::prelude::*;
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum OrderState {
     Start,
@@ -76,15 +84,40 @@ enum OrderState {
     Complete,
     Failed,
 }
-<!--blank-->
-// Define simple tasks (omitted for brevity, see Tasks page)
+
+// Define simple tasks (full impls covered on the Tasks page)
+#[derive(Clone)]
+struct StartTask;
+#[derive(Clone)]
 struct ValidateTask;
+#[derive(Clone)]
 struct ProcessTask;
-<!--blank-->
+
+#[task(state = OrderState)]
+impl StartTask {
+    async fn run_bare(&self) -> Result<TaskResult<OrderState>, CanoError> {
+        Ok(TaskResult::Single(OrderState::Validate))
+    }
+}
+
+#[task(state = OrderState)]
+impl ValidateTask {
+    async fn run_bare(&self) -> Result<TaskResult<OrderState>, CanoError> {
+        Ok(TaskResult::Single(OrderState::Process))
+    }
+}
+
+#[task(state = OrderState)]
+impl ProcessTask {
+    async fn run_bare(&self) -> Result<TaskResult<OrderState>, CanoError> {
+        Ok(TaskResult::Single(OrderState::Complete))
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     let store = MemoryStore::new();
-<!--blank-->
+
     // Build workflow using the builder pattern — each method consumes self
     // and returns a new Workflow, so you must capture the return value.
     // For workflows that need no shared resources at all, use `Workflow::bare()`.
@@ -95,13 +128,15 @@ async fn main() -> Result<(), CanoError> {
         .register(OrderState::Process, ProcessTask)
         // 2. Define Exit States (Workflow stops here)
         .add_exit_states(vec![OrderState::Complete, OrderState::Failed]);
-<!--blank-->
+
     // 3. Execute
     let result = workflow.orchestrate(OrderState::Start).await?;
-<!--blank-->
+
     println!("Final State: {:?}", result);
     Ok(())
-}</code></pre>
+}
+
+```
 <hr class="section-divider">
 
 <h2 id="builder-pattern"><a href="#builder-pattern" class="anchor-link" aria-hidden="true">#</a>Builder Pattern and #[must_use]</h2>
@@ -114,18 +149,40 @@ will warn you if you discard the return value. If you forget to capture it, the 
 
 <div class="callout callout-warning">
 <div class="callout-label">Warning: Do not discard the return value</div>
-<pre><code class="language-rust">// WRONG — registration is lost!
-let workflow = Workflow::new(Resources::new().insert("store", store.clone()));
-workflow.register(State::Start, my_task);  // returns a new Workflow, but it is discarded
-<!--blank-->
-// CORRECT — capture the returned workflow
-let workflow = Workflow::new(Resources::new().insert("store", store.clone()));
-let workflow = workflow.register(State::Start, my_task);
-<!--blank-->
-// BEST — chain calls in a single expression
-let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
-    .register(State::Start, my_task)
-    .add_exit_state(State::Complete);</code></pre>
+
+```rust
+use cano::prelude::*;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum State { Start, Complete }
+
+#[derive(Clone)]
+struct MyTask;
+
+#[task(state = State)]
+impl MyTask {
+    async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> {
+        Ok(TaskResult::Single(State::Complete))
+    }
+}
+
+fn examples(store: MemoryStore) {
+    let my_task = MyTask;
+
+    // WRONG — registration is lost!
+    let workflow = Workflow::new(Resources::new().insert("store", store.clone()));
+    workflow.register(State::Start, my_task.clone());  // returns a new Workflow, but it is discarded
+
+    // CORRECT — capture the returned workflow
+    let workflow = Workflow::new(Resources::new().insert("store", store.clone()));
+    let _workflow = workflow.register(State::Start, my_task.clone());
+
+    // BEST — chain calls in a single expression
+    let _workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+        .register(State::Start, my_task)
+        .add_exit_state(State::Complete);
+}
+```
 </div>
 <hr class="section-divider">
 
@@ -153,19 +210,50 @@ Checks that a specific initial state has a handler registered. Returns <code>Can
 if the given state has no registered task or split handler.
 </p>
 
-<pre><code class="language-rust">let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
-    .register(State::Start, MyTask)
-    .register(State::Process, ProcessTask)
-    .add_exit_state(State::Complete);
-<!--blank-->
-// Validate structure: ensures handlers and exit states exist
-workflow.validate()?;
-<!--blank-->
-// Validate that the initial state has a handler
-workflow.validate_initial_state(&State::Start)?;
-<!--blank-->
-// Safe to orchestrate
-let result = workflow.orchestrate(State::Start).await?;</code></pre>
+```rust
+use cano::prelude::*;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum State { Start, Process, Complete }
+
+#[derive(Clone)]
+struct MyTask;
+#[derive(Clone)]
+struct ProcessTask;
+
+#[task(state = State)]
+impl MyTask {
+    async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> {
+        Ok(TaskResult::Single(State::Process))
+    }
+}
+
+#[task(state = State)]
+impl ProcessTask {
+    async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> {
+        Ok(TaskResult::Single(State::Complete))
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    let store = MemoryStore::new();
+    let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+        .register(State::Start, MyTask)
+        .register(State::Process, ProcessTask)
+        .add_exit_state(State::Complete);
+
+    // Validate structure: ensures handlers and exit states exist
+    workflow.validate()?;
+
+    // Validate that the initial state has a handler
+    workflow.validate_initial_state(&State::Start)?;
+
+    // Safe to orchestrate
+    let _result = workflow.orchestrate(State::Start).await?;
+    Ok(())
+}
+```
 <hr class="section-divider">
 
 <h2 id="error-handling"><a href="#error-handling" class="anchor-link" aria-hidden="true">#</a>Error Handling</h2>
@@ -241,14 +329,17 @@ through the join strategy.
 </p>
 </div>
 
-<pre><code class="language-rust">match workflow.orchestrate(State::Start).await {
+```rust
+match workflow.orchestrate(State::Start).await {
     Ok(final_state) => println!("Completed: {:?}", final_state),
     Err(CanoError::Workflow(msg)) => eprintln!("Workflow error: {}", msg),
     Err(CanoError::Configuration(msg)) => eprintln!("Config error: {}", msg),
     Err(CanoError::Timeout(msg)) => eprintln!("Attempt timed out: {}", msg),
     Err(CanoError::RetryExhausted(msg)) => eprintln!("Retries exhausted: {}", msg),
     Err(e) => eprintln!("Task error: {}", e),
-}</code></pre>
+}
+
+```
 <hr class="section-divider">
 
 <h2 id="split-join"><a href="#split-join" class="anchor-link" aria-hidden="true">#</a>Split/Join Workflows</h2>
@@ -279,32 +370,56 @@ E -->|Failed/Timeout| G[Error State]
 <div class="strategy-card">
 <p class="strategy-name">All</p>
 <p>Wait for <strong>all</strong> tasks to complete successfully.</p>
-<pre><code class="language-rust">JoinStrategy::All</code></pre>
+
+```rust
+JoinStrategy::All
+
+```
 </div>
 <div class="strategy-card">
 <p class="strategy-name">Any</p>
 <p>Proceed after the <strong>first</strong> task completes successfully.</p>
-<pre><code class="language-rust">JoinStrategy::Any</code></pre>
+
+```rust
+JoinStrategy::Any
+
+```
 </div>
 <div class="strategy-card">
 <p class="strategy-name">Quorum(n)</p>
 <p>Wait for <strong>n</strong> tasks to complete successfully.</p>
-<pre><code class="language-rust">JoinStrategy::Quorum(2)</code></pre>
+
+```rust
+JoinStrategy::Quorum(2)
+
+```
 </div>
 <div class="strategy-card">
 <p class="strategy-name">Percentage(p)</p>
 <p>Wait for <strong>p%</strong> of tasks to complete successfully.</p>
-<pre><code class="language-rust">JoinStrategy::Percentage(0.5)</code></pre>
+
+```rust
+JoinStrategy::Percentage(0.5)
+
+```
 </div>
 <div class="strategy-card">
 <p class="strategy-name">PartialResults(n)</p>
 <p>Proceed after <strong>n</strong> tasks complete successfully.</p>
-<pre><code class="language-rust">JoinStrategy::PartialResults(3)</code></pre>
+
+```rust
+JoinStrategy::PartialResults(3)
+
+```
 </div>
 <div class="strategy-card">
 <p class="strategy-name">PartialTimeout</p>
 <p>Accept whatever completes before <strong>timeout</strong> expires. Requires <code>.with_timeout()</code>.</p>
-<pre><code class="language-rust">JoinStrategy::PartialTimeout</code></pre>
+
+```rust
+JoinStrategy::PartialTimeout
+
+```
 </div>
 </div>
 
@@ -319,8 +434,12 @@ strategy still applies once results come in.
 
 <div class="code-block">
 <span class="code-block-label">Bulkhead config</span>
-<pre><code class="language-rust">let join_config = JoinConfig::new(JoinStrategy::All, State::Aggregate)
-    .with_bulkhead(4); // at most 4 split tasks run at once</code></pre>
+
+```rust
+let join_config = JoinConfig::new(JoinStrategy::All, State::Aggregate)
+    .with_bulkhead(4); // at most 4 split tasks run at once
+
+```
 </div>
 
 <div class="callout callout-warning">
@@ -335,9 +454,10 @@ Leave the bulkhead unset (<code>None</code>) for unbounded concurrency. Bulkhead
 <h3 id="complete-example"><a href="#complete-example" class="anchor-link" aria-hidden="true">#</a>Complete Example</h3>
 <p>Here is a complete, runnable example demonstrating how to use Split/Join with different strategies.</p>
 
-<pre><code class="language-rust">use cano::prelude::*;
+```rust
+use cano::prelude::*;
 use std::time::Duration;
-<!--blank-->
+
 // 1. Define Workflow State
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum DataState {
@@ -347,107 +467,107 @@ enum DataState {
     Aggregate,
     Complete,
 }
-<!--blank-->
+
 // 2. Task to load initial data
 #[derive(Clone)]
 struct DataLoader;
-<!--blank-->
+
 #[task(state = DataState)]
 impl DataLoader {
     async fn run(&self, res: &Resources) -> Result<TaskResult<DataState>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
         println!("Loading initial data...");
-<!--blank-->
+
         // Load some data to process
         let data = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
         store.put("input_data", data)?;
-<!--blank-->
+
         println!("Data loaded: 10 numbers");
         Ok(TaskResult::Single(DataState::ParallelProcessing))
     }
 }
-<!--blank-->
+
 // 3. Parallel processing task
 #[derive(Clone)]
 struct ProcessorTask {
     task_id: usize,
 }
-<!--blank-->
+
 impl ProcessorTask {
     fn new(task_id: usize) -> Self {
         Self { task_id }
     }
 }
-<!--blank-->
+
 #[task(state = DataState)]
 impl ProcessorTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<DataState>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
         println!("Processor {} starting...", self.task_id);
-<!--blank-->
+
         // Get input data
         let data: Vec<i32> = store.get("input_data")?;
-<!--blank-->
+
         // Simulate processing time
         tokio::time::sleep(Duration::from_millis(100 * self.task_id as u64)).await;
-<!--blank-->
+
         // Process data (simple example: multiply by task_id)
         let result: i32 = data.iter().map(|&x| x * self.task_id as i32).sum();
-<!--blank-->
+
         // Store individual result
         store.put(&format!("result_{}", self.task_id), result)?;
-<!--blank-->
+
         println!("Processor {} completed with result: {}", self.task_id, result);
         Ok(TaskResult::Single(DataState::Aggregate))
     }
 }
-<!--blank-->
+
 // 4. Aggregator task
 #[derive(Clone)]
 struct Aggregator;
-<!--blank-->
+
 #[task(state = DataState)]
 impl Aggregator {
     async fn run(&self, res: &Resources) -> Result<TaskResult<DataState>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
         println!("Aggregating results...");
-<!--blank-->
+
         // Collect all results
         let mut total = 0;
         let mut count = 0;
-<!--blank-->
+
         for i in 1..=3 {
             if let Ok(result) = store.get::<i32>(&format!("result_{}", i)) {
                 total += result;
                 count += 1;
             }
         }
-<!--blank-->
+
         store.put("final_result", total)?;
         store.put("processor_count", count)?;
-<!--blank-->
+
         println!("Aggregation complete: {} processors, total: {}", count, total);
         Ok(TaskResult::Single(DataState::Complete))
     }
 }
-<!--blank-->
+
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     let store = MemoryStore::new();
-<!--blank-->
+
     // Define tasks to run in parallel
     let processors = vec![
         ProcessorTask::new(1),
         ProcessorTask::new(2),
         ProcessorTask::new(3),
     ];
-<!--blank-->
+
     // Configure Join Strategy: Wait for ALL tasks
     let join_config = JoinConfig::new(
         JoinStrategy::All,
         DataState::Aggregate
     ).with_timeout(Duration::from_secs(5));
-<!--blank-->
+
     // Build Workflow
     let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(DataState::Start, DataLoader)
@@ -458,16 +578,18 @@ async fn main() -> Result<(), CanoError> {
         )
         .register(DataState::Aggregate, Aggregator)
         .add_exit_state(DataState::Complete);
-<!--blank-->
+
     // Run Workflow
     let result = workflow.orchestrate(DataState::Start).await?;
-<!--blank-->
+
     let final_result: i32 = store.get("final_result")?;
     println!("Workflow completed: {:?}", result);
     println!("Final result: {}", final_result);
-<!--blank-->
+
     Ok(())
-}</code></pre>
+}
+
+```
 <hr class="section-divider">
 
 <h2 id="join-strategy-examples"><a href="#join-strategy-examples" class="anchor-link" aria-hidden="true">#</a>Join Strategy Examples</h2>
@@ -494,22 +616,61 @@ Note over W: All Complete → Proceed
 </div>
 </div>
 
-<pre><code class="language-rust">// All Strategy: Best for workflows requiring complete data
-let join_config = JoinConfig::new(
-    JoinStrategy::All, 
-    DataState::Aggregate
-).with_timeout(Duration::from_secs(10));
-<!--blank-->
-let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
-    .register(DataState::Start, DataLoader)
-    .register_split(
-        DataState::ParallelProcessing,
-        vec![ProcessorTask::new(1), ProcessorTask::new(2), ProcessorTask::new(3)],
-        join_config
-    )
-    .register(DataState::Aggregate, Aggregator)
-    .add_exit_state(DataState::Complete);
-</code></pre>
+```rust
+use cano::prelude::*;
+use std::time::Duration;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum DataState { Start, ParallelProcessing, Aggregate, Complete }
+
+#[derive(Clone)]
+struct DataLoader;
+#[derive(Clone)]
+struct ProcessorTask { id: u32 }
+impl ProcessorTask { fn new(id: u32) -> Self { Self { id } } }
+#[derive(Clone)]
+struct Aggregator;
+
+#[task(state = DataState)]
+impl DataLoader {
+    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
+        Ok(TaskResult::Single(DataState::ParallelProcessing))
+    }
+}
+
+#[task(state = DataState)]
+impl ProcessorTask {
+    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
+        Ok(TaskResult::Single(DataState::Aggregate))
+    }
+}
+
+#[task(state = DataState)]
+impl Aggregator {
+    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
+        Ok(TaskResult::Single(DataState::Complete))
+    }
+}
+
+fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
+    // All Strategy: Best for workflows requiring complete data
+    let join_config = JoinConfig::new(
+        JoinStrategy::All,
+        DataState::Aggregate,
+    ).with_timeout(Duration::from_secs(10));
+
+    Workflow::new(Resources::new().insert("store", store))
+        .register(DataState::Start, DataLoader)
+        .register_split(
+            DataState::ParallelProcessing,
+            vec![ProcessorTask::new(1), ProcessorTask::new(2), ProcessorTask::new(3)],
+            join_config,
+        )
+        .register(DataState::Aggregate, Aggregator)
+        .add_exit_state(DataState::Complete)
+}
+
+```
 
 <h3 id="strategy-any"><a href="#strategy-any" class="anchor-link" aria-hidden="true">#</a>2. Any Strategy - First to Complete</h3>
 <p>Proceeds as soon as the first task completes successfully. Other tasks are cancelled.</p>
@@ -532,26 +693,59 @@ W->>T3: Cancel
 </div>
 </div>
 
-<pre><code class="language-rust">// Any Strategy: Best for redundant API calls or fastest-wins scenarios
-let join_config = JoinConfig::new(
-    JoinStrategy::Any, 
-    DataState::Complete  // Skip aggregation, proceed directly
-);
-<!--blank-->
-// Example: Call 3 different data sources, use whoever responds first
-let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
-    .register(DataState::Start, DataLoader)
-    .register_split(
-        DataState::ParallelProcessing,
-        vec![
-            ApiCallTask::new("provider1"),
-            ApiCallTask::new("provider2"),
-            ApiCallTask::new("provider3"),
-        ],
-        join_config
-    )
-    .add_exit_state(DataState::Complete);
-</code></pre>
+```rust
+use cano::prelude::*;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum DataState { Start, ParallelProcessing, Complete }
+
+#[derive(Clone)]
+struct DataLoader;
+
+#[task(state = DataState)]
+impl DataLoader {
+    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
+        Ok(TaskResult::Single(DataState::ParallelProcessing))
+    }
+}
+
+#[derive(Clone)]
+struct ApiCallTask { provider: String }
+
+impl ApiCallTask {
+    fn new(provider: &str) -> Self { Self { provider: provider.into() } }
+}
+
+#[task(state = DataState)]
+impl ApiCallTask {
+    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
+        Ok(TaskResult::Single(DataState::Complete))
+    }
+}
+
+fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
+    // Any Strategy: Best for redundant API calls or fastest-wins scenarios
+    let join_config = JoinConfig::new(
+        JoinStrategy::Any,
+        DataState::Complete  // Skip aggregation, proceed directly
+    );
+
+    // Example: Call 3 different data sources, use whoever responds first
+    Workflow::new(Resources::new().insert("store", store))
+        .register(DataState::Start, DataLoader)
+        .register_split(
+            DataState::ParallelProcessing,
+            vec![
+                ApiCallTask::new("provider1"),
+                ApiCallTask::new("provider2"),
+                ApiCallTask::new("provider3"),
+            ],
+            join_config,
+        )
+        .add_exit_state(DataState::Complete)
+}
+
+```
 
 <h3 id="strategy-quorum"><a href="#strategy-quorum" class="anchor-link" aria-hidden="true">#</a>3. Quorum Strategy - Wait for N Tasks</h3>
 <p>Proceeds after a specific number of tasks complete successfully. Useful for consensus systems.</p>
@@ -577,29 +771,67 @@ W->>T4: Cancel
 </div>
 </div>
 
-<pre><code class="language-rust">// Quorum Strategy: Best for distributed consensus or majority voting
-let join_config = JoinConfig::new(
-    JoinStrategy::Quorum(3),  // Need 3 out of 5 to succeed
-    DataState::Aggregate
-).with_timeout(Duration::from_secs(5));
-<!--blank-->
-// Example: Write to 5 replicas, succeed when 3 confirm
-let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
-    .register(DataState::Start, PrepareData)
-    .register_split(
-        DataState::ParallelProcessing,
-        vec![
-            WriteReplica::new(1),
-            WriteReplica::new(2),
-            WriteReplica::new(3),
-            WriteReplica::new(4),
-            WriteReplica::new(5),
-        ],
-        join_config
-    )
-    .register(DataState::Aggregate, ConfirmWrite)
-    .add_exit_state(DataState::Complete);
-</code></pre>
+```rust
+use cano::prelude::*;
+use std::time::Duration;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum DataState { Start, ParallelProcessing, Aggregate, Complete }
+
+#[derive(Clone)]
+struct PrepareData;
+#[derive(Clone)]
+struct WriteReplica { id: u32 }
+impl WriteReplica { fn new(id: u32) -> Self { Self { id } } }
+#[derive(Clone)]
+struct ConfirmWrite;
+
+#[task(state = DataState)]
+impl PrepareData {
+    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
+        Ok(TaskResult::Single(DataState::ParallelProcessing))
+    }
+}
+
+#[task(state = DataState)]
+impl WriteReplica {
+    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
+        Ok(TaskResult::Single(DataState::Aggregate))
+    }
+}
+
+#[task(state = DataState)]
+impl ConfirmWrite {
+    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
+        Ok(TaskResult::Single(DataState::Complete))
+    }
+}
+
+fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
+    // Quorum Strategy: Best for distributed consensus or majority voting
+    let join_config = JoinConfig::new(
+        JoinStrategy::Quorum(3),  // Need 3 out of 5 to succeed
+        DataState::Aggregate,
+    ).with_timeout(Duration::from_secs(5));
+
+    // Example: Write to 5 replicas, succeed when 3 confirm
+    Workflow::new(Resources::new().insert("store", store))
+        .register(DataState::Start, PrepareData)
+        .register_split(
+            DataState::ParallelProcessing,
+            vec![
+                WriteReplica::new(1),
+                WriteReplica::new(2),
+                WriteReplica::new(3),
+                WriteReplica::new(4),
+                WriteReplica::new(5),
+            ],
+            join_config,
+        )
+        .register(DataState::Aggregate, ConfirmWrite)
+        .add_exit_state(DataState::Complete)
+}
+```
 
 <h3 id="strategy-percentage"><a href="#strategy-percentage" class="anchor-link" aria-hidden="true">#</a>4. Percentage Strategy - Wait for % of Tasks</h3>
 <p>Proceeds after a percentage of tasks complete successfully. Flexible for varying batch sizes.</p>
@@ -625,28 +857,67 @@ W->>T3: Cancel
 </div>
 </div>
 
-<pre><code class="language-rust">// Percentage Strategy: Best for batch processing with acceptable partial results
-let join_config = JoinConfig::new(
-    JoinStrategy::Percentage(0.75),  // Need 75% to succeed
-    DataState::Aggregate
-).with_timeout(Duration::from_secs(10));
-<!--blank-->
-// Example: Process 100 records, proceed when 75 complete
-let mut tasks = Vec::new();
-for i in 0..100 {
-    tasks.push(RecordProcessor::new(i));
+```rust
+use cano::prelude::*;
+use std::time::Duration;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum DataState { Start, ParallelProcessing, Aggregate, Complete }
+
+#[derive(Clone)]
+struct LoadRecords;
+#[derive(Clone)]
+struct RecordProcessor { idx: usize }
+impl RecordProcessor { fn new(idx: usize) -> Self { Self { idx } } }
+#[derive(Clone)]
+struct SummarizeResults;
+
+#[task(state = DataState)]
+impl LoadRecords {
+    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
+        Ok(TaskResult::Single(DataState::ParallelProcessing))
+    }
 }
-<!--blank-->
-let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
-    .register(DataState::Start, LoadRecords)
-    .register_split(
-        DataState::ParallelProcessing,
-        tasks,
-        join_config
-    )
-    .register(DataState::Aggregate, SummarizeResults)
-    .add_exit_state(DataState::Complete);
-</code></pre>
+
+#[task(state = DataState)]
+impl RecordProcessor {
+    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
+        Ok(TaskResult::Single(DataState::Aggregate))
+    }
+}
+
+#[task(state = DataState)]
+impl SummarizeResults {
+    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
+        Ok(TaskResult::Single(DataState::Complete))
+    }
+}
+
+fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
+    // Percentage Strategy: Best for batch processing with acceptable partial results
+    let join_config = JoinConfig::new(
+        JoinStrategy::Percentage(0.75),  // Need 75% to succeed
+        DataState::Aggregate,
+    ).with_timeout(Duration::from_secs(10));
+
+    // Example: Process 100 records, proceed when 75 complete
+    let mut tasks = Vec::new();
+    for i in 0..100 {
+        tasks.push(RecordProcessor::new(i));
+    }
+
+    Workflow::new(Resources::new().insert("store", store))
+        .register(DataState::Start, LoadRecords)
+        .register_split(
+            DataState::ParallelProcessing,
+            tasks,
+            join_config,
+        )
+        .register(DataState::Aggregate, SummarizeResults)
+        .add_exit_state(DataState::Complete)
+}
+
+```
 
 <h3 id="strategy-partial-results"><a href="#strategy-partial-results" class="anchor-link" aria-hidden="true">#</a>5. PartialResults Strategy - Accept Partial Completion</h3>
 <p>Proceeds after N tasks complete successfully, cancels remaining tasks. Tracks all outcomes.</p>
@@ -673,29 +944,68 @@ Note over W: Track: 2 success, 1 error, 1 cancelled
 </div>
 </div>
 
-<pre><code class="language-rust">// PartialResults Strategy: Best for fault-tolerant systems with latency optimization
-let join_config = JoinConfig::new(
-    JoinStrategy::PartialResults(2),  // Proceed after any 2 succeed
-    DataState::Aggregate
-)
-.with_timeout(Duration::from_secs(5));
-<!--blank-->
-// Example: Call multiple services, use fastest 3 responses
-let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
-    .register(DataState::Start, PrepareRequest)
-    .register_split(
-        DataState::ParallelProcessing,
-        vec![
-            ServiceCall::new("fast-service"),
-            ServiceCall::new("medium-service"),
-            ServiceCall::new("slow-service"),
-            ServiceCall::new("backup-service"),
-        ],
-        join_config
+```rust
+use cano::prelude::*;
+use std::time::Duration;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum DataState { Start, ParallelProcessing, Aggregate, Complete }
+
+#[derive(Clone)]
+struct PrepareRequest;
+#[derive(Clone)]
+struct ServiceCall { name: String }
+impl ServiceCall { fn new(name: &str) -> Self { Self { name: name.into() } } }
+#[derive(Clone)]
+struct MergePartialResults;
+
+#[task(state = DataState)]
+impl PrepareRequest {
+    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
+        Ok(TaskResult::Single(DataState::ParallelProcessing))
+    }
+}
+
+#[task(state = DataState)]
+impl ServiceCall {
+    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
+        Ok(TaskResult::Single(DataState::Aggregate))
+    }
+}
+
+#[task(state = DataState)]
+impl MergePartialResults {
+    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
+        Ok(TaskResult::Single(DataState::Complete))
+    }
+}
+
+fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
+    // PartialResults Strategy: Best for fault-tolerant systems with latency optimization
+    let join_config = JoinConfig::new(
+        JoinStrategy::PartialResults(2),  // Proceed after any 2 succeed
+        DataState::Aggregate,
     )
-    .register(DataState::Aggregate, MergePartialResults)
-    .add_exit_state(DataState::Complete);
-</code></pre>
+    .with_timeout(Duration::from_secs(5));
+
+    // Example: Call multiple services, use fastest 3 responses
+    Workflow::new(Resources::new().insert("store", store))
+        .register(DataState::Start, PrepareRequest)
+        .register_split(
+            DataState::ParallelProcessing,
+            vec![
+                ServiceCall::new("fast-service"),
+                ServiceCall::new("medium-service"),
+                ServiceCall::new("slow-service"),
+                ServiceCall::new("backup-service"),
+            ],
+            join_config,
+        )
+        .register(DataState::Aggregate, MergePartialResults)
+        .add_exit_state(DataState::Complete)
+}
+
+```
 
 <h3 id="strategy-partial-timeout"><a href="#strategy-partial-timeout" class="anchor-link" aria-hidden="true">#</a>6. PartialTimeout Strategy - Deadline-Based Completion</h3>
 <p>Accepts whatever completes before timeout expires. Proceeds with available results.</p>
@@ -722,29 +1032,67 @@ Note over W: Proceed with 2 results
 </div>
 </div>
 
-<pre><code class="language-rust">// PartialTimeout Strategy: Best for real-time systems with strict SLAs
-let join_config = JoinConfig::new(
-    JoinStrategy::PartialTimeout,  // Must specify timeout
-    DataState::Aggregate
-)
-.with_timeout(Duration::from_millis(500));  // 500ms deadline
-<!--blank-->
-// Example: Real-time recommendation system with 500ms SLA
-let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
-    .register(DataState::Start, LoadUserContext)
-    .register_split(
-        DataState::ParallelProcessing,
-        vec![
-            RecommendationEngine::new("collaborative"),
-            RecommendationEngine::new("content-based"),
-            RecommendationEngine::new("trending"),
-            RecommendationEngine::new("personalized"),
-        ],
-        join_config
+```rust
+use cano::prelude::*;
+use std::time::Duration;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum DataState { Start, ParallelProcessing, Aggregate, Complete }
+
+#[derive(Clone)]
+struct LoadUserContext;
+#[derive(Clone)]
+struct RecommendationEngine { kind: String }
+impl RecommendationEngine { fn new(kind: &str) -> Self { Self { kind: kind.into() } } }
+#[derive(Clone)]
+struct AggregateWithinSla;
+
+#[task(state = DataState)]
+impl LoadUserContext {
+    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
+        Ok(TaskResult::Single(DataState::ParallelProcessing))
+    }
+}
+
+#[task(state = DataState)]
+impl RecommendationEngine {
+    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
+        Ok(TaskResult::Single(DataState::Aggregate))
+    }
+}
+
+#[task(state = DataState)]
+impl AggregateWithinSla {
+    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
+        Ok(TaskResult::Single(DataState::Complete))
+    }
+}
+
+fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
+    // PartialTimeout Strategy: Best for real-time systems with strict SLAs
+    let join_config = JoinConfig::new(
+        JoinStrategy::PartialTimeout,  // Must specify timeout
+        DataState::Aggregate,
     )
-    .register(DataState::Aggregate, AggregateWithinSla)
-    .add_exit_state(DataState::Complete);
-</code></pre>
+    .with_timeout(Duration::from_millis(500));  // 500ms deadline
+
+    // Example: Real-time recommendation system with 500ms SLA
+    Workflow::new(Resources::new().insert("store", store))
+        .register(DataState::Start, LoadUserContext)
+        .register_split(
+            DataState::ParallelProcessing,
+            vec![
+                RecommendationEngine::new("collaborative"),
+                RecommendationEngine::new("content-based"),
+                RecommendationEngine::new("trending"),
+                RecommendationEngine::new("personalized"),
+            ],
+            join_config,
+        )
+        .register(DataState::Aggregate, AggregateWithinSla)
+        .add_exit_state(DataState::Complete)
+}
+```
 <hr class="section-divider">
 
 <h2 id="comparison-table"><a href="#comparison-table" class="anchor-link" aria-hidden="true">#</a>Comparison Table</h2>
@@ -810,11 +1158,13 @@ Process items from a queue in parallel batches. Instead of running multiple work
 use a single workflow that pulls batches and processes them in parallel.
 </p>
 
-<pre><code class="language-rust">use cano::prelude::*;
+```rust
+use cano::prelude::*;
 use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
-<!--blank-->
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum QueueState {
     PullBatch,
@@ -822,22 +1172,22 @@ enum QueueState {
     Complete,
     Idle,
 }
-<!--blank-->
+
 // Simulated queue (in production, use actual queue like Redis, SQS, etc.)
 type SharedQueue = Arc<Mutex<VecDeque<String>>>;
-<!--blank-->
+
 #[derive(Clone)]
 struct QueuePuller {
     queue: SharedQueue,
     batch_size: usize,
 }
-<!--blank-->
+
 #[task(state = QueueState)]
 impl QueuePuller {
     async fn run(&self, res: &Resources) -> Result<TaskResult<QueueState>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
         let mut queue = self.queue.lock().await;
-<!--blank-->
+
         // Pull batch from queue
         let mut batch = Vec::new();
         for _ in 0..self.batch_size {
@@ -847,67 +1197,67 @@ impl QueuePuller {
                 break;
             }
         }
-<!--blank-->
+
         if batch.is_empty() {
             println!("Queue empty, waiting...");
             // Wait and retry
             tokio::time::sleep(Duration::from_secs(1)).await;
             return Ok(TaskResult::Single(QueueState::PullBatch));
         }
-<!--blank-->
+
         println!("Pulled {} items from queue", batch.len());
         store.put("current_batch", batch)?;
-<!--blank-->
+
         // Split into parallel processing
         Ok(TaskResult::Single(QueueState::ProcessBatch))
     }
 }
-<!--blank-->
+
 #[derive(Clone)]
 struct ItemProcessor {
     item_id: String,
 }
-<!--blank-->
+
 #[task(state = QueueState)]
 impl ItemProcessor {
     async fn run(&self, res: &Resources) -> Result<TaskResult<QueueState>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
         println!("Processing item: {}", self.item_id);
-<!--blank-->
+
         // Simulate processing
         tokio::time::sleep(Duration::from_millis(500)).await;
-<!--blank-->
+
         // Store result
         store.put(&format!("result_{}", self.item_id), "completed")?;
-<!--blank-->
+
         Ok(TaskResult::Single(QueueState::Complete))
     }
 }
-<!--blank-->
+
 #[derive(Clone)]
 struct BatchSplitter {
     queue: SharedQueue,
     batch_size: usize,
 }
-<!--blank-->
+
 #[task(state = QueueState)]
 impl BatchSplitter {
     async fn run(&self, res: &Resources) -> Result<TaskResult<QueueState>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
         let batch: Vec<String> = store.get("current_batch")?;
-<!--blank-->
+
         if batch.is_empty() {
             return Ok(TaskResult::Single(QueueState::PullBatch));
         }
-<!--blank-->
+
         // Create processors for each item in parallel
         let processors: Vec<Box<dyn Task<QueueState>>> = batch
             .into_iter()
             .map(|item| Box::new(ItemProcessor { item_id: item }) as Box<dyn Task<QueueState>>)
             .collect();
-<!--blank-->
+
         println!("Splitting into {} parallel processors", processors.len());
-<!--blank-->
+
         // Return split to process all items in parallel
         Ok(TaskResult::Split(
             processors.into_iter()
@@ -916,7 +1266,7 @@ impl BatchSplitter {
         ))
     }
 }
-<!--blank-->
+
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     let store = MemoryStore::new();
@@ -927,7 +1277,7 @@ async fn main() -> Result<(), CanoError> {
         "order4".to_string(),
         "order5".to_string(),
     ])));
-<!--blank-->
+
     let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(QueueState::PullBatch, QueuePuller { 
             queue: queue.clone(), 
@@ -938,7 +1288,7 @@ async fn main() -> Result<(), CanoError> {
             batch_size: 10,
         })
         .add_exit_state(QueueState::Complete);
-<!--blank-->
+
     // Process batches continuously until queue empty
     loop {
         let result = workflow.orchestrate(QueueState::PullBatch).await?;
@@ -949,10 +1299,12 @@ async fn main() -> Result<(), CanoError> {
             }
         }
     }
-<!--blank-->
+
     println!("✅ All items processed!");
     Ok(())
-}</code></pre>
+}
+
+```
 
 <h3 id="pattern-dynamic"><a href="#pattern-dynamic" class="anchor-link" aria-hidden="true">#</a>Pattern 2: Dynamic Task Generation</h3>
 <p>
@@ -960,9 +1312,10 @@ Generate parallel tasks dynamically based on runtime data. Perfect for processin
 or handling events that arrive over time.
 </p>
 
-<pre><code class="language-rust">use cano::prelude::*;
+```rust
+use cano::prelude::*;
 use std::time::Duration;
-<!--blank-->
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum DataState {
     LoadRecords,
@@ -970,11 +1323,11 @@ enum DataState {
     Aggregate,
     Complete,
 }
-<!--blank-->
+
 // Load records and store them so the split tasks can read them
 #[derive(Clone)]
 struct RecordLoader;
-<!--blank-->
+
 #[task(state = DataState)]
 impl RecordLoader {
     async fn run(&self, res: &Resources) -> Result<TaskResult<DataState>, CanoError> {
@@ -985,13 +1338,13 @@ impl RecordLoader {
         Ok(TaskResult::Single(DataState::ProcessBatch))
     }
 }
-<!--blank-->
+
 // Each processor reads from the shared store and handles one record by index
 #[derive(Clone)]
 struct RecordProcessor {
     index: usize,
 }
-<!--blank-->
+
 #[task(state = DataState)]
 impl RecordProcessor {
     async fn run(&self, res: &Resources) -> Result<TaskResult<DataState>, CanoError> {
@@ -1003,26 +1356,43 @@ impl RecordProcessor {
         Ok(TaskResult::Single(DataState::Aggregate))
     }
 }
-<!--blank-->
+
+// Aggregator runs once after the split joins
+#[derive(Clone)]
+struct FinishAggregate;
+
+#[task(state = DataState)]
+impl FinishAggregate {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<DataState>, CanoError> {
+        let store = res.get::<MemoryStore, _>("store")?;
+        let total: i32 = (0..100)
+            .filter_map(|i| store.get::<i32>(&format!("result_{}", i)).ok())
+            .sum();
+        println!("Aggregated total: {}", total);
+        Ok(TaskResult::Single(DataState::Complete))
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     let store = MemoryStore::new();
-<!--blank-->
+
     // Build the processor tasks before constructing the workflow
     let processors: Vec<RecordProcessor> = (0..100).map(|i| RecordProcessor { index: i }).collect();
-<!--blank-->
+
     let join_config = JoinConfig::new(JoinStrategy::All, DataState::Aggregate);
-<!--blank-->
+
     let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(DataState::LoadRecords, RecordLoader)
         .register_split(DataState::ProcessBatch, processors, join_config)
         .register(DataState::Aggregate, FinishAggregate)
         .add_exit_state(DataState::Complete);
-<!--blank-->
+
     workflow.orchestrate(DataState::LoadRecords).await?;
     Ok(())
 }
-</code></pre>
+
+```
 
 <h3 id="pattern-resource"><a href="#pattern-resource" class="anchor-link" aria-hidden="true">#</a>Pattern 3: Resource-Limited Parallel Processing</h3>
 <p>
@@ -1030,15 +1400,25 @@ Control parallelism when you have limited resources (API keys, connections, etc.
 Use semaphores to limit concurrent executions within a single workflow.
 </p>
 
-<pre><code class="language-rust">use tokio::sync::Semaphore;
+```rust
+use cano::prelude::*;
+
+use tokio::sync::Semaphore;
 use std::sync::Arc;
-<!--blank-->
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ApiState { Start, Complete }
+
+async fn make_api_call(_id: usize) -> Result<String, CanoError> {
+    Ok("ok".to_string())
+}
+
 #[derive(Clone)]
 struct RateLimitedApiTask {
     api_id: usize,
     semaphore: Arc<Semaphore>,  // Limit concurrent API calls
 }
-<!--blank-->
+
 #[task(state = ApiState)]
 impl RateLimitedApiTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<ApiState>, CanoError> {
@@ -1046,37 +1426,39 @@ impl RateLimitedApiTask {
         // Acquire permit (blocks if limit reached)
         let _permit = self.semaphore.acquire().await
             .map_err(|e| CanoError::task_execution(e.to_string()))?;
-<!--blank-->
+
         println!("API call {} starting (within rate limit)", self.api_id);
-<!--blank-->
+
         // Make API call
         let result = make_api_call(self.api_id).await?;
         store.put(&format!("api_result_{}", self.api_id), result)?;
-<!--blank-->
+
         println!("API call {} completed", self.api_id);
-<!--blank-->
+
         Ok(TaskResult::Single(ApiState::Complete))
     }
 }
-<!--blank-->
-// Example: Limit to 5 concurrent API calls
-let semaphore = Arc::new(Semaphore::new(5));
-<!--blank-->
-let mut tasks = Vec::new();
-for i in 0..20 {
-    tasks.push(RateLimitedApiTask {
-        api_id: i,
-        semaphore: semaphore.clone(),
-    });
+
+fn build_workflow(store: MemoryStore) -> Workflow<ApiState> {
+    // Example: Limit to 5 concurrent API calls
+    let semaphore = Arc::new(Semaphore::new(5));
+
+    let mut tasks = Vec::new();
+    for i in 0..20 {
+        tasks.push(RateLimitedApiTask {
+            api_id: i,
+            semaphore: semaphore.clone(),
+        });
+    }
+
+    // All 20 tasks will run, but only 5 at a time
+    let join_config = JoinConfig::new(JoinStrategy::All, ApiState::Complete);
+
+    Workflow::new(Resources::new().insert("store", store))
+        .register_split(ApiState::Start, tasks, join_config)
+        .add_exit_state(ApiState::Complete)
 }
-<!--blank-->
-// All 20 tasks will run, but only 5 at a time
-let join_config = JoinConfig::new(JoinStrategy::All, ApiState::Complete);
-<!--blank-->
-let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
-    .register_split(ApiState::Start, tasks, join_config)
-    .add_exit_state(ApiState::Complete);
-</code></pre>
+```
 
 <h3 id="pattern-continuous"><a href="#pattern-continuous" class="anchor-link" aria-hidden="true">#</a>Pattern 4: Continuous Workflow with Split/Join</h3>
 <p>
@@ -1084,14 +1466,23 @@ Combine scheduling with split/join for continuous parallel processing within a s
 scheduled workflow.
 </p>
 
-<pre><code class="language-rust">use cano::prelude::*;
-<!--blank-->
+```rust
+use cano::prelude::*;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum ProcessState { Start, ProcessBatch, Complete }
+
+// Simulated upstream queue lookup
+async fn fetch_pending_work() -> Result<Vec<String>, CanoError> {
+    Ok(vec!["job-1".to_string(), "job-2".to_string()])
+}
+
 // WorkProcessor handles a single item identified by index in the store
 #[derive(Clone)]
 struct WorkProcessor {
     item_index: usize,
 }
-<!--blank-->
+
 #[task(state = ProcessState)]
 impl WorkProcessor {
     async fn run(&self, res: &Resources) -> Result<TaskResult<ProcessState>, CanoError> {
@@ -1104,12 +1495,12 @@ impl WorkProcessor {
         Ok(TaskResult::Single(ProcessState::Complete))
     }
 }
-<!--blank-->
+
 // LoaderTask fetches work and registers parallel processors via register_split at workflow build time.
 // Because the split tasks are registered statically, the batch size is fixed per workflow instance.
 #[derive(Clone)]
 struct BatchLoaderTask;
-<!--blank-->
+
 #[task(state = ProcessState)]
 impl BatchLoaderTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<ProcessState>, CanoError> {
@@ -1123,28 +1514,30 @@ impl BatchLoaderTask {
         Ok(TaskResult::Single(ProcessState::ProcessBatch))
     }
 }
-<!--blank-->
+
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     let mut scheduler = Scheduler::new();
     let store = MemoryStore::new();
-<!--blank-->
+
     // Build worker tasks for a fixed batch size; adjust batch_size as needed.
     let batch_size = 10usize;
     let processors: Vec<WorkProcessor> = (0..batch_size).map(|i| WorkProcessor { item_index: i }).collect();
     let join_config = JoinConfig::new(JoinStrategy::All, ProcessState::Complete);
-<!--blank-->
+
     let batch_workflow = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(ProcessState::Start, BatchLoaderTask)
         .register_split(ProcessState::ProcessBatch, processors, join_config)
         .add_exit_state(ProcessState::Complete);
-<!--blank-->
+
     // Schedule to run every 10 seconds
     scheduler.every_seconds("batch_processor", batch_workflow, ProcessState::Start, 10)?;
-<!--blank-->
+
     scheduler.start().await?;
     Ok(())
-}</code></pre>
+}
+
+```
 
 <h3 id="when-to-use"><a href="#when-to-use" class="anchor-link" aria-hidden="true">#</a>When to Use These Patterns</h3>
 <ul>
@@ -1202,125 +1595,129 @@ Handler-->>Client: 200 JSON response
 </ol>
 
 <h3 id="on-request-example"><a href="#on-request-example" class="anchor-link" aria-hidden="true">#</a>Full Example (Axum)</h3>
-<pre><code class="language-rust">use axum::http::StatusCode;
+
+```rust
+use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use cano::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-<!--blank-->
+
 // ── States ──────────────────────────────────────────────────────────────
-<!--blank-->
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum TextPipelineState {
     Parse,
     Transform,
     Done,
 }
-<!--blank-->
+
 // ── Request / Response ──────────────────────────────────────────────────
-<!--blank-->
+
 #[derive(Deserialize)]
 struct ProcessRequest { text: String }
-<!--blank-->
+
 #[derive(Serialize)]
 struct ProcessResponse {
     original: String,
     word_count: usize,
     uppercased: String,
 }
-<!--blank-->
+
 // ── Tasks ───────────────────────────────────────────────────────────────
-<!--blank-->
+
 #[derive(Clone)]
 struct ParseTask;
-<!--blank-->
+
 #[task(state = TextPipelineState)]
 impl ParseTask {
     async fn run(
-        &amp;self,
-        res: &amp;Resources,
-    ) -&gt; Result&lt;TaskResult&lt;TextPipelineState&gt;, CanoError&gt; {
-        let store = res.get::&lt;MemoryStore, _&gt;("store")?;
+        &self,
+        res: &Resources,
+    ) -> Result<TaskResult<TextPipelineState>, CanoError> {
+        let store = res.get::<MemoryStore, _>("store")?;
         let text: String = store.get("input_text")
             .map_err(|e| CanoError::task_execution(format!("missing input: {e}")))?;
-<!--blank-->
+
         if text.trim().is_empty() {
             return Err(CanoError::task_execution("input text is empty"));
         }
         store.put("validated_text", text)
             .map_err(|e| CanoError::store(format!("{e}")))?;
-<!--blank-->
+
         Ok(TaskResult::Single(TextPipelineState::Transform))
     }
 }
-<!--blank-->
+
 #[derive(Clone)]
 struct TransformTask;
-<!--blank-->
+
 #[task(state = TextPipelineState)]
 impl TransformTask {
     async fn run(
-        &amp;self,
-        res: &amp;Resources,
-    ) -&gt; Result&lt;TaskResult&lt;TextPipelineState&gt;, CanoError&gt; {
-        let store = res.get::&lt;MemoryStore, _&gt;("store")?;
+        &self,
+        res: &Resources,
+    ) -> Result<TaskResult<TextPipelineState>, CanoError> {
+        let store = res.get::<MemoryStore, _>("store")?;
         let text: String = store.get("validated_text")
             .map_err(|e| CanoError::task_execution(format!("{e}")))?;
-<!--blank-->
+
         store.put("word_count", text.split_whitespace().count())
             .map_err(|e| CanoError::store(format!("{e}")))?;
         store.put("uppercased", text.to_uppercase())
             .map_err(|e| CanoError::store(format!("{e}")))?;
-<!--blank-->
+
         Ok(TaskResult::Single(TextPipelineState::Done))
     }
 }
-<!--blank-->
+
 // ── Workflow factory ────────────────────────────────────────────────────
-<!--blank-->
-fn build_workflow(store: MemoryStore) -&gt; Workflow&lt;TextPipelineState&gt; {
+
+fn build_workflow(store: MemoryStore) -> Workflow<TextPipelineState> {
     Workflow::new(Resources::new().insert("store", store))
         .register(TextPipelineState::Parse, ParseTask)
         .register(TextPipelineState::Transform, TransformTask)
         .add_exit_state(TextPipelineState::Done)
         .with_timeout(Duration::from_secs(5))
 }
-<!--blank-->
+
 // ── Handler ─────────────────────────────────────────────────────────────
-<!--blank-->
+
 async fn process_handler(
-    Json(payload): Json&lt;ProcessRequest&gt;,
-) -&gt; Result&lt;Json&lt;ProcessResponse&gt;, StatusCode&gt; {
+    Json(payload): Json<ProcessRequest>,
+) -> Result<Json<ProcessResponse>, StatusCode> {
     // Fresh store per request — full isolation
     let store = MemoryStore::new();
     store.put("input_text", payload.text.clone())
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-<!--blank-->
+
     let workflow = build_workflow(store.clone());
     workflow.orchestrate(TextPipelineState::Parse).await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-<!--blank-->
+
     let word_count: usize = store.get("word_count")
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let uppercased: String = store.get("uppercased")
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-<!--blank-->
+
     Ok(Json(ProcessResponse {
         original: payload.text,
         word_count,
         uppercased,
     }))
 }
-<!--blank-->
+
 // ── Main ────────────────────────────────────────────────────────────────
-<!--blank-->
+
 #[tokio::main]
 async fn main() {
     let app = Router::new().route("/process", post(process_handler));
     let listener = tokio::net::TcpListener::bind("0.0.0.0:4001").await.unwrap();
     axum::serve(listener, app).await.unwrap();
-}</code></pre>
+}
+
+```
 
 <div class="callout callout-tip">
 <p><strong>💡 Tips:</strong></p>
@@ -1426,34 +1823,36 @@ style Join5 fill:#F59E0B
 </div>
 
 <h3 id="ad-implementation"><a href="#ad-implementation" class="anchor-link" aria-hidden="true">#</a>Complete Implementation</h3>
-<pre><code class="language-rust">use cano::prelude::*;
+
+```rust
+use cano::prelude::*;
 use std::time::Duration;
-<!--blank-->
+
 // ============================================================================
 // State Definitions
 // ============================================================================
-<!--blank-->
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum AdExchangeState {
     // Entry and validation
     Start,
-<!--blank-->
+
     // Context gathering (Split 1)
     GatherContext,
-<!--blank-->
+
     // Bid request phase (Split 2)
     RequestBids,
-<!--blank-->
+
     // Auction phase (Split 3)
     ScoreBids,
     RunAuction,
-<!--blank-->
+
     // Tracking phase (Split 4)
     TrackResults,
-<!--blank-->
+
     // Error tracking phase (Split 5)
     ErrorTracking,
-<!--blank-->
+
     // Terminal states
     BuildResponse,
     InvalidResponse,
@@ -1461,27 +1860,27 @@ enum AdExchangeState {
     Rejected,
     NoFill,
 }
-<!--blank-->
+
 // ============================================================================
 // Data Models
 // ============================================================================
-<!--blank-->
+
 #[derive(Debug, Clone)]
 struct AdRequest {
     request_id: String,
     placement_id: String,
     floor_price: f64,
 }
-<!--blank-->
+
 #[derive(Debug, Clone)]
 struct UserContext {}
-<!--blank-->
+
 #[derive(Debug, Clone)]
 struct GeoContext {}
-<!--blank-->
+
 #[derive(Debug, Clone)]
 struct DeviceContext {}
-<!--blank-->
+
 #[derive(Debug, Clone)]
 struct BidResponse {
     partner_id: String,
@@ -1489,56 +1888,56 @@ struct BidResponse {
     creative_id: String,
     response_time_ms: u64,
 }
-<!--blank-->
+
 #[derive(Debug, Clone)]
 struct ScoredBid {
     bid: BidResponse,
     score: f64,  // Adjusted price after quality scoring
     rank: usize,
 }
-<!--blank-->
+
 #[derive(Debug, Clone)]
 struct AuctionResult {
     winner: Option<ScoredBid>,
     total_bids: usize,
     auction_time_ms: u64,
 }
-<!--blank-->
+
 // ============================================================================
 // Phase 1: Request Validation
 // ============================================================================
-<!--blank-->
+
 #[derive(Clone)]
 struct ValidateRequestTask;
-<!--blank-->
+
 #[task(state = AdExchangeState)]
 impl ValidateRequestTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
         let request: AdRequest = store.get("ad_request")?;
-<!--blank-->
+
         println!("🔍 Validating request {}", request.request_id);
-<!--blank-->
+
         // Validation logic
         if request.placement_id.is_empty() {
             println!("❌ Invalid placement ID");
             return Ok(TaskResult::Single(AdExchangeState::InvalidResponse));
         }
-<!--blank-->
+
         if request.floor_price < 0.01 {
             println!("❌ Floor price too low");
             return Ok(TaskResult::Single(AdExchangeState::InvalidResponse));
         }
-<!--blank-->
+
         println!("✅ Request validated");
         Ok(TaskResult::Single(AdExchangeState::GatherContext))
     }
 }
-<!--blank-->
+
 // ============================================================================
 // Phase 2: Context Gathering (Split 1 - All Strategy)
 // ============================================================================
-<!--blank-->
+
 // Wrapper enum for heterogeneous context gathering tasks
 #[derive(Clone)]
 enum ContextTask {
@@ -1546,7 +1945,7 @@ enum ContextTask {
     FetchGeo,
     DetectDevice,
 }
-<!--blank-->
+
 #[task(state = AdExchangeState)]
 impl ContextTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
@@ -1555,9 +1954,9 @@ impl ContextTask {
             ContextTask::FetchUser => {
                 println!("  👤 Fetching user profile...");
                 tokio::time::sleep(Duration::from_millis(50)).await;
-<!--blank-->
+
                 let user = UserContext {};
-<!--blank-->
+
                 store.put("user_context", user)?;
                 println!("  ✅ User profile loaded");
                 Ok(TaskResult::Single(AdExchangeState::RequestBids))
@@ -1565,9 +1964,9 @@ impl ContextTask {
             ContextTask::FetchGeo => {
                 println!("  🌍 Fetching geo data...");
                 tokio::time::sleep(Duration::from_millis(30)).await;
-<!--blank-->
+
                 let geo = GeoContext {};
-<!--blank-->
+
                 store.put("geo_context", geo)?;
                 println!("  ✅ Geo data loaded");
                 Ok(TaskResult::Single(AdExchangeState::RequestBids))
@@ -1575,9 +1974,9 @@ impl ContextTask {
             ContextTask::DetectDevice => {
                 println!("  📱 Detecting device...");
                 tokio::time::sleep(Duration::from_millis(20)).await;
-<!--blank-->
+
                 let device = DeviceContext {};
-<!--blank-->
+
                 store.put("device_context", device)?;
                 println!("  ✅ Device detected");
                 Ok(TaskResult::Single(AdExchangeState::RequestBids))
@@ -1585,75 +1984,75 @@ impl ContextTask {
         }
     }
 }
-<!--blank-->
+
 // ============================================================================
 // Phase 3: Bid Requests (Split 2 - PartialTimeout Strategy)
 // ============================================================================
-<!--blank-->
+
 #[derive(Clone)]
 struct ContactDSPTask {
     partner_id: String,
     response_delay_ms: u64,  // Simulated network latency
 }
-<!--blank-->
+
 #[task(state = AdExchangeState)]
 impl ContactDSPTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
         println!("  📡 Requesting bid from {}...", self.partner_id);
-<!--blank-->
+
         // Simulate DSP bid request with varying latency
         tokio::time::sleep(Duration::from_millis(self.response_delay_ms)).await;
-<!--blank-->
+
         // Some DSPs might not respond in time or may not bid
         if self.response_delay_ms > 180 {
             // Will timeout
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-<!--blank-->
+
         let bid = BidResponse {
             partner_id: self.partner_id.clone(),
             price: 2.50 + (self.response_delay_ms as f64 / 100.0),
             creative_id: format!("creative_{}", self.partner_id),
             response_time_ms: self.response_delay_ms,
         };
-<!--blank-->
+
         // Store bid
         let mut bids: Vec<BidResponse> = store.get("bids").unwrap_or_default();
         bids.push(bid.clone());
         store.put("bids", bids)?;
-<!--blank-->
+
         println!("  ✅ {} bid: ${:.2}", self.partner_id, bid.price);
         Ok(TaskResult::Single(AdExchangeState::ScoreBids))
     }
 }
-<!--blank-->
+
 // ============================================================================
 // Phase 4: Bid Scoring (Split 3 - Percentage Strategy)
 // ============================================================================
-<!--blank-->
+
 #[derive(Clone)]
 struct ScoreBidTask {
     bid_index: usize,
 }
-<!--blank-->
+
 #[task(state = AdExchangeState)]
 impl ScoreBidTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
         let bids: Vec<BidResponse> = store.get("bids")?;
-<!--blank-->
+
         if self.bid_index >= bids.len() {
             return Err(CanoError::task_execution("Bid index out of range"));
         }
-<!--blank-->
+
         let bid = &bids[self.bid_index];
-<!--blank-->
+
         println!("  📊 Scoring bid from {}...", bid.partner_id);
-<!--blank-->
+
         // Simulate scoring computation
         tokio::time::sleep(Duration::from_millis(10)).await;
-<!--blank-->
+
         // Quality score based on partner history and response time
         let quality_multiplier = match bid.response_time_ms {
             0..=50 => 1.1,    // Fast response bonus
@@ -1661,45 +2060,45 @@ impl ScoreBidTask {
             101..=150 => 0.95, // Slight penalty
             _ => 0.9,         // Slow response penalty
         };
-<!--blank-->
+
         let scored_bid = ScoredBid {
             bid: bid.clone(),
             score: bid.price * quality_multiplier,
             rank: 0,  // Will be set during auction
         };
-<!--blank-->
+
         let score_value = scored_bid.score;
-<!--blank-->
+
         // Store scored bid
         let mut scored_bids: Vec<ScoredBid> = store.get("scored_bids").unwrap_or_default();
         scored_bids.push(scored_bid);
         store.put("scored_bids", scored_bids)?;
-<!--blank-->
+
         println!("  ✅ Bid scored: ${:.2}", score_value);
         Ok(TaskResult::Single(AdExchangeState::RunAuction))
     }
 }
-<!--blank-->
+
 // ============================================================================
 // Phase 5: Auction
 // ============================================================================
-<!--blank-->
+
 #[derive(Clone)]
 struct RunAuctionTask;
-<!--blank-->
+
 #[task(state = AdExchangeState)]
 impl RunAuctionTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
         println!("\n  🎯 Running auction...");
-<!--blank-->
+
         let start = tokio::time::Instant::now();
         let mut scored_bids: Vec<ScoredBid> = store.get("scored_bids")?;
         let request: AdRequest = store.get("ad_request")?;
-<!--blank-->
+
         // Filter bids above floor price
         scored_bids.retain(|b| b.score >= request.floor_price);
-<!--blank-->
+
         if scored_bids.is_empty() {
             println!("  ❌ No valid bids above floor price");
             let result = AuctionResult {
@@ -1710,33 +2109,33 @@ impl RunAuctionTask {
             store.put("auction_result", result)?;
             return Ok(TaskResult::Single(AdExchangeState::ErrorTracking));
         }
-<!--blank-->
+
         // Sort by score (descending)
         scored_bids.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
-<!--blank-->
+
         // Set ranks
         for (i, bid) in scored_bids.iter_mut().enumerate() {
             bid.rank = i + 1;
         }
-<!--blank-->
+
         let winner = scored_bids[0].clone();
         println!("  🏆 Winner: {} at ${:.2}", winner.bid.partner_id, winner.score);
-<!--blank-->
+
         let result = AuctionResult {
             winner: Some(winner),
             total_bids: scored_bids.len(),
             auction_time_ms: start.elapsed().as_millis() as u64,
         };
-<!--blank-->
+
         store.put("auction_result", result)?;
         Ok(TaskResult::Single(AdExchangeState::TrackResults))
     }
 }
-<!--blank-->
+
 // ============================================================================
 // Phase 6: Tracking (Split 4 - Quorum Strategy)
 // ============================================================================
-<!--blank-->
+
 // Wrapper enum for heterogeneous tracking tasks
 #[derive(Clone)]
 enum TrackingTask {
@@ -1745,7 +2144,7 @@ enum TrackingTask {
     NotifyWinner,
     StoreAuction,
 }
-<!--blank-->
+
 #[task(state = AdExchangeState)]
 impl TrackingTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
@@ -1754,7 +2153,7 @@ impl TrackingTask {
             TrackingTask::LogAnalytics => {
                 println!("  📈 Logging to analytics...");
                 tokio::time::sleep(Duration::from_millis(30)).await;
-<!--blank-->
+
                 let result: AuctionResult = store.get("auction_result")?;
                 println!("  ✅ Analytics logged: {} bids", result.total_bids);
                 Ok(TaskResult::Single(AdExchangeState::BuildResponse))
@@ -1762,53 +2161,53 @@ impl TrackingTask {
             TrackingTask::UpdateMetrics => {
                 println!("  📊 Updating metrics...");
                 tokio::time::sleep(Duration::from_millis(25)).await;
-<!--blank-->
+
                 println!("  ✅ Metrics updated");
                 Ok(TaskResult::Single(AdExchangeState::BuildResponse))
             }
             TrackingTask::NotifyWinner => {
                 println!("  📬 Notifying winner...");
-<!--blank-->
+
                 let result: AuctionResult = store.get("auction_result")?;
                 if let Some(winner) = result.winner {
                     tokio::time::sleep(Duration::from_millis(40)).await;
                     println!("  ✅ Winner {} notified", winner.bid.partner_id);
                 }
-<!--blank-->
+
                 Ok(TaskResult::Single(AdExchangeState::BuildResponse))
             }
             TrackingTask::StoreAuction => {
                 println!("  💾 Storing auction data...");
                 tokio::time::sleep(Duration::from_millis(35)).await;
-<!--blank-->
+
                 println!("  ✅ Auction data stored");
                 Ok(TaskResult::Single(AdExchangeState::BuildResponse))
             }
         }
     }
 }
-<!--blank-->
+
 // ============================================================================
 // Phase 7: Response Building
 // ============================================================================
-<!--blank-->
+
 #[derive(Clone)]
 struct BuildResponseTask;
-<!--blank-->
+
 #[task(state = AdExchangeState)]
 impl BuildResponseTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
         println!("\n  📦 Building response...");
-<!--blank-->
+
         let request: AdRequest = store.get("ad_request")?;
         let result: AuctionResult = store.get("auction_result")?;
-<!--blank-->
+
         println!("\n🎯 Ad Exchange Response Summary:");
         println!("  Request ID: {}", request.request_id);
         println!("  Total Bids: {}", result.total_bids);
         println!("  Auction Time: {}ms", result.auction_time_ms);
-<!--blank-->
+
         if let Some(winner) = result.winner {
             println!("  Winner: {}", winner.bid.partner_id);
             println!("  Winning Price: ${:.2}", winner.score);
@@ -1816,18 +2215,18 @@ impl BuildResponseTask {
         } else {
             println!("  Result: No Fill");
         }
-<!--blank-->
+
         Ok(TaskResult::Single(AdExchangeState::Complete))
     }
 }
-<!--blank-->
+
 // ============================================================================
 // NoFill Handler
 // ============================================================================
-<!--blank-->
+
 #[derive(Clone)]
 struct NoFillTask;
-<!--blank-->
+
 #[task(state = AdExchangeState)]
 impl NoFillTask {
     async fn run(&self, _res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
@@ -1836,14 +2235,14 @@ impl NoFillTask {
         Ok(TaskResult::Single(AdExchangeState::Complete))
     }
 }
-<!--blank-->
+
 // ============================================================================
 // Invalid Response Handler
 // ============================================================================
-<!--blank-->
+
 #[derive(Clone)]
 struct InvalidResponseTask;
-<!--blank-->
+
 #[task(state = AdExchangeState)]
 impl InvalidResponseTask {
     async fn run(&self, _res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
@@ -1852,18 +2251,18 @@ impl InvalidResponseTask {
         Ok(TaskResult::Single(AdExchangeState::Complete))
     }
 }
-<!--blank-->
+
 // ============================================================================
 // Phase 8: Error Tracking (Split 5 - All Strategy)
 // ============================================================================
-<!--blank-->
+
 // Wrapper enum for error tracking tasks
 #[derive(Clone)]
 enum ErrorTrackingTask {
     LogError,
     UpdateErrorMetrics,
 }
-<!--blank-->
+
 #[task(state = AdExchangeState)]
 impl ErrorTrackingTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
@@ -1872,40 +2271,40 @@ impl ErrorTrackingTask {
             ErrorTrackingTask::LogError => {
                 println!("  📝 Logging error...");
                 tokio::time::sleep(Duration::from_millis(20)).await;
-<!--blank-->
+
                 // Determine error type from store or state
                 let error_type = if store.get::<AuctionResult>("auction_result").is_ok() {
                     "NoFill"
                 } else {
                     "Rejected"
                 };
-<!--blank-->
+
                 println!("  ✅ Error logged: {}", error_type);
                 Ok(TaskResult::Single(AdExchangeState::NoFill))
             }
             ErrorTrackingTask::UpdateErrorMetrics => {
                 println!("  📊 Updating error metrics...");
                 tokio::time::sleep(Duration::from_millis(25)).await;
-<!--blank-->
+
                 println!("  ✅ Error metrics updated");
                 Ok(TaskResult::Single(AdExchangeState::NoFill))
             }
         }
     }
 }
-<!--blank-->
+
 // ============================================================================
 // Main Workflow Construction
 // ============================================================================
-<!--blank-->
+
 fn create_ad_exchange_workflow(store: MemoryStore) -> Workflow<AdExchangeState> {
     Workflow::new(Resources::new().insert("store", store.clone()))
         // Phase 1: Validation
         .register(AdExchangeState::Start, ValidateRequestTask)
-<!--blank-->
+
         // Invalid Response Handler
         .register(AdExchangeState::InvalidResponse, InvalidResponseTask)
-<!--blank-->
+
         // Phase 2: Context Gathering - SPLIT 1 (All Strategy)
         // All three must succeed to proceed within 100ms timeout
         // If any task fails or timeout is exceeded, workflow will error and transition to NoFill
@@ -1922,7 +2321,7 @@ fn create_ad_exchange_workflow(store: MemoryStore) -> Workflow<AdExchangeState> 
             )
             .with_timeout(Duration::from_millis(100)),
         )
-<!--blank-->
+
         // Phase 3: Bid Requests - SPLIT 2 (PartialTimeout Strategy)
         // Accept whatever bids come back within 200ms
         .register_split(
@@ -1940,7 +2339,7 @@ fn create_ad_exchange_workflow(store: MemoryStore) -> Workflow<AdExchangeState> 
             )
             .with_timeout(Duration::from_millis(200)),
         )
-<!--blank-->
+
         // Phase 4: Bid Scoring - SPLIT 3 (All Strategy)
         // Score all received bids within 50ms timeout
         // If timeout or any scoring fails, workflow will error and transition to NoFill
@@ -1957,10 +2356,10 @@ fn create_ad_exchange_workflow(store: MemoryStore) -> Workflow<AdExchangeState> 
             )
             .with_timeout(Duration::from_millis(50)),
         )
-<!--blank-->
+
         // Phase 5: Auction
         .register(AdExchangeState::RunAuction, RunAuctionTask)
-<!--blank-->
+
         // Phase 6: Tracking - SPLIT 4 (All Strategy)
         // All tracking tasks must complete within 100ms timeout
         // If timeout or any task fails, workflow will error and transition to NoFill
@@ -1978,13 +2377,13 @@ fn create_ad_exchange_workflow(store: MemoryStore) -> Workflow<AdExchangeState> 
             )
             .with_timeout(Duration::from_millis(100)),
         )
-<!--blank-->
+
         // Phase 7: Response
         .register(AdExchangeState::BuildResponse, BuildResponseTask)
-<!--blank-->
+
         // NoFill handler (used when splits timeout or fail)
         .register(AdExchangeState::NoFill, NoFillTask)
-<!--blank-->
+
         // Phase 8: Error Tracking - SPLIT 5 (All Strategy)
         // Both error logging and metrics must complete within 50ms timeout
         .register_split(
@@ -1999,40 +2398,40 @@ fn create_ad_exchange_workflow(store: MemoryStore) -> Workflow<AdExchangeState> 
             )
             .with_timeout(Duration::from_millis(50)),
         )
-<!--blank-->
+
         // Terminal states
         .add_exit_states(vec![
             AdExchangeState::Complete,
             AdExchangeState::Rejected,
         ])
 }
-<!--blank-->
+
 // ============================================================================
 // Example Usage
 // ============================================================================
-<!--blank-->
+
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     println!("🚀 Real-Time Ad Exchange Workflow\n");
     println!("{}", "=".repeat(60));
-<!--blank-->
+
     let store = MemoryStore::new();
-<!--blank-->
+
     // Create ad request
     let request = AdRequest {
         request_id: "req_abc123".to_string(),
         placement_id: "placement_728x90_top".to_string(),
         floor_price: 1.50,
     };
-<!--blank-->
+
     store.put("ad_request", request)?;
-<!--blank-->
+
     // Build and execute workflow
     let workflow = create_ad_exchange_workflow(store.clone());
-<!--blank-->
+
     println!("\n🎬 Starting ad exchange workflow...\n");
     let start = tokio::time::Instant::now();
-<!--blank-->
+
     // Execute workflow - if splits timeout or fail, transition to NoFill
     let result = match workflow.orchestrate(AdExchangeState::Start).await {
         Ok(state) => state,
@@ -2040,20 +2439,22 @@ async fn main() -> Result<(), CanoError> {
             // If workflow fails due to split timeout/error, handle as NoFill
             eprintln!("❌ Workflow error: {}", e);
             println!("\n⚠️  Handling as No Fill due to error\n");
-<!--blank-->
+
             // Execute ErrorTracking state explicitly
             workflow.orchestrate(AdExchangeState::ErrorTracking).await?
         }
     };
-<!--blank-->
+
     let total_time = start.elapsed();
-<!--blank-->
+
     println!("\n{}", "=".repeat(60));
     println!("✅ Workflow completed in {:?}", total_time);
     println!("   Final State: {:?}", result);
-<!--blank-->
+
     Ok(())
-}</code></pre>
+}
+
+```
 
 <h3 id="ad-features"><a href="#ad-features" class="anchor-link" aria-hidden="true">#</a>Key Features Demonstrated</h3>
 <div class="card-stack">
@@ -2085,12 +2486,14 @@ async fn main() -> Result<(), CanoError> {
 </div>
 
 <h3 id="ad-output"><a href="#ad-output" class="anchor-link" aria-hidden="true">#</a>Example Output</h3>
-<pre><code>🚀 Real-Time Ad Exchange Workflow
-<!--blank-->
+
+```text
+🚀 Real-Time Ad Exchange Workflow
+
 ============================================================
-<!--blank-->
+
 🎬 Starting ad exchange workflow...
-<!--blank-->
+
 🔍 Validating request req_abc123
 ✅ Request validated
   👤 Fetching user profile...
@@ -2113,7 +2516,7 @@ async fn main() -> Result<(), CanoError> {
   ✅ Bid scored: $3.52
   ✅ Bid scored: $3.25
   ✅ Bid scored: $3.30
-<!--blank-->
+
   🎯 Running auction...
   🏆 Winner: DSP-Global at $3.52
   📈 Logging to analytics...
@@ -2124,9 +2527,9 @@ async fn main() -> Result<(), CanoError> {
   ✅ Analytics logged: 3 bids
   ✅ Auction data stored
   ✅ Winner DSP-Global notified
-<!--blank-->
+
   📦 Building response...
-<!--blank-->
+
 🎯 Ad Exchange Response Summary:
   Request ID: req_abc123
   Total Bids: 3
@@ -2134,10 +2537,12 @@ async fn main() -> Result<(), CanoError> {
   Winner: DSP-Global
   Winning Price: $3.52
   Creative: creative_DSP-Global
-<!--blank-->
+
 ============================================================
 ✅ Workflow completed in 307.716975ms
-   Final State: Complete</code></pre>
+   Final State: Complete
+
+```
 
 <div class="callout callout-tip">
 <p><strong>💡 Production Insight:</strong> This ad exchange workflow demonstrates how to build real-time 
