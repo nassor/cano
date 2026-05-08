@@ -45,12 +45,12 @@ All tracing instrumentation is behind conditional compilation, so it adds zero o
 
 ```toml
 [dependencies]
-cano = { version = "0.10", features = ["tracing"] }
+cano = { version = "0.11", features = ["tracing"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Or enable everything (tracing + scheduler):
-# cano = { version = "0.10", features = ["all"] }
+# cano = { version = "0.11", features = ["all"] }
 
 ```
 
@@ -189,7 +189,7 @@ execution in log output.</p>
 ```toml
 # Enable both scheduler and tracing
 [dependencies]
-cano = { version = "0.10", features = ["all"] }
+cano = { version = "0.11", features = ["all"] }
 
 ```
 <hr class="section-divider">

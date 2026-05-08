@@ -81,7 +81,7 @@ It excels at managing complex lifecycles where state transitions matter:
 
 ```toml
 [dependencies]
-cano = { version = "0.10", features = ["all"] }
+cano = { version = "0.11", features = ["all"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 ```
