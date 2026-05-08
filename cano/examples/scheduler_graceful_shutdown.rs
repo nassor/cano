@@ -157,10 +157,13 @@ async fn main() -> CanoResult<()> {
     scheduler.every_seconds("long_task", long_flow, MyState::Start, 10)?;
     scheduler.every_seconds("quick_task", quick_flow, MyState::Start, 2)?;
 
-    // Clone scheduler for signal handler
-    let scheduler_for_signal = scheduler.clone();
+    // Start the scheduler — consumes the builder, returns a clone-able handle.
+    println!("✅ Scheduler started");
+    println!("💡 Press Ctrl+C to trigger graceful shutdown\n");
+    let running = scheduler.start().await?;
 
-    // Set up Ctrl+C handler for graceful shutdown
+    // Clone the handle for the Ctrl+C signal handler.
+    let signal_handle = running.clone();
     tokio::spawn(async move {
         tokio::signal::ctrl_c()
             .await
@@ -169,17 +172,16 @@ async fn main() -> CanoResult<()> {
         println!("\n\n🛑 Received Ctrl+C - Initiating graceful shutdown...");
         println!("   Stopping scheduler and waiting for running workflows to complete...");
 
-        // Stop the scheduler (this will wait for running workflows to complete)
-        match scheduler_for_signal.stop().await {
+        match signal_handle.stop().await {
             Ok(()) => println!("✅ All workflows completed gracefully"),
             Err(e) => eprintln!("⚠️  Shutdown error: {}", e),
         }
     });
 
-    // DEMO: Simulate user interrupt after 10 seconds
+    // DEMO: Simulate user interrupt after 15 seconds.
     let pid = std::process::id();
     tokio::spawn(async move {
-        println!("⏳ Demo will automatically trigger Ctrl+C in 10 seconds...");
+        println!("⏳ Demo will automatically trigger Ctrl+C in 15 seconds...");
         sleep(Duration::from_secs(15)).await;
         println!("\n⏰ Demo time limit reached - sending SIGINT...");
 
@@ -197,11 +199,8 @@ async fn main() -> CanoResult<()> {
         );
     });
 
-    // Start the scheduler
-    println!("✅ Scheduler started");
-    println!("💡 Press Ctrl+C to trigger graceful shutdown\n");
-
-    scheduler.start().await?;
+    // Block on the scheduler until shutdown completes.
+    running.wait().await?;
 
     println!("\n🎉 Shutdown complete!");
     Ok(())
@@ -214,7 +213,7 @@ async fn main() -> CanoResult<()> {
 /// Pattern 1: Graceful with custom timeout
 #[allow(dead_code)]
 async fn graceful_shutdown_with_timeout(
-    scheduler: &Scheduler<MyState>,
+    scheduler: &RunningScheduler<MyState>,
     timeout_duration: Duration,
 ) -> CanoResult<()> {
     println!("🛑 Stopping scheduler...");
@@ -241,7 +240,7 @@ async fn graceful_shutdown_with_timeout(
 
 /// Pattern 2: Monitor and report progress
 #[allow(dead_code)]
-async fn monitored_shutdown(scheduler: &Scheduler<MyState>) -> CanoResult<()> {
+async fn monitored_shutdown(scheduler: &RunningScheduler<MyState>) -> CanoResult<()> {
     println!("🛑 Initiating shutdown...");
     scheduler.stop().await?;
 
@@ -278,7 +277,7 @@ async fn monitored_shutdown(scheduler: &Scheduler<MyState>) -> CanoResult<()> {
 
 /// Pattern 3: Progressive timeout with escalation
 #[allow(dead_code)]
-async fn progressive_shutdown(scheduler: &Scheduler<MyState>) -> CanoResult<()> {
+async fn progressive_shutdown(scheduler: &RunningScheduler<MyState>) -> CanoResult<()> {
     scheduler.stop().await?;
 
     // First attempt: short timeout (10 seconds)
@@ -316,7 +315,7 @@ async fn progressive_shutdown(scheduler: &Scheduler<MyState>) -> CanoResult<()> 
 
 /// Pattern 4: Immediate check and conditional wait
 #[allow(dead_code)]
-async fn conditional_shutdown(scheduler: &Scheduler<MyState>) -> CanoResult<()> {
+async fn conditional_shutdown(scheduler: &RunningScheduler<MyState>) -> CanoResult<()> {
     scheduler.stop().await?;
 
     if !scheduler.has_running_flows().await {

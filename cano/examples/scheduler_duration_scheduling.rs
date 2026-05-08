@@ -160,26 +160,14 @@ async fn main() -> CanoResult<()> {
     println!("  • Frequent task: Every 1 second");
     println!();
 
-    // Start the scheduler in background
-    let mut scheduler_handle = scheduler.clone();
-    let scheduler_task = tokio::spawn(async move {
-        println!("Scheduler background task started.");
-        if let Err(e) = scheduler_handle.start().await {
-            eprintln!("Scheduler failed: {}", e);
-        }
-        println!("Scheduler background task finished.");
-    });
+    // Start consumes the builder and returns a live handle.
+    let running = scheduler.start().await?;
 
     println!("🚀 Scheduler started! Running for 10 seconds...");
     tokio::time::sleep(Duration::from_secs(10)).await;
 
-    scheduler.stop().await?;
+    running.stop().await?;
     println!("✅ Scheduler stopped gracefully");
-
-    // Await the scheduler task to ensure it cleans up
-    scheduler_task
-        .await
-        .map_err(|e| CanoError::task_execution(format!("Scheduler task failed: {}", e)))?;
 
     Ok(())
 }

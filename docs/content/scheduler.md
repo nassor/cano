@@ -56,6 +56,27 @@ create separate <code>Scheduler</code> instances.
 </div>
 <hr class="section-divider">
 
+<h2 id="lifecycle"><a href="#lifecycle" class="anchor-link" aria-hidden="true">#</a>Lifecycle: <code>Scheduler</code> &rarr; <code>RunningScheduler</code></h2>
+<p>
+The scheduler is split into two halves to make a double-start impossible at the type level:
+</p>
+<ul>
+<li><strong><code>Scheduler</code></strong> is the <em>builder</em>. Register workflows with <code>every</code> /
+<code>cron</code> / <code>manual</code> and attach optional <code>BackoffPolicy</code> via
+<code>set_backoff</code>. <code>Scheduler</code> is <strong>not</strong> <code>Clone</code>.</li>
+<li><strong><code>RunningScheduler</code></strong> is the <em>live handle</em> returned by
+<code>scheduler.start().await?</code>. It owns the spawned driver and per-flow loop tasks. It is cheap to
+clone — every clone shares the same command channel and flow registry, so you can call <code>trigger</code>,
+<code>status</code>, <code>list</code>, <code>reset_flow</code>, and <code>stop</code> from any task.</li>
+</ul>
+<p>
+<code>start</code> consumes the builder, so the compiler prevents you from starting the same scheduler
+twice or mutating the registry mid-flight. <code>stop().await</code> on any clone signals graceful
+shutdown and waits for it to complete; <code>wait().await</code> blocks without sending Stop, useful for
+"main blocks until Ctrl+C handler stops the scheduler" patterns.
+</p>
+<hr class="section-divider">
+
 <h2 id="overlap-prevention"><a href="#overlap-prevention" class="anchor-link" aria-hidden="true">#</a>Overlap Prevention</h2>
 <p>
 The scheduler prevents overlapping executions of the same workflow. If a previous execution is still
@@ -161,7 +182,10 @@ async fn main() -> Result<(), CanoError> {
     // Run every 30 seconds
     scheduler.every_seconds("health_check", workflow, State::Start, 30)?;
 
-    scheduler.start().await?;
+    // start() consumes the builder and returns a clone-able RunningScheduler.
+    // wait() blocks until somebody calls stop() on a clone.
+    let running = scheduler.start().await?;
+    running.wait().await?;
     Ok(())
 }
 
@@ -255,7 +279,8 @@ async fn main() -> Result<(), CanoError> {
     // Run daily at 6 PM: "0 0 18 * * *"
     scheduler.cron("evening_report", evening_report, State::Start, "0 0 18 * * *")?;
 
-    scheduler.start().await?;
+    let running = scheduler.start().await?;
+    running.wait().await?;
     Ok(())
 }
 
@@ -264,12 +289,12 @@ async fn main() -> Result<(), CanoError> {
 <h3 id="manual-triggering"><a href="#manual-triggering" class="anchor-link" aria-hidden="true">#</a>3. Manual Triggering - On-Demand Execution</h3>
 <p>Trigger workflows manually via API. Ideal for user-initiated tasks or event-driven processing.</p>
 
-<div class="callout callout-warning">
-<div class="callout-label">Important</div>
+<div class="callout callout-info">
+<div class="callout-label">Type-safe lifecycle</div>
 <p>
-Calling <code>trigger()</code> before the scheduler has been started will return an error.
-Always call <code>scheduler.start()</code> (or spawn it in a background task) before
-triggering workflows manually.
+<code>trigger()</code> lives on <code>RunningScheduler</code>, which is only obtained by calling
+<code>scheduler.start().await?</code>. The compiler will not let you trigger a workflow before the
+scheduler is running.
 </p>
 </div>
 
@@ -324,21 +349,19 @@ async fn main() -> Result<(), CanoError> {
     // Register as manual-only workflow
     scheduler.manual("data_export", export_workflow, State::Start)?;
 
-    // Start scheduler in background
-    let mut scheduler_handle = scheduler.clone();
-    tokio::spawn(async move {
-        scheduler_handle.start().await.unwrap();
-    });
+    // Start consumes the builder and returns a live, clone-able handle.
+    let running = scheduler.start().await?;
 
     // Trigger manually when needed
     println!("Triggering export...");
-    scheduler.trigger("data_export").await?;
+    running.trigger("data_export").await?;
 
     // Can be triggered again later
     tokio::time::sleep(Duration::from_secs(5)).await;
-    scheduler.trigger("data_export").await?;
+    running.trigger("data_export").await?;
 
-    scheduler.stop().await?;
+    // stop() sends the Stop command and waits for graceful shutdown.
+    running.stop().await?;
     Ok(())
 }
 
@@ -448,24 +471,21 @@ async fn main() -> Result<(), CanoError> {
 
     scheduler.manual("emergency_export", export_workflow, State::Start)?;
 
-    // Start scheduler
-    let mut scheduler_handle = scheduler.clone();
-    tokio::spawn(async move {
-        scheduler_handle.start().await.unwrap();
-    });
+    // Start consumes the builder and returns a live handle.
+    let running = scheduler.start().await?;
 
     // Monitor and trigger as needed
     loop {
         tokio::time::sleep(Duration::from_secs(60)).await;
 
         // Check status of all workflows
-        let workflows = scheduler.list().await;
+        let workflows = running.list().await;
         for info in workflows {
             println!("{}: {:?} (runs: {})", info.id, info.status, info.run_count);
         }
 
         // Example: Trigger emergency export if needed based on some condition
-        // scheduler.trigger("emergency_export").await?;
+        // running.trigger("emergency_export").await?;
     }
 }
 
@@ -548,7 +568,8 @@ async fn main() -> Result<(), CanoError> {
         },
     )?;
 
-    scheduler.start().await?;
+    let running = scheduler.start().await?;
+    running.wait().await?;
     Ok(())
 }
 
@@ -586,16 +607,16 @@ has a policy attached. <code>FlowInfo</code> exposes <code>failure_streak</code>
 
 <h3 id="recovery"><a href="#recovery" class="anchor-link" aria-hidden="true">#</a>Recovery via <code>reset_flow</code></h3>
 <p>
-A <code>Tripped</code> flow stays parked until you clear it. <code>Scheduler::reset_flow(id)</code> clears
-the failure streak and <code>next_eligible</code>, and (when the flow is not currently running) sets the
-status back to <code>Idle</code>. Manual <code>trigger()</code> is rejected on a tripped flow — call
+A <code>Tripped</code> flow stays parked until you clear it. <code>RunningScheduler::reset_flow(id)</code>
+clears the failure streak and <code>next_eligible</code>, and (when the flow is not currently running) sets
+the status back to <code>Idle</code>. Manual <code>trigger()</code> is rejected on a tripped flow — call
 <code>reset_flow</code> first.
 </p>
 
 ```rust
-let snap = scheduler.status("flaky").await.expect("flow exists");
+let snap = running.status("flaky").await.expect("flow exists");
 if matches!(snap.status, Status::Tripped { .. }) {
-    scheduler.reset_flow("flaky").await?;
+    running.reset_flow("flaky").await?;
 }
 
 ```
@@ -615,15 +636,16 @@ All active executions are tracked and included in the shutdown wait.
 </p>
 
 ```rust
-// Stop scheduler but allow running flows to finish
-scheduler.stop().await?;
+// Stop the scheduler and wait for running flows to finish.
+running.stop().await?;
 
 ```
 
 <p>
 When <code>stop()</code> is called, the scheduler signals all scheduling loops to stop,
-then waits for any in-progress workflow executions to complete before returning.
-This ensures no workflow is abruptly terminated mid-execution.
+waits up to 30 seconds for any in-progress workflow executions to finish, and runs each
+workflow's resource <code>teardown_all</code> in reverse registration order before returning.
+A second <code>stop()</code> call after success is idempotent — it returns the same cached result.
 </p>
 <hr class="section-divider">
 
@@ -1187,18 +1209,13 @@ async fn main() -> Result<(), CanoError> {
 
     println!("\n🎬 Starting scheduler...\n");
 
-    // Start scheduler in background
-    let mut scheduler_clone = scheduler.clone();
-    let scheduler_handle = tokio::spawn(async move {
-        scheduler_clone.start().await
-    });
-
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Start consumes the builder and returns a clone-able handle.
+    let running = scheduler.start().await?;
 
     // MAP PHASE: Trigger all batch workflows
     println!("🗺️  MAP PHASE: Triggering all batch workflows...\n");
     for (batch_name, _) in &batches {
-        scheduler.trigger(batch_name).await?;
+        running.trigger(batch_name).await?;
     }
 
     // Wait for all workflows to complete
@@ -1208,7 +1225,7 @@ async fn main() -> Result<(), CanoError> {
     for attempt in 0..60 {
         tokio::time::sleep(Duration::from_secs(5)).await;
 
-        let workflows = scheduler.list().await;
+        let workflows = running.list().await;
         let completed_count = workflows
             .iter()
             .filter(|w| w.status == Status::Completed)
@@ -1236,11 +1253,9 @@ async fn main() -> Result<(), CanoError> {
     println!("\n🔄 REDUCE PHASE: Aggregating results from all batches...\n");
     reduce_global_results(&global_results).await?;
 
-    // Stop scheduler
+    // Stop scheduler — sends Stop and waits for graceful shutdown.
     println!("\n🛑 Stopping scheduler...");
-    scheduler.stop().await?;
-
-    let _ = scheduler_handle.await;
+    running.stop().await?;
 
     println!("\n✅ Multi-level map-reduce analysis complete!");
 

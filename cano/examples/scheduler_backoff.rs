@@ -101,12 +101,11 @@ async fn main() -> CanoResult<()> {
         },
     )?;
 
-    let mut run_handle = scheduler.clone();
-    let bg = tokio::spawn(async move { run_handle.start().await });
+    let running = scheduler.start().await?;
 
     // Watch the flow trip after 3 failures.
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    let snap = scheduler.status("flaky").await.expect("flow exists");
+    let snap = running.status("flaky").await.expect("flow exists");
     println!("\nAfter ~1.5s — status: {:?}", snap.status);
     println!(
         "  run_count = {}, streak = {}",
@@ -115,22 +114,20 @@ async fn main() -> CanoResult<()> {
 
     if matches!(snap.status, Status::Tripped { .. }) {
         println!("\nFlow tripped — calling reset_flow to give it another chance...");
-        scheduler.reset_flow("flaky").await?;
+        running.reset_flow("flaky").await?;
     }
 
     // After reset the flow runs again, hits 1 more failure (run #4), then
     // succeeds on run #5.
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    let snap = scheduler.status("flaky").await.expect("flow exists");
+    let snap = running.status("flaky").await.expect("flow exists");
     println!("\nAfter reset + ~1.5s — status: {:?}", snap.status);
     println!(
         "  run_count = {}, streak = {}",
         snap.run_count, snap.failure_streak
     );
 
-    scheduler.stop().await?;
-    bg.await
-        .map_err(|e| CanoError::task_execution(format!("scheduler join failed: {e}")))??;
+    running.stop().await?;
 
     Ok(())
 }
