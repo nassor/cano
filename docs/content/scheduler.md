@@ -492,7 +492,7 @@ call <code>set_backoff</code> to activate the new code path.
 <div class="callout-label">Distinct from CircuitBreaker</div>
 <p>
 Flow-level <code>Tripped</code> is scoped to the scheduler and is separate from the task-level
-<code>CanoError::CircuitOpen</code> emitted by <a href="../tasks/"><code>CircuitBreaker</code></a>.
+<code>CanoError::CircuitOpen</code> emitted by <a href="../task/#config-retries"><code>CircuitBreaker</code></a>.
 The breaker gates a single task's call to a dependency; this policy gates the scheduler from re-firing
 an entire flow.
 </p>
