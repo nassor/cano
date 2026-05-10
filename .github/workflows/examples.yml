@@ -1,0 +1,120 @@
+name: Examples
+
+# Actually *runs* every example (a smoke test that they still work against the
+# current code), unlike the main CI which only `cargo check`s them. Slower — a
+# couple of examples download books over the network — so it lives in its own
+# workflow, and like CI it only fires for pull requests against `main` and for
+# pushes to `main`.
+on:
+  push:
+  #   branches: [ "main" ]
+  # pull_request:
+  #   branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  examples:
+    name: Run examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-examples-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-examples-
+
+      # Build everything up front: a compile error surfaces as its own step
+      # rather than mid-loop, and the per-example runs below don't recompile.
+      - name: Build examples
+        run: cargo build --examples --all-features
+
+      - name: Run examples
+        shell: bash
+        run: |
+          set -uo pipefail
+
+          # `ai_workflow_yes_and` needs a running Ollama daemon — nothing to talk
+          # to in CI, so it is intentionally skipped.
+          SKIP=("ai_workflow_yes_and")
+          # `workflow_on_request` is an HTTP server: it never exits on its own,
+          # so it gets the dedicated smoke test below instead of the run loop.
+          SERVERS=("workflow_on_request")
+
+          contains() {
+            local needle="$1"; shift
+            local x
+            for x in "$@"; do [ "$x" = "$needle" ] && return 0; done
+            return 1
+          }
+
+          failed=()
+
+          for path in cano/examples/*.rs; do
+            ex="$(basename "$path" .rs)"
+            if contains "$ex" "${SKIP[@]}"; then
+              echo "::notice::skipping example '$ex' (requires an external Ollama daemon)"
+              continue
+            fi
+            contains "$ex" "${SERVERS[@]}" && continue
+
+            echo "::group::cargo run --example $ex --all-features"
+            if timeout --signal=TERM --kill-after=15s 240s \
+                 cargo run --quiet --example "$ex" --all-features; then
+              echo "ok: $ex"
+            else
+              code=$?
+              echo "::error::example '$ex' exited with status $code"
+              failed+=("$ex (exit $code)")
+            fi
+            echo "::endgroup::"
+          done
+
+          # HTTP-server example: boot the prebuilt binary, hit the endpoint, stop it.
+          for ex in "${SERVERS[@]}"; do
+            contains "$ex" "${SKIP[@]}" && continue
+            echo "::group::smoke test: $ex"
+            ./target/debug/examples/"$ex" &
+            srv=$!
+            ok=0
+            for _ in $(seq 1 30); do
+              if curl -sf -X POST http://127.0.0.1:4001/process \
+                   -H 'Content-Type: application/json' \
+                   -d '{"text":"Hello World From Cano"}' | tee /dev/stderr | grep -q '"word_count"'; then
+                ok=1
+                break
+              fi
+              sleep 1
+            done
+            kill "$srv" 2>/dev/null || true
+            wait "$srv" 2>/dev/null || true
+            if [ "$ok" -eq 1 ]; then
+              echo "ok: $ex"
+            else
+              echo "::error::example '$ex' did not serve a valid response on 127.0.0.1:4001"
+              failed+=("$ex (no response)")
+            fi
+            echo "::endgroup::"
+          done
+
+          if [ "${#failed[@]}" -ne 0 ]; then
+            echo "Failed examples: ${failed[*]}"
+            exit 1
+          fi
+          echo "All examples ran successfully."
