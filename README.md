@@ -35,7 +35,7 @@ The engine is built on three core concepts: **Tasks/Nodes** for logic, **Workflo
 - **Robust Retry Logic**: Configurable strategies including exponential backoff with jitter and per-attempt timeouts.
 - **Circuit Breaker**: Shared `CircuitBreaker` short-circuits calls to failing dependencies before the retry loop, with configurable failure threshold, cool-down, and half-open probing.
 - **Built-in Scheduling**: Cron-based, interval, and manual triggers for background jobs.
-- **Observability**: Integrated `tracing` support for deep insights into workflow execution.
+- **Observability**: Integrated `tracing` spans, plus synchronous `WorkflowObserver` hooks for lifecycle/failure events and `Resource::health()` probes (`Resources::check_all_health`).
 - **Performance-Focused**: Minimizes heap allocations by leveraging stack-based objects wherever possible, giving you control over where allocations occur.
 
 ## Simple Example: Parallel Processing

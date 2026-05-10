@@ -128,6 +128,13 @@
 //! [`MemoryStore`] provides a thread-safe `Arc<RwLock<HashMap>>` for sharing typed data
 //! between states. For custom backends, register a concrete storage resource in [`Resources`].
 //!
+//! ### Observability
+//!
+//! Beyond the optional `tracing` integration, implement [`WorkflowObserver`] and attach it
+//! with [`Workflow::with_observer`] to receive synchronous lifecycle and failure callbacks
+//! (state entry, task start/success/failure, retry, circuit-open). Resources can also report
+//! their own [`HealthStatus`] via [`Resource::health`], aggregated by [`Resources::check_all_health`].
+//!
 //! ## Processing Lifecycle
 //!
 //! **Task**: Single `run()` method — full control over execution flow.
@@ -143,7 +150,8 @@
 //! - [`mod@node`]: The [`Node`] trait — three-phase lifecycle with retry via [`TaskConfig`]
 //! - [`workflow`]: [`Workflow`] — FSM orchestration with Split/Join support
 //! - `scheduler` (requires `scheduler` feature): `Scheduler` (builder) and `RunningScheduler` (live handle) — cron and interval scheduling
-//! - [`mod@resource`]: [`Resource`] trait and [`Resources`] dictionary — lifecycle-aware resource management
+//! - [`mod@resource`]: [`Resource`] trait, [`Resources`] dictionary, and [`HealthStatus`] — lifecycle-aware resource management and health probes
+//! - [`observer`]: [`WorkflowObserver`] — synchronous lifecycle/failure event hooks
 //! - [`store`]: [`MemoryStore`] — a typed in-memory store that implements [`Resource`]
 //! - [`error`]: [`CanoError`] variants and the [`CanoResult`] alias
 //!
@@ -156,6 +164,7 @@
 pub mod circuit;
 pub mod error;
 pub mod node;
+pub mod observer;
 pub mod resource;
 pub mod store;
 pub mod task;
@@ -171,7 +180,8 @@ mod tracing_tests;
 pub use circuit::{CircuitBreaker, CircuitPolicy, CircuitState, Permit as CircuitPermit};
 pub use error::{CanoError, CanoResult};
 pub use node::{DefaultNodeResult, DynNode, Node, NodeObject};
-pub use resource::{Resource, Resources};
+pub use observer::WorkflowObserver;
+pub use resource::{HealthStatus, Resource, Resources};
 pub use store::MemoryStore;
 pub use task::{DynTask, RetryMode, Task, TaskConfig, TaskObject, TaskResult};
 pub use workflow::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult, StateEntry, Workflow};
@@ -227,9 +237,9 @@ pub mod prelude {
 
     pub use crate::{
         CanoError, CanoResult, CircuitBreaker, CircuitPermit, CircuitPolicy, CircuitState,
-        DefaultNodeResult, JoinConfig, JoinStrategy, MemoryStore, Node, Resource, Resources,
-        RetryMode, SplitResult, SplitTaskResult, StateEntry, Task, TaskConfig, TaskObject,
-        TaskResult, Workflow,
+        DefaultNodeResult, HealthStatus, JoinConfig, JoinStrategy, MemoryStore, Node, Resource,
+        Resources, RetryMode, SplitResult, SplitTaskResult, StateEntry, Task, TaskConfig,
+        TaskObject, TaskResult, Workflow, WorkflowObserver,
     };
 
     #[cfg(feature = "scheduler")]

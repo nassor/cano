@@ -70,7 +70,7 @@ It excels at managing complex lifecycles where state transitions matter:
 <div class="feature-card animate-in">
 <div class="feature-icon accent" aria-hidden="true">&#9673;</div>
 <h3>Observability</h3>
-<p>Comprehensive tracing and observability for workflow execution.</p>
+<p>Built-in <code>tracing</code> spans, plus <code>WorkflowObserver</code> hooks and resource health probes.</p>
 </div>
 </div>
 

@@ -136,6 +136,10 @@ path = "examples/workflow_on_request.rs"
 name = "circuit_breaker"
 path = "examples/circuit_breaker.rs"
 
+[[example]]
+name = "workflow_observer"
+path = "examples/workflow_observer.rs"
+
 [[bench]]
 name = "workflow_performance"
 harness = false

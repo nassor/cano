@@ -100,6 +100,7 @@
 
 use crate::circuit::CircuitBreaker;
 use crate::error::CanoError;
+use crate::observer::WorkflowObserver;
 use crate::resource::Resources;
 use cano_macros::task;
 use rand::RngExt;
@@ -273,6 +274,16 @@ pub struct TaskConfig {
     /// retry slot. Share one breaker across multiple tasks to make a trip from
     /// any caller protect every caller.
     pub circuit_breaker: Option<Arc<CircuitBreaker>>,
+    /// Observers notified of retry and circuit-open events from inside
+    /// [`run_with_retries`]. The workflow engine stamps its registered observer
+    /// list (and [`task_name`](Self::task_name)) onto a per-dispatch copy of the
+    /// config when any observer is attached; left `None` there is zero overhead
+    /// on the hot path. See [`WorkflowObserver`].
+    pub observers: Option<Arc<[Arc<dyn WorkflowObserver>]>>,
+    /// Human-readable task identifier reported to [`observers`](Self::observers).
+    /// Populated by the workflow engine from [`Task::name`]; `None` when
+    /// [`run_with_retries`] is invoked directly without observers wired.
+    pub task_name: Option<Cow<'static, str>>,
 }
 
 impl TaskConfig {
@@ -289,6 +300,8 @@ impl TaskConfig {
             retry_mode: RetryMode::None,
             attempt_timeout: None,
             circuit_breaker: None,
+            observers: None,
+            task_name: None,
         }
     }
 
@@ -339,6 +352,20 @@ impl TaskConfig {
     }
 }
 
+/// Invoke `f` for every observer attached to `config`, passing the resolved task name.
+///
+/// No-op (and no allocation) when `config.observers` is `None` — the common case
+/// on the hot path when no observer is wired into the workflow.
+#[inline]
+fn notify_observers(config: &TaskConfig, f: impl Fn(&dyn WorkflowObserver, &str)) {
+    if let Some(observers) = config.observers.as_deref() {
+        let name = config.task_name.as_deref().unwrap_or("<task>");
+        for observer in observers {
+            f(observer.as_ref(), name);
+        }
+    }
+}
+
 /// Default implementation for retry logic that can be used by any task
 ///
 /// This function provides a standard retry mechanism that can be used by any task
@@ -384,6 +411,7 @@ where
                 Err(e) => {
                     #[cfg(feature = "tracing")]
                     warn!(error = %e, "Circuit breaker open; short-circuiting task");
+                    notify_observers(config, |o, name| o.on_circuit_open(name));
                     return Err(e);
                 }
             },
@@ -439,11 +467,14 @@ where
                         "Task failed after {} attempt(s): {}",
                         attempt, e
                     )));
-                } else if let Some(delay) = config.retry_mode.delay_for_attempt(attempt - 1) {
-                    #[cfg(feature = "tracing")]
-                    debug!(delay_ms = delay.as_millis(), "Waiting before retry");
+                } else {
+                    notify_observers(config, |o, name| o.on_retry(name, attempt as u32));
+                    if let Some(delay) = config.retry_mode.delay_for_attempt(attempt - 1) {
+                        #[cfg(feature = "tracing")]
+                        debug!(delay_ms = delay.as_millis(), "Waiting before retry");
 
-                    tokio::time::sleep(delay).await;
+                        tokio::time::sleep(delay).await;
+                    }
                 }
             }
         }
@@ -536,6 +567,17 @@ where
     /// - Return a custom configuration with specific retry/parameter settings
     fn config(&self) -> TaskConfig {
         TaskConfig::default()
+    }
+
+    /// Human-readable identifier for this task, reported to
+    /// [`WorkflowObserver`] hooks.
+    ///
+    /// The default returns [`std::any::type_name`] of the implementing type
+    /// (e.g. `"my_crate::tasks::FetchTask"`). Override it to give a task a
+    /// stable, friendlier name — useful when the type name is long or when
+    /// several workflow states share one task type.
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed(std::any::type_name::<Self>())
     }
 
     /// Execute the task with access to shared resources.

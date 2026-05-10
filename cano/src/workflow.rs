@@ -81,8 +81,18 @@ use std::time::Duration;
 use futures_util::FutureExt;
 
 use crate::error::CanoError;
+use crate::observer::WorkflowObserver;
 use crate::resource::Resources;
 use crate::task::{Task, TaskResult};
+
+/// Invoke `f` for each observer in `observers`. Used at every workflow event site;
+/// a no-op when the list is empty (the common case — observers are opt-in).
+#[inline]
+fn notify_observers(observers: &[Arc<dyn WorkflowObserver>], f: impl Fn(&dyn WorkflowObserver)) {
+    for observer in observers {
+        f(observer.as_ref());
+    }
+}
 
 /// Best-effort extraction of a human-readable message from a panic payload.
 fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
@@ -367,6 +377,9 @@ where
     /// Cached result of `validate()`. Populated on the first `orchestrate` call;
     /// subsequent calls read this and skip the O(states + splits) validation walk.
     validated: OnceLock<Result<(), CanoError>>,
+    /// Observers notified of lifecycle and failure events. Empty by default;
+    /// each event is delivered to every observer in registration order.
+    observers: Vec<Arc<dyn WorkflowObserver>>,
     /// Optional tracing span
     #[cfg(feature = "tracing")]
     tracing_span: Option<Span>,
@@ -385,6 +398,7 @@ where
             workflow_timeout: None,
             exit_states: Vec::new(),
             validated: OnceLock::new(),
+            observers: Vec::new(),
             #[cfg(feature = "tracing")]
             tracing_span: None,
         }
@@ -459,11 +473,93 @@ where
         self
     }
 
+    /// Register a [`WorkflowObserver`] to receive lifecycle and failure events.
+    ///
+    /// May be called more than once; every observer receives every event in
+    /// registration order. Observers are additive — they do not replace or
+    /// suppress the engine's `tracing` instrumentation. Registration is O(1).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use cano::prelude::*;
+    /// use std::sync::Arc;
+    /// use std::sync::atomic::{AtomicUsize, Ordering};
+    ///
+    /// #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    /// enum Step { Start, Done }
+    ///
+    /// struct NoopTask;
+    /// #[task]
+    /// impl Task<Step> for NoopTask {
+    ///     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    ///         Ok(TaskResult::Single(Step::Done))
+    ///     }
+    /// }
+    ///
+    /// #[derive(Default)]
+    /// struct Counter(AtomicUsize);
+    /// impl WorkflowObserver for Counter {
+    ///     fn on_task_success(&self, _task_id: &str) {
+    ///         self.0.fetch_add(1, Ordering::Relaxed);
+    ///     }
+    /// }
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), CanoError> {
+    /// let counter = Arc::new(Counter::default());
+    /// let workflow = Workflow::bare()
+    ///     .register(Step::Start, NoopTask)
+    ///     .add_exit_state(Step::Done)
+    ///     .with_observer(counter.clone());
+    /// workflow.orchestrate(Step::Start).await?;
+    /// assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_observer(mut self, observer: Arc<dyn WorkflowObserver>) -> Self {
+        self.observers.push(observer);
+        self
+    }
+
     /// Set a tracing span for this workflow (requires "tracing" feature)
     #[cfg(feature = "tracing")]
     pub fn with_tracing_span(mut self, span: Span) -> Self {
         self.tracing_span = Some(span);
         self
+    }
+
+    /// A shareable snapshot of the registered observers, or `None` when none are
+    /// attached. The `None` fast path keeps observer-free workflows allocation-free
+    /// per dispatch; with observers attached this allocates one small slice per
+    /// state transition / split task.
+    fn observer_slice(&self) -> Option<Arc<[Arc<dyn WorkflowObserver>]>> {
+        if self.observers.is_empty() {
+            None
+        } else {
+            Some(Arc::from(self.observers.as_slice()))
+        }
+    }
+
+    /// Return `base` unchanged when no observers are attached; otherwise a cloned
+    /// config carrying the observer slice and task name so [`run_with_retries`]
+    /// can emit `on_retry` / `on_circuit_open`.
+    ///
+    /// [`run_with_retries`]: crate::task::run_with_retries
+    fn config_with_observers(
+        base: &Arc<crate::task::TaskConfig>,
+        observers: &Option<Arc<[Arc<dyn WorkflowObserver>]>>,
+        task_name: &str,
+    ) -> Arc<crate::task::TaskConfig> {
+        match observers {
+            None => Arc::clone(base),
+            Some(slice) => {
+                let mut cfg = (**base).clone();
+                cfg.observers = Some(Arc::clone(slice));
+                cfg.task_name = Some(Cow::Owned(task_name.to_owned()));
+                Arc::new(cfg)
+            }
+        }
     }
 
     fn validate_join_config(
@@ -664,6 +760,14 @@ where
         info!(initial_state = ?current_state, "Starting workflow execution");
 
         loop {
+            // Notify observers of every state entry, including the initial state
+            // and any terminal exit state. Skip the `Debug` formatting allocation
+            // entirely when no observers are attached.
+            if !self.observers.is_empty() {
+                let state_label = format!("{current_state:?}");
+                notify_observers(&self.observers, |o| o.on_state_enter(&state_label));
+            }
+
             // Check if we've reached an exit state
             if self.exit_states.contains(&current_state) {
                 #[cfg(feature = "tracing")]
@@ -703,6 +807,16 @@ where
         config: Arc<crate::task::TaskConfig>,
     ) -> Result<TState, CanoError> {
         use crate::task::run_with_retries;
+
+        let observers = self.observer_slice();
+        let task_name = task.name();
+        if let Some(ref slice) = observers {
+            notify_observers(slice, |o| o.on_task_start(task_name.as_ref()));
+        }
+        // Stamp observers + task name onto a per-dispatch config so
+        // `run_with_retries` can emit `on_retry` / `on_circuit_open`. Zero-cost
+        // (returns the same Arc) when no observers are attached.
+        let config = Self::config_with_observers(&config, &observers, &task_name);
 
         #[cfg(feature = "tracing")]
         let task_span = if tracing::enabled!(tracing::Level::INFO) {
@@ -747,16 +861,25 @@ where
             }
         };
 
-        match result? {
-            TaskResult::Single(next_state) => {
+        let outcome: Result<TState, CanoError> = match result {
+            Ok(TaskResult::Single(next_state)) => {
                 #[cfg(feature = "tracing")]
                 debug!(next_state = ?next_state, "Single task completed");
                 Ok(next_state)
             }
-            TaskResult::Split(_) => Err(CanoError::workflow(
+            Ok(TaskResult::Split(_)) => Err(CanoError::workflow(
                 "Single task returned split result - use register_split() for split tasks",
             )),
+            Err(e) => Err(e),
+        };
+
+        if let Some(ref slice) = observers {
+            match &outcome {
+                Ok(_) => notify_observers(slice, |o| o.on_task_success(task_name.as_ref())),
+                Err(e) => notify_observers(slice, |o| o.on_task_failure(task_name.as_ref(), e)),
+            }
         }
+        outcome
     }
 
     async fn execute_split_join(
@@ -789,12 +912,35 @@ where
         let mut join_set: tokio::task::JoinSet<(usize, Result<TaskResult<TState>, CanoError>)> =
             tokio::task::JoinSet::new();
 
+        // Observer wiring. `task_ids[idx]` holds each split task's reported id
+        // (`"{name}[{idx}]"`); kept on the parent so `on_task_success` /
+        // `on_task_failure` can be fired from here once results are collected.
+        // Both stay empty / `None` and cost nothing when no observers are attached.
+        let observers = self.observer_slice();
+        let mut task_ids: Vec<Cow<'static, str>> = if observers.is_some() {
+            Vec::with_capacity(total_tasks)
+        } else {
+            Vec::new()
+        };
+
         #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
         for (idx, task) in tasks.into_iter().enumerate() {
             use crate::task::run_with_retries;
 
-            // Use cached config from registration time, not task.config().
-            let config = Arc::clone(&configs[idx]);
+            let task_id: Cow<'static, str> = if observers.is_some() {
+                Cow::Owned(format!("{}[{}]", task.name(), idx))
+            } else {
+                Cow::Borrowed("<split-task>")
+            };
+            if let Some(ref slice) = observers {
+                notify_observers(slice, |o| o.on_task_start(&task_id));
+            }
+            // Use cached config from registration time, with observers + task id
+            // stamped on when present (a no-op clone-free path otherwise).
+            let config = Self::config_with_observers(&configs[idx], &observers, &task_id);
+            if observers.is_some() {
+                task_ids.push(task_id);
+            }
             let resources_clone = Arc::clone(&resources);
             let bulkhead_clone = bulkhead.clone();
 
@@ -869,6 +1015,23 @@ where
         let split_result = self
             .collect_results(join_set, &join_config, total_tasks)
             .await?;
+
+        // Fire per-task observer events for everything that ran to completion.
+        // Cancelled tasks are intentionally silent (no dedicated hook), and an
+        // aggregated error entry carries `task_index == usize::MAX`, which
+        // `task_ids.get` filters out.
+        if let Some(ref slice) = observers {
+            for success in &split_result.successes {
+                if let Some(id) = task_ids.get(success.task_index) {
+                    notify_observers(slice, |o| o.on_task_success(id));
+                }
+            }
+            for failure in &split_result.errors {
+                if let (Some(id), Err(err)) = (task_ids.get(failure.task_index), &failure.result) {
+                    notify_observers(slice, |o| o.on_task_failure(id, err));
+                }
+            }
+        }
 
         let successful = split_result.successes.len();
         let _failed = split_result.errors.len();
@@ -1034,6 +1197,7 @@ where
             exit_states: self.exit_states.clone(),
             // Fresh OnceLock: cloned workflows re-validate on first orchestrate.
             validated: OnceLock::new(),
+            observers: self.observers.clone(),
             #[cfg(feature = "tracing")]
             tracing_span: self.tracing_span.clone(),
         }

@@ -59,13 +59,13 @@ fn expand_inherent_impl(
             ImplItem::Fn(f) => match f.sig.ident.to_string().as_str() {
                 "run" => run_fn = Some(f),
                 "run_bare" => run_bare_fn = Some(f),
-                "config" => {} // allowed
+                "config" | "name" => {} // allowed Task trait methods
                 other => {
                     errors.push(syn::Error::new_spanned(
                         &f.sig.ident,
                         format!(
                             "#[cano::task]: unexpected method `{other}` in inherent impl; \
-                             only `run`, `run_bare`, and `config` are allowed"
+                             only `run`, `run_bare`, `config`, and `name` are allowed"
                         ),
                     ));
                 }
