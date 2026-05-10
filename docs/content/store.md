@@ -1,12 +1,12 @@
 +++
-title = "Store"
-description = "Learn how to use the Store in Cano - thread-safe shared state for pipeline data passing between workflow stages."
+title = "MemoryStore"
+description = "MemoryStore in Cano - the default thread-safe, in-memory shared state for passing data between workflow stages."
 template = "page.html"
 +++
 
 <div class="content-wrapper">
-<h1>Store</h1>
-<p class="subtitle">Thread-safe shared state for pipeline data passing between workflow stages.</p>
+<h1>MemoryStore</h1>
+<p class="subtitle">The default in-memory shared state for passing data between workflow stages.</p>
 
 <p>
 The store is the shared data layer that connects workflow stages. Tasks and nodes write
