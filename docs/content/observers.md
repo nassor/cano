@@ -32,6 +32,7 @@ Observers are <strong>additive</strong>: attaching one does not change or suppre
 <li><a href="#events">Lifecycle Events</a></li>
 <li><a href="#task-ids">Task Identifiers</a></li>
 <li><a href="#sync">Synchronous by Design</a></li>
+<li><a href="#tracing-observer">Built-in: TracingObserver</a></li>
 <li><a href="#health">Resource Health Probes</a></li>
 <li><a href="#full-example">Full Example</a></li>
 </ol>
@@ -199,6 +200,67 @@ let observer: std::sync::Arc<dyn WorkflowObserver> =
 # let _ = observer;
 # }
 ```
+<hr class="section-divider">
+
+<h2 id="tracing-observer"><a href="#tracing-observer" class="anchor-link" aria-hidden="true">#</a>Built-in: <code>TracingObserver</code></h2>
+
+<div class="feature-banner">
+<div class="banner-icon" aria-hidden="true">⚙️</div>
+<div class="banner-content">
+<p><strong>Feature flag required</strong> — <code>TracingObserver</code> is behind the
+<code>tracing</code> feature gate (<code>features = ["tracing"]</code> or <code>features = ["all"]</code>).</p>
+</div>
+</div>
+
+<p>
+<code>TracingObserver</code> is a ready-made observer that re-emits every hook as a
+<a href="../tracing/"><code>tracing</code></a> event under the <code>cano::observer</code> target.
+Wire it up in one line — no custom observer needed:
+</p>
+
+```rust
+use cano::prelude::*;
+use std::sync::Arc;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Step { Start, Done }
+
+#[derive(Clone)]
+struct DoWork;
+
+#[task(state = Step)]
+impl DoWork {
+    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+        Ok(TaskResult::Single(Step::Done))
+    }
+}
+
+# fn build() -> Workflow<Step> {
+Workflow::bare()
+    .register(Step::Start, DoWork)
+    .add_exit_state(Step::Done)
+    .with_observer(Arc::new(TracingObserver::new()))
+# }
+```
+
+<p>It emits <strong>events, not spans</strong> — it does not reproduce the nested span tree the
+<code>tracing</code> feature's built-in instrumentation creates
+(<code>workflow_orchestrate</code> → <code>single_task_execution</code> → <code>task_attempt</code>, …).
+Use it alongside that instrumentation, or on its own when the high-level events are all you need.
+Because the events carry the <code>cano::observer</code> target, you can filter them separately:
+<code>RUST_LOG=cano::observer=debug</code>.</p>
+
+<table>
+<thead><tr><th>Hook</th><th>Level</th><th>Message</th><th>Fields</th></tr></thead>
+<tbody>
+<tr><td><code>on_state_enter</code></td><td><code>DEBUG</code></td><td><code>"workflow entered state"</code></td><td><code>state</code></td></tr>
+<tr><td><code>on_task_start</code></td><td><code>DEBUG</code></td><td><code>"task started"</code></td><td><code>task_id</code></td></tr>
+<tr><td><code>on_task_success</code></td><td><code>INFO</code></td><td><code>"task succeeded"</code></td><td><code>task_id</code></td></tr>
+<tr><td><code>on_task_failure</code></td><td><code>ERROR</code></td><td><code>"task failed"</code></td><td><code>task_id</code>, <code>error</code></td></tr>
+<tr><td><code>on_retry</code></td><td><code>WARN</code></td><td><code>"task retry"</code></td><td><code>task_id</code>, <code>attempt</code></td></tr>
+<tr><td><code>on_circuit_open</code></td><td><code>WARN</code></td><td><code>"circuit breaker rejected task"</code></td><td><code>task_id</code></td></tr>
+</tbody>
+</table>
 <hr class="section-divider">
 
 <h2 id="health"><a href="#health" class="anchor-link" aria-hidden="true">#</a>Resource Health Probes</h2>

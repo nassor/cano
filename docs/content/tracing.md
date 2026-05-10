@@ -37,6 +37,14 @@ Cano provides comprehensive observability through the optional <code>tracing</co
 <a href="https://docs.rs/tracing/latest/tracing/" target="_blank">tracing</a> library.
 All tracing instrumentation is behind conditional compilation, so it adds zero overhead when disabled.
 </p>
+
+<p>
+For a callback-style API — get notified on workflow lifecycle and failure events without depending
+on the <code>tracing</code> ecosystem — see <a href="../observers/">Observers</a>. The
+<code>tracing</code> feature also ships a ready-made <code>TracingObserver</code> that bridges the
+two: attach it with <code>.with_observer(Arc::new(TracingObserver::new()))</code> to re-emit those
+observer events as <code>tracing</code> events under the <code>cano::observer</code> target.
+</p>
 <hr class="section-divider">
 
 <h2 id="setup"><a href="#setup" class="anchor-link" aria-hidden="true">#</a>Setup</h2>

@@ -132,8 +132,10 @@
 //!
 //! Beyond the optional `tracing` integration, implement [`WorkflowObserver`] and attach it
 //! with [`Workflow::with_observer`] to receive synchronous lifecycle and failure callbacks
-//! (state entry, task start/success/failure, retry, circuit-open). Resources can also report
-//! their own [`HealthStatus`] via [`Resource::health`], aggregated by [`Resources::check_all_health`].
+//! (state entry, task start/success/failure, retry, circuit-open). With the `tracing` feature
+//! enabled, [`TracingObserver`] is a ready-made observer that re-emits those callbacks as
+//! `tracing` events. Resources can also report their own [`HealthStatus`] via
+//! [`Resource::health`], aggregated by [`Resources::check_all_health`].
 //!
 //! ## Processing Lifecycle
 //!
@@ -151,7 +153,7 @@
 //! - [`workflow`]: [`Workflow`] — FSM orchestration with Split/Join support
 //! - `scheduler` (requires `scheduler` feature): `Scheduler` (builder) and `RunningScheduler` (live handle) — cron and interval scheduling
 //! - [`mod@resource`]: [`Resource`] trait, [`Resources`] dictionary, and [`HealthStatus`] — lifecycle-aware resource management and health probes
-//! - [`observer`]: [`WorkflowObserver`] — synchronous lifecycle/failure event hooks
+//! - [`observer`]: [`WorkflowObserver`] — synchronous lifecycle/failure event hooks (and [`TracingObserver`], behind the `tracing` feature)
 //! - [`store`]: [`MemoryStore`] — a typed in-memory store that implements [`Resource`]
 //! - [`error`]: [`CanoError`] variants and the [`CanoResult`] alias
 //!
@@ -185,6 +187,9 @@ pub use resource::{HealthStatus, Resource, Resources};
 pub use store::MemoryStore;
 pub use task::{DynTask, RetryMode, Task, TaskConfig, TaskObject, TaskResult};
 pub use workflow::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult, StateEntry, Workflow};
+
+#[cfg(feature = "tracing")]
+pub use observer::TracingObserver;
 
 #[cfg(feature = "scheduler")]
 pub use scheduler::{BackoffPolicy, FlowInfo, RunningScheduler, Schedule, Scheduler, Status};
@@ -244,6 +249,9 @@ pub mod prelude {
 
     #[cfg(feature = "scheduler")]
     pub use crate::{BackoffPolicy, FlowInfo, RunningScheduler, Schedule, Scheduler, Status};
+
+    #[cfg(feature = "tracing")]
+    pub use crate::TracingObserver;
 
     // Re-export the cano async-trait macros for convenience.
     pub use crate::{node, resource, task};

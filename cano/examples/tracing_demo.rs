@@ -19,6 +19,7 @@
 //! ```
 
 use cano::prelude::*;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{Instrument, info, info_span, warn};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -377,6 +378,31 @@ async fn main() -> CanoResult<()> {
         }
     }
 
+    // Example 5: TracingObserver — observer events re-emitted as tracing events
+    {
+        info!("📋 Example 5: TracingObserver (events under the `cano::observer` target)");
+
+        let store = MemoryStore::new();
+        store.put("operand_a", 3)?;
+        store.put("operand_b", 4)?;
+        let resources = Resources::new().insert("store", store.clone());
+
+        let observed_workflow = Workflow::new(resources)
+            .register(
+                WorkflowState::Start,
+                SimpleMathTask::new("observed_task", "add"),
+            )
+            .add_exit_state(WorkflowState::Complete)
+            // One line: re-emit lifecycle/failure events as `tracing` events.
+            .with_observer(Arc::new(TracingObserver::new()));
+
+        let result = observed_workflow.orchestrate(WorkflowState::Start).await?;
+        println!("✅ Observed workflow completed with state: {result:?}");
+        println!(
+            "   (look for `task started` / `task succeeded` events; filter with RUST_LOG=cano::observer=debug)\n"
+        );
+    }
+
     info!("🎉 Tracing demo completed!");
     println!("\n🔍 Tracing Demo Summary:");
     println!("• Workflows are automatically instrumented with tracing");
@@ -384,6 +410,7 @@ async fn main() -> CanoResult<()> {
     println!("• Tasks can add custom tracing spans");
     println!("• Schedulers trace workflow executions with context");
     println!("• Error paths are traced with appropriate log levels");
+    println!("• TracingObserver re-emits observer events under the `cano::observer` target");
     println!("\nTo see more detailed tracing output, run with RUST_LOG=debug");
 
     Ok(())

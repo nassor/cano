@@ -1,6 +1,10 @@
 #[cfg(feature = "tracing")]
 mod tests {
     use crate::prelude::*;
+    use std::borrow::Cow;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
     use tracing::info_span;
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -126,5 +130,173 @@ mod tests {
         let result = workflow.orchestrate(TestState::Start).await.unwrap();
 
         assert_eq!(result, TestState::Complete);
+    }
+
+    // -- TracingObserver --------------------------------------------------
+
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    enum Flow {
+        A,
+        B,
+        Done,
+    }
+
+    struct AlwaysFail;
+    #[crate::task]
+    impl Task<Flow> for AlwaysFail {
+        fn config(&self) -> TaskConfig {
+            TaskConfig::new().with_fixed_retry(2, Duration::from_millis(1))
+        }
+        fn name(&self) -> Cow<'static, str> {
+            "always-fail".into()
+        }
+        async fn run_bare(&self) -> Result<TaskResult<Flow>, CanoError> {
+            Err(CanoError::task_execution("nope"))
+        }
+    }
+
+    struct RecoverAfter {
+        remaining_failures: Arc<AtomicUsize>,
+    }
+    #[crate::task]
+    impl Task<Flow> for RecoverAfter {
+        fn config(&self) -> TaskConfig {
+            TaskConfig::new().with_fixed_retry(3, Duration::from_millis(1))
+        }
+        fn name(&self) -> Cow<'static, str> {
+            "recover-after".into()
+        }
+        async fn run_bare(&self) -> Result<TaskResult<Flow>, CanoError> {
+            if self.remaining_failures.fetch_sub(1, Ordering::SeqCst) > 0 {
+                return Err(CanoError::task_execution("not ready"));
+            }
+            Ok(TaskResult::Single(Flow::Done))
+        }
+    }
+
+    struct GuardedTask {
+        breaker: Arc<CircuitBreaker>,
+    }
+    #[crate::task]
+    impl Task<Flow> for GuardedTask {
+        fn config(&self) -> TaskConfig {
+            TaskConfig::minimal().with_circuit_breaker(Arc::clone(&self.breaker))
+        }
+        fn name(&self) -> Cow<'static, str> {
+            "guarded".into()
+        }
+        async fn run_bare(&self) -> Result<TaskResult<Flow>, CanoError> {
+            Ok(TaskResult::Single(Flow::Done))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tracing_observer_runs_workflow() {
+        // Behavior parity: attaching a TracingObserver doesn't change execution.
+        let workflow = Workflow::bare()
+            .register(
+                Flow::A,
+                RecoverAfter {
+                    remaining_failures: Arc::new(AtomicUsize::new(1)),
+                },
+            )
+            .add_exit_state(Flow::Done)
+            .with_observer(Arc::new(TracingObserver::new()));
+        assert_eq!(workflow.orchestrate(Flow::A).await.unwrap(), Flow::Done);
+    }
+
+    #[derive(Clone)]
+    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_tracing_observer_captures_events() {
+        // `#[tokio::test]` uses the current-thread runtime, so a thread-local
+        // subscriber set via `set_default` applies to everything the workflow runs.
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(CaptureWriter(Arc::clone(&buf)))
+            .with_max_level(tracing::Level::TRACE)
+            .with_ansi(false)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        // Retry then ultimate failure → on_state_enter / on_task_start / on_retry / on_task_failure.
+        let fail_wf = Workflow::bare()
+            .register(Flow::A, AlwaysFail)
+            .add_exit_state(Flow::Done)
+            .with_observer(Arc::new(TracingObserver::new()));
+        assert!(fail_wf.orchestrate(Flow::A).await.is_err());
+
+        // Pre-tripped breaker → on_circuit_open + on_task_failure.
+        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+            failure_threshold: 1,
+            reset_timeout: Duration::from_secs(60),
+            half_open_max_calls: 1,
+        }));
+        let permit = breaker.try_acquire().unwrap();
+        breaker.record_failure(permit);
+        let cb_wf = Workflow::bare()
+            .register(
+                Flow::B,
+                GuardedTask {
+                    breaker: Arc::clone(&breaker),
+                },
+            )
+            .add_exit_state(Flow::Done)
+            .with_observer(Arc::new(TracingObserver::new()));
+        assert!(matches!(
+            cb_wf.orchestrate(Flow::B).await,
+            Err(CanoError::CircuitOpen(_))
+        ));
+
+        drop(guard);
+        let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        assert!(
+            output.contains("cano::observer"),
+            "missing target:\n{output}"
+        );
+        assert!(
+            output.contains("workflow entered state"),
+            "missing state-enter event:\n{output}"
+        );
+        assert!(
+            output.contains("task started"),
+            "missing task-start event:\n{output}"
+        );
+        assert!(
+            output.contains("task retry"),
+            "missing retry event:\n{output}"
+        );
+        assert!(
+            output.contains("always-fail"),
+            "missing failing task id:\n{output}"
+        );
+        assert!(
+            output.contains("task failed"),
+            "missing task-failure event:\n{output}"
+        );
+        assert!(
+            output.contains("circuit breaker rejected task"),
+            "missing circuit-open event:\n{output}"
+        );
+        assert!(
+            output.contains("guarded"),
+            "missing guarded task id:\n{output}"
+        );
     }
 }

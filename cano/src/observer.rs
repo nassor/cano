@@ -40,6 +40,13 @@
 //! delivered to every registered observer in registration order. Registration
 //! is O(1) and the resulting list is shared by `Arc`, so dispatch never clones
 //! observer state.
+//!
+//! ## Built-in: [`TracingObserver`]
+//!
+//! With the `tracing` feature enabled, [`TracingObserver`] is a ready-made observer
+//! that turns each hook into a [`tracing`](https://docs.rs/tracing) event under the
+//! `cano::observer` target. It emits **events, not spans**, and is a *complement* to —
+//! not a replacement for — the `tracing` feature's built-in span instrumentation.
 
 use crate::error::CanoError;
 
@@ -79,6 +86,82 @@ pub trait WorkflowObserver: Send + Sync + 'static {
     /// rejects the call because it is open. Followed by an
     /// [`on_task_failure`](Self::on_task_failure) with a [`CanoError::CircuitOpen`].
     fn on_circuit_open(&self, _task_id: &str) {}
+}
+
+/// A [`WorkflowObserver`] that re-emits every event as a [`tracing`](https://docs.rs/tracing)
+/// event (requires the `tracing` feature).
+///
+/// This is a convenience for getting workflow lifecycle/failure signals into your
+/// `tracing` subscriber without writing an observer by hand. It emits **flat events,
+/// not spans** — it does not (and cannot) reproduce the nested span tree the `tracing`
+/// feature's built-in instrumentation creates (`workflow_orchestrate` → `single_task_execution`
+/// → `task_attempt`, etc.). Use it *alongside* that instrumentation, or on its own when you
+/// only want the high-level events.
+///
+/// All events are emitted under the `cano::observer` target, so they can be filtered
+/// independently — e.g. `RUST_LOG=cano::observer=debug`. Event levels mirror the engine's
+/// existing instrumentation for the analogous sites:
+///
+/// | hook | level | message | fields |
+/// |---|---|---|---|
+/// | [`on_state_enter`](WorkflowObserver::on_state_enter) | `DEBUG` | `"workflow entered state"` | `state` |
+/// | [`on_task_start`](WorkflowObserver::on_task_start) | `DEBUG` | `"task started"` | `task_id` |
+/// | [`on_task_success`](WorkflowObserver::on_task_success) | `INFO` | `"task succeeded"` | `task_id` |
+/// | [`on_task_failure`](WorkflowObserver::on_task_failure) | `ERROR` | `"task failed"` | `task_id`, `error` |
+/// | [`on_retry`](WorkflowObserver::on_retry) | `WARN` | `"task retry"` | `task_id`, `attempt` |
+/// | [`on_circuit_open`](WorkflowObserver::on_circuit_open) | `WARN` | `"circuit breaker rejected task"` | `task_id` |
+///
+/// # Example
+///
+/// ```rust
+/// # use cano::prelude::*;
+/// # use std::sync::Arc;
+/// # #[derive(Clone, Debug, PartialEq, Eq, Hash)] enum Step { Start, Done }
+/// # #[derive(Clone)] struct Work;
+/// # #[task(state = Step)]
+/// # impl Work {
+/// #     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> { Ok(TaskResult::Single(Step::Done)) }
+/// # }
+/// let workflow = Workflow::bare()
+///     .register(Step::Start, Work)
+///     .add_exit_state(Step::Done)
+///     .with_observer(Arc::new(TracingObserver::new()));
+/// # let _ = workflow;
+/// ```
+#[cfg(feature = "tracing")]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TracingObserver;
+
+#[cfg(feature = "tracing")]
+impl TracingObserver {
+    /// Create a `TracingObserver`. Wrap it in an `Arc` and pass it to
+    /// [`Workflow::with_observer`](crate::workflow::Workflow::with_observer).
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(feature = "tracing")]
+impl WorkflowObserver for TracingObserver {
+    fn on_state_enter(&self, state: &str) {
+        tracing::debug!(state, "workflow entered state");
+    }
+    fn on_task_start(&self, task_id: &str) {
+        tracing::debug!(task_id, "task started");
+    }
+    fn on_task_success(&self, task_id: &str) {
+        tracing::info!(task_id, "task succeeded");
+    }
+    fn on_task_failure(&self, task_id: &str, err: &CanoError) {
+        tracing::error!(task_id, error = %err, "task failed");
+    }
+    fn on_retry(&self, task_id: &str, attempt: u32) {
+        tracing::warn!(task_id, attempt, "task retry");
+    }
+    fn on_circuit_open(&self, task_id: &str) {
+        tracing::warn!(task_id, "circuit breaker rejected task");
+    }
 }
 
 #[cfg(test)]
