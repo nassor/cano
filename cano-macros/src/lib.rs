@@ -14,8 +14,9 @@
 //! - [`task`] — for `impl Task` (and the `Task` trait definition itself)
 //! - [`node`] — for `impl Node` and the `Node` trait
 //! - [`resource`] — for `impl Resource` and the `Resource` trait
+//! - [`checkpoint_store`] — for `impl CheckpointStore` and the `CheckpointStore` trait
 //!
-//! All three are functionally identical; they differ only in name. New traits
+//! All are functionally identical; they differ only in name. New traits
 //! that need async-fn-in-dyn rewriting can ship their own `cano-macros`
 //! attribute alongside.
 
@@ -157,6 +158,18 @@ pub fn node(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// self-documenting at impl sites.
 #[proc_macro_attribute]
 pub fn resource(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    async_rewrite::rewrite(item)
+}
+
+/// Apply to `impl CheckpointStore for ...` blocks (or the `CheckpointStore`
+/// trait definition itself).
+///
+/// Rewrites every `async fn` method into a method returning
+/// `Pin<Box<dyn Future<Output = ...> + Send + 'async_trait>>`. Behaviorally
+/// identical to [`task`], [`node`], and [`resource`]; the separate name keeps
+/// the attribute self-documenting at impl sites.
+#[proc_macro_attribute]
+pub fn checkpoint_store(_attr: TokenStream, item: TokenStream) -> TokenStream {
     async_rewrite::rewrite(item)
 }
 

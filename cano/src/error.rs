@@ -31,6 +31,7 @@
 //! | `RetryExhausted` | All retries exhausted | Increase retries or fix root cause |
 //! | `Timeout` | Per-attempt timeout reached | Increase `attempt_timeout` or speed up the task |
 //! | `CircuitOpen` | Circuit breaker rejected the call | Wait for the breaker's `reset_timeout` or fix the upstream dependency |
+//! | `CheckpointStore` | Checkpoint persistence failed | Check the recovery store backend (disk, permissions, encoding) |
 //! | `Generic` | General errors | Check the specific error message |
 //!
 //! ## Using Errors in Your Nodes
@@ -198,6 +199,14 @@ pub enum CanoError {
     /// dependency is unhealthy, and immediate retries would only add load.
     CircuitOpen(String),
 
+    /// A checkpoint store operation failed.
+    ///
+    /// Emitted by [`crate::recovery::CheckpointStore`] implementations (including the
+    /// built-in `RedbCheckpointStore`, behind the `recovery` feature) when an append,
+    /// load, or clear cannot complete — for example a disk error, a permission
+    /// problem, or a row that fails to encode/decode.
+    CheckpointStore(String),
+
     /// General-purpose error for other scenarios
     ///
     /// Use this for errors that don't fit the other categories.
@@ -260,6 +269,11 @@ impl CanoError {
         CanoError::CircuitOpen(msg.into())
     }
 
+    /// Create a new checkpoint-store error
+    pub fn checkpoint_store<S: Into<String>>(msg: S) -> Self {
+        CanoError::CheckpointStore(msg.into())
+    }
+
     /// Create a new generic error
     pub fn generic<S: Into<String>>(msg: S) -> Self {
         CanoError::Generic(msg.into())
@@ -292,6 +306,7 @@ impl CanoError {
             CanoError::RetryExhausted(msg) => msg,
             CanoError::Timeout(msg) => msg,
             CanoError::CircuitOpen(msg) => msg,
+            CanoError::CheckpointStore(msg) => msg,
             CanoError::Generic(msg) => msg,
             CanoError::ResourceNotFound(msg) => msg,
             CanoError::ResourceTypeMismatch(msg) => msg,
@@ -311,6 +326,7 @@ impl CanoError {
             CanoError::RetryExhausted(_) => "retry_exhausted",
             CanoError::Timeout(_) => "timeout",
             CanoError::CircuitOpen(_) => "circuit_open",
+            CanoError::CheckpointStore(_) => "checkpoint_store",
             CanoError::Generic(_) => "generic",
             CanoError::ResourceNotFound(_) => "resource_not_found",
             CanoError::ResourceTypeMismatch(_) => "resource_type_mismatch",
@@ -331,6 +347,7 @@ impl std::fmt::Display for CanoError {
             CanoError::RetryExhausted(msg) => write!(f, "Retry exhausted: {msg}"),
             CanoError::Timeout(msg) => write!(f, "Timeout error: {msg}"),
             CanoError::CircuitOpen(msg) => write!(f, "Circuit open: {msg}"),
+            CanoError::CheckpointStore(msg) => write!(f, "Checkpoint store error: {msg}"),
             CanoError::Generic(msg) => write!(f, "Error: {msg}"),
             CanoError::ResourceNotFound(msg) => write!(f, "Resource not found: {msg}"),
             CanoError::ResourceTypeMismatch(msg) => write!(f, "Resource type mismatch: {msg}"),
@@ -353,6 +370,7 @@ impl PartialEq for CanoError {
             (CanoError::RetryExhausted(a), CanoError::RetryExhausted(b)) => a == b,
             (CanoError::Timeout(a), CanoError::Timeout(b)) => a == b,
             (CanoError::CircuitOpen(a), CanoError::CircuitOpen(b)) => a == b,
+            (CanoError::CheckpointStore(a), CanoError::CheckpointStore(b)) => a == b,
             (CanoError::Generic(a), CanoError::Generic(b)) => a == b,
             (CanoError::ResourceNotFound(a), CanoError::ResourceNotFound(b)) => a == b,
             (CanoError::ResourceTypeMismatch(a), CanoError::ResourceTypeMismatch(b)) => a == b,
@@ -603,6 +621,30 @@ mod tests {
         let timeout = CanoError::timeout("x");
         let circuit = CanoError::circuit_open("x");
         assert_ne!(timeout, circuit);
+    }
+
+    #[test]
+    fn test_checkpoint_store_constructor_and_category() {
+        let err = CanoError::checkpoint_store("disk full");
+        assert_eq!(err.message(), "disk full");
+        assert_eq!(err.category(), "checkpoint_store");
+        assert_eq!(format!("{err}"), "Checkpoint store error: disk full");
+    }
+
+    #[test]
+    fn test_checkpoint_store_partial_eq() {
+        let a = CanoError::checkpoint_store("x");
+        let b = CanoError::checkpoint_store("x");
+        assert_eq!(a, b);
+
+        let c = CanoError::checkpoint_store("x");
+        let d = CanoError::checkpoint_store("y");
+        assert_ne!(c, d);
+
+        // Different variant with the same message must not compare equal.
+        let circuit = CanoError::circuit_open("x");
+        let checkpoint = CanoError::checkpoint_store("x");
+        assert_ne!(circuit, checkpoint);
     }
 
     #[test]

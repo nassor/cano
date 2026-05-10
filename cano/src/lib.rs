@@ -167,6 +167,7 @@ pub mod circuit;
 pub mod error;
 pub mod node;
 pub mod observer;
+pub mod recovery;
 pub mod resource;
 pub mod store;
 pub mod task;
@@ -183,7 +184,11 @@ pub use circuit::{CircuitBreaker, CircuitPolicy, CircuitState, Permit as Circuit
 pub use error::{CanoError, CanoResult};
 pub use node::{DefaultNodeResult, DynNode, Node, NodeObject};
 pub use observer::WorkflowObserver;
+pub use recovery::{CheckpointRow, CheckpointStore};
 pub use resource::{HealthStatus, Resource, Resources};
+
+#[cfg(feature = "recovery")]
+pub use recovery::RedbCheckpointStore;
 pub use store::MemoryStore;
 pub use task::{DynTask, RetryMode, Task, TaskConfig, TaskObject, TaskResult};
 pub use workflow::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult, StateEntry, Workflow};
@@ -217,6 +222,13 @@ pub use cano_macros::node;
 /// differs only in name.
 pub use cano_macros::resource;
 
+/// Attribute macro applied to the `CheckpointStore` trait definition and
+/// `impl CheckpointStore` blocks.
+///
+/// See [`macro@task`] for the rewrite shape; this macro is functionally identical and
+/// differs only in name.
+pub use cano_macros::checkpoint_store;
+
 /// Derive macro that generates a `from_resources` associated function for a struct.
 ///
 /// See [`FromResources`] for the full specification. Each
@@ -241,10 +253,10 @@ pub mod prelude {
     //! Use `use cano::prelude::*;` to import the most commonly used types and traits.
 
     pub use crate::{
-        CanoError, CanoResult, CircuitBreaker, CircuitPermit, CircuitPolicy, CircuitState,
-        DefaultNodeResult, HealthStatus, JoinConfig, JoinStrategy, MemoryStore, Node, Resource,
-        Resources, RetryMode, SplitResult, SplitTaskResult, StateEntry, Task, TaskConfig,
-        TaskObject, TaskResult, Workflow, WorkflowObserver,
+        CanoError, CanoResult, CheckpointRow, CheckpointStore, CircuitBreaker, CircuitPermit,
+        CircuitPolicy, CircuitState, DefaultNodeResult, HealthStatus, JoinConfig, JoinStrategy,
+        MemoryStore, Node, Resource, Resources, RetryMode, SplitResult, SplitTaskResult,
+        StateEntry, Task, TaskConfig, TaskObject, TaskResult, Workflow, WorkflowObserver,
     };
 
     #[cfg(feature = "scheduler")]
@@ -253,8 +265,11 @@ pub mod prelude {
     #[cfg(feature = "tracing")]
     pub use crate::TracingObserver;
 
+    #[cfg(feature = "recovery")]
+    pub use crate::RedbCheckpointStore;
+
     // Re-export the cano async-trait macros for convenience.
-    pub use crate::{node, resource, task};
+    pub use crate::{checkpoint_store, node, resource, task};
 
     // Re-export derive macros alongside their trait counterparts. Rust's separate
     // macro and type namespaces let the derive `Resource` coexist with the
