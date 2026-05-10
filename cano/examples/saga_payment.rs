@@ -2,18 +2,14 @@
 //!
 //! Run with: `cargo run --example saga_payment`
 //!
-//! `Reserve → Charge → Ship → Done`. `Reserve`, `Charge`, and `Ship` are
-//! [`CompensatableTask`]s: each forward step returns an `Output` describing what it did,
-//! and a matching `compensate` undoes it. If a later step fails, the engine drains the
-//! per-run compensation stack in reverse and runs each `compensate`.
+//! `Reserve → Charge → Ship → Done`, all three steps compensatable. `Charge` declines, so
+//! the run stops; `Charge` produced no output (it failed before committing) so it isn't on
+//! the compensation stack — only `Reserve` is, so its `compensate` runs, releasing the
+//! reservation. A clean rollback like this returns the *original* error from `orchestrate`.
 //!
-//! Here `Charge` always fails (declined card), so the run stops. `Charge` produced no
-//! output (it failed before committing), so it isn't on the stack; only `Reserve` is, so
-//! its compensation runs — releasing the reservation. `Ship` is never reached. A clean
-//! rollback like this returns the *original* error from `orchestrate`. Watch the observer
-//! output to follow the forward steps, the failure, and the rollback.
-
-use std::sync::Arc;
+//! Each step uses `#[task(state = Step, compensatable)]`: like a plain `#[task(state = …)]`,
+//! but `run` also returns an `Output` and there's a `compensate` that undoes the step given
+//! that `Output`. (`#[compensatable_task(state = Step)]` is the same thing.)
 
 use cano::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -26,7 +22,7 @@ enum Step {
     Done,
 }
 
-/// Output of `ReserveInventory::run`, handed back to its `compensate`.
+/// What `ReserveInventory::run` produced — handed back to its `compensate` to undo it.
 #[derive(Debug, Serialize, Deserialize)]
 struct Reservation {
     order_id: String,
@@ -34,7 +30,7 @@ struct Reservation {
     qty: u32,
 }
 
-/// Output `ChargeCard::run` would produce on success.
+/// What `ChargeCard::run` would produce on success.
 #[derive(Debug, Serialize, Deserialize)]
 struct Charge {
     order_id: String,
@@ -45,77 +41,53 @@ struct ReserveInventory;
 struct ChargeCard;
 struct ShipOrder;
 
-// `#[compensatable_task(state = …)]` on an inherent `impl` builds the
-// `impl CompensatableTask<Step> for …` header for you — only `type Output`,
-// `run`, and `compensate` need writing (and `config` / `name` if you want them).
-
-#[compensatable_task(state = Step)]
+#[task(state = Step, compensatable)]
 impl ReserveInventory {
     type Output = Reservation;
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {
-        let reservation = Reservation {
+        let r = Reservation {
             order_id: "ord-1001".into(),
             sku: "WIDGET-7".into(),
             qty: 3,
         };
-        println!(
-            "  ReserveInventory: reserved {} × {} for {}",
-            reservation.qty, reservation.sku, reservation.order_id
-        );
-        Ok((TaskResult::Single(Step::Charge), reservation))
+        println!("reserve  : holding {} × {}", r.qty, r.sku);
+        Ok((TaskResult::Single(Step::Charge), r))
     }
-    async fn compensate(&self, _res: &Resources, output: Reservation) -> Result<(), CanoError> {
-        println!(
-            "  ReserveInventory::compensate: releasing {} × {} for {}",
-            output.qty, output.sku, output.order_id
-        );
+    async fn compensate(&self, _res: &Resources, r: Reservation) -> Result<(), CanoError> {
+        println!("reserve  : releasing {} × {}  (rollback)", r.qty, r.sku);
         Ok(())
     }
 }
 
-#[compensatable_task(state = Step)]
+#[task(state = Step, compensatable)]
 impl ChargeCard {
     type Output = Charge;
-    // No retries — a declined card is a declined card; surface it straight away.
+    // No retries — a declined card won't un-decline; let the error escape `orchestrate`.
     fn config(&self) -> TaskConfig {
         TaskConfig::minimal()
     }
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Charge), CanoError> {
-        println!("  ChargeCard: charging $42.00 ... declined!");
+        println!("charge   : $42.00 → declined");
         Err(CanoError::task_execution("card declined"))
-        // On success this would be:
-        //   Ok((TaskResult::Single(Step::Ship),
-        //       Charge { order_id: "ord-1001".into(), amount_cents: 4_200 }))
+        // On success: Ok((TaskResult::Single(Step::Ship),
+        //                 Charge { order_id: "ord-1001".into(), amount_cents: 4_200 }))
     }
-    async fn compensate(&self, _res: &Resources, output: Charge) -> Result<(), CanoError> {
-        println!(
-            "  ChargeCard::compensate: refunding {} cents for {}",
-            output.amount_cents, output.order_id
-        );
+    async fn compensate(&self, _res: &Resources, c: Charge) -> Result<(), CanoError> {
+        println!("charge   : refunding {} cents  (rollback)", c.amount_cents);
         Ok(())
     }
 }
 
-#[compensatable_task(state = Step)]
+#[task(state = Step, compensatable)]
 impl ShipOrder {
-    type Output = (); // a compensatable task that needs no output data
+    type Output = (); // a compensatable task that needs no data to undo itself
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, ()), CanoError> {
-        println!("  ShipOrder: shipping");
+        println!("ship     : dispatching");
         Ok((TaskResult::Single(Step::Done), ()))
     }
-    async fn compensate(&self, _res: &Resources, _output: ()) -> Result<(), CanoError> {
-        println!("  ShipOrder::compensate: recalling shipment");
+    async fn compensate(&self, _res: &Resources, _: ()) -> Result<(), CanoError> {
+        println!("ship     : recalling shipment  (rollback)");
         Ok(())
-    }
-}
-
-struct Tracer;
-impl WorkflowObserver for Tracer {
-    fn on_state_enter(&self, state: &str) {
-        println!("→ {state}");
-    }
-    fn on_task_failure(&self, task_id: &str, err: &CanoError) {
-        println!("✗ {task_id}: {err}");
     }
 }
 
@@ -125,12 +97,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .register_with_compensation(Step::Reserve, ReserveInventory)
         .register_with_compensation(Step::Charge, ChargeCard)
         .register_with_compensation(Step::Ship, ShipOrder)
-        .add_exit_state(Step::Done)
-        .with_observer(Arc::new(Tracer));
+        .add_exit_state(Step::Done);
 
     match workflow.orchestrate(Step::Reserve).await {
-        Ok(s) => println!("\nCompleted at {s:?}"),
-        Err(e) => println!("\nWorkflow failed and rolled back: {e}"),
+        Ok(state) => println!("\ncompleted at {state:?}"),
+        Err(error) => println!("\nfailed, rolled back: {error}"),
     }
     Ok(())
 }

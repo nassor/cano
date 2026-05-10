@@ -154,7 +154,7 @@ The `CheckpointStore` trait is backend-agnostic (no feature flag) — implement 
 
 ## Sagas / Compensation
 
-For steps that mutate external systems, implement `CompensatableTask` — its `run` returns the next state *and* an `Output`, and its `compensate` undoes the step given that `Output` — and register it with `register_with_compensation`. The engine keeps a per-run compensation stack; if a later state fails, it drains the stack in reverse and runs each `compensate`. A clean rollback returns the original error (and clears the checkpoint log if one is attached); a failed `compensate` produces `CanoError::CompensationFailed` with the original error plus every compensation error.
+For steps that mutate external systems, write a `#[task(state = …, compensatable)]` — like a plain `#[task]`, but its `run` returns the next state *and* an `Output`, and it has a `compensate` that undoes the step given that `Output` — and register it with `register_with_compensation`. The engine keeps a per-run compensation stack; if a later state fails, it drains the stack in reverse and runs each `compensate`. A clean rollback returns the original error (and clears the checkpoint log if one is attached); a failed `compensate` produces `CanoError::CompensationFailed` with the original error plus every compensation error.
 
 ```rust
 use cano::prelude::*;
@@ -166,8 +166,9 @@ struct Reservation { sku: String, qty: u32 }
 
 struct ReserveInventory;
 
-// Like `#[task(state = …)]`, this builds the `impl CompensatableTask<Step> for …` header.
-#[compensatable_task(state = Step)]
+// `compensatable` flag → the macro builds `impl CompensatableTask<Step> for …`.
+// (`#[compensatable_task(state = Step)]` is the same thing.)
+#[task(state = Step, compensatable)]
 impl ReserveInventory {
     type Output = Reservation;
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {

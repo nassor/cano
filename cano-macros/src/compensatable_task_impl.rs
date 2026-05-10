@@ -45,7 +45,9 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     expand_inherent_impl(item_impl, state_ty, args.key)
 }
 
-fn expand_inherent_impl(
+/// Build `impl CompensatableTask<#state_ty [, #key_ty]> for #self_ty` from an inherent
+/// `impl` block. Shared by `#[compensatable_task(state = …)]` and `#[task(state = …, compensatable)]`.
+pub(crate) fn expand_inherent_impl(
     item_impl: ItemImpl,
     state_ty: Type,
     key_ty: Option<Type>,
@@ -61,7 +63,7 @@ fn expand_inherent_impl(
             ImplItem::Type(t) => errors.push(syn::Error::new_spanned(
                 &t.ident,
                 format!(
-                    "#[cano::compensatable_task]: unexpected associated type `{}`; the trait \
+                    "a compensatable-task impl has an unexpected associated type `{}`; the trait \
                      defines only `Output`",
                     t.ident
                 ),
@@ -73,7 +75,7 @@ fn expand_inherent_impl(
                 other => errors.push(syn::Error::new_spanned(
                     &f.sig.ident,
                     format!(
-                        "#[cano::compensatable_task]: unexpected method `{other}` in inherent \
+                        "a compensatable-task impl has an unexpected method `{other}` in inherent \
                          impl; only `run`, `compensate`, `config`, and `name` are allowed"
                     ),
                 )),
@@ -85,21 +87,21 @@ fn expand_inherent_impl(
     if output_ty.is_none() {
         errors.push(syn::Error::new(
             item_impl.span(),
-            "#[cano::compensatable_task] requires `type Output = ...;` (the data `run` produces \
+            "a compensatable-task impl requires `type Output = ...;` (the data `run` produces \
              and `compensate` consumes; must be `Serialize + DeserializeOwned + Send + Sync + 'static`)",
         ));
     }
     if run_fn.is_none() {
         errors.push(syn::Error::new(
             item_impl.span(),
-            "#[cano::compensatable_task] requires `async fn run(&self, res: &Resources<_>) \
+            "a compensatable-task impl requires `async fn run(&self, res: &Resources<_>) \
              -> Result<(TaskResult<_>, Self::Output), CanoError>`",
         ));
     }
     if compensate_fn.is_none() {
         errors.push(syn::Error::new(
             item_impl.span(),
-            "#[cano::compensatable_task] requires `async fn compensate(&self, res: &Resources<_>, \
+            "a compensatable-task impl requires `async fn compensate(&self, res: &Resources<_>, \
              output: Self::Output) -> Result<(), CanoError>`",
         ));
     }

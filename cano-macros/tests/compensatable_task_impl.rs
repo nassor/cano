@@ -51,11 +51,32 @@ impl ReserveNamed {
     }
 }
 
+/// Same task, written with the `#[task(state = …, compensatable)]` spelling — must be
+/// equivalent to `#[compensatable_task(state = …)]`.
+#[derive(Clone)]
+struct ReserveViaTaskFlag(Arc<AtomicBool>);
+
+#[task(state = Step, compensatable)]
+impl ReserveViaTaskFlag {
+    type Output = u32;
+    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, u32), CanoError> {
+        Ok((TaskResult::Single(Step::Boom), 7))
+    }
+    async fn compensate(&self, _res: &Resources, output: u32) -> Result<(), CanoError> {
+        assert_eq!(output, 7);
+        self.0.store(true, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 struct Boom;
 
 #[task(state = Step)]
 impl Boom {
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal() // fail-fast so the original error surfaces directly
+    }
     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
         Err(CanoError::task_execution("boom"))
     }
@@ -70,7 +91,7 @@ async fn inherent_compensatable_impl_registers_and_compensates() {
         .add_exit_state(Step::Done);
 
     let err = workflow.orchestrate(Step::Reserve).await.unwrap_err();
-    assert!(err.message().contains("boom")); // clean rollback → the original failure is surfaced
+    assert_eq!(err.message(), "boom"); // clean rollback → the original failure is surfaced
     assert!(
         compensated.load(Ordering::SeqCst),
         "Reserve::compensate must have run"
@@ -84,5 +105,21 @@ async fn inherent_compensatable_impl_registers_and_compensates() {
     assert_eq!(
         workflow.orchestrate(Step::Reserve).await.unwrap(),
         Step::Done
+    );
+}
+
+#[tokio::test]
+async fn task_compensatable_flag_is_equivalent() {
+    let compensated = Arc::new(AtomicBool::new(false));
+    let workflow = Workflow::bare()
+        .register_with_compensation(Step::Reserve, ReserveViaTaskFlag(compensated.clone()))
+        .register(Step::Boom, Boom)
+        .add_exit_state(Step::Done);
+
+    let err = workflow.orchestrate(Step::Reserve).await.unwrap_err();
+    assert_eq!(err.message(), "boom");
+    assert!(
+        compensated.load(Ordering::SeqCst),
+        "`#[task(.., compensatable)]` must produce a working CompensatableTask"
     );
 }

@@ -41,10 +41,12 @@ persisted, so a resumed run can still compensate work done in an earlier process
 
 <h2 id="writing"><a href="#writing" class="anchor-link" aria-hidden="true">#</a>Writing a Compensatable Task</h2>
 <p>
-<code>CompensatableTask</code> is a standalone trait (not an extension of <a href="../task/">Task</a>).
-Like <code>#[task(state = …)]</code>, <code>#[compensatable_task(state = …)]</code> on an inherent
-<code>impl</code> block builds the <code>impl CompensatableTask&lt;…&gt; for …</code> header for you —
-you write only <code>type Output</code>, <code>run</code>, and <code>compensate</code> (plus
+<code>CompensatableTask</code> is a standalone trait (not an extension of <a href="../task/">Task</a>) —
+its <code>run</code> returns <code>(next_state, Output)</code>, which <code>Task::run</code> has no slot
+for. But you write the <code>impl</code> just like a plain <a href="../task/"><code>#[task]</code></a>
+one, with the <code>compensatable</code> flag: <code>#[task(state = …, compensatable)]</code> on an
+inherent <code>impl</code> block builds the <code>impl CompensatableTask&lt;…&gt; for …</code> header
+for you — you write only <code>type Output</code>, <code>run</code>, and <code>compensate</code> (plus
 <code>config</code> / <code>name</code> if you want them). The associated <code>Output</code> must be
 <code>serde</code>-serializable; it's the <strong>only</strong> thing carried from <code>run</code> to
 <code>compensate</code> (they may run in different processes after a resume), so make it self-contained.
@@ -62,7 +64,7 @@ struct Reservation { sku: String, qty: u32 }
 
 struct ReserveInventory;
 
-#[compensatable_task(state = Step)]
+#[task(state = Step, compensatable)]
 impl ReserveInventory {
     type Output = Reservation;
 
@@ -80,11 +82,12 @@ impl ReserveInventory {
 ```
 
 <p>
-If you'd rather write the trait header yourself — e.g. for a non-default resource-key type, or a
-generic impl — a bare <code>#[compensatable_task] impl CompensatableTask&lt;Step, MyKey&gt; for
-ReserveInventory { … }</code> works too; the <code>state</code> / <code>key</code> args only apply to
-the inherent form. (<code>#[compensatable_task(state = Step, key = MyKey)]</code> covers the common
-non-default-key case on the inherent form.)
+<code>#[compensatable_task(state = Step)]</code> is exactly equivalent to
+<code>#[task(state = Step, compensatable)]</code> — use whichever name you prefer. And if you'd rather
+write the trait header yourself — e.g. for a non-default resource-key type, or a generic impl — a
+bare <code>#[compensatable_task] impl CompensatableTask&lt;Step, MyKey&gt; for ReserveInventory { … }</code>
+works too (or pass <code>key = MyKey</code> to the inherent form:
+<code>#[task(state = Step, key = MyKey, compensatable)]</code>).
 </p>
 
 <p>
@@ -227,14 +230,15 @@ This is the <code>saga_payment</code> example shipped with the crate; run it wit
 ```rust
 use cano::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step { Reserve, Charge, Ship, Done }
 
+/// What `ReserveInventory::run` produced — handed back to its `compensate` to undo it.
 #[derive(Debug, Serialize, Deserialize)]
 struct Reservation { order_id: String, sku: String, qty: u32 }
 
+/// What `ChargeCard::run` would produce on success.
 #[derive(Debug, Serialize, Deserialize)]
 struct Charge { order_id: String, amount_cents: u64 }
 
@@ -242,43 +246,43 @@ struct ReserveInventory;
 struct ChargeCard;
 struct ShipOrder;
 
-#[compensatable_task(state = Step)]
+#[task(state = Step, compensatable)]
 impl ReserveInventory {
     type Output = Reservation;
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {
         let r = Reservation { order_id: "ord-1001".into(), sku: "WIDGET-7".into(), qty: 3 };
-        println!("  reserved {} × {} for {}", r.qty, r.sku, r.order_id);
+        println!("reserve  : holding {} × {}", r.qty, r.sku);
         Ok((TaskResult::Single(Step::Charge), r))
     }
-    async fn compensate(&self, _res: &Resources, output: Reservation) -> Result<(), CanoError> {
-        println!("  releasing {} × {} for {}", output.qty, output.sku, output.order_id);
+    async fn compensate(&self, _res: &Resources, r: Reservation) -> Result<(), CanoError> {
+        println!("reserve  : releasing {} × {}  (rollback)", r.qty, r.sku);
         Ok(())
     }
 }
 
-#[compensatable_task(state = Step)]
+#[task(state = Step, compensatable)]
 impl ChargeCard {
     type Output = Charge;
     fn config(&self) -> TaskConfig { TaskConfig::minimal() } // a declined card won't un-decline
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Charge), CanoError> {
-        println!("  charging ... declined!");
+        println!("charge   : $42.00 → declined");
         Err(CanoError::task_execution("card declined"))
     }
-    async fn compensate(&self, _res: &Resources, output: Charge) -> Result<(), CanoError> {
-        println!("  refunding {} cents for {}", output.amount_cents, output.order_id);
+    async fn compensate(&self, _res: &Resources, c: Charge) -> Result<(), CanoError> {
+        println!("charge   : refunding {} cents  (rollback)", c.amount_cents);
         Ok(())
     }
 }
 
-#[compensatable_task(state = Step)]
+#[task(state = Step, compensatable)]
 impl ShipOrder {
-    type Output = ();
+    type Output = (); // no data needed to undo a shipment in this demo
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, ()), CanoError> {
-        println!("  shipping");
+        println!("ship     : dispatching");
         Ok((TaskResult::Single(Step::Done), ()))
     }
-    async fn compensate(&self, _res: &Resources, _output: ()) -> Result<(), CanoError> {
-        println!("  recalling shipment");
+    async fn compensate(&self, _res: &Resources, _: ()) -> Result<(), CanoError> {
+        println!("ship     : recalling shipment  (rollback)");
         Ok(())
     }
 }
@@ -291,8 +295,8 @@ let workflow = Workflow::bare()
     .add_exit_state(Step::Done);
 
 match workflow.orchestrate(Step::Reserve).await {
-    Ok(s) => println!("completed at {s:?}"),
-    Err(e) => println!("rolled back: {e}"), // "card declined" — the original error
+    Ok(state) => println!("completed at {state:?}"),
+    Err(error) => println!("failed, rolled back: {error}"), // "card declined" — the original error
 }
 # }
 ```

@@ -73,6 +73,12 @@ pub fn derive_from_resources(input: TokenStream) -> TokenStream {
 ///    user writes only the inherent block; the macro builds the trait header
 ///    and enforces that exactly one of `run` / `run_bare` is present.
 ///
+/// On the inherent form, adding the `compensatable` flag —
+/// `#[task(state = S [, key = K], compensatable)]` — builds an
+/// `impl CompensatableTask<S [, K]> for X` instead (the body must then have
+/// `type Output`, `run` returning `(TaskResult<S>, Self::Output)`, and `compensate`);
+/// it is exactly equivalent to [`compensatable_task`]`(state = S [, key = K])`.
+///
 /// # Example
 ///
 /// ```ignore
@@ -208,6 +214,10 @@ pub fn checkpoint_store(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Either way, every `async fn` is rewritten to return
 /// `Pin<Box<dyn Future<Output = ...> + Send + 'async_trait>>`. On the trait definition the macro
 /// just performs that rewrite.
+///
+/// The inherent-impl form is also reachable as [`task`]`(state = S [, key = K], compensatable)` —
+/// the two are equivalent, so a codebase can use one macro name for plain and compensatable tasks
+/// alike if it prefers.
 #[proc_macro_attribute]
 pub fn compensatable_task(attr: TokenStream, item: TokenStream) -> TokenStream {
     if let Ok(item_impl) = syn::parse::<syn::ItemImpl>(item.clone()) {
