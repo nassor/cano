@@ -140,21 +140,38 @@ not on the stack — there is nothing to undo for it.</li>
 <hr class="section-divider">
 
 <h2 id="result"><a href="#result" class="anchor-link" aria-hidden="true">#</a>What <code>orchestrate</code> Returns</h2>
-<table>
-<thead><tr><th>Outcome</th><th>Returned</th><th>Checkpoint log</th></tr></thead>
-<tbody>
-<tr><td>Run reaches an exit state</td><td><code>Ok(final_state)</code></td><td>cleared</td></tr>
-<tr><td>Failure, nothing to compensate (empty stack)</td><td>the original error</td><td>kept</td></tr>
-<tr><td>Failure, every <code>compensate</code> succeeded</td><td>the original error, unchanged</td><td>cleared</td></tr>
-<tr><td>Failure, ≥1 <code>compensate</code> failed</td><td><code>CanoError::CompensationFailed { errors }</code></td><td>kept (for manual recovery)</td></tr>
-</tbody>
-</table>
+<p>A run ends one of four ways — three of them on failure, told apart by what the rollback managed to do:</p>
+<div class="card-grid outcome-cards">
+<div class="card outcome-ok">
+<h3>Reaches an exit state</h3>
+<p>The FSM ran all the way to a registered exit state.</p>
+<p><strong class="outcome-key">Returns</strong><code>Ok(final_state)</code></p>
+<p><strong class="outcome-key">Checkpoint log</strong><span class="outcome-pill cleared">cleared</span></p>
+</div>
+<div class="card outcome-warn">
+<h3>Fails — nothing to compensate</h3>
+<p>No compensatable step had completed yet, so the rollback stack is empty.</p>
+<p><strong class="outcome-key">Returns</strong>the original error</p>
+<p><strong class="outcome-key">Checkpoint log</strong><span class="outcome-pill kept">kept</span></p>
+</div>
+<div class="card outcome-warn">
+<h3>Fails — rollback succeeds</h3>
+<p>The stack drained LIFO and every <code>compensate</code> ran cleanly.</p>
+<p><strong class="outcome-key">Returns</strong>the original error, unchanged — <em>not</em> <code>CompensationFailed</code></p>
+<p><strong class="outcome-key">Checkpoint log</strong><span class="outcome-pill cleared">cleared</span></p>
+</div>
+<div class="card outcome-danger">
+<h3>Fails — rollback incomplete</h3>
+<p>At least one <code>compensate</code> errored, or a stack entry had no registered compensator.</p>
+<p><strong class="outcome-key">Returns</strong><code>CanoError::CompensationFailed { errors }</code></p>
+<p><strong class="outcome-key">Checkpoint log</strong><span class="outcome-pill kept">kept — for manual recovery</span></p>
+</div>
+</div>
 <p>
-A <em>clean</em> rollback returns the <strong>original</strong> error — not <code>CompensationFailed</code>;
-the rollback succeeded, the workflow still didn't. <code>CompensationFailed.errors[0]</code> is that
-original failure; <code>errors[1..]</code> are the compensation errors, in drain order (a stack entry
-whose compensator isn't registered — e.g. resuming against a changed workflow definition — counts as
-one). All checkpoint-log clearing is best-effort: a failed <code>clear</code> is logged, never fatal.
+<code>CompensationFailed.errors[0]</code> is the original failure; <code>errors[1..]</code> are the
+compensation errors, in drain order (a stack entry whose compensator isn't registered — e.g. resuming
+against a changed workflow definition — counts as one). All checkpoint-log clearing is best-effort: a
+failed <code>clear</code> is logged, never fatal.
 </p>
 <hr class="section-divider">
 

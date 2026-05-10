@@ -592,6 +592,41 @@ a.card:hover {
     font-size: var(--text-lg);
 }
 
+/* Outcome cards — a tier-coloured left border + "key: value" rows + status pill */
+.outcome-cards .card {
+    border-left: 3px solid var(--border-color);
+    padding: var(--space-6) var(--space-7);
+}
+
+.outcome-cards .card.outcome-ok { border-left-color: var(--success-color); }
+.outcome-cards .card.outcome-warn { border-left-color: var(--warning-color); }
+.outcome-cards .card.outcome-danger { border-left-color: var(--danger-color); }
+
+.outcome-cards .card h3 {
+    font-size: var(--text-lg);
+}
+
+.outcome-key {
+    display: block;
+    margin-bottom: 2px;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-faint);
+}
+
+.outcome-pill {
+    display: inline-block;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-sm);
+}
+
+.outcome-pill.cleared { background: var(--success-muted); color: var(--success-color); }
+.outcome-pill.kept { background: var(--warning-muted); color: var(--warning-color); }
+
 /* --------------------------------------------------------------------------
    7. Code Blocks & Inline Code
    -------------------------------------------------------------------------- */
