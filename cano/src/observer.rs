@@ -86,6 +86,17 @@ pub trait WorkflowObserver: Send + Sync + 'static {
     /// rejects the call because it is open. Followed by an
     /// [`on_task_failure`](Self::on_task_failure) with a [`CanoError::CircuitOpen`].
     fn on_circuit_open(&self, _task_id: &str) {}
+
+    /// Called after a [`CheckpointRow`](crate::recovery::CheckpointRow) is durably
+    /// appended for `workflow_id` at `sequence`. Fires once per state entry on a
+    /// workflow configured with [`Workflow::with_checkpoint_store`](crate::workflow::Workflow::with_checkpoint_store);
+    /// never fires when no checkpoint store is attached.
+    fn on_checkpoint(&self, _workflow_id: &str, _sequence: u64) {}
+
+    /// Called once at the start of [`Workflow::resume_from`](crate::workflow::Workflow::resume_from),
+    /// after the run has been rehydrated. `sequence` is the sequence of the last
+    /// persisted row; execution continues from the state recorded by that row.
+    fn on_resume(&self, _workflow_id: &str, _sequence: u64) {}
 }
 
 /// A [`WorkflowObserver`] that re-emits every event as a [`tracing`](https://docs.rs/tracing)
@@ -110,6 +121,8 @@ pub trait WorkflowObserver: Send + Sync + 'static {
 /// | [`on_task_failure`](WorkflowObserver::on_task_failure) | `ERROR` | `"task failed"` | `task_id`, `error` |
 /// | [`on_retry`](WorkflowObserver::on_retry) | `WARN` | `"task retry"` | `task_id`, `attempt` |
 /// | [`on_circuit_open`](WorkflowObserver::on_circuit_open) | `WARN` | `"circuit breaker rejected task"` | `task_id` |
+/// | [`on_checkpoint`](WorkflowObserver::on_checkpoint) | `DEBUG` | `"checkpoint appended"` | `workflow_id`, `sequence` |
+/// | [`on_resume`](WorkflowObserver::on_resume) | `INFO` | `"workflow resumed from checkpoint"` | `workflow_id`, `sequence` |
 ///
 /// # Example
 ///
@@ -161,6 +174,12 @@ impl WorkflowObserver for TracingObserver {
     }
     fn on_circuit_open(&self, task_id: &str) {
         tracing::warn!(task_id, "circuit breaker rejected task");
+    }
+    fn on_checkpoint(&self, workflow_id: &str, sequence: u64) {
+        tracing::debug!(workflow_id, sequence, "checkpoint appended");
+    }
+    fn on_resume(&self, workflow_id: &str, sequence: u64) {
+        tracing::info!(workflow_id, sequence, "workflow resumed from checkpoint");
     }
 }
 

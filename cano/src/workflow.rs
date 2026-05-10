@@ -82,6 +82,7 @@ use futures_util::FutureExt;
 
 use crate::error::CanoError;
 use crate::observer::WorkflowObserver;
+use crate::recovery::{CheckpointRow, CheckpointStore};
 use crate::resource::Resources;
 use crate::task::{Task, TaskResult};
 
@@ -380,6 +381,16 @@ where
     /// Observers notified of lifecycle and failure events. Empty by default;
     /// each event is delivered to every observer in registration order.
     observers: Vec<Arc<dyn WorkflowObserver>>,
+    /// Optional append-only checkpoint store. When set (alongside [`workflow_id`](Self::workflow_id)),
+    /// every state entry writes a [`CheckpointRow`] before the state's task runs, so a
+    /// crashed run can be resumed via [`resume_from`](Self::resume_from). `None` by default —
+    /// workflows without a store keep their zero-overhead behavior.
+    checkpoint_store: Option<Arc<dyn CheckpointStore>>,
+    /// Identifier under which checkpoint rows are recorded for the forward
+    /// (`orchestrate`) direction. Required whenever [`checkpoint_store`](Self::checkpoint_store)
+    /// is set on that path (the first checkpoint write errors if it's missing);
+    /// [`resume_from`](Self::resume_from) takes the id explicitly.
+    workflow_id: Option<String>,
     /// Optional tracing span
     #[cfg(feature = "tracing")]
     tracing_span: Option<Span>,
@@ -399,6 +410,8 @@ where
             exit_states: Vec::new(),
             validated: OnceLock::new(),
             observers: Vec::new(),
+            checkpoint_store: None,
+            workflow_id: None,
             #[cfg(feature = "tracing")]
             tracing_span: None,
         }
@@ -519,6 +532,41 @@ where
     /// ```
     pub fn with_observer(mut self, observer: Arc<dyn WorkflowObserver>) -> Self {
         self.observers.push(observer);
+        self
+    }
+
+    /// Attach an append-only [`CheckpointStore`] so the workflow records its FSM
+    /// progress and can be resumed after a crash via [`resume_from`](Self::resume_from).
+    ///
+    /// When set, every state entry writes one [`CheckpointRow`] *before* the state's
+    /// task runs: the sequence, the state's `Debug` label, and `task_id` — the
+    /// [`Task::name`] for a single-task state, or `""` for a split state or a pure
+    /// exit state. Split states write exactly one row — the entry row — not one per
+    /// parallel task.
+    ///
+    /// You must also call [`with_workflow_id`](Self::with_workflow_id) to name the run
+    /// (for the forward direction); [`orchestrate`](Self::orchestrate) errors on the first
+    /// checkpoint write if a store is attached without an id. [`resume_from`](Self::resume_from)
+    /// takes the id explicitly and doesn't need the builder.
+    ///
+    /// Workflows without a checkpoint store are unaffected — there is zero per-transition
+    /// cost when no store is attached.
+    ///
+    /// State labels are the `Debug` rendering of `TState`; resume relies on each registered
+    /// (or exit) state having a distinct `Debug` form, which holds for any `#[derive(Debug)]`
+    /// enum.
+    pub fn with_checkpoint_store(mut self, store: Arc<dyn CheckpointStore>) -> Self {
+        self.checkpoint_store = Some(store);
+        self
+    }
+
+    /// Set the identifier under which this run's [`CheckpointRow`]s are recorded.
+    ///
+    /// Required whenever a [`checkpoint_store`](Self::with_checkpoint_store) is attached.
+    /// [`resume_from`](Self::resume_from) takes the id explicitly, so this builder is only
+    /// needed for the forward (`orchestrate`) direction.
+    pub fn with_workflow_id(mut self, workflow_id: impl Into<String>) -> Self {
+        self.workflow_id = Some(workflow_id.into());
         self
     }
 
@@ -754,18 +802,70 @@ where
         &self,
         initial_state: TState,
     ) -> Result<TState, CanoError> {
+        self.execute_workflow_from(initial_state, 0, self.workflow_id.clone())
+            .await
+    }
+
+    /// The FSM loop, parameterized by the starting checkpoint sequence and the
+    /// workflow id to record under. `execute_workflow` enters with `(state, 0,
+    /// self.workflow_id)`; [`resume_from`](Self::resume_from) enters with
+    /// `(resumed_state, last_sequence + 1, Some(id))`.
+    ///
+    /// When a checkpoint store is attached, each iteration writes one
+    /// [`CheckpointRow`] for the state being entered — including the initial/
+    /// resumed state and any terminal exit state — *before* that state's task
+    /// runs. The task at the resumed state therefore re-runs on resume; tasks
+    /// must be idempotent. Split states write a single entry row, not one per
+    /// parallel task.
+    async fn execute_workflow_from(
+        &self,
+        initial_state: TState,
+        start_sequence: u64,
+        workflow_id: Option<String>,
+    ) -> Result<TState, CanoError> {
         let mut current_state = initial_state;
+        let mut sequence = start_sequence;
 
         #[cfg(feature = "tracing")]
         info!(initial_state = ?current_state, "Starting workflow execution");
 
         loop {
+            // The `Debug` label of the state being entered. Needed for observer
+            // `on_state_enter` and for checkpoint rows; skipped (no allocation)
+            // when neither is in play — the common, zero-overhead case.
+            let state_label: Option<String> =
+                if !self.observers.is_empty() || self.checkpoint_store.is_some() {
+                    Some(format!("{current_state:?}"))
+                } else {
+                    None
+                };
+
             // Notify observers of every state entry, including the initial state
-            // and any terminal exit state. Skip the `Debug` formatting allocation
-            // entirely when no observers are attached.
-            if !self.observers.is_empty() {
-                let state_label = format!("{current_state:?}");
-                notify_observers(&self.observers, |o| o.on_state_enter(&state_label));
+            // and any terminal exit state.
+            if let Some(ref label) = state_label {
+                notify_observers(&self.observers, |o| o.on_state_enter(label));
+            }
+
+            // Checkpoint this state entry before touching its task. One row per
+            // state — a split is one state, hence one row regardless of fan-out.
+            if let Some(ref store) = self.checkpoint_store {
+                let workflow_id = workflow_id.as_deref().ok_or_else(|| {
+                    CanoError::checkpoint_store(
+                        "checkpointing requires a workflow id (call with_workflow_id)",
+                    )
+                })?;
+                // `state_label` is always `Some` here (checkpoint_store ⇒ label computed).
+                let label = state_label.as_deref().unwrap_or_default();
+                let task_id = match self.states.get(&current_state).map(|e| e.as_ref()) {
+                    Some(StateEntry::Single { task, .. }) => task.name().into_owned(),
+                    _ => String::new(),
+                };
+                store
+                    .append(workflow_id, CheckpointRow::new(sequence, label, task_id))
+                    .await
+                    .map_err(|e| CanoError::checkpoint_store(format!("append checkpoint: {e}")))?;
+                notify_observers(&self.observers, |o| o.on_checkpoint(workflow_id, sequence));
+                sequence += 1;
             }
 
             // Check if we've reached an exit state
@@ -799,6 +899,107 @@ where
                 }
             };
         }
+    }
+
+    /// Map a checkpoint state label (the `Debug` rendering of a `TState`) back to
+    /// the matching registered or exit state, or `None` if no state has that label.
+    fn state_from_label(&self, label: &str) -> Option<TState> {
+        self.states
+            .keys()
+            .chain(self.exit_states.iter())
+            .find(|s| format!("{s:?}") == label)
+            .cloned()
+    }
+
+    /// Resume a previously checkpointed run.
+    ///
+    /// Loads every [`CheckpointRow`] recorded for `workflow_id` from the attached
+    /// [`CheckpointStore`], takes the highest-`sequence` row, maps its state label
+    /// back to a registered (or exit) state, and re-enters the FSM loop from there
+    /// — re-running that state's task. **Tasks at and after the resume point must be
+    /// idempotent**: the workflow has no way to know whether the resumed state's
+    /// side effects already completed before the crash.
+    ///
+    /// If the run's last recorded state is an exit state, this returns it immediately
+    /// (the run had already completed).
+    ///
+    /// Resources' `setup`/`teardown` run around the resumed execution, exactly as in
+    /// [`orchestrate`](Self::orchestrate). Subsequent checkpoint rows are recorded
+    /// under the same `workflow_id` and continue the sequence.
+    ///
+    /// `output_blob`s carried on the loaded rows are not yet consumed (they will feed
+    /// the compensation stack once that lands).
+    ///
+    /// # Errors
+    ///
+    /// - [`CanoError::Configuration`] — no checkpoint store attached, or the workflow
+    ///   shape is invalid (see [`validate`](Self::validate)).
+    /// - [`CanoError::CheckpointStore`] — the store failed, or there are no recorded
+    ///   rows for `workflow_id`.
+    /// - [`CanoError::Workflow`] — the recorded state label doesn't match any state of
+    ///   this workflow (e.g. resuming against a different workflow definition).
+    /// - Any [`CanoError`] propagated from a task during the resumed execution.
+    pub async fn resume_from(&self, workflow_id: impl Into<String>) -> Result<TState, CanoError> {
+        let workflow_id = workflow_id.into();
+
+        #[cfg(feature = "tracing")]
+        let workflow_span = self.tracing_span.clone().unwrap_or_else(|| {
+            if tracing::enabled!(tracing::Level::INFO) {
+                info_span!("workflow_resume")
+            } else {
+                tracing::Span::none()
+            }
+        });
+        #[cfg(feature = "tracing")]
+        let _enter = workflow_span.enter();
+
+        let store = self.checkpoint_store.clone().ok_or_else(|| {
+            CanoError::configuration(
+                "resume_from requires a checkpoint store (call with_checkpoint_store)",
+            )
+        })?;
+
+        let cached_validation = self.validated.get_or_init(|| self.validate());
+        if let Err(e) = cached_validation {
+            return Err(e.clone());
+        }
+
+        let rows = store.load_run(&workflow_id).await.map_err(|e| {
+            CanoError::checkpoint_store(format!("load checkpoint run {workflow_id:?}: {e}"))
+        })?;
+        let last = rows.iter().max_by_key(|r| r.sequence).ok_or_else(|| {
+            CanoError::checkpoint_store(format!(
+                "no checkpoint rows for workflow id {workflow_id:?}"
+            ))
+        })?;
+        let resume_state = self.state_from_label(&last.state).ok_or_else(|| {
+            CanoError::workflow(format!(
+                "checkpoint state {:?} is not a registered or exit state of this workflow",
+                last.state
+            ))
+        })?;
+        let start_sequence = last.sequence + 1;
+
+        #[cfg(feature = "tracing")]
+        info!(workflow_id = %workflow_id, resume_state = ?resume_state, last_sequence = last.sequence, "Resuming workflow from checkpoint");
+        notify_observers(&self.observers, |o| {
+            o.on_resume(&workflow_id, last.sequence)
+        });
+
+        self.resources.setup_all().await?;
+        let exec = self.execute_workflow_from(resume_state, start_sequence, Some(workflow_id));
+        let result = if let Some(timeout_duration) = self.workflow_timeout {
+            match tokio::time::timeout(timeout_duration, exec).await {
+                Ok(result) => result,
+                Err(_) => Err(CanoError::workflow("Workflow timeout exceeded")),
+            }
+        } else {
+            exec.await
+        };
+        self.resources
+            .teardown_range(0..self.resources.lifecycle_len())
+            .await;
+        result
     }
 
     async fn execute_single_task(
@@ -1198,6 +1399,8 @@ where
             // Fresh OnceLock: cloned workflows re-validate on first orchestrate.
             validated: OnceLock::new(),
             observers: self.observers.clone(),
+            checkpoint_store: self.checkpoint_store.clone(),
+            workflow_id: self.workflow_id.clone(),
             #[cfg(feature = "tracing")]
             tracing_span: self.tracing_span.clone(),
         }
@@ -1256,6 +1459,8 @@ where
             .field("states", &format!("{} states", self.states.len()))
             .field("exit_states", &self.exit_states)
             .field("workflow_timeout", &self.workflow_timeout)
+            .field("workflow_id", &self.workflow_id)
+            .field("checkpoint_store", &self.checkpoint_store.is_some())
             .finish()
     }
 }
@@ -2586,5 +2791,293 @@ mod tests {
             "shared breaker must trip after 4 concurrent failures, got {:?}",
             breaker.state()
         );
+    }
+
+    // ---- Checkpoint / resume ----
+
+    use crate::recovery::{CheckpointRow, CheckpointStore};
+    use std::sync::Mutex;
+
+    /// In-memory [`CheckpointStore`] for workflow tests.
+    #[derive(Default)]
+    struct MemCheckpoints(Mutex<HashMap<String, Vec<CheckpointRow>>>);
+
+    #[cano_macros::checkpoint_store]
+    impl CheckpointStore for MemCheckpoints {
+        async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
+            self.0
+                .lock()
+                .unwrap()
+                .entry(workflow_id.to_string())
+                .or_default()
+                .push(row);
+            Ok(())
+        }
+        async fn load_run(&self, workflow_id: &str) -> Result<Vec<CheckpointRow>, CanoError> {
+            Ok(self.rows(workflow_id))
+        }
+        async fn clear(&self, workflow_id: &str) -> Result<(), CanoError> {
+            self.0.lock().unwrap().remove(workflow_id);
+            Ok(())
+        }
+    }
+
+    impl MemCheckpoints {
+        fn rows(&self, workflow_id: &str) -> Vec<CheckpointRow> {
+            let mut rows = self
+                .0
+                .lock()
+                .unwrap()
+                .get(workflow_id)
+                .cloned()
+                .unwrap_or_default();
+            rows.sort_by_key(|r| r.sequence);
+            rows
+        }
+        fn states(&self, workflow_id: &str) -> Vec<(u64, String)> {
+            self.rows(workflow_id)
+                .into_iter()
+                .map(|r| (r.sequence, r.state))
+                .collect()
+        }
+    }
+
+    /// Records `(event, workflow_id, sequence)` for `on_checkpoint` / `on_resume`.
+    #[derive(Default)]
+    struct CkptObserver(Mutex<Vec<(&'static str, String, u64)>>);
+    impl WorkflowObserver for CkptObserver {
+        fn on_checkpoint(&self, workflow_id: &str, sequence: u64) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(("checkpoint", workflow_id.to_string(), sequence));
+        }
+        fn on_resume(&self, workflow_id: &str, sequence: u64) {
+            self.0
+                .lock()
+                .unwrap()
+                .push(("resume", workflow_id.to_string(), sequence));
+        }
+    }
+    impl CkptObserver {
+        fn events(&self) -> Vec<(&'static str, String, u64)> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_row_written_for_each_state_entered() {
+        let store = Arc::new(MemCheckpoints::default());
+        let workflow = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Process))
+            .register(TestState::Process, SimpleTask::new(TestState::Complete))
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone())
+            .with_workflow_id("run-1");
+
+        assert_eq!(
+            workflow.orchestrate(TestState::Start).await.unwrap(),
+            TestState::Complete
+        );
+
+        // One row per state entered, in order — including the terminal exit state.
+        assert_eq!(
+            store.states("run-1"),
+            vec![
+                (0, "Start".to_string()),
+                (1, "Process".to_string()),
+                (2, "Complete".to_string()),
+            ]
+        );
+        let rows = store.rows("run-1");
+        assert!(
+            !rows[0].task_id.is_empty() && !rows[1].task_id.is_empty(),
+            "rows for registered states carry the task name"
+        );
+        assert!(
+            rows[2].task_id.is_empty(),
+            "the exit state has no task, so its row's task_id is empty"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_checkpoint_store_means_no_rows_and_resume_is_rejected() {
+        // A store-free workflow runs exactly as before — nothing to assert beyond
+        // "it still works"; the interesting bit is that resume_from refuses.
+        let workflow = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Complete))
+            .add_exit_state(TestState::Complete);
+        assert_eq!(
+            workflow.orchestrate(TestState::Start).await.unwrap(),
+            TestState::Complete
+        );
+        let err = workflow.resume_from("whatever").await.unwrap_err();
+        assert_eq!(err.category(), "configuration");
+        assert!(err.message().contains("checkpoint store"));
+    }
+
+    #[tokio::test]
+    async fn resume_continues_from_last_checkpointed_state() {
+        let store = Arc::new(MemCheckpoints::default());
+        // Seed: the run got as far as entering `Process` before "crashing".
+        store
+            .append("run-2", CheckpointRow::new(0, "Start", ""))
+            .await
+            .unwrap();
+        store
+            .append("run-2", CheckpointRow::new(1, "Process", ""))
+            .await
+            .unwrap();
+
+        let start_task = SimpleTask::new(TestState::Process);
+        let process_task = SimpleTask::new(TestState::Complete);
+        let observer = Arc::new(CkptObserver::default());
+        let workflow = Workflow::bare()
+            .register(TestState::Start, start_task.clone())
+            .register(TestState::Process, process_task.clone())
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone())
+            .with_observer(observer.clone());
+
+        assert_eq!(
+            workflow.resume_from("run-2").await.unwrap(),
+            TestState::Complete
+        );
+        assert_eq!(
+            start_task.count(),
+            0,
+            "state before the resume point never runs"
+        );
+        assert_eq!(
+            process_task.count(),
+            1,
+            "the resumed state's task re-runs once"
+        );
+
+        // Continuation appended rows from sequence 2 onward (re-entering `Process`, then `Complete`).
+        assert_eq!(
+            store.states("run-2"),
+            vec![
+                (0, "Start".to_string()),
+                (1, "Process".to_string()),
+                (2, "Process".to_string()),
+                (3, "Complete".to_string()),
+            ]
+        );
+        assert_eq!(
+            observer.events(),
+            vec![
+                ("resume", "run-2".to_string(), 1),
+                ("checkpoint", "run-2".to_string(), 2),
+                ("checkpoint", "run-2".to_string(), 3),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_from_exit_state_returns_immediately() {
+        let store = Arc::new(MemCheckpoints::default());
+        store
+            .append("done-run", CheckpointRow::new(0, "Start", ""))
+            .await
+            .unwrap();
+        store
+            .append("done-run", CheckpointRow::new(1, "Complete", ""))
+            .await
+            .unwrap();
+        let work = SimpleTask::new(TestState::Complete);
+        let workflow = Workflow::bare()
+            .register(TestState::Start, work.clone())
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone());
+
+        assert_eq!(
+            workflow.resume_from("done-run").await.unwrap(),
+            TestState::Complete
+        );
+        assert_eq!(
+            work.count(),
+            0,
+            "no task runs when resuming into an exit state"
+        );
+    }
+
+    #[tokio::test]
+    async fn split_state_writes_a_single_checkpoint_row() {
+        let store = Arc::new(MemCheckpoints::default());
+        let tasks: Vec<SimpleTask> = (0..5)
+            .map(|_| SimpleTask::new(TestState::Complete))
+            .collect();
+        let join_config = JoinConfig::new(JoinStrategy::All, TestState::Complete);
+        let workflow = Workflow::bare()
+            .register_split(TestState::Start, tasks, join_config)
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone())
+            .with_workflow_id("split-run");
+
+        assert_eq!(
+            workflow.orchestrate(TestState::Start).await.unwrap(),
+            TestState::Complete
+        );
+
+        // The 5-way split is one state ⇒ one entry row, not five.
+        let rows = store.rows("split-run");
+        assert_eq!(
+            rows.iter().filter(|r| r.state == "Start").count(),
+            1,
+            "the split state is checkpointed exactly once"
+        );
+        assert_eq!(
+            store.states("split-run"),
+            vec![(0, "Start".to_string()), (1, "Complete".to_string())]
+        );
+        assert!(
+            rows[0].task_id.is_empty(),
+            "a split state's checkpoint row has no single task id"
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_requires_workflow_id_on_orchestrate() {
+        let store = Arc::new(MemCheckpoints::default());
+        // Store attached but no workflow id — orchestrate must error at the first checkpoint write.
+        let workflow = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Complete))
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone());
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        assert_eq!(err.category(), "checkpoint_store");
+        assert!(err.message().contains("workflow id"));
+    }
+
+    #[tokio::test]
+    async fn resume_unknown_workflow_id_errors() {
+        let store = Arc::new(MemCheckpoints::default());
+        let workflow = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Complete))
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone());
+        let err = workflow.resume_from("never-ran").await.unwrap_err();
+        assert_eq!(err.category(), "checkpoint_store");
+        assert!(err.message().contains("no checkpoint rows"));
+    }
+
+    #[tokio::test]
+    async fn resume_with_unrecognized_state_label_errors() {
+        let store = Arc::new(MemCheckpoints::default());
+        store
+            .append(
+                "wrong-defn",
+                CheckpointRow::new(0, "NotAStateOfThisWorkflow", ""),
+            )
+            .await
+            .unwrap();
+        let workflow = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Complete))
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone());
+        let err = workflow.resume_from("wrong-defn").await.unwrap_err();
+        assert_eq!(err.category(), "workflow");
+        assert!(err.message().contains("is not a registered or exit state"));
     }
 }

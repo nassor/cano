@@ -44,6 +44,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1.52.1", features = ["macros", "sync", "time", "rt-multi-thread", "signal"] }
 
+# Subprocess driver for the SIGKILL recovery integration test (tests/recovery_e2e.rs).
+# A [[bin]] (not an example) so `cargo test --features recovery` builds it and sets
+# CARGO_BIN_EXE_recovery_resume for the test harness.
+[[bin]]
+name = "recovery_resume"
+path = "src/bin/recovery_resume.rs"
+required-features = ["recovery"]
+
 [[example]]
 name = "ai_workflow_yes_and"
 path = "examples/ai_workflow_yes_and.rs"
