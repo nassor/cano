@@ -219,8 +219,6 @@ across every task that hits the same dependency so they trip together.
 <span class="code-block-label">Attaching a breaker to a task config</span>
 
 ```rust
-# use cano::prelude::*;
-# use std::sync::Arc;
 fn build_config(breaker: Arc<CircuitBreaker>) -> TaskConfig {
     TaskConfig::default()
         .with_exponential_retry(3)

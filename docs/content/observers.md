@@ -77,7 +77,6 @@ impl WorkflowObserver for TaskCounter {
     }
 }
 
-# async fn run() -> Result<(), CanoError> {
 let counter = Arc::new(TaskCounter::default());
 
 let workflow = Workflow::bare()
@@ -87,8 +86,6 @@ let workflow = Workflow::bare()
 
 workflow.orchestrate(Step::Start).await?;
 assert_eq!(counter.0.load(Ordering::Relaxed), 1);
-# Ok(())
-# }
 ```
 <hr class="section-divider">
 
@@ -205,12 +202,9 @@ impl WorkflowObserver for ChannelObserver {
     }
 }
 
-# fn build() {
 let (tx, _rx) = channel();
 let observer: std::sync::Arc<dyn WorkflowObserver> =
     std::sync::Arc::new(ChannelObserver { tx });
-# let _ = observer;
-# }
 ```
 <hr class="section-divider">
 
@@ -241,12 +235,10 @@ impl DoWork {
     }
 }
 
-# fn build() -> Workflow<Step> {
 Workflow::bare()
     .register(Step::Start, DoWork)
     .add_exit_state(Step::Done)
     .with_observer(Arc::new(TracingObserver::new()))
-# }
 ```
 
 <p>It emits <strong>events, not spans</strong> — it does not reproduce the nested span tree the
@@ -317,13 +309,7 @@ checks sequentially.
 ```rust
 use cano::prelude::*;
 
-# struct PrimaryDb;
-# #[resource] impl Resource for PrimaryDb {}
-# struct ReadReplica;
-# #[resource] impl Resource for ReadReplica {
-#     async fn health(&self) -> HealthStatus { HealthStatus::Degraded("lag".into()) }
-# }
-# async fn run() {
+// PrimaryDb and ReadReplica are Resource impls (see ReadReplica above).
 let resources: Resources = Resources::new()
     .insert("db", PrimaryDb)
     .insert("replica", ReadReplica);
@@ -336,7 +322,6 @@ match resources.aggregate_health().await {
     HealthStatus::Healthy => println!("all good"),
     other => println!("attention needed: {other:?}"),
 }
-# }
 ```
 
 <p>
@@ -398,7 +383,6 @@ impl FlakyLoad {
     }
 }
 
-# async fn run() -> Result<(), CanoError> {
 let observer = Arc::new(PrintingObserver::default());
 
 let workflow = Workflow::bare()
@@ -408,7 +392,5 @@ let workflow = Workflow::bare()
 
 workflow.orchestrate(Step::Load).await?;
 assert_eq!(observer.failures.load(Ordering::Relaxed), 0);
-# Ok(())
-# }
 ```
 </div>

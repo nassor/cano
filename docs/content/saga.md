@@ -108,28 +108,13 @@ state. It's <strong>single-task states only</strong> — there is no
 
 ```rust
 use cano::prelude::*;
-use std::sync::Arc;
 
-# #[derive(Debug, Clone, PartialEq, Eq, Hash)] enum Step { Reserve, Charge, Ship, Done }
-# #[derive(serde::Serialize, serde::Deserialize)] struct R; #[derive(serde::Serialize, serde::Deserialize)] struct C;
-# struct ReserveInventory; struct ChargeCard; struct ShipOrder;
-# #[compensatable_task] impl CompensatableTask<Step> for ReserveInventory { type Output = R;
-#   async fn run(&self, _: &Resources) -> Result<(TaskResult<Step>, R), CanoError> { Ok((TaskResult::Single(Step::Charge), R)) }
-#   async fn compensate(&self, _: &Resources, _: R) -> Result<(), CanoError> { Ok(()) } }
-# #[compensatable_task] impl CompensatableTask<Step> for ChargeCard { type Output = C;
-#   async fn run(&self, _: &Resources) -> Result<(TaskResult<Step>, C), CanoError> { Ok((TaskResult::Single(Step::Ship), C)) }
-#   async fn compensate(&self, _: &Resources, _: C) -> Result<(), CanoError> { Ok(()) } }
-# #[compensatable_task] impl CompensatableTask<Step> for ShipOrder { type Output = ();
-#   async fn run(&self, _: &Resources) -> Result<(TaskResult<Step>, ()), CanoError> { Ok((TaskResult::Single(Step::Done), ())) }
-#   async fn compensate(&self, _: &Resources, _: ()) -> Result<(), CanoError> { Ok(()) } }
-# fn build() {
+// ReserveInventory / ChargeCard / ShipOrder each `impl CompensatableTask<Step>`.
 let workflow = Workflow::bare()
     .register_with_compensation(Step::Reserve, ReserveInventory)
     .register_with_compensation(Step::Charge, ChargeCard)
     .register_with_compensation(Step::Ship, ShipOrder)
     .add_exit_state(Step::Done);
-# let _ = workflow;
-# }
 ```
 
 <p>
@@ -296,7 +281,6 @@ impl ShipOrder {
     }
 }
 
-# async fn run() {
 let workflow = Workflow::bare()
     .register_with_compensation(Step::Reserve, ReserveInventory)
     .register(Step::Validate, ValidateOrder)              // plain — no compensation
@@ -308,6 +292,5 @@ match workflow.orchestrate(Step::Reserve).await {
     Ok(state) => println!("completed at {state:?}"),
     Err(error) => println!("failed, rolled back: {error}"), // "courier unavailable" — the original error
 }
-# }
 ```
 </div>

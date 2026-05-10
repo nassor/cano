@@ -89,10 +89,6 @@ worst case (plus backoff).
 </p>
 
 ```rust
-# use cano::prelude::*;
-# use std::time::Duration;
-# #[derive(Debug, Clone, PartialEq, Eq, Hash)] enum Step { Call, Done }
-# #[derive(Clone)] struct CallTask;
 #[task(state = Step)]
 impl CallTask {
     fn config(&self) -> TaskConfig {
@@ -239,7 +235,6 @@ impl CallUpstream {
     }
 }
 
-# fn build() {
 let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
     failure_threshold: 3,
     reset_timeout: Duration::from_secs(5),
@@ -248,8 +243,6 @@ let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
 let workflow = Workflow::bare()
     .register(Step::Call, CallUpstream { breaker: Arc::clone(&breaker) })
     .add_exit_state(Step::Done);
-# let _ = (workflow, breaker);
-# }
 ```
 
 <div class="callout callout-warning">
@@ -272,15 +265,11 @@ it up by key inside the task, and drive the RAII API directly:
 </p>
 
 ```rust
-# use cano::prelude::*;
-# async fn body(breaker: &CircuitBreaker) -> Result<(), CanoError> {
-let permit = breaker.try_acquire()?;            // Err(CanoError::CircuitOpen) when open
+let permit = breaker.try_acquire()?;        // Err(CanoError::CircuitOpen) when open
 match do_the_call().await {
-    Ok(v)  => { breaker.record_success(permit); Ok(v).map(|_| ()) }
+    Ok(v)  => { breaker.record_success(permit); Ok(v) }
     Err(e) => { breaker.record_failure(permit); Err(e) }
 }
-# }
-# async fn do_the_call() -> Result<(), CanoError> { Ok(()) }
 ```
 
 <p>
@@ -315,17 +304,10 @@ the rest queue. Tasks still all get spawned and the join strategy is unchanged â
 </p>
 
 ```rust
-# use cano::prelude::*;
-# #[derive(Debug, Clone, PartialEq, Eq, Hash)] enum S { Fan, Join, Done }
-# #[derive(Clone)] struct W;
-# #[task(state = S)] impl W { async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> { Ok(TaskResult::Single(S::Join)) } }
-# fn build() {
 let join = JoinConfig::new(JoinStrategy::All, S::Join).with_bulkhead(8); // â‰¤ 8 at a time
 let workflow = Workflow::bare()
     .register_split(S::Fan, (0..200).map(|_| W).collect(), join)
     .add_exit_state(S::Done);
-# let _ = workflow;
-# }
 ```
 <hr class="section-divider">
 

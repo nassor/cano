@@ -71,7 +71,6 @@ impl WorkTask {
     }
 }
 
-# async fn build() -> Result<(), Box<dyn std::error::Error>> {
 let store = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
 
 let workflow = Workflow::bare()
@@ -82,8 +81,6 @@ let workflow = Workflow::bare()
     .with_workflow_id("run-42");
 
 workflow.orchestrate(Step::Start).await?;
-# Ok(())
-# }
 ```
 <hr class="section-divider">
 
@@ -132,11 +129,6 @@ use cano::prelude::*;
 use cano::RedbCheckpointStore;
 use std::sync::Arc;
 
-# #[derive(Debug, Clone, PartialEq, Eq, Hash)] enum Step { Start, Work, Done }
-# #[derive(Clone)] struct StartTask; #[derive(Clone)] struct WorkTask;
-# #[task(state = Step)] impl StartTask { async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> { Ok(TaskResult::Single(Step::Work)) } }
-# #[task(state = Step)] impl WorkTask { async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> { Ok(TaskResult::Single(Step::Done)) } }
-# async fn run() -> Result<(), Box<dyn std::error::Error>> {
 let store = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
 let workflow = Workflow::bare()
     .register(Step::Start, StartTask)
@@ -147,8 +139,6 @@ let workflow = Workflow::bare()
 // Some earlier process crashed mid-run; pick up where it left off.
 let final_state = workflow.resume_from("run-42").await?;
 assert_eq!(final_state, Step::Done);
-# Ok(())
-# }
 ```
 
 <p>
@@ -234,11 +224,8 @@ checkpoint table. It is cheap to clone — the handle is held behind an <code>Ar
 use cano::RedbCheckpointStore;
 use std::sync::Arc;
 
-# fn build() -> Result<(), Box<dyn std::error::Error>> {
 let store: Arc<RedbCheckpointStore> = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
-// .with_checkpoint_store(store) on the workflow
-# let _ = store; Ok(())
-# }
+// pass it to the workflow: .with_checkpoint_store(store)
 ```
 
 <p>
@@ -326,7 +313,6 @@ impl FinalizeTask {
     }
 }
 
-# async fn run() -> Result<(), Box<dyn std::error::Error>> {
 let store = Arc::new(RedbCheckpointStore::new("recovery.redb")?);
 let resources = Resources::new().insert("crash", CrashOnce::default());
 let workflow = Workflow::new(resources)
@@ -348,7 +334,5 @@ assert_eq!(final_state, Step::Done);
 for row in store.load_run("demo-run").await? {
     println!("#{} {}  {}", row.sequence, row.state, row.task_id);
 }
-# Ok(())
-# }
 ```
 </div>

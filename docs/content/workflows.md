@@ -351,14 +351,6 @@ how many of those tasks run at once.
 <span class="code-block-label">A split state</span>
 
 ```rust
-# use cano::prelude::*;
-# use std::time::Duration;
-# #[derive(Debug, Clone, PartialEq, Eq, Hash)] enum State { Fanout, Aggregate, Complete }
-# #[derive(Clone)] struct Worker { id: u32 }
-# #[derive(Clone)] struct Aggregator;
-# #[task(state = State)] impl Worker { async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> { Ok(TaskResult::Single(State::Aggregate)) } }
-# #[task(state = State)] impl Aggregator { async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> { Ok(TaskResult::Single(State::Complete)) } }
-# fn build(store: MemoryStore) -> Workflow<State> {
 let join_config = JoinConfig::new(JoinStrategy::All, State::Aggregate)
     .with_timeout(Duration::from_secs(5));
 
@@ -366,7 +358,6 @@ Workflow::new(Resources::new().insert("store", store))
     .register_split(State::Fanout, vec![Worker { id: 1 }, Worker { id: 2 }], join_config)
     .register(State::Aggregate, Aggregator)
     .add_exit_state(State::Complete)
-# }
 ```
 </div>
 

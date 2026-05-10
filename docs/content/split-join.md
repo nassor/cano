@@ -72,20 +72,6 @@ E -->|Failed/Timeout| G[Error State]
 <span class="code-block-label">register_split + JoinConfig</span>
 
 ```rust
-# use cano::prelude::*;
-# use std::time::Duration;
-# #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-# enum State { Start, Fanout, Aggregate, Complete }
-# #[derive(Clone)] struct Loader;
-# #[derive(Clone)] struct Worker { id: u32 }
-# #[derive(Clone)] struct Aggregator;
-# #[task(state = State)]
-# impl Loader { async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> { Ok(TaskResult::Single(State::Fanout)) } }
-# #[task(state = State)]
-# impl Worker { async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> { Ok(TaskResult::Single(State::Aggregate)) } }
-# #[task(state = State)]
-# impl Aggregator { async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> { Ok(TaskResult::Single(State::Complete)) } }
-# fn build(store: MemoryStore) -> Workflow<State> {
 let join_config = JoinConfig::new(JoinStrategy::All, State::Aggregate)
     .with_timeout(Duration::from_secs(5));
 
@@ -94,7 +80,6 @@ Workflow::new(Resources::new().insert("store", store))
     .register_split(State::Fanout, vec![Worker { id: 1 }, Worker { id: 2 }, Worker { id: 3 }], join_config)
     .register(State::Aggregate, Aggregator)
     .add_exit_state(State::Complete)
-# }
 ```
 </div>
 
@@ -119,7 +104,6 @@ fails with <code>CanoError::Workflow</code> — use <code>register_split()</code
 <p>Wait for <strong>all</strong> tasks to complete successfully.</p>
 
 ```rust
-# use cano::prelude::*;
 JoinStrategy::All
 ```
 </div>
@@ -128,7 +112,6 @@ JoinStrategy::All
 <p>Proceed after the <strong>first</strong> task completes successfully.</p>
 
 ```rust
-# use cano::prelude::*;
 JoinStrategy::Any
 ```
 </div>
@@ -137,7 +120,6 @@ JoinStrategy::Any
 <p>Wait for <strong>n</strong> tasks to complete successfully.</p>
 
 ```rust
-# use cano::prelude::*;
 JoinStrategy::Quorum(2)
 ```
 </div>
@@ -146,7 +128,6 @@ JoinStrategy::Quorum(2)
 <p>Wait for <strong>p%</strong> of tasks to complete successfully (value in <code>(0.0, 1.0]</code>).</p>
 
 ```rust
-# use cano::prelude::*;
 JoinStrategy::Percentage(0.5)
 ```
 </div>
@@ -155,7 +136,6 @@ JoinStrategy::Percentage(0.5)
 <p>Proceed once <strong>n</strong> tasks complete (successes <em>or</em> failures).</p>
 
 ```rust
-# use cano::prelude::*;
 JoinStrategy::PartialResults(3)
 ```
 </div>
@@ -164,7 +144,6 @@ JoinStrategy::PartialResults(3)
 <p>Accept whatever completes before <strong>timeout</strong> expires. Requires <code>.with_timeout()</code>.</p>
 
 ```rust
-# use cano::prelude::*;
 JoinStrategy::PartialTimeout
 ```
 </div>
@@ -192,10 +171,6 @@ strategy still applies once results come in.
 <span class="code-block-label">Bulkhead config</span>
 
 ```rust
-# use cano::prelude::*;
-# use std::time::Duration;
-# #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-# enum State { Aggregate }
 let join_config = JoinConfig::new(JoinStrategy::All, State::Aggregate)
     .with_bulkhead(4); // at most 4 split tasks run at once
 ```
@@ -1182,16 +1157,6 @@ Handler-->>Client: 200 JSON response
 </ol>
 
 ```rust
-# use cano::prelude::*;
-# use std::time::Duration;
-# #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-# enum TextPipelineState { Parse, Transform, Done }
-# #[derive(Clone)] struct ParseTask;
-# #[derive(Clone)] struct TransformTask;
-# #[task(state = TextPipelineState)]
-# impl ParseTask { async fn run_bare(&self) -> Result<TaskResult<TextPipelineState>, CanoError> { Ok(TaskResult::Single(TextPipelineState::Transform)) } }
-# #[task(state = TextPipelineState)]
-# impl TransformTask { async fn run_bare(&self) -> Result<TaskResult<TextPipelineState>, CanoError> { Ok(TaskResult::Single(TextPipelineState::Done)) } }
 // One factory, called per request with a fresh store.
 fn build_workflow(store: MemoryStore) -> Workflow<TextPipelineState> {
     Workflow::new(Resources::new().insert("store", store))
@@ -1201,16 +1166,12 @@ fn build_workflow(store: MemoryStore) -> Workflow<TextPipelineState> {
         .with_timeout(Duration::from_secs(5))
 }
 
-# async fn handle(text: String) -> Result<usize, CanoError> {
 // Inside an HTTP handler:
 let store = MemoryStore::new();              // fresh store — full isolation
 store.put("input_text", text)?;
 let workflow = build_workflow(store.clone());
-let final_state = workflow.orchestrate(TextPipelineState::Parse).await?;
+let final_state = workflow.orchestrate(TextPipelineState::Parse).await?; // which terminal branch ran
 let word_count: usize = store.get("word_count")?;
-# let _ = final_state;
-# Ok(word_count)
-# }
 ```
 
 <div class="callout callout-tip">
