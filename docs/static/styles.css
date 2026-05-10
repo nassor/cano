@@ -592,7 +592,11 @@ a.card:hover {
     font-size: var(--text-lg);
 }
 
-/* Outcome cards — a tier-coloured left border + "key: value" rows + status pill */
+/* Outcome cards — fixed 2×2 grid, a tier-coloured left border + "key: value" rows + status pill */
+.outcome-cards {
+    grid-template-columns: repeat(2, 1fr);
+}
+
 .outcome-cards .card {
     border-left: 3px solid var(--border-color);
     padding: var(--space-6) var(--space-7);
