@@ -31,8 +31,11 @@
 //! #[derive(Default)]
 //! struct InMemoryStore(Mutex<HashMap<String, Vec<CheckpointRow>>>);
 //!
+//! // `#[cano::checkpoint_store]` on an inherent `impl` builds the
+//! // `impl CheckpointStore for InMemoryStore` header for you. (Or write that header
+//! // yourself: `#[cano::checkpoint_store] impl CheckpointStore for InMemoryStore { … }`.)
 //! #[cano::checkpoint_store]
-//! impl CheckpointStore for InMemoryStore {
+//! impl InMemoryStore {
 //!     async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
 //!         self.0.lock().unwrap().entry(workflow_id.to_string()).or_default().push(row);
 //!         Ok(())

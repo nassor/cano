@@ -52,8 +52,10 @@ use crate::task::{TaskConfig, TaskResult};
 /// undone via [`compensate`](Self::compensate).
 ///
 /// Register it with [`Workflow::register_with_compensation`](crate::workflow::Workflow::register_with_compensation).
-/// Apply [`#[cano::compensatable_task]`](macro@crate::compensatable_task) to the `impl`
-/// block — the async-trait rewrite, exactly like `#[task]`:
+/// Apply [`#[cano::compensatable_task(state = …)]`](macro@crate::compensatable_task) to an
+/// inherent `impl` block — like `#[task(state = …)]`, the macro builds the
+/// `impl CompensatableTask<…> for …` header for you (you can also write that header
+/// yourself with a bare `#[cano::compensatable_task]`):
 ///
 /// ```rust
 /// use cano::prelude::*;
@@ -67,8 +69,8 @@ use crate::task::{TaskConfig, TaskResult};
 ///
 /// struct ReserveInventory;
 ///
-/// #[cano::compensatable_task]
-/// impl CompensatableTask<Step> for ReserveInventory {
+/// #[cano::compensatable_task(state = Step)]
+/// impl ReserveInventory {
 ///     type Output = Reservation;
 ///     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {
 ///         // ... actually reserve ...

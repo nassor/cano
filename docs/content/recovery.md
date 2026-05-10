@@ -187,8 +187,11 @@ use std::sync::Mutex;
 #[derive(Default)]
 struct InMemoryStore(Mutex<HashMap<String, Vec<CheckpointRow>>>);
 
-#[cano::checkpoint_store]                  // the async-trait rewrite, like #[task]
-impl CheckpointStore for InMemoryStore {
+// `#[cano::checkpoint_store]` on an inherent `impl` builds the `impl CheckpointStore for …`
+// header for you (it also rewrites the `async fn`s). Or write that header yourself:
+// `#[cano::checkpoint_store] impl CheckpointStore for InMemoryStore { … }`.
+#[cano::checkpoint_store]
+impl InMemoryStore {
     async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
         self.0.lock().unwrap().entry(workflow_id.to_string()).or_default().push(row);
         Ok(())

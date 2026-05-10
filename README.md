@@ -166,8 +166,9 @@ struct Reservation { sku: String, qty: u32 }
 
 struct ReserveInventory;
 
-#[compensatable_task]
-impl CompensatableTask<Step> for ReserveInventory {
+// Like `#[task(state = …)]`, this builds the `impl CompensatableTask<Step> for …` header.
+#[compensatable_task(state = Step)]
+impl ReserveInventory {
     type Output = Reservation;
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {
         // ... reserve the stock ...

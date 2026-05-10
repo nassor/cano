@@ -42,10 +42,12 @@ persisted, so a resumed run can still compensate work done in an earlier process
 <h2 id="writing"><a href="#writing" class="anchor-link" aria-hidden="true">#</a>Writing a Compensatable Task</h2>
 <p>
 <code>CompensatableTask</code> is a standalone trait (not an extension of <a href="../task/">Task</a>).
-Apply <code>#[compensatable_task]</code> to the <code>impl</code> block — the same async-trait rewrite
-as <code>#[task]</code>. The associated <code>Output</code> must be <code>serde</code>-serializable;
-it's the <strong>only</strong> thing carried from <code>run</code> to <code>compensate</code> (they may
-run in different processes after a resume), so make it self-contained.
+Like <code>#[task(state = …)]</code>, <code>#[compensatable_task(state = …)]</code> on an inherent
+<code>impl</code> block builds the <code>impl CompensatableTask&lt;…&gt; for …</code> header for you —
+you write only <code>type Output</code>, <code>run</code>, and <code>compensate</code> (plus
+<code>config</code> / <code>name</code> if you want them). The associated <code>Output</code> must be
+<code>serde</code>-serializable; it's the <strong>only</strong> thing carried from <code>run</code> to
+<code>compensate</code> (they may run in different processes after a resume), so make it self-contained.
 </p>
 
 ```rust
@@ -60,8 +62,8 @@ struct Reservation { sku: String, qty: u32 }
 
 struct ReserveInventory;
 
-#[compensatable_task]
-impl CompensatableTask<Step> for ReserveInventory {
+#[compensatable_task(state = Step)]
+impl ReserveInventory {
     type Output = Reservation;
 
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {
@@ -76,6 +78,14 @@ impl CompensatableTask<Step> for ReserveInventory {
     }
 }
 ```
+
+<p>
+If you'd rather write the trait header yourself — e.g. for a non-default resource-key type, or a
+generic impl — a bare <code>#[compensatable_task] impl CompensatableTask&lt;Step, MyKey&gt; for
+ReserveInventory { … }</code> works too; the <code>state</code> / <code>key</code> args only apply to
+the inherent form. (<code>#[compensatable_task(state = Step, key = MyKey)]</code> covers the common
+non-default-key case on the inherent form.)
+</p>
 
 <p>
 <code>config()</code> and <code>name()</code> have the same defaults as <code>Task</code> — override
@@ -232,8 +242,8 @@ struct ReserveInventory;
 struct ChargeCard;
 struct ShipOrder;
 
-#[compensatable_task]
-impl CompensatableTask<Step> for ReserveInventory {
+#[compensatable_task(state = Step)]
+impl ReserveInventory {
     type Output = Reservation;
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {
         let r = Reservation { order_id: "ord-1001".into(), sku: "WIDGET-7".into(), qty: 3 };
@@ -246,8 +256,8 @@ impl CompensatableTask<Step> for ReserveInventory {
     }
 }
 
-#[compensatable_task]
-impl CompensatableTask<Step> for ChargeCard {
+#[compensatable_task(state = Step)]
+impl ChargeCard {
     type Output = Charge;
     fn config(&self) -> TaskConfig { TaskConfig::minimal() } // a declined card won't un-decline
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Charge), CanoError> {
@@ -260,8 +270,8 @@ impl CompensatableTask<Step> for ChargeCard {
     }
 }
 
-#[compensatable_task]
-impl CompensatableTask<Step> for ShipOrder {
+#[compensatable_task(state = Step)]
+impl ShipOrder {
     type Output = ();
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, ()), CanoError> {
         println!("  shipping");

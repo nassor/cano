@@ -45,8 +45,12 @@ struct ReserveInventory;
 struct ChargeCard;
 struct ShipOrder;
 
-#[compensatable_task]
-impl CompensatableTask<Step> for ReserveInventory {
+// `#[compensatable_task(state = …)]` on an inherent `impl` builds the
+// `impl CompensatableTask<Step> for …` header for you — only `type Output`,
+// `run`, and `compensate` need writing (and `config` / `name` if you want them).
+
+#[compensatable_task(state = Step)]
+impl ReserveInventory {
     type Output = Reservation;
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {
         let reservation = Reservation {
@@ -69,8 +73,8 @@ impl CompensatableTask<Step> for ReserveInventory {
     }
 }
 
-#[compensatable_task]
-impl CompensatableTask<Step> for ChargeCard {
+#[compensatable_task(state = Step)]
+impl ChargeCard {
     type Output = Charge;
     // No retries — a declined card is a declined card; surface it straight away.
     fn config(&self) -> TaskConfig {
@@ -92,8 +96,8 @@ impl CompensatableTask<Step> for ChargeCard {
     }
 }
 
-#[compensatable_task]
-impl CompensatableTask<Step> for ShipOrder {
+#[compensatable_task(state = Step)]
+impl ShipOrder {
     type Output = (); // a compensatable task that needs no output data
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, ()), CanoError> {
         println!("  ShipOrder: shipping");

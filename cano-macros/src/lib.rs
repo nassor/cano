@@ -25,6 +25,8 @@ use proc_macro::TokenStream;
 
 mod async_rewrite;
 mod attr_args;
+mod checkpoint_store_impl;
+mod compensatable_task_impl;
 mod from_resources;
 mod node_impl;
 mod resource_derive;
@@ -162,27 +164,61 @@ pub fn resource(_attr: TokenStream, item: TokenStream) -> TokenStream {
     async_rewrite::rewrite(item)
 }
 
-/// Apply to `impl CheckpointStore for ...` blocks (or the `CheckpointStore`
-/// trait definition itself).
+/// Apply to the `CheckpointStore` trait definition, an
+/// `impl CheckpointStore for T` block, or — for less boilerplate — an inherent
+/// `impl T { ... }` block.
 ///
-/// Rewrites every `async fn` method into a method returning
-/// `Pin<Box<dyn Future<Output = ...> + Send + 'async_trait>>`. Behaviorally
-/// identical to [`task`], [`node`], and [`resource`]; the separate name keeps
-/// the attribute self-documenting at impl sites.
+/// Two surface forms on impl blocks:
+///
+/// 1. **Trait-impl form:** `#[checkpoint_store] impl CheckpointStore for T { ... }` —
+///    user writes the trait header.
+/// 2. **Inherent-impl form:** `#[checkpoint_store] impl T { async fn append(..); async fn
+///    load_run(..); async fn clear(..); }` — the macro builds the `impl CheckpointStore for T`
+///    header and enforces that all three methods are present. (`CheckpointStore` takes no type
+///    parameters, so there are no attribute args.)
+///
+/// Either way, every `async fn` is rewritten to return
+/// `Pin<Box<dyn Future<Output = ...> + Send + 'async_trait>>`. On the trait definition the macro
+/// just performs that rewrite.
 #[proc_macro_attribute]
 pub fn checkpoint_store(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    if let Ok(item_impl) = syn::parse::<syn::ItemImpl>(item.clone())
+        && item_impl.trait_.is_none()
+    {
+        return checkpoint_store_impl::expand(item.into())
+            .unwrap_or_else(syn::Error::into_compile_error)
+            .into();
+    }
     async_rewrite::rewrite(item)
 }
 
-/// Apply to `impl CompensatableTask for ...` blocks (or the `CompensatableTask`
-/// trait definition itself).
+/// Apply to the `CompensatableTask` trait definition, an
+/// `impl CompensatableTask<S [, K]> for T` block, or — for less boilerplate — an
+/// inherent `impl T { ... }` block.
 ///
-/// Rewrites every `async fn` method into a method returning
-/// `Pin<Box<dyn Future<Output = ...> + Send + 'async_trait>>`. Behaviorally
-/// identical to [`task`], [`node`], [`resource`], and [`checkpoint_store`]; the
-/// separate name keeps the attribute self-documenting at impl sites.
+/// Two surface forms on impl blocks:
+///
+/// 1. **Trait-impl form:** `#[compensatable_task] impl CompensatableTask<S> for T { type Output =
+///    O; async fn run(..); async fn compensate(..); }` — user writes the trait header.
+/// 2. **Inherent-impl form:** `#[compensatable_task(state = S [, key = K])] impl T { type Output =
+///    O; async fn run(..); async fn compensate(..); }` — the macro builds the
+///    `impl CompensatableTask<S [, K]> for T` header from the attribute args and enforces that
+///    `type Output`, `run`, and `compensate` are present (`config` / `name` may be overridden).
+///
+/// Either way, every `async fn` is rewritten to return
+/// `Pin<Box<dyn Future<Output = ...> + Send + 'async_trait>>`. On the trait definition the macro
+/// just performs that rewrite.
 #[proc_macro_attribute]
-pub fn compensatable_task(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn compensatable_task(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if let Ok(item_impl) = syn::parse::<syn::ItemImpl>(item.clone()) {
+        let attr2: proc_macro2::TokenStream = attr.into();
+        let is_inherent = item_impl.trait_.is_none();
+        if is_inherent || !attr2.is_empty() {
+            return compensatable_task_impl::expand(attr2, item.into())
+                .unwrap_or_else(syn::Error::into_compile_error)
+                .into();
+        }
+    }
     async_rewrite::rewrite(item)
 }
 
