@@ -155,6 +155,10 @@ name = "workflow_observer"
 path = "examples/workflow_observer.rs"
 
 [[example]]
+name = "observer_metrics"
+path = "examples/observer_metrics.rs"
+
+[[example]]
 name = "workflow_recovery"
 path = "examples/workflow_recovery.rs"
 required-features = ["recovery"]

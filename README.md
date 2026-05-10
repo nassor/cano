@@ -40,6 +40,26 @@ The engine is built on three core concepts: **Tasks/Nodes** for logic, **Workflo
 - **Observability**: Integrated `tracing` spans, plus synchronous `WorkflowObserver` hooks for lifecycle/failure events (with a ready-made `TracingObserver`) and `Resource::health()` probes (`Resources::check_all_health`).
 - **Performance-Focused**: Minimizes heap allocations by leveraging stack-based objects wherever possible, giving you control over where allocations occur.
 
+## Resilient, Self-Healing — What the Tagline Maps To
+
+Every word in *"high-performance orchestration engine for building resilient, self-healing systems"* is a concrete primitive. All of them are **opt-in and zero-cost when unused** — the FSM dispatch hot path stays allocation-light whether or not you wire any of this up.
+
+| Tagline word | Primitive | Where | Example |
+|---|---|---|---|
+| **resilient** — recover from transient faults | `RetryMode` (fixed / exponential-backoff-with-jitter) via `TaskConfig` | `src/task.rs` | — |
+| | Per-attempt timeout (`TaskConfig::with_attempt_timeout` → `CanoError::Timeout`, fed back through retries) | `src/task.rs` | — |
+| | `CircuitBreaker` — short-circuits a failing dependency before the retry loop (closed → open → half-open) | `src/circuit.rs` | `examples/circuit_breaker.rs` |
+| | Split **bulkhead** — cap concurrent parallel tasks (`JoinConfig::with_bulkhead`) | `src/workflow.rs` | `examples/workflow_split_join.rs` |
+| | Panic safety — a panicking task body becomes `CanoError::TaskExecution`, never unwinds through the engine | `src/workflow.rs` (`catch_unwind`) | — |
+| | Scheduler backoff & trip (`BackoffPolicy`, `Status::Backoff` / `Status::Tripped`, `RunningScheduler::reset_flow`) | `src/scheduler/` (`scheduler` feature) | `examples/scheduler_backoff.rs` |
+| **self-healing** — repair / roll back / report on its own state | Checkpoint + resume: `CheckpointStore` records every state entry; `Workflow::resume_from` rehydrates a crashed run. Built-in `RedbCheckpointStore` (embedded, ACID) | `src/recovery/`, `src/workflow.rs` (`recovery` feature for redb) | `examples/workflow_recovery.rs` |
+| | Sagas / compensation: `CompensatableTask` + `Workflow::register_with_compensation`; a failure drains the compensation stack in reverse | `src/saga.rs`, `src/workflow.rs` | `examples/saga_payment.rs` |
+| | `WorkflowObserver` — synchronous lifecycle/failure/checkpoint/resume hooks (and the built-in `TracingObserver`) | `src/observer.rs` | `examples/workflow_observer.rs`, `examples/observer_metrics.rs` |
+| | Resource health probes: `Resource::health()`, `Resources::check_all_health()` / `aggregate_health()` | `src/resource.rs` | `examples/workflow_observer.rs` |
+| **high-performance** | Allocation-light FSM dispatch; every primitive above is a `dyn`-erased / `Option` check that's skipped when not configured | — | `cargo bench --bench workflow_performance` |
+
+See the [Resilience guide](https://nassor.github.io/cano/resilience/) (in-process primitives) and the [Recovery](https://nassor.github.io/cano/recovery/) / [Saga](https://nassor.github.io/cano/saga/) guides for the rest.
+
 ## Simple Example: Parallel Processing
 
 Here is a real-world example showing how to split execution into parallel tasks and join them back together.

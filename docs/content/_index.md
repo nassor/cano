@@ -68,11 +68,54 @@ It excels at managing complex lifecycles where state transitions matter:
 <p>Execute multiple workflow instances in parallel with timeout strategies.</p>
 </div>
 <div class="feature-card animate-in">
+<div class="feature-icon" aria-hidden="true">&#128190;</div>
+<h3>Crash Recovery</h3>
+<p>Pluggable <code>CheckpointStore</code> records every state entry; <code>resume_from</code> rehydrates a crashed run. Embedded, ACID <code>RedbCheckpointStore</code> behind the <code>recovery</code> feature.</p>
+</div>
+<div class="feature-card animate-in">
+<div class="feature-icon secondary" aria-hidden="true">&#8634;</div>
+<h3>Sagas / Compensation</h3>
+<p>Pair a forward step with a <code>compensate</code> action; a later failure rolls back the work already done, in reverse — and replays the rollback across a crash.</p>
+</div>
+<div class="feature-card animate-in">
 <div class="feature-icon accent" aria-hidden="true">&#9673;</div>
 <h3>Observability</h3>
 <p>Built-in <code>tracing</code> spans, plus <code>WorkflowObserver</code> hooks and resource health probes.</p>
 </div>
 </div>
+
+<h2>Resilient, Self-Healing — What the Tagline Maps To</h2>
+<p>
+Every word in <em>"high-performance orchestration engine for building resilient, self-healing systems"</em>
+is a concrete primitive. All of them are <strong>opt-in and zero-cost when unused</strong> — the FSM
+dispatch hot path stays allocation-light whether or not you wire any of this up.
+</p>
+
+<table>
+<thead><tr><th>Tagline word</th><th>Primitive</th><th>Guide</th></tr></thead>
+<tbody>
+<tr><td rowspan="6"><strong>resilient</strong><br>recover from transient faults</td>
+    <td><code>RetryMode</code> — fixed / exponential-backoff-with-jitter, via <code>TaskConfig</code></td>
+    <td rowspan="5"><a href="resilience/">Resilience</a></td></tr>
+<tr><td>Per-attempt timeout (<code>TaskConfig::with_attempt_timeout</code> → <code>CanoError::Timeout</code>, retried)</td></tr>
+<tr><td><code>CircuitBreaker</code> — short-circuits a failing dependency before the retry loop (closed → open → half-open)</td></tr>
+<tr><td>Split <strong>bulkhead</strong> — cap concurrent parallel tasks (<code>JoinConfig::with_bulkhead</code>)</td></tr>
+<tr><td>Panic safety — a panicking task body becomes <code>CanoError::TaskExecution</code>, never unwinds through the engine</td></tr>
+<tr><td>Scheduler backoff &amp; trip (<code>BackoffPolicy</code>, <code>Status::Backoff</code> / <code>Status::Tripped</code>, <code>reset_flow</code>)</td>
+    <td><a href="scheduler/">Scheduler</a></td></tr>
+<tr><td rowspan="4"><strong>self-healing</strong><br>repair / roll back / report on its own state</td>
+    <td>Checkpoint + resume: <code>CheckpointStore</code> records each state entry; <code>resume_from</code> rehydrates a crashed run (built-in <code>RedbCheckpointStore</code>)</td>
+    <td><a href="recovery/">Recovery</a></td></tr>
+<tr><td>Sagas / compensation: <code>CompensatableTask</code> + <code>register_with_compensation</code> — a failure drains the compensation stack in reverse</td>
+    <td><a href="saga/">Saga</a></td></tr>
+<tr><td><code>WorkflowObserver</code> — synchronous lifecycle / failure / checkpoint / resume hooks (and the built-in <code>TracingObserver</code>)</td>
+    <td rowspan="2"><a href="observers/">Observers</a></td></tr>
+<tr><td>Resource health probes: <code>Resource::health()</code>, <code>Resources::check_all_health()</code> / <code>aggregate_health()</code></td></tr>
+<tr><td><strong>high-performance</strong></td>
+    <td>Allocation-light FSM dispatch; every primitive above is a <code>dyn</code>-erased / <code>Option</code> check that's skipped when not configured — see <code>cargo bench --bench workflow_performance</code></td>
+    <td>—</td></tr>
+</tbody>
+</table>
 
 <h2>Getting Started</h2>
 <p>Add Cano to your <code>Cargo.toml</code>:</p>
