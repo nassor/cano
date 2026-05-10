@@ -35,7 +35,7 @@
         <ul class="nav-links nav-top">
             <li><a href="{{ get_url(path='@/_index.md') }}">Home</a></li>
         </ul>
-        <details class="nav-section" open>
+        <details class="nav-section" id="nav-concepts" open>
             <summary class="nav-section-label">Concepts</summary>
             <ul class="nav-links">
                 <li><a href="{{ get_url(path='@/task.md') }}">Tasks</a></li>
@@ -45,14 +45,14 @@
                 <li><a href="{{ get_url(path='@/scheduler.md') }}">Scheduler</a></li>
             </ul>
         </details>
-        <details class="nav-section">
+        <details class="nav-section" id="nav-state-data">
             <summary class="nav-section-label">State &amp; Data</summary>
             <ul class="nav-links">
                 <li><a href="{{ get_url(path='@/resources.md') }}">Resources</a></li>
                 <li><a href="{{ get_url(path='@/store.md') }}">Store</a></li>
             </ul>
         </details>
-        <details class="nav-section">
+        <details class="nav-section" id="nav-resilience">
             <summary class="nav-section-label">Resilience</summary>
             <ul class="nav-links">
                 <li><a href="{{ get_url(path='@/resilience.md') }}">Resilience</a></li>
@@ -60,7 +60,7 @@
                 <li><a href="{{ get_url(path='@/saga.md') }}">Saga</a></li>
             </ul>
         </details>
-        <details class="nav-section">
+        <details class="nav-section" id="nav-observability">
             <summary class="nav-section-label">Observability</summary>
             <ul class="nav-links">
                 <li><a href="{{ get_url(path='@/tracing.md') }}">Tracing</a></li>
