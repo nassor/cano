@@ -132,10 +132,21 @@
 //!
 //! Beyond the optional `tracing` integration, implement [`WorkflowObserver`] and attach it
 //! with [`Workflow::with_observer`] to receive synchronous lifecycle and failure callbacks
-//! (state entry, task start/success/failure, retry, circuit-open). With the `tracing` feature
-//! enabled, [`TracingObserver`] is a ready-made observer that re-emits those callbacks as
-//! `tracing` events. Resources can also report their own [`HealthStatus`] via
-//! [`Resource::health`], aggregated by [`Resources::check_all_health`].
+//! (state entry, task start/success/failure, retry, circuit-open, checkpoint, resume). With
+//! the `tracing` feature enabled, [`TracingObserver`] is a ready-made observer that re-emits
+//! those callbacks as `tracing` events. Resources can also report their own [`HealthStatus`]
+//! via [`Resource::health`], aggregated by [`Resources::check_all_health`].
+//!
+//! ### Crash Recovery
+//!
+//! Attach a [`CheckpointStore`] with [`Workflow::with_checkpoint_store`] (plus
+//! [`Workflow::with_workflow_id`]) and the FSM records one [`CheckpointRow`] per state
+//! entered — *before* that state's task runs. After a crash, [`Workflow::resume_from`]
+//! reloads the run, re-enters the FSM at the last checkpointed state, and continues
+//! forward; the resumed state's task re-runs, so tasks at and after the resume point must
+//! be idempotent. The trait is backend-agnostic; with the `recovery` feature,
+//! `RedbCheckpointStore` is a ready-made embedded, ACID implementation. Workflows
+//! without a checkpoint store pay nothing. See the `workflow_recovery` example.
 //!
 //! ## Processing Lifecycle
 //!
@@ -154,6 +165,7 @@
 //! - `scheduler` (requires `scheduler` feature): `Scheduler` (builder) and `RunningScheduler` (live handle) — cron and interval scheduling
 //! - [`mod@resource`]: [`Resource`] trait, [`Resources`] dictionary, and [`HealthStatus`] — lifecycle-aware resource management and health probes
 //! - [`observer`]: [`WorkflowObserver`] — synchronous lifecycle/failure event hooks (and [`TracingObserver`], behind the `tracing` feature)
+//! - [`recovery`]: [`CheckpointStore`] / [`CheckpointRow`] — append-only checkpoint log for crash recovery (and `RedbCheckpointStore`, behind the `recovery` feature)
 //! - [`store`]: [`MemoryStore`] — a typed in-memory store that implements [`Resource`]
 //! - [`error`]: [`CanoError`] variants and the [`CanoResult`] alias
 //!

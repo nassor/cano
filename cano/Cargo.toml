@@ -152,6 +152,11 @@ path = "examples/circuit_breaker.rs"
 name = "workflow_observer"
 path = "examples/workflow_observer.rs"
 
+[[example]]
+name = "workflow_recovery"
+path = "examples/workflow_recovery.rs"
+required-features = ["recovery"]
+
 [[bench]]
 name = "workflow_performance"
 harness = false

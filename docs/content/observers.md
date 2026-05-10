@@ -15,7 +15,8 @@ Cano gives you two opt-in observability surfaces that sit alongside the
 <ul>
 <li><strong><code>WorkflowObserver</code></strong> — synchronous callbacks fired at every
 workflow lifecycle and failure event (state entry, task start/success/failure, retry,
-circuit-open). No feature flag, no <code>async-trait</code> overhead.</li>
+circuit-open, and — when a <a href="../recovery/">checkpoint store</a> is attached —
+checkpoint and resume). No feature flag, no <code>async-trait</code> overhead.</li>
 <li><strong>Resource health</strong> — <code>Resource::health()</code> plus
 <code>Resources::check_all_health()</code> / <code>aggregate_health()</code> to report on
 the state of databases, HTTP clients, and other dependencies on demand.</li>
@@ -127,6 +128,17 @@ just failed — the retry that follows is attempt <code>attempt + 1</code>.</p>
 <p>Fired when a <code>CircuitBreaker</code> attached via
 <code>TaskConfig::with_circuit_breaker</code> rejects a call because it is open. Followed by
 an <code>on_task_failure</code> carrying a <code>CanoError::CircuitOpen</code>.</p>
+</div>
+<div class="card">
+<h3 id="on-checkpoint"><a href="#on-checkpoint" class="anchor-link" aria-hidden="true">#</a><code>on_checkpoint(workflow_id: &amp;str, sequence: u64)</code></h3>
+<p>Fired after each <a href="../recovery/"><code>CheckpointRow</code></a> is durably appended —
+once per state entry, only on a workflow configured with <code>Workflow::with_checkpoint_store</code>.</p>
+</div>
+<div class="card">
+<h3 id="on-resume"><a href="#on-resume" class="anchor-link" aria-hidden="true">#</a><code>on_resume(workflow_id: &amp;str, sequence: u64)</code></h3>
+<p>Fired once at the start of <a href="../recovery/"><code>Workflow::resume_from</code></a>.
+<code>sequence</code> is the last persisted row's sequence; execution continues from the state
+that row recorded.</p>
 </div>
 </div>
 
@@ -259,6 +271,8 @@ Because the events carry the <code>cano::observer</code> target, you can filter 
 <tr><td><code>on_task_failure</code></td><td><code>ERROR</code></td><td><code>"task failed"</code></td><td><code>task_id</code>, <code>error</code></td></tr>
 <tr><td><code>on_retry</code></td><td><code>WARN</code></td><td><code>"task retry"</code></td><td><code>task_id</code>, <code>attempt</code></td></tr>
 <tr><td><code>on_circuit_open</code></td><td><code>WARN</code></td><td><code>"circuit breaker rejected task"</code></td><td><code>task_id</code></td></tr>
+<tr><td><code>on_checkpoint</code></td><td><code>DEBUG</code></td><td><code>"checkpoint appended"</code></td><td><code>workflow_id</code>, <code>sequence</code></td></tr>
+<tr><td><code>on_resume</code></td><td><code>INFO</code></td><td><code>"workflow resumed from checkpoint"</code></td><td><code>workflow_id</code>, <code>sequence</code></td></tr>
 </tbody>
 </table>
 <hr class="section-divider">

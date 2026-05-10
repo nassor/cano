@@ -35,6 +35,7 @@ The engine is built on three core concepts: **Tasks/Nodes** for logic, **Workflo
 - **Robust Retry Logic**: Configurable strategies including exponential backoff with jitter and per-attempt timeouts.
 - **Circuit Breaker**: Shared `CircuitBreaker` short-circuits calls to failing dependencies before the retry loop, with configurable failure threshold, cool-down, and half-open probing.
 - **Built-in Scheduling**: Cron-based, interval, and manual triggers for background jobs.
+- **Crash Recovery**: Pluggable `CheckpointStore` records every FSM state entry; `Workflow::resume_from` rehydrates a crashed run and continues. Ships with an embedded, ACID `RedbCheckpointStore` behind the `recovery` feature.
 - **Observability**: Integrated `tracing` spans, plus synchronous `WorkflowObserver` hooks for lifecycle/failure events (with a ready-made `TracingObserver`) and `Resource::health()` probes (`Resources::check_all_health`).
 - **Performance-Focused**: Minimizes heap allocations by leveraging stack-based objects wherever possible, giving you control over where allocations occur.
 
@@ -116,6 +117,39 @@ async fn main() -> Result<(), CanoError> {
     Ok(())
 }
 ```
+
+## Crash Recovery & Resume
+
+Attach a `CheckpointStore` and the workflow records one `CheckpointRow` per state entered — *before* that state's task runs. After a crash, `resume_from(workflow_id)` reloads the run and re-enters the FSM at the last checkpointed state. The resumed state's task **re-runs**, so tasks at and after the resume point must be idempotent.
+
+```rust
+use cano::prelude::*;
+use cano::RedbCheckpointStore;            // behind the `recovery` feature
+use std::sync::Arc;
+
+# #[derive(Debug, Clone, PartialEq, Eq, Hash)] enum Step { Start, Work, Done }
+# #[derive(Clone)] struct StartTask; #[derive(Clone)] struct WorkTask;
+# #[task(state = Step)] impl StartTask { async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> { Ok(TaskResult::Single(Step::Work)) } }
+# #[task(state = Step)] impl WorkTask { async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> { Ok(TaskResult::Single(Step::Done)) } }
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let store = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
+let workflow = Workflow::bare()
+    .register(Step::Start, StartTask)
+    .register(Step::Work, WorkTask)
+    .add_exit_state(Step::Done)
+    .with_checkpoint_store(store)
+    .with_workflow_id("run-42");
+
+// First time: run forward (checkpoints are written along the way).
+let _ = workflow.orchestrate(Step::Start).await;
+
+// After a crash: pick up where it left off.
+let final_state = workflow.resume_from("run-42").await?;
+# let _ = final_state; Ok(())
+# }
+```
+
+The `CheckpointStore` trait is backend-agnostic (no feature flag) — implement it over Postgres, an HTTP service, anything; `RedbCheckpointStore` is just the batteries-included default. `cargo run --example workflow_recovery --features recovery` walks through a full crash-and-resume cycle. See the [Recovery guide](https://nassor.github.io/cano/recovery/).
 
 ## Documentation
 
