@@ -97,7 +97,7 @@ pub struct CheckpointRow {
     pub sequence: u64,            // monotonically increasing within the run
     pub state: String,            // the Debug rendering of the state value
     pub task_id: String,          // Task::name() for a single-task state; "" for split / exit
-    pub output_blob: Option<Vec<u8>>,  // opaque bytes, reserved for compensatable tasks
+    pub output_blob: Option<Vec<u8>>,  // serialized output of a compensatable task (else None)
 }
 ```
 
@@ -108,8 +108,10 @@ exit state. A <code>Start → Work → Done</code> workflow records three rows.<
 <li><code>state</code> is <code>format!("{state:?}")</code>; resume maps it back to the matching
 registered or exit state, so each state must have a distinct <code>Debug</code> form (true for any
 <code>#[derive(Debug)]</code> enum).</li>
-<li><code>output_blob</code> is plumbing for a future compensation/rollback stack — it is carried
-through but not yet consumed.</li>
+<li><code>output_blob</code> carries a <a href="../saga/">compensatable task</a>'s serialized
+output: a successful compensatable state writes a second <em>completion</em> row with it set, and
+<code>resume_from</code> rehydrates the compensation stack from those rows. Plain rows leave it
+<code>None</code>.</li>
 </ul>
 
 <p>Rows are <strong>append-only</strong>. Reconstructing a run is "load every row for this id, in
@@ -207,7 +209,10 @@ impl CheckpointStore for InMemoryStore {
 Contract: <code>append</code> durably persists the row; <code>load_run</code> returns every row
 ever appended for the id, <strong>sorted ascending by <code>sequence</code></strong>, or an empty
 <code>Vec</code> for an unknown id; <code>clear</code> removes a run's rows and must not touch any
-other id (clearing an unknown id is a no-op). Implementations must be
+other id (clearing an unknown id is a no-op). The engine calls <code>clear</code> automatically
+when a run reaches an exit state — and after a fully successful
+<a href="../saga/">compensation rollback</a> — so a finished run leaves no recovery log behind
+(it's best-effort: a <code>clear</code> failure is logged, not fatal). Implementations must be
 <code>Send + Sync + 'static</code> so one store can be shared (typically as
 <code>Arc&lt;dyn CheckpointStore&gt;</code>) across concurrent workflows.
 </p>
