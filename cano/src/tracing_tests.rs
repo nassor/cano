@@ -134,6 +134,27 @@ mod tests {
 
     // -- TracingObserver --------------------------------------------------
 
+    /// Install a thread-local subscriber that discards everything, at `TRACE`.
+    ///
+    /// `tracing`'s callsite-interest cache is *process-global*: the first time a
+    /// callsite (e.g. one of `TracingObserver`'s `cano::observer` events) is hit
+    /// while no subscriber exists, its interest is cached as `Interest::never()`
+    /// and the event is suppressed forever after — even on a thread that later
+    /// installs a subscriber. With `#[test]`s running concurrently, that turns
+    /// any "drive a `TracingObserver` without a subscriber" test into a landmine
+    /// for [`test_tracing_observer_captures_events`]. Every test in this module
+    /// that runs a workflow with a `TracingObserver` attached installs this guard
+    /// first so those callsites are always evaluated against a real subscriber.
+    #[must_use]
+    fn discard_all_tracing() -> tracing::subscriber::DefaultGuard {
+        tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(std::io::sink)
+                .with_max_level(tracing::Level::TRACE)
+                .finish(),
+        )
+    }
+
     #[derive(Clone, Debug, PartialEq, Eq, Hash)]
     enum Flow {
         A,
@@ -193,6 +214,10 @@ mod tests {
     #[tokio::test]
     async fn test_tracing_observer_runs_workflow() {
         // Behavior parity: attaching a TracingObserver doesn't change execution.
+        // Hold a (discarding) subscriber so we don't poison `cano::observer`
+        // callsites for `test_tracing_observer_captures_events` — see
+        // `discard_all_tracing`.
+        let _sub = discard_all_tracing();
         let workflow = Workflow::bare()
             .register(
                 Flow::A,
