@@ -219,12 +219,14 @@ compensators report progress themselves.
 
 <h2 id="full-example"><a href="#full-example" class="anchor-link" aria-hidden="true">#</a>Full Example</h2>
 <p>
-A <code>Reserve → Charge → Ship → Done</code> workflow, all three steps compensatable.
-<code>Charge</code> declines, so the run stops; <code>Charge</code> produced no output (it failed
-before committing), so only <code>Reserve</code> is on the stack — its compensation runs, releasing
-the reservation. A clean rollback like this returns the original error from <code>orchestrate</code>.
-This is the <code>saga_payment</code> example shipped with the crate; run it with
-<code>cargo run --example saga_payment</code>.
+A <code>Reserve → Validate → Charge → Ship → Done</code> workflow that mixes both kinds of step:
+<code>Reserve</code> and <code>Charge</code> are compensatable; <code>Validate</code> and
+<code>Ship</code> are plain. <code>Ship</code> fails (courier down) — and a plain task failing
+drains the compensation stack just like a compensatable one would: <code>Charge</code> refunds,
+then <code>Reserve</code> releases the hold. The plain steps (<code>Validate</code>, and the
+<code>Ship</code> that failed) aren't on the stack, so they're left alone. A clean rollback like
+this returns the original error from <code>orchestrate</code>. This is the <code>saga_payment</code>
+example shipped with the crate; run it with <code>cargo run --example saga_payment</code>.
 </p>
 
 ```rust
@@ -232,17 +234,18 @@ use cano::prelude::*;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum Step { Reserve, Charge, Ship, Done }
+enum Step { Reserve, Validate, Charge, Ship, Done }
 
 /// What `ReserveInventory::run` produced — handed back to its `compensate` to undo it.
 #[derive(Debug, Serialize, Deserialize)]
 struct Reservation { order_id: String, sku: String, qty: u32 }
 
-/// What `ChargeCard::run` would produce on success.
+/// What `ChargeCard::run` produced — handed back to its `compensate` (a refund).
 #[derive(Debug, Serialize, Deserialize)]
-struct Charge { order_id: String, amount_cents: u64 }
+struct Charge { order_id: String, txn_id: String, amount_cents: u64 }
 
 struct ReserveInventory;
+struct ValidateOrder;
 struct ChargeCard;
 struct ShipOrder;
 
@@ -252,7 +255,7 @@ impl ReserveInventory {
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {
         let r = Reservation { order_id: "ord-1001".into(), sku: "WIDGET-7".into(), qty: 3 };
         println!("reserve  : holding {} × {}", r.qty, r.sku);
-        Ok((TaskResult::Single(Step::Charge), r))
+        Ok((TaskResult::Single(Step::Validate), r))
     }
     async fn compensate(&self, _res: &Resources, r: Reservation) -> Result<(), CanoError> {
         println!("reserve  : releasing {} × {}  (rollback)", r.qty, r.sku);
@@ -260,43 +263,52 @@ impl ReserveInventory {
     }
 }
 
-#[task(state = Step, compensatable)]
-impl ChargeCard {
-    type Output = Charge;
-    fn config(&self) -> TaskConfig { TaskConfig::minimal() } // a declined card won't un-decline
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Charge), CanoError> {
-        println!("charge   : $42.00 → declined");
-        Err(CanoError::task_execution("card declined"))
-    }
-    async fn compensate(&self, _res: &Resources, c: Charge) -> Result<(), CanoError> {
-        println!("charge   : refunding {} cents  (rollback)", c.amount_cents);
-        Ok(())
+// A plain task — `register`, not `register_with_compensation`. Nothing to undo, so it never
+// appears on the compensation stack.
+#[task(state = Step)]
+impl ValidateOrder {
+    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+        println!("validate : order ok");
+        Ok(TaskResult::Single(Step::Charge))
     }
 }
 
 #[task(state = Step, compensatable)]
-impl ShipOrder {
-    type Output = (); // no data needed to undo a shipment in this demo
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, ()), CanoError> {
-        println!("ship     : dispatching");
-        Ok((TaskResult::Single(Step::Done), ()))
+impl ChargeCard {
+    type Output = Charge;
+    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Charge), CanoError> {
+        let charge = Charge { order_id: "ord-1001".into(), txn_id: "tx-7788".into(), amount_cents: 4_200 };
+        println!("charge   : $42.00 charged ({})", charge.txn_id);
+        Ok((TaskResult::Single(Step::Ship), charge))
     }
-    async fn compensate(&self, _res: &Resources, _: ()) -> Result<(), CanoError> {
-        println!("ship     : recalling shipment  (rollback)");
+    async fn compensate(&self, _res: &Resources, c: Charge) -> Result<(), CanoError> {
+        println!("charge   : refunding {} cents (tx {})  (rollback)", c.amount_cents, c.txn_id);
         Ok(())
+    }
+}
+
+// Another plain task — and this one fails. Its failure rolls back every compensatable step
+// that ran before it: `Charge`, then `Reserve`.
+#[task(state = Step)]
+impl ShipOrder {
+    fn config(&self) -> TaskConfig { TaskConfig::minimal() } // fail-fast — surface the original error
+    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+        println!("ship     : dispatching → courier unavailable");
+        Err(CanoError::task_execution("courier unavailable"))
     }
 }
 
 # async fn run() {
 let workflow = Workflow::bare()
     .register_with_compensation(Step::Reserve, ReserveInventory)
+    .register(Step::Validate, ValidateOrder)              // plain — no compensation
     .register_with_compensation(Step::Charge, ChargeCard)
-    .register_with_compensation(Step::Ship, ShipOrder)
+    .register(Step::Ship, ShipOrder)                      // plain — and it fails
     .add_exit_state(Step::Done);
 
 match workflow.orchestrate(Step::Reserve).await {
     Ok(state) => println!("completed at {state:?}"),
-    Err(error) => println!("failed, rolled back: {error}"), // "card declined" — the original error
+    Err(error) => println!("failed, rolled back: {error}"), // "courier unavailable" — the original error
 }
 # }
 ```

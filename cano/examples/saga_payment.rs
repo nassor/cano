@@ -1,15 +1,17 @@
-//! # Saga / Compensation — roll back a multi-step payment when a step fails
+//! # Saga / Compensation — mixing compensatable and plain steps
 //!
 //! Run with: `cargo run --example saga_payment`
 //!
-//! `Reserve → Charge → Ship → Done`, all three steps compensatable. `Charge` declines, so
-//! the run stops; `Charge` produced no output (it failed before committing) so it isn't on
-//! the compensation stack — only `Reserve` is, so its `compensate` runs, releasing the
-//! reservation. A clean rollback like this returns the *original* error from `orchestrate`.
+//! `Reserve → Validate → Charge → Ship → Done`. `Reserve` and `Charge` are *compensatable*
+//! (`#[task(state = Step, compensatable)]`): each forward step returns an `Output`, and a
+//! matching `compensate` undoes it. `Validate` and `Ship` are *plain* (`#[task(state = Step)]`,
+//! registered with `register`) — they have nothing to roll back, so they never appear on the
+//! compensation stack.
 //!
-//! Each step uses `#[task(state = Step, compensatable)]`: like a plain `#[task(state = …)]`,
-//! but `run` also returns an `Output` and there's a `compensate` that undoes the step given
-//! that `Output`. (`#[compensatable_task(state = Step)]` is the same thing.)
+//! `Ship` fails (courier down). *Any* task failing — plain or compensatable — drains the
+//! per-run compensation stack in reverse: `Charge` refunds, then `Reserve` releases. The plain
+//! steps (`Validate`, and the `Ship` that failed) aren't on the stack, so they're left alone.
+//! A clean rollback like this returns the *original* error from `orchestrate`.
 
 use cano::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -17,6 +19,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step {
     Reserve,
+    Validate,
     Charge,
     Ship,
     Done,
@@ -30,14 +33,16 @@ struct Reservation {
     qty: u32,
 }
 
-/// What `ChargeCard::run` would produce on success.
+/// What `ChargeCard::run` produced — handed back to its `compensate` (a refund).
 #[derive(Debug, Serialize, Deserialize)]
 struct Charge {
     order_id: String,
+    txn_id: String,
     amount_cents: u64,
 }
 
 struct ReserveInventory;
+struct ValidateOrder;
 struct ChargeCard;
 struct ShipOrder;
 
@@ -51,7 +56,7 @@ impl ReserveInventory {
             qty: 3,
         };
         println!("reserve  : holding {} × {}", r.qty, r.sku);
-        Ok((TaskResult::Single(Step::Charge), r))
+        Ok((TaskResult::Single(Step::Validate), r))
     }
     async fn compensate(&self, _res: &Resources, r: Reservation) -> Result<(), CanoError> {
         println!("reserve  : releasing {} × {}  (rollback)", r.qty, r.sku);
@@ -59,35 +64,48 @@ impl ReserveInventory {
     }
 }
 
-#[task(state = Step, compensatable)]
-impl ChargeCard {
-    type Output = Charge;
-    // No retries — a declined card won't un-decline; let the error escape `orchestrate`.
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Charge), CanoError> {
-        println!("charge   : $42.00 → declined");
-        Err(CanoError::task_execution("card declined"))
-        // On success: Ok((TaskResult::Single(Step::Ship),
-        //                 Charge { order_id: "ord-1001".into(), amount_cents: 4_200 }))
-    }
-    async fn compensate(&self, _res: &Resources, c: Charge) -> Result<(), CanoError> {
-        println!("charge   : refunding {} cents  (rollback)", c.amount_cents);
-        Ok(())
+// A plain task: registered with `register`, not `register_with_compensation`. It has no
+// side effect to undo, so it never gets a compensation-stack entry and is left alone if a
+// later step fails.
+#[task(state = Step)]
+impl ValidateOrder {
+    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+        println!("validate : order ok");
+        Ok(TaskResult::Single(Step::Charge))
     }
 }
 
 #[task(state = Step, compensatable)]
-impl ShipOrder {
-    type Output = (); // a compensatable task that needs no data to undo itself
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, ()), CanoError> {
-        println!("ship     : dispatching");
-        Ok((TaskResult::Single(Step::Done), ()))
+impl ChargeCard {
+    type Output = Charge;
+    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Charge), CanoError> {
+        let charge = Charge {
+            order_id: "ord-1001".into(),
+            txn_id: "tx-7788".into(),
+            amount_cents: 4_200,
+        };
+        println!("charge   : $42.00 charged ({})", charge.txn_id);
+        Ok((TaskResult::Single(Step::Ship), charge))
     }
-    async fn compensate(&self, _res: &Resources, _: ()) -> Result<(), CanoError> {
-        println!("ship     : recalling shipment  (rollback)");
+    async fn compensate(&self, _res: &Resources, c: Charge) -> Result<(), CanoError> {
+        println!(
+            "charge   : refunding {} cents (tx {})  (rollback)",
+            c.amount_cents, c.txn_id
+        );
         Ok(())
+    }
+}
+
+// Another plain task — and this one fails. Its failure triggers the rollback of every
+// compensatable step that ran before it: `Charge`, then `Reserve`.
+#[task(state = Step)]
+impl ShipOrder {
+    fn config(&self) -> TaskConfig {
+        TaskConfig::minimal() // fail-fast — let the original error escape `orchestrate`
+    }
+    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+        println!("ship     : dispatching → courier unavailable");
+        Err(CanoError::task_execution("courier unavailable"))
     }
 }
 
@@ -95,8 +113,9 @@ impl ShipOrder {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workflow = Workflow::bare()
         .register_with_compensation(Step::Reserve, ReserveInventory)
+        .register(Step::Validate, ValidateOrder) // plain — no compensation
         .register_with_compensation(Step::Charge, ChargeCard)
-        .register_with_compensation(Step::Ship, ShipOrder)
+        .register(Step::Ship, ShipOrder) // plain — and it fails
         .add_exit_state(Step::Done);
 
     match workflow.orchestrate(Step::Reserve).await {
