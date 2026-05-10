@@ -92,6 +92,9 @@ document.addEventListener('DOMContentLoaded', () => {
     if (linkPath === currentPath) {
       link.classList.add('active');
       link.setAttribute('aria-current', 'page');
+      // Expand the collapsible section that contains the current page.
+      const section = link.closest('details.nav-section');
+      if (section) section.open = true;
     } else {
       link.classList.remove('active');
       link.removeAttribute('aria-current');
