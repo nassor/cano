@@ -75,8 +75,7 @@ pub use redb::RedbCheckpointStore;
 /// Rows are append-only and ordered within a run by [`sequence`](Self::sequence).
 /// `output_blob` is `Some` only for tasks whose output must be retained for
 /// compensation/rollback; it is opaque bytes to the store.
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "recovery", derive(bincode::Encode, bincode::Decode))]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CheckpointRow {
     /// Monotonically increasing position of this transition within its run.
     pub sequence: u64,

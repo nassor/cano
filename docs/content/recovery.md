@@ -230,7 +230,7 @@ let store: Arc<RedbCheckpointStore> = Arc::new(RedbCheckpointStore::new("workflo
 
 <p>
 Internally a single table maps <code>(workflow_id, sequence)</code> to the
-<a href="https://docs.rs/bincode"><code>bincode</code></a>-encoded payload. redb orders composite
+<a href="https://docs.rs/postcard"><code>postcard</code></a>-encoded payload. redb orders composite
 keys element by element, so a workflow's rows are stored — and range-scanned — in ascending
 <code>sequence</code> order; the <code>sequence</code> lives in the key, not the value.
 </p>

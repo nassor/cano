@@ -8,7 +8,7 @@
 //! ## Storage layout
 //!
 //! A single table, `cano_checkpoints`, maps `(workflow_id, sequence)` to a
-//! [`bincode`]-encoded [`StoredRow`] (the [`CheckpointRow`] fields *other than*
+//! [`postcard`]-encoded [`StoredRow`] (the [`CheckpointRow`] fields *other than*
 //! `sequence` — which is already the second key component, so there's no need to
 //! store it twice). redb orders composite keys element by element, so within one
 //! `workflow_id` the rows are stored — and range-scanned — in ascending
@@ -24,12 +24,12 @@ use super::{CheckpointRow, CheckpointStore};
 use crate::error::CanoError;
 use cano_macros::checkpoint_store;
 
-/// `(workflow_id, sequence) -> bincode(StoredRow)`.
+/// `(workflow_id, sequence) -> postcard(StoredRow)`.
 const CHECKPOINTS: TableDefinition<(&str, u64), &[u8]> = TableDefinition::new("cano_checkpoints");
 
 /// The payload half of a [`CheckpointRow`]: everything except `sequence`, which
 /// is carried by the redb key. Kept private — callers only ever see `CheckpointRow`.
-#[derive(bincode::Encode, bincode::Decode)]
+#[derive(serde::Serialize, serde::Deserialize)]
 struct StoredRow {
     state: String,
     task_id: String,
@@ -83,7 +83,7 @@ impl CheckpointStore for RedbCheckpointStore {
             task_id: row.task_id,
             output_blob: row.output_blob,
         };
-        let bytes = bincode::encode_to_vec(&payload, bincode::config::standard())
+        let bytes = postcard::to_stdvec(&payload)
             .map_err(|e| CanoError::CheckpointStore(format!("encode checkpoint row: {e}")))?;
 
         let tx = self.db.begin_write().map_err(redb_err)?;
@@ -104,11 +104,8 @@ impl CheckpointStore for RedbCheckpointStore {
         let mut rows = Vec::new();
         for entry in table.range(workflow_range(workflow_id)).map_err(redb_err)? {
             let (key, value) = entry.map_err(redb_err)?;
-            let (payload, _) = bincode::decode_from_slice::<StoredRow, _>(
-                value.value(),
-                bincode::config::standard(),
-            )
-            .map_err(|e| CanoError::CheckpointStore(format!("decode checkpoint row: {e}")))?;
+            let payload = postcard::from_bytes::<StoredRow>(value.value())
+                .map_err(|e| CanoError::CheckpointStore(format!("decode checkpoint row: {e}")))?;
             rows.push(CheckpointRow {
                 sequence: key.value().1,
                 state: payload.state,
