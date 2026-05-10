@@ -84,38 +84,37 @@ It excels at managing complex lifecycles where state transitions matter:
 </div>
 </div>
 
-<h2>Resilient, Self-Healing — What the Tagline Maps To</h2>
+<h2>Resilient, Self-Healing</h2>
 <p>
-Every word in <em>"high-performance orchestration engine for building resilient, self-healing systems"</em>
-is a concrete primitive. All of them are <strong>opt-in and zero-cost when unused</strong> — the FSM
-dispatch hot path stays allocation-light whether or not you wire any of this up.
+What the tagline means, concretely. Every one of these is <strong>opt-in and zero-cost when unused</strong> —
+the FSM dispatch hot path stays allocation-light whether or not you wire any of it up.
 </p>
 
-<table>
-<thead><tr><th>Tagline word</th><th>Primitive</th><th>Guide</th></tr></thead>
-<tbody>
-<tr><td rowspan="6"><strong>resilient</strong><br>recover from transient faults</td>
-    <td><code>RetryMode</code> — fixed / exponential-backoff-with-jitter, via <code>TaskConfig</code></td>
-    <td rowspan="5"><a href="resilience/">Resilience</a></td></tr>
-<tr><td>Per-attempt timeout (<code>TaskConfig::with_attempt_timeout</code> → <code>CanoError::Timeout</code>, retried)</td></tr>
-<tr><td><code>CircuitBreaker</code> — short-circuits a failing dependency before the retry loop (closed → open → half-open)</td></tr>
-<tr><td>Split <strong>bulkhead</strong> — cap concurrent parallel tasks (<code>JoinConfig::with_bulkhead</code>)</td></tr>
-<tr><td>Panic safety — a panicking task body becomes <code>CanoError::TaskExecution</code>, never unwinds through the engine</td></tr>
-<tr><td>Scheduler backoff &amp; trip (<code>BackoffPolicy</code>, <code>Status::Backoff</code> / <code>Status::Tripped</code>, <code>reset_flow</code>)</td>
-    <td><a href="scheduler/">Scheduler</a></td></tr>
-<tr><td rowspan="4"><strong>self-healing</strong><br>repair / roll back / report on its own state</td>
-    <td>Checkpoint + resume: <code>CheckpointStore</code> records each state entry; <code>resume_from</code> rehydrates a crashed run (built-in <code>RedbCheckpointStore</code>)</td>
-    <td><a href="recovery/">Recovery</a></td></tr>
-<tr><td>Sagas / compensation: <code>CompensatableTask</code> + <code>register_with_compensation</code> — a failure drains the compensation stack in reverse</td>
-    <td><a href="saga/">Saga</a></td></tr>
-<tr><td><code>WorkflowObserver</code> — synchronous lifecycle / failure / checkpoint / resume hooks (and the built-in <code>TracingObserver</code>)</td>
-    <td rowspan="2"><a href="observers/">Observers</a></td></tr>
-<tr><td>Resource health probes: <code>Resource::health()</code>, <code>Resources::check_all_health()</code> / <code>aggregate_health()</code></td></tr>
-<tr><td><strong>high-performance</strong></td>
-    <td>Allocation-light FSM dispatch; every primitive above is a <code>dyn</code>-erased / <code>Option</code> check that's skipped when not configured — see <code>cargo bench --bench workflow_performance</code></td>
-    <td>—</td></tr>
-</tbody>
-</table>
+<div class="feature-grid">
+<div class="feature-card animate-in">
+<div class="feature-icon" aria-hidden="true">&#128737;&#65039;</div>
+<h3>Resilient — recover from transient faults</h3>
+<ul>
+<li>Retries — fixed, or exponential backoff with jitter</li>
+<li>Per-attempt timeouts</li>
+<li><a href="resilience/#circuit-breaker">Circuit breaker</a> — short-circuit a failing dependency</li>
+<li>Split <a href="split-join/#bulkhead">bulkhead</a> — cap concurrent parallel tasks</li>
+<li>Panic safety — a panicking task becomes an error, never unwinds the engine</li>
+<li><a href="scheduler/#backoff-and-trip">Scheduler backoff &amp; trip</a> for flaky scheduled flows</li>
+</ul>
+</div>
+<div class="feature-card animate-in">
+<div class="feature-icon secondary" aria-hidden="true">&#128295;</div>
+<h3>Self-healing — repair &amp; report on its own state</h3>
+<ul>
+<li><a href="recovery/">Checkpoint + resume</a> — replay a crashed run from its last state</li>
+<li><a href="saga/">Sagas / compensation</a> — roll back completed work in reverse on failure</li>
+<li><a href="observers/">Observer hooks</a> — synchronous lifecycle / failure / retry / checkpoint events</li>
+<li><a href="observers/#health">Resource health probes</a> — on-demand health for a workflow's dependencies</li>
+</ul>
+</div>
+</div>
+<p>Full coverage: the <a href="resilience/">Resilience</a>, <a href="recovery/">Recovery</a>, <a href="saga/">Saga</a> and <a href="observers/">Observers</a> guides.</p>
 
 <h2>Getting Started</h2>
 <p>Add Cano to your <code>Cargo.toml</code>:</p>

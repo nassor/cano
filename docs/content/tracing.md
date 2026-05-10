@@ -6,15 +6,14 @@ template = "page.html"
 
 <div class="content-wrapper">
 <h1>Tracing</h1>
-<p class="subtitle">Comprehensive observability for your workflows.</p>
+<p class="subtitle"><code>tracing</code>-crate span instrumentation for your workflows.</p>
+<p class="feature-tag">Behind the <code>tracing</code> feature gate (<code>features = ["tracing"]</code>).</p>
 
-<div class="feature-banner">
-<div class="banner-icon" aria-hidden="true">⚙️</div>
-<div class="banner-content">
-<p><strong>Feature flag required</strong> -- Tracing is behind the <code>tracing</code> feature gate.
-Enable it with <code>features = ["tracing"]</code> or <code>features = ["all"]</code> in your
-<code>Cargo.toml</code>.</p>
-</div>
+<div class="callout callout-info">
+<span class="callout-label">See also</span>
+<p>This page covers Cano's built-in <code>tracing</code> <em>spans</em>. For the synchronous callback API
+(<code>WorkflowObserver</code>) and the ready-made <code>TracingObserver</code> that re-emits those callbacks
+as <code>tracing</code> events, see <a href="../observers/">Observers</a>.</p>
 </div>
 
 <nav class="page-toc" aria-label="Table of contents">

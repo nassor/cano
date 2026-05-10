@@ -8,19 +8,12 @@ template = "page.html"
 
 <h1>Scheduler</h1>
 <p class="subtitle">Automate your workflows with flexible scheduling and concurrency.</p>
-
-<div class="feature-banner">
-<div class="banner-icon" aria-hidden="true">⚙️</div>
-<div class="banner-content">
-<p><strong>Feature flag required</strong> -- The scheduler is behind the <code>scheduler</code> feature gate.
-Enable it with <code>features = ["scheduler"]</code> or <code>features = ["all"]</code> in your
-<code>Cargo.toml</code>.</p>
-</div>
-</div>
+<p class="feature-tag">Behind the <code>scheduler</code> feature gate (<code>features = ["scheduler"]</code>).</p>
 
 <nav class="page-toc" aria-label="Table of contents">
 <div class="page-toc-title">On this page</div>
 <ol>
+<li><a href="#lifecycle">Lifecycle: Scheduler &rarr; RunningScheduler</a></li>
 <li><a href="#overlap-prevention">Overlap Prevention</a></li>
 <li><a href="#scheduling-strategies">Scheduling Strategies</a></li>
 <li><a href="#strategy-examples">Strategy Examples</a></li>
@@ -512,7 +505,7 @@ call <code>set_backoff</code> to activate the new code path.
 <div class="callout-label">Distinct from CircuitBreaker</div>
 <p>
 Flow-level <code>Tripped</code> is scoped to the scheduler and is separate from the task-level
-<code>CanoError::CircuitOpen</code> emitted by <a href="../task/#config-retries"><code>CircuitBreaker</code></a>.
+<code>CanoError::CircuitOpen</code> emitted by a <a href="../resilience/#circuit-breaker"><code>CircuitBreaker</code></a>.
 The breaker gates a single task's call to a dependency; this policy gates the scheduler from re-firing
 an entire flow.
 </p>
@@ -649,731 +642,65 @@ A second <code>stop()</code> call after success is idempotent — it returns the
 </p>
 <hr class="section-divider">
 
+
 <h2 id="multi-level-map-reduce"><a href="#multi-level-map-reduce" class="anchor-link" aria-hidden="true">#</a>Advanced Pattern: Multi-Level Map-Reduce</h2>
 <p>
-Combine manual workflow triggering with split/join to create powerful multi-level map-reduce patterns. 
-Each workflow processes a batch of data in parallel (workflow-level map-reduce), and multiple workflows 
-run concurrently with different parameters (scheduler-level map-reduce).
+The scheduler composes naturally with <a href="../split-join/">split/join</a> to give you
+a two-level map-reduce. <strong>Level 1</strong> lives inside a single workflow: a state registered with
+<code>register_split</code> fans a batch out across parallel tasks, and a <code>JoinConfig</code> reduces
+their results back into one summary state. <strong>Level 2</strong> lives at the scheduler: register several
+of those batch workflows — each with different parameters (a different batch of records, a different region,
+a different tenant) — as <code>manual</code> flows or interval flows, and trigger them concurrently. Because
+every workflow carries its own <a href="../resources/"><code>Resources</code></a> dictionary, you hand each
+one a shared accumulator (an <code>Arc&lt;RwLock&lt;…&gt;&gt;</code> wrapped in a <code>Resource</code>); every
+batch independently appends its summary, and a final reduce step folds them together.
 </p>
 
-<h3 id="architecture-overview"><a href="#architecture-overview" class="anchor-link" aria-hidden="true">#</a>Architecture Overview</h3>
-<div class="diagram-frame">
-<p class="diagram-label">Multi-Level Map-Reduce Architecture</p>
-<div class="mermaid">
-graph TB
-subgraph "Scheduler Level (Map-Reduce)"
-S[Scheduler] -->|Trigger| W1[Workflow: Batch-A-Classics]
-S -->|Trigger| W2[Workflow: Batch-B-Adventure]
-end
-subgraph "Batch-A-Classics Workflow (Split/Join)"
-W1 --> Init1[Init: 2 Books]
-Init1 --> D1[Split: Download]
-D1 --> D1A["Download: Pride &amp; Prejudice"]
-D1 --> D1B[Download: Alice in Wonderland]
-D1A --> J1D[Join: All Downloads]
-D1B --> J1D
-J1D --> A1[Split: Analyze]
-A1 --> A1A[Analyze: Book 1]
-A1 --> A1B[Analyze: Book 2]
-A1A --> J1A[Join: 75% Complete]
-A1B --> J1A
-J1A --> Sum1[Summarize Batch A]
-end
-subgraph "Batch-B-Adventure Workflow (Split/Join)"
-W2 --> Init2[Init: 2 Books]
-Init2 --> D2[Split: Download]
-D2 --> D2A[Download: Moby Dick]
-D2 --> D2B[Download: Huck Finn]
-D2A --> J2D[Join: All Downloads]
-D2B --> J2D
-J2D --> A2[Split: Analyze]
-A2 --> A2A[Analyze: Book 1]
-A2 --> A2B[Analyze: Book 2]
-A2A --> J2A[Join: 75% Complete]
-A2B --> J2A
-J2A --> Sum2[Summarize Batch B]
-end
-Sum1 --> R["Global Reduce: Aggregate All Batches"]
-Sum2 --> R
-R --> F["Final Rankings and Statistics"]
-style S fill:#4CAF50
-style R fill:#2196F3
-style F fill:#FF9800
-style D1A fill:#E3F2FD
-style D1B fill:#E3F2FD
-style D2A fill:#E3F2FD
-style D2B fill:#E3F2FD
-style A1A fill:#FFF9C4
-style A1B fill:#FFF9C4
-style A2A fill:#FFF9C4
-style A2B fill:#FFF9C4
-</div>
-</div>
+<ul>
+<li><strong>Map (level 1)</strong> — <code>register_split</code> runs N tasks over a batch in parallel.</li>
+<li><strong>Reduce (level 1)</strong> — <code>JoinConfig</code> (e.g. <code>JoinStrategy::All</code> or
+<code>Percentage(0.75)</code>) merges the parallel results into a single batch summary.</li>
+<li><strong>Map (level 2)</strong> — the scheduler holds several batch workflows and fires them concurrently
+via <code>trigger</code> (or on intervals), each with its own parameters and <code>Resources</code>.</li>
+<li><strong>Reduce (level 2)</strong> — a shared accumulator resource collects every batch summary; once all
+flows finish, a final pass aggregates across batches.</li>
+</ul>
 
-<h3 id="book-analysis"><a href="#book-analysis" class="anchor-link" aria-hidden="true">#</a>Complete Example: Multi-Batch Book Analysis</h3>
-<p>
-This example demonstrates analyzing books from Project Gutenberg using a two-level map-reduce pattern.
-Each batch workflow downloads and analyzes multiple books in parallel, then all results are aggregated globally.
-</p>
+<p>The skeleton — one batch workflow with a parallel state, plus a scheduler wiring up a couple of batches:</p>
 
 ```rust
-use cano::prelude::*;
-use std::collections::HashSet;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use tokio::time::{Duration, timeout};
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum BookAnalysisState {
-    Start,
-    DownloadBatch,
-    AnalyzeBatch,
-    SummarizeBatch,
-    Complete,
-    Error,
-}
-
-// Book data structures
-#[derive(Debug, Clone)]
-struct Book {
-    id: u32,
-    title: String,
-    content: String,
-    batch_name: String,
-}
-
-#[derive(Debug, Clone)]
-struct BookAnalysis {
-    #[allow(dead_code)]
-    book_id: u32,
-    title: String,
-    batch_name: String,
-    preposition_count: usize,
-    total_words: usize,
-    unique_prepositions: HashSet<String>,
-}
-
-#[derive(Debug, Clone)]
-struct BatchSummary {
-    batch_name: String,
-    total_books: usize,
-    avg_prepositions: f64,
-    total_unique_prepositions: usize,
-    book_analyses: Vec<BookAnalysis>,
-}
-
-// Shared global state for collecting results from all batches
-#[derive(Debug, Clone)]
-struct GlobalResults {
-    batch_summaries: Arc<RwLock<Vec<BatchSummary>>>,
-}
-
-impl GlobalResults {
-    fn new() -> Self {
-        Self {
-            batch_summaries: Arc::new(RwLock::new(Vec::new())),
-        }
-    }
-
-    async fn add_batch(&self, summary: BatchSummary) {
-        let mut summaries = self.batch_summaries.write().await;
-        summaries.push(summary);
-    }
-
-    async fn get_all_batches(&self) -> Vec<BatchSummary> {
-        let summaries = self.batch_summaries.read().await;
-        summaries.clone()
-    }
-}
-
-const PREPOSITIONS: &[&str] = &[
-    "about", "above", "across", "after", "against", "along", "among", "around",
-    "at", "before", "behind", "below", "beneath", "beside", "between", "beyond",
-    "by", "down", "during", "for", "from", "in", "into", "near", "of", "off",
-    "on", "over", "through", "to", "toward", "under", "up", "with", "within",
-];
-
-type BookMetadata = (u32, String, String);
-
-// Download a book from Project Gutenberg
-async fn download_book(
-    id: u32,
-    title: String,
-    url: String,
-    batch_name: String,
-) -> Result<Book, String> {
-    println!("  📥 [{batch_name}] Downloading: {title}");
-
-    let client = reqwest::Client::new();
-
-    let download_future = async {
-        let response = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("Failed to fetch {url}: {e}"))?;
-
-        if !response.status().is_success() {
-            return Err(format!("HTTP error for {title}: {}", response.status()));
-        }
-
-        let content = response
-            .text()
-            .await
-            .map_err(|e| format!("Failed to read content for {title}: {e}"))?;
-
-        if content.len() < 1000 {
-            return Err(format!("Content too short for {title}"));
-        }
-
-        println!(
-            "  ✅ [{batch_name}] Downloaded: {title} ({} KB)",
-            content.len() / 1024
-        );
-
-        Ok(Book {
-            id,
-            title: title.clone(),
-            content,
-            batch_name,
-        })
-    };
-
-    timeout(Duration::from_secs(30), download_future)
-        .await
-        .map_err(|_| format!("Timeout downloading {title}"))?
-}
-
-// Analyze prepositions in a book
-fn analyze_prepositions(book: &Book) -> BookAnalysis {
-    let preposition_set: HashSet<&str> = PREPOSITIONS.iter().copied().collect();
-    let mut found_prepositions = HashSet::new();
-
-    let content_lower = book.content.to_lowercase();
-    let words: Vec<&str> = content_lower
-        .split_whitespace()
-        .map(|word| word.trim_matches(|c: char| !c.is_alphabetic()))
-        .filter(|word| !word.is_empty())
-        .collect();
-
-    let total_words = words.len();
-
-    for word in words {
-        if preposition_set.contains(word) {
-            found_prepositions.insert(word.to_string());
-        }
-    }
-
-    BookAnalysis {
-        book_id: book.id,
-        title: book.title.clone(),
-        batch_name: book.batch_name.clone(),
-        preposition_count: found_prepositions.len(),
-        total_words,
-        unique_prepositions: found_prepositions,
-    }
-}
-
-// Task: Initialize batch processing
-#[derive(Clone)]
-struct InitBatchTask {
-    batch_name: String,
-    books: Vec<BookMetadata>,
-}
-
-#[task(state = BookAnalysisState)]
-impl InitBatchTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
-        println!(
-            "\n🎯 [{0}] Initializing batch with {1} books",
-            self.batch_name,
-            self.books.len()
-        );
-
-        let store = res.get::<MemoryStore, _>("store")?;
-        store.put("batch_name", self.batch_name.clone())?;
-        store.put("book_metadata", self.books.clone())?;
-
-        Ok(TaskResult::Single(BookAnalysisState::DownloadBatch))
-    }
-}
-
-// Task: Download a single book (used in split)
-#[derive(Clone)]
-struct DownloadTask {
-    book_id: u32,
-    title: String,
-    url: String,
-    batch_name: String,
-}
-
-#[task(state = BookAnalysisState)]
-impl DownloadTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
-        match download_book(
-            self.book_id,
-            self.title.clone(),
-            self.url.clone(),
-            self.batch_name.clone(),
-        )
-        .await
-        {
-            Ok(book) => {
-                // Store individual book
-                let store = res.get::<MemoryStore, _>("store")?;
-                store.put(&format!("book_{}", self.book_id), book)?;
-                Ok(TaskResult::Single(BookAnalysisState::AnalyzeBatch))
-            }
-            Err(e) => Err(CanoError::task_execution(format!("Download failed: {e}"))),
-        }
-    }
-}
-
-// Task: Analyze a single book (used after split)
-#[derive(Clone)]
-struct AnalyzeTask {
-    book_id: u32,
-}
-
-#[task(state = BookAnalysisState)]
-impl AnalyzeTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
-        let book: Book = store
-            .get(&format!("book_{}", self.book_id))
-            .map_err(|e| CanoError::task_execution(format!("Book not found: {e}")))?;
-
-        let analysis = analyze_prepositions(&book);
-
-        println!(
-            "  🔍 [{}] Analyzed '{}': {} prepositions",
-            analysis.batch_name, analysis.title, analysis.preposition_count
-        );
-
-        // Store analysis
-        store.put(&format!("analysis_{}", self.book_id), analysis)?;
-
-        Ok(TaskResult::Single(BookAnalysisState::SummarizeBatch))
-    }
-}
-
-// Task: Collect all analyses and create batch summary
-#[derive(Clone)]
-struct SummarizeBatchTask {
-    global_results: GlobalResults,
-}
-
-#[task(state = BookAnalysisState)]
-impl SummarizeBatchTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
-        let batch_name: String = store.get("batch_name")?;
-        let books: Vec<BookMetadata> = store.get("book_metadata")?;
-
-        println!("  📊 [{batch_name}] Summarizing batch results...");
-
-        // Collect all analyses
-        let mut analyses = Vec::new();
-        for (book_id, _, _) in &books {
-            if let Ok(analysis) = store.get::<BookAnalysis>(&format!("analysis_{}", book_id)) {
-                analyses.push(analysis);
-            }
-        }
-
-        if analyses.is_empty() {
-            return Err(CanoError::task_execution("No analyses found for batch"));
-        }
-
-        // Calculate batch statistics
-        let total_books = analyses.len();
-        let avg_prepositions = analyses
-            .iter()
-            .map(|a| a.preposition_count as f64)
-            .sum::<f64>()
-            / total_books as f64;
-
-        // Collect all unique prepositions across batch
-        let mut all_prepositions = HashSet::new();
-        for analysis in &analyses {
-            all_prepositions.extend(analysis.unique_prepositions.iter().cloned());
-        }
-
-        let summary = BatchSummary {
-            batch_name: batch_name.clone(),
-            total_books,
-            avg_prepositions,
-            total_unique_prepositions: all_prepositions.len(),
-            book_analyses: analyses,
-        };
-
-        println!(
-            "  ✅ [{batch_name}] Batch complete: {total_books} books, avg {avg_prepositions:.1} prepositions"
-        );
-
-        // Add to global results
-        self.global_results.add_batch(summary).await;
-
-        Ok(TaskResult::Single(BookAnalysisState::Complete))
-    }
-}
-
-// Create workflow for a specific batch
-fn create_batch_workflow(
-    batch_name: String,
-    books: Vec<BookMetadata>,
-    global_results: GlobalResults,
-) -> Workflow<BookAnalysisState> {
-    let store = MemoryStore::new();
-
-    Workflow::new(Resources::new().insert("store", store))
-        .register(
-            BookAnalysisState::Start,
-            InitBatchTask {
-                batch_name: batch_name.clone(),
-                books: books.clone(),
-            },
-        )
-        // Split: Download all books in parallel
+// Level 1: a workflow that map-reduces over one batch.
+fn batch_workflow(batch: Vec<Item>, results: SharedResults) -> Workflow<State> {
+    Workflow::new(Resources::new().insert("results", results))
         .register_split(
-            BookAnalysisState::DownloadBatch,
-            books
-                .iter()
-                .map(|(id, title, url)| DownloadTask {
-                    book_id: *id,
-                    title: title.clone(),
-                    url: url.clone(),
-                    batch_name: batch_name.clone(),
-                })
-                .collect::<Vec<_>>(),
-            JoinConfig::new(
-                JoinStrategy::All,
-                BookAnalysisState::AnalyzeBatch,
-            )
-            .with_timeout(Duration::from_secs(120)),
+            State::Process,
+            batch.iter().map(|item| ProcessTask::new(item)).collect::<Vec<_>>(),
+            JoinConfig::new(JoinStrategy::All, State::Summarize)
+                .with_timeout(Duration::from_secs(60)),
         )
-        // Split: Analyze all books in parallel
-        .register_split(
-            BookAnalysisState::AnalyzeBatch,
-            books
-                .iter()
-                .map(|(id, _, _)| AnalyzeTask { book_id: *id })
-                .collect::<Vec<_>>(),
-            JoinConfig::new(
-                JoinStrategy::Percentage(0.75), // Proceed if 75% complete
-                BookAnalysisState::SummarizeBatch,
-            )
-            .with_timeout(Duration::from_secs(60)),
-        )
-        .register(
-            BookAnalysisState::SummarizeBatch,
-            SummarizeBatchTask {
-                global_results: global_results.clone(),
-            },
-        )
-        .add_exit_states(vec![BookAnalysisState::Complete, BookAnalysisState::Error])
+        .register(State::Summarize, SummarizeTask) // appends a batch summary into `results`
+        .add_exit_states(vec![State::Done, State::Error])
 }
 
-// Reduce: Aggregate all batch results and display global rankings
-async fn reduce_global_results(global_results: &GlobalResults) -> Result<(), CanoError> {
-    println!("\n🌐 GLOBAL REDUCE: Aggregating results from all batches");
-    println!("{}", "=".repeat(60));
-
-    let batches = global_results.get_all_batches().await;
-
-    if batches.is_empty() {
-        return Err(CanoError::task_execution("No batches completed successfully"));
-    }
-
-    // Collect all book analyses
-    let mut all_books: Vec<BookAnalysis> = batches
-        .iter()
-        .flat_map(|b| b.book_analyses.clone())
-        .collect();
-
-    // Sort by preposition count
-    all_books.sort_by(|a, b| b.preposition_count.cmp(&a.preposition_count));
-
-    // Display batch summaries
-    println!("\n📦 Batch Summaries:");
-    println!("{}", "-".repeat(60));
-    for batch in &batches {
-        println!("  Batch: {}", batch.batch_name);
-        println!("    • Books processed: {}", batch.total_books);
-        println!(
-            "    • Avg prepositions: {:.1}",
-            batch.avg_prepositions
-        );
-        println!(
-            "    • Total unique prepositions: {}",
-            batch.total_unique_prepositions
-        );
-    }
-
-    // Display global rankings
-    println!("\n🏆 Global Book Rankings (Top 10):");
-    println!("{}", "-".repeat(60));
-    for (rank, book) in all_books.iter().take(10).enumerate() {
-        println!(
-            "  #{}: {} [{}]",
-            rank + 1,
-            book.title,
-            book.batch_name
-        );
-        println!(
-            "      {} unique prepositions | {} total words",
-            book.preposition_count, book.total_words
-        );
-    }
-
-    // Global statistics
-    let total_books = all_books.len();
-    let avg_prepositions = all_books
-        .iter()
-        .map(|b| b.preposition_count as f64)
-        .sum::<f64>()
-        / total_books as f64;
-
-    let mut all_unique_prepositions = HashSet::new();
-    for book in &all_books {
-        all_unique_prepositions.extend(book.unique_prepositions.iter().cloned());
-    }
-
-    println!("\n📈 Global Statistics:");
-    println!("{}", "-".repeat(60));
-    println!("  Total batches processed: {}", batches.len());
-    println!("  Total books analyzed: {}", total_books);
-    println!("  Average prepositions per book: {:.1}", avg_prepositions);
-    println!(
-        "  Total unique prepositions found: {}",
-        all_unique_prepositions.len()
-    );
-
-    if let (Some(top), Some(bottom)) = (all_books.first(), all_books.last()) {
-        println!("\n🥇 Most diverse: {} ({} prepositions)", top.title, top.preposition_count);
-        println!("🥉 Least diverse: {} ({} prepositions)", bottom.title, bottom.preposition_count);
-    }
-
-    Ok(())
-}
-
-#[tokio::main]
-async fn main() -> Result<(), CanoError> {
-    println!("🚀 Multi-Level Map-Reduce Book Analysis");
-    println!("{}", "=".repeat(60));
-    println!("📚 Level 1: Workflow-level Split/Join (within each batch)");
-    println!("🌐 Level 2: Scheduler-level Map-Reduce (across all batches)");
-    println!("{}", "=".repeat(60));
-
-    let mut scheduler = Scheduler::new();
-    let global_results = GlobalResults::new();
-
-    // Define book batches (different parameters per workflow)
-    let batches = vec![
-        (
-            "Batch-A-Classics".to_string(),
-            vec![
-                (1342, "Pride and Prejudice".to_string(), 
-                 "https://www.gutenberg.org/files/1342/1342-0.txt".to_string()),
-                (11, "Alice's Adventures in Wonderland".to_string(), 
-                 "https://www.gutenberg.org/files/11/11-0.txt".to_string()),
-            ],
-        ),
-        (
-            "Batch-B-Adventure".to_string(),
-            vec![
-                (2701, "Moby Dick".to_string(), 
-                 "https://www.gutenberg.org/files/2701/2701-0.txt".to_string()),
-                (76, "Huckleberry Finn".to_string(), 
-                 "https://www.gutenberg.org/files/76/76-0.txt".to_string()),
-            ],
-        ),
-    ];
-
-    println!("\n📦 Preparing {} batches for processing\n", batches.len());
-
-    // Register a workflow for each batch
-    for (batch_name, books) in &batches {
-        let workflow = create_batch_workflow(
-            batch_name.clone(),
-            books.clone(),
-            global_results.clone(),
-        );
-
-        scheduler.manual(batch_name, workflow, BookAnalysisState::Start)?;
-        println!(
-            "  ✅ Registered workflow: {} ({} books)",
-            batch_name,
-            books.len()
-        );
-    }
-
-    println!("\n🎬 Starting scheduler...\n");
-
-    // Start consumes the builder and returns a clone-able handle.
-    let running = scheduler.start().await?;
-
-    // MAP PHASE: Trigger all batch workflows
-    println!("🗺️  MAP PHASE: Triggering all batch workflows...\n");
-    for (batch_name, _) in &batches {
-        running.trigger(batch_name).await?;
-    }
-
-    // Wait for all workflows to complete
-    println!("\n⏳ Waiting for all workflows to complete...\n");
-
-    let mut all_complete = false;
-    for attempt in 0..60 {
-        tokio::time::sleep(Duration::from_secs(5)).await;
-
-        let workflows = running.list().await;
-        let completed_count = workflows
-            .iter()
-            .filter(|w| w.status == Status::Completed)
-            .count();
-
-        println!(
-            "  📊 Progress: {}/{} workflows completed (attempt {})",
-            completed_count,
-            workflows.len(),
-            attempt + 1
-        );
-
-        if completed_count == workflows.len() {
-            all_complete = true;
-            println!("  ✅ All workflows completed!");
-            break;
-        }
-    }
-
-    if !all_complete {
-        println!("\n⚠️  Warning: Not all workflows completed in time");
-    }
-
-    // REDUCE phase: Aggregate results from all batches
-    println!("\n🔄 REDUCE PHASE: Aggregating results from all batches...\n");
-    reduce_global_results(&global_results).await?;
-
-    // Stop scheduler — sends Stop and waits for graceful shutdown.
-    println!("\n🛑 Stopping scheduler...");
-    running.stop().await?;
-
-    println!("\n✅ Multi-level map-reduce analysis complete!");
-
-    Ok(())
-}
-
-```
-
-<h3 id="key-concepts"><a href="#key-concepts" class="anchor-link" aria-hidden="true">#</a>Key Concepts</h3>
-<div class="card-stack">
-<div class="card">
-<h3>Level 1: Workflow Split/Join</h3>
-<p><strong>Map:</strong> Each workflow splits its work into parallel tasks (e.g., 3 records processed simultaneously)</p>
-<p><strong>Reduce:</strong> Results join back together into a region summary</p>
-</div>
-<div class="card">
-<h3>Level 2: Scheduler Map/Reduce</h3>
-<p><strong>Map:</strong> Multiple workflows run concurrently, each with different parameters (different regions)</p>
-<p><strong>Reduce:</strong> After all workflows complete, aggregate results across all regions</p>
-</div>
-<div class="card">
-<h3>Shared State</h3>
-<p>Use <code>Arc&lt;RwLock&lt;&gt;&gt;</code> to collect results from all workflows into a shared global state</p>
-<p>Each workflow independently adds its summary to the global collection</p>
-</div>
-</div>
-
-<h3 id="example-output"><a href="#example-output" class="anchor-link" aria-hidden="true">#</a>Example Output</h3>
-
-```text
-🚀 Multi-Level Map-Reduce Book Analysis
-============================================================
-📚 Level 1: Workflow-level Split/Join (within each batch)
-🌐 Level 2: Scheduler-level Map-Reduce (across all batches)
-============================================================
-
-📦 Preparing 2 batches for processing
-
-  ✅ Registered workflow: Batch-A-Classics (2 books)
-  ✅ Registered workflow: Batch-B-Adventure (2 books)
-
-🎬 Starting scheduler...
-
-🗺️  MAP PHASE: Triggering all batch workflows...
-
-🎯 [Batch-A-Classics] Initializing batch with 2 books
-🎯 [Batch-B-Adventure] Initializing batch with 2 books
-  📥 [Batch-A-Classics] Downloading: Pride and Prejudice
-  📥 [Batch-A-Classics] Downloading: Alice's Adventures in Wonderland
-  📥 [Batch-B-Adventure] Downloading: Moby Dick
-  📥 [Batch-B-Adventure] Downloading: Huckleberry Finn
-  ✅ [Batch-A-Classics] Downloaded: Pride and Prejudice (717 KB)
-  ✅ [Batch-B-Adventure] Downloaded: Moby Dick (1246 KB)
-  ✅ [Batch-A-Classics] Downloaded: Alice's Adventures in Wonderland (173 KB)
-  ✅ [Batch-B-Adventure] Downloaded: Huckleberry Finn (419 KB)
-  🔍 [Batch-A-Classics] Analyzed 'Pride and Prejudice': 34 prepositions
-  🔍 [Batch-B-Adventure] Analyzed 'Moby Dick': 35 prepositions
-  🔍 [Batch-A-Classics] Analyzed 'Alice's Adventures in Wonderland': 33 prepositions
-  🔍 [Batch-B-Adventure] Analyzed 'Huckleberry Finn': 35 prepositions
-  📊 [Batch-A-Classics] Summarizing batch results...
-  ✅ [Batch-A-Classics] Batch complete: 2 books, avg 33.5 prepositions
-  📊 [Batch-B-Adventure] Summarizing batch results...
-  ✅ [Batch-B-Adventure] Batch complete: 2 books, avg 35.0 prepositions
-
-⏳ Waiting for all workflows to complete...
-
-  📊 Progress: 2/2 workflows completed (attempt 1)
-  ✅ All workflows completed!
-
-🔄 REDUCE PHASE: Aggregating results from all batches...
-
-🌐 GLOBAL REDUCE: Aggregating results from all batches
-============================================================
-
-📦 Batch Summaries:
-------------------------------------------------------------
-  Batch: Batch-A-Classics
-    • Books processed: 2
-    • Avg prepositions: 33.5
-    • Total unique prepositions: 34
-  Batch: Batch-B-Adventure
-    • Books processed: 2
-    • Avg prepositions: 35.0
-    • Total unique prepositions: 35
-
-🏆 Global Book Rankings (Top 10):
-------------------------------------------------------------
-  #1: Moby Dick [Batch-B-Adventure]
-      35 unique prepositions | 215136 total words
-  #2: Huckleberry Finn [Batch-B-Adventure]
-      35 unique prepositions | 111035 total words
-  #3: Pride and Prejudice [Batch-A-Classics]
-      34 unique prepositions | 122685 total words
-  #4: Alice's Adventures in Wonderland [Batch-A-Classics]
-      33 unique prepositions | 26444 total words
-
-📈 Global Statistics:
-------------------------------------------------------------
-  Total batches processed: 2
-  Total books analyzed: 4
-  Average prepositions per book: 34.2
-  Total unique prepositions found: 35
-
-🥇 Most diverse: Moby Dick (35 prepositions)
-🥉 Least diverse: Alice's Adventures in Wonderland (33 prepositions)
-
-🛑 Stopping scheduler...
-
-✅ Multi-level map-reduce analysis complete!
+// Level 2: the scheduler runs several batch workflows concurrently.
+let results = SharedResults::default();
+let mut scheduler = Scheduler::new();
+scheduler.manual("batch-a", batch_workflow(batch_a, results.clone()), State::Start)?;
+scheduler.manual("batch-b", batch_workflow(batch_b, results.clone()), State::Start)?;
+let running = scheduler.start().await?;
+running.trigger("batch-a")?;
+running.trigger("batch-b")?;
+// ...wait for both flows to finish, then reduce across all batch summaries in `results`.
 
 ```
 
 <div class="callout callout-tip">
 <p>
-<strong>💡 Use Case:</strong> This pattern is perfect for distributed data processing, multi-tenant systems, 
-batch ETL jobs, or any scenario where you need to process independent datasets in parallel and then 
-aggregate the results. Each workflow can have completely different parameters while sharing the aggregation logic.</p>
+The full runnable program is <code>examples/scheduler_mapreduce_books.rs</code> —
+<code>cargo run --example scheduler_mapreduce_books --features scheduler</code>. It downloads several books
+from Project Gutenberg, splits download + analysis across parallel tasks within each batch workflow, runs
+multiple batch workflows concurrently, and reduces all results into global rankings. See also
+<code>examples/scheduler_book_prepositions.rs</code> for the single-workflow variant.</p>
 </div>
 
 </div>
-

@@ -215,19 +215,13 @@ let observer: std::sync::Arc<dyn WorkflowObserver> =
 <hr class="section-divider">
 
 <h2 id="tracing-observer"><a href="#tracing-observer" class="anchor-link" aria-hidden="true">#</a>Built-in: <code>TracingObserver</code></h2>
-
-<div class="feature-banner">
-<div class="banner-icon" aria-hidden="true">⚙️</div>
-<div class="banner-content">
-<p><strong>Feature flag required</strong> — <code>TracingObserver</code> is behind the
-<code>tracing</code> feature gate (<code>features = ["tracing"]</code> or <code>features = ["all"]</code>).</p>
-</div>
-</div>
+<p class="feature-tag">Behind the <code>tracing</code> feature gate (<code>features = ["tracing"]</code>).</p>
 
 <p>
 <code>TracingObserver</code> is a ready-made observer that re-emits every hook as a
-<a href="../tracing/"><code>tracing</code></a> event under the <code>cano::observer</code> target.
-Wire it up in one line — no custom observer needed:
+<a href="../tracing/"><code>tracing</code></a> event under the <code>cano::observer</code> target — it's a
+bridge from these callbacks to the <a href="../tracing/">Tracing</a> integration's flat events (it does
+<em>not</em> reproduce the engine's nested span tree). Wire it up in one line — no custom observer needed:
 </p>
 
 ```rust

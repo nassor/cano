@@ -160,15 +160,13 @@ label doesn't match any state of <em>this</em> workflow definition.
 
 <h2 id="idempotency"><a href="#idempotency" class="anchor-link" aria-hidden="true">#</a>The Idempotency Contract</h2>
 
-<div class="feature-banner">
-<div class="banner-icon" aria-hidden="true">⚠️</div>
-<div class="banner-content">
+<div class="callout callout-warning">
+<span class="callout-label">Important</span>
 <p><strong>The task at the resumed state re-runs.</strong> The checkpoint for a state is written
 <em>before</em> its task — so when you resume, the engine cannot tell whether that task's side
 effects already happened. Tasks at and after the resume point must therefore be
 <strong>idempotent</strong>: re-running them must be safe (use upserts, dedupe keys, conditional
 writes, …). States <em>before</em> the resume point are never re-run.</p>
-</div>
 </div>
 <hr class="section-divider">
 
@@ -222,16 +220,7 @@ when a run reaches an exit state — and after a fully successful
 <hr class="section-divider">
 
 <h2 id="redb"><a href="#redb" class="anchor-link" aria-hidden="true">#</a>Built-in: <code>RedbCheckpointStore</code></h2>
-
-<div class="feature-banner">
-<div class="banner-icon" aria-hidden="true">⚙️</div>
-<div class="banner-content">
-<p><strong>Feature flag required</strong> — <code>RedbCheckpointStore</code> is behind the
-<code>recovery</code> feature gate (<code>features = ["recovery"]</code> or
-<code>features = ["all"]</code>). The <code>CheckpointStore</code> trait and <code>CheckpointRow</code>
-are always available.</p>
-</div>
-</div>
+<p class="feature-tag">Behind the <code>recovery</code> feature gate (<code>features = ["recovery"]</code>). The <code>CheckpointStore</code> trait and <code>CheckpointRow</code> are always available.</p>
 
 <p>
 <code>RedbCheckpointStore</code> is an embedded, ACID, pure-Rust key-value store

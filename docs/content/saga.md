@@ -175,16 +175,14 @@ one). All checkpoint-log clearing is best-effort: a failed <code>clear</code> is
 
 <h2 id="idempotency"><a href="#idempotency" class="anchor-link" aria-hidden="true">#</a>The Idempotency Contract</h2>
 
-<div class="feature-banner">
-<div class="banner-icon" aria-hidden="true">⚠️</div>
-<div class="banner-content">
+<div class="callout callout-warning">
+<span class="callout-label">Important</span>
 <p><strong><code>compensate</code> must be idempotent.</strong> It can run more than once for the same
 logical step — most often when a <a href="../recovery/">resume</a> re-runs a compensatable task whose
 result was already recorded, or when a re-run lands between writing the task's completion checkpoint
 and entering the next state. Use refunds keyed by transaction id, conditional releases, "if still
 reserved" checks — anything that's safe to apply twice. The forward <code>run</code> at and after a
 resume point must likewise be idempotent.</p>
-</div>
 </div>
 <hr class="section-divider">
 
