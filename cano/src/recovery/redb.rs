@@ -7,23 +7,39 @@
 //!
 //! ## Storage layout
 //!
-//! A single table, `cano_checkpoints`, maps `(workflow_id, sequence)` to the
-//! [`bincode`]-encoded [`CheckpointRow`]. redb orders composite keys element by
-//! element, so within one `workflow_id` the rows are stored — and range-scanned —
-//! in ascending `sequence` order, which is exactly what
-//! [`CheckpointStore::load_run`] must return.
+//! A single table, `cano_checkpoints`, maps `(workflow_id, sequence)` to a
+//! [`bincode`]-encoded [`StoredRow`] (the [`CheckpointRow`] fields *other than*
+//! `sequence` — which is already the second key component, so there's no need to
+//! store it twice). redb orders composite keys element by element, so within one
+//! `workflow_id` the rows are stored — and range-scanned — in ascending
+//! `sequence` order, which is exactly what [`CheckpointStore::load_run`] returns.
 
+use std::ops::RangeInclusive;
 use std::path::Path;
 use std::sync::Arc;
 
-use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+use redb::{Database, ReadableDatabase, TableDefinition};
 
 use super::{CheckpointRow, CheckpointStore};
 use crate::error::CanoError;
 use cano_macros::checkpoint_store;
 
-/// `(workflow_id, sequence) -> bincode(CheckpointRow)`.
+/// `(workflow_id, sequence) -> bincode(StoredRow)`.
 const CHECKPOINTS: TableDefinition<(&str, u64), &[u8]> = TableDefinition::new("cano_checkpoints");
+
+/// The payload half of a [`CheckpointRow`]: everything except `sequence`, which
+/// is carried by the redb key. Kept private — callers only ever see `CheckpointRow`.
+#[derive(bincode::Encode, bincode::Decode)]
+struct StoredRow {
+    state: String,
+    task_id: String,
+    output_blob: Option<Vec<u8>>,
+}
+
+/// The key range covering every row for `workflow_id`, in ascending `sequence` order.
+fn workflow_range(workflow_id: &str) -> RangeInclusive<(&str, u64)> {
+    (workflow_id, u64::MIN)..=(workflow_id, u64::MAX)
+}
 
 /// Wrap any `redb` error (they all implement [`Display`](std::fmt::Display)) as a
 /// [`CanoError::CheckpointStore`].
@@ -62,7 +78,12 @@ impl RedbCheckpointStore {
 impl CheckpointStore for RedbCheckpointStore {
     async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
         let sequence = row.sequence;
-        let bytes = bincode::encode_to_vec(&row, bincode::config::standard())
+        let payload = StoredRow {
+            state: row.state,
+            task_id: row.task_id,
+            output_blob: row.output_blob,
+        };
+        let bytes = bincode::encode_to_vec(&payload, bincode::config::standard())
             .map_err(|e| CanoError::CheckpointStore(format!("encode checkpoint row: {e}")))?;
 
         let tx = self.db.begin_write().map_err(redb_err)?;
@@ -81,17 +102,19 @@ impl CheckpointStore for RedbCheckpointStore {
         let table = tx.open_table(CHECKPOINTS).map_err(redb_err)?;
 
         let mut rows = Vec::new();
-        for entry in table
-            .range((workflow_id, u64::MIN)..=(workflow_id, u64::MAX))
-            .map_err(redb_err)?
-        {
-            let (_key, value) = entry.map_err(redb_err)?;
-            let (row, _) = bincode::decode_from_slice::<CheckpointRow, _>(
+        for entry in table.range(workflow_range(workflow_id)).map_err(redb_err)? {
+            let (key, value) = entry.map_err(redb_err)?;
+            let (payload, _) = bincode::decode_from_slice::<StoredRow, _>(
                 value.value(),
                 bincode::config::standard(),
             )
             .map_err(|e| CanoError::CheckpointStore(format!("decode checkpoint row: {e}")))?;
-            rows.push(row);
+            rows.push(CheckpointRow {
+                sequence: key.value().1,
+                state: payload.state,
+                task_id: payload.task_id,
+                output_blob: payload.output_blob,
+            });
         }
         Ok(rows)
     }
@@ -100,16 +123,9 @@ impl CheckpointStore for RedbCheckpointStore {
         let tx = self.db.begin_write().map_err(redb_err)?;
         {
             let mut table = tx.open_table(CHECKPOINTS).map_err(redb_err)?;
-            // Collect this workflow's sequences first, then remove them — redb
-            // won't let us mutate the table while a range iterator borrows it.
-            let sequences: Vec<u64> = table
-                .range((workflow_id, u64::MIN)..=(workflow_id, u64::MAX))
-                .map_err(redb_err)?
-                .map(|entry| entry.map(|(k, _)| k.value().1).map_err(redb_err))
-                .collect::<Result<Vec<_>, _>>()?;
-            for sequence in sequences {
-                table.remove((workflow_id, sequence)).map_err(redb_err)?;
-            }
+            table
+                .retain_in(workflow_range(workflow_id), |_, _| false)
+                .map_err(redb_err)?;
         }
         tx.commit().map_err(redb_err)?;
         Ok(())
@@ -137,7 +153,7 @@ mod tests {
         store
             .append(
                 "run",
-                CheckpointRow::with_output(2, "C", "t2", vec![7, 8, 9]),
+                CheckpointRow::new(2, "C", "t2").with_output(vec![7, 8, 9]),
             )
             .await
             .unwrap();

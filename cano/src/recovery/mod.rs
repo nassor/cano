@@ -38,7 +38,9 @@
 //!         Ok(())
 //!     }
 //!     async fn load_run(&self, workflow_id: &str) -> Result<Vec<CheckpointRow>, CanoError> {
-//!         Ok(self.0.lock().unwrap().get(workflow_id).cloned().unwrap_or_default())
+//!         let mut rows = self.0.lock().unwrap().get(workflow_id).cloned().unwrap_or_default();
+//!         rows.sort_by_key(|r| r.sequence); // contract: ascending by `sequence`
+//!         Ok(rows)
 //!     }
 //!     async fn clear(&self, workflow_id: &str) -> Result<(), CanoError> {
 //!         self.0.lock().unwrap().remove(workflow_id);
@@ -94,19 +96,11 @@ impl CheckpointRow {
         }
     }
 
-    /// Build a row carrying an output blob (for compensatable tasks).
-    pub fn with_output(
-        sequence: u64,
-        state: impl Into<String>,
-        task_id: impl Into<String>,
-        output_blob: Vec<u8>,
-    ) -> Self {
-        Self {
-            sequence,
-            state: state.into(),
-            task_id: task_id.into(),
-            output_blob: Some(output_blob),
-        }
+    /// Attach an output blob (for compensatable tasks whose output must be
+    /// retained for rollback). Builder-style: `CheckpointRow::new(..).with_output(bytes)`.
+    pub fn with_output(mut self, output_blob: Vec<u8>) -> Self {
+        self.output_blob = Some(output_blob);
+        self
     }
 }
 
@@ -192,7 +186,8 @@ mod tests {
         assert_eq!(bare.task_id, "worker");
         assert_eq!(bare.output_blob, None);
 
-        let carried = CheckpointRow::with_output(4, "Done", "worker", vec![1, 2, 3]);
+        let carried = CheckpointRow::new(4, "Done", "worker").with_output(vec![1, 2, 3]);
+        assert_eq!(carried.sequence, 4);
         assert_eq!(carried.output_blob.as_deref(), Some(&[1u8, 2, 3][..]));
     }
 
@@ -209,7 +204,7 @@ mod tests {
             .await
             .unwrap();
         store
-            .append("run", CheckpointRow::with_output(2, "C", "t2", vec![9]))
+            .append("run", CheckpointRow::new(2, "C", "t2").with_output(vec![9]))
             .await
             .unwrap();
 
