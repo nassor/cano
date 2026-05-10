@@ -599,7 +599,6 @@ a.card:hover {
 
 .outcome-cards .card {
     border-left: 3px solid var(--border-color);
-    padding: var(--space-6) var(--space-7);
 }
 
 .outcome-cards .card.outcome-ok { border-left-color: var(--success-color); }
