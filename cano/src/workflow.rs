@@ -84,6 +84,7 @@ use crate::error::CanoError;
 use crate::observer::WorkflowObserver;
 use crate::recovery::{CheckpointRow, CheckpointStore};
 use crate::resource::Resources;
+use crate::saga::{CompensatableTask, CompensationEntry, ErasedCompensatable};
 use crate::task::{Task, TaskResult};
 
 /// Invoke `f` for each observer in `observers`. Used at every workflow event site;
@@ -322,6 +323,15 @@ where
         configs: Arc<Vec<Arc<crate::task::TaskConfig>>>,
         join_config: Arc<JoinConfig<TState>>,
     },
+    /// Single task that records an output and can be compensated (see
+    /// [`Workflow::register_with_compensation`]).
+    CompensatableSingle {
+        /// Type-erased compensatable task — exposes the forward run (returning the next
+        /// state plus the serialized output) and the compensation.
+        task: Arc<dyn ErasedCompensatable<TState, TResourceKey>>,
+        /// Forward-run config, captured at registration time (see `Single::config`).
+        config: Arc<crate::task::TaskConfig>,
+    },
 }
 
 impl<TState, TResourceKey> Clone for StateEntry<TState, TResourceKey>
@@ -343,6 +353,10 @@ where
                 tasks: tasks.clone(),
                 configs: Arc::clone(configs),
                 join_config: join_config.clone(),
+            },
+            StateEntry::CompensatableSingle { task, config } => StateEntry::CompensatableSingle {
+                task: Arc::clone(task),
+                config: Arc::clone(config),
             },
         }
     }
@@ -381,6 +395,11 @@ where
     /// Observers notified of lifecycle and failure events. Empty by default;
     /// each event is delivered to every observer in registration order.
     observers: Vec<Arc<dyn WorkflowObserver>>,
+    /// Compensators for every state registered via [`register_with_compensation`](Self::register_with_compensation),
+    /// keyed by the task's [`name`](crate::saga::CompensatableTask::name). Used to look a
+    /// compensator up by id when draining the compensation stack — including a stack
+    /// rehydrated from a checkpoint log, where only the `task_id` string is available.
+    compensators: HashMap<String, Arc<dyn ErasedCompensatable<TState, TResourceKey>>>,
     /// Optional append-only checkpoint store. When set (alongside [`workflow_id`](Self::workflow_id)),
     /// every state entry writes a [`CheckpointRow`] before the state's task runs, so a
     /// crashed run can be resumed via [`resume_from`](Self::resume_from). `None` by default —
@@ -410,6 +429,7 @@ where
             exit_states: Vec::new(),
             validated: OnceLock::new(),
             observers: Vec::new(),
+            compensators: HashMap::new(),
             checkpoint_store: None,
             workflow_id: None,
             #[cfg(feature = "tracing")]
@@ -431,6 +451,7 @@ where
     where
         T: Task<TState, TResourceKey> + Send + Sync + 'static,
     {
+        self.forget_compensator_for(&state);
         let config = Arc::new(task.config());
         self.states.insert(
             state,
@@ -452,6 +473,7 @@ where
     where
         T: Task<TState, TResourceKey> + Send + Sync + 'static,
     {
+        self.forget_compensator_for(&state);
         let configs: Vec<Arc<crate::task::TaskConfig>> =
             tasks.iter().map(|t| Arc::new(t.config())).collect();
         let arc_tasks: Vec<Arc<dyn Task<TState, TResourceKey> + Send + Sync>> =
@@ -463,6 +485,56 @@ where
                 tasks: arc_tasks,
                 configs: Arc::new(configs),
                 join_config: Arc::new(join_config),
+            }),
+        );
+        self
+    }
+
+    /// If `state` currently holds a [`StateEntry::CompensatableSingle`], drop that task's
+    /// (now-stale) entry from the [`compensators`](Self::compensators) registry, so a later
+    /// `register*` for the same state doesn't leave a dangling compensator reachable by id.
+    fn forget_compensator_for(&mut self, state: &TState) {
+        let stale_name = if let Some(StateEntry::CompensatableSingle { task, .. }) =
+            self.states.get(state).map(|e| e.as_ref())
+        {
+            Some(task.name().into_owned())
+        } else {
+            None
+        };
+        if let Some(name) = stale_name {
+            self.compensators.remove(&name);
+        }
+    }
+
+    /// Register a [`CompensatableTask`] for a state.
+    ///
+    /// Like [`register`](Self::register), but the engine captures the task's
+    /// [`Output`](CompensatableTask::Output) when it succeeds and pushes
+    /// `(task name, serialized output)` onto the run's compensation stack. If a *later*
+    /// state's task then fails, the stack is drained in reverse and each
+    /// [`compensate`](CompensatableTask::compensate) runs. With a
+    /// [`checkpoint store`](Self::with_checkpoint_store) attached, the serialized output
+    /// is also persisted, so a [resumed](Self::resume_from) run can still compensate it.
+    ///
+    /// Replaces any handler previously registered for `state`. Infallible.
+    ///
+    /// **Compensation is supported for single-task states only** — there is no
+    /// `register_split_with_compensation` in this version.
+    pub fn register_with_compensation<T>(mut self, state: TState, task: T) -> Self
+    where
+        T: CompensatableTask<TState, TResourceKey> + 'static,
+    {
+        self.forget_compensator_for(&state);
+        let config = Arc::new(task.config());
+        let name = task.name().into_owned();
+        let erased: Arc<dyn ErasedCompensatable<TState, TResourceKey>> =
+            Arc::new(crate::saga::CompensatableAdapter(Arc::new(task)));
+        self.compensators.insert(name, Arc::clone(&erased));
+        self.states.insert(
+            state,
+            Arc::new(StateEntry::CompensatableSingle {
+                task: erased,
+                config,
             }),
         );
         self
@@ -802,26 +874,33 @@ where
         &self,
         initial_state: TState,
     ) -> Result<TState, CanoError> {
-        self.execute_workflow_from(initial_state, 0, self.workflow_id.clone())
+        self.execute_workflow_from(initial_state, 0, self.workflow_id.clone(), Vec::new())
             .await
     }
 
-    /// The FSM loop, parameterized by the starting checkpoint sequence and the
-    /// workflow id to record under. `execute_workflow` enters with `(state, 0,
-    /// self.workflow_id)`; [`resume_from`](Self::resume_from) enters with
-    /// `(resumed_state, last_sequence + 1, Some(id))`.
+    /// The FSM loop, parameterized by the starting checkpoint sequence, the workflow id
+    /// to record under, and the (possibly pre-populated, on resume) compensation stack.
+    /// `execute_workflow` enters with `(state, 0, self.workflow_id, [])`;
+    /// [`resume_from`](Self::resume_from) enters with `(resumed_state, last_sequence + 1,
+    /// Some(id), rehydrated_stack)`.
     ///
-    /// When a checkpoint store is attached, each iteration writes one
-    /// [`CheckpointRow`] for the state being entered — including the initial/
-    /// resumed state and any terminal exit state — *before* that state's task
-    /// runs. The task at the resumed state therefore re-runs on resume; tasks
-    /// must be idempotent. Split states write a single entry row, not one per
-    /// parallel task.
+    /// When a checkpoint store is attached, each iteration writes one [`CheckpointRow`]
+    /// for the state being entered — including the initial/resumed state and any terminal
+    /// exit state — *before* that state's task runs. A split is one state ⇒ one row.
+    /// A successful [compensatable](crate::saga::CompensatableTask) state writes a second,
+    /// *completion* row carrying the serialized output and pushes it onto the compensation
+    /// stack. The task at the resumed state re-runs on resume; tasks must be idempotent.
+    ///
+    /// On a terminal failure (a task error, a `Split` returned from a `Single`, a missing
+    /// handler, or a checkpoint-append failure) the compensation stack is drained — see
+    /// [`run_compensations`](Self::run_compensations). On success against a checkpoint
+    /// store, the run's log is cleared.
     async fn execute_workflow_from(
         &self,
         initial_state: TState,
         start_sequence: u64,
         workflow_id: Option<String>,
+        mut compensation_stack: Vec<CompensationEntry>,
     ) -> Result<TState, CanoError> {
         let mut current_state = initial_state;
         let mut sequence = start_sequence;
@@ -849,45 +928,67 @@ where
             // Checkpoint this state entry before touching its task. One row per
             // state — a split is one state, hence one row regardless of fan-out.
             if let Some(ref store) = self.checkpoint_store {
-                let workflow_id = workflow_id.as_deref().ok_or_else(|| {
-                    CanoError::checkpoint_store(
-                        "checkpointing requires a workflow id (call with_workflow_id)",
-                    )
-                })?;
+                let wf_id = match workflow_id.as_deref() {
+                    Some(id) => id,
+                    None => {
+                        let err = CanoError::checkpoint_store(
+                            "checkpointing requires a workflow id (call with_workflow_id)",
+                        );
+                        return self
+                            .run_compensations(workflow_id.as_deref(), compensation_stack, err)
+                            .await;
+                    }
+                };
                 // `state_label` is always `Some` here (checkpoint_store ⇒ label computed).
                 let label = state_label.as_deref().unwrap_or_default();
                 let task_id = match self.states.get(&current_state).map(|e| e.as_ref()) {
                     Some(StateEntry::Single { task, .. }) => task.name().into_owned(),
+                    Some(StateEntry::CompensatableSingle { task, .. }) => task.name().into_owned(),
                     _ => String::new(),
                 };
-                store
-                    .append(workflow_id, CheckpointRow::new(sequence, label, task_id))
+                if let Err(e) = store
+                    .append(wf_id, CheckpointRow::new(sequence, label, task_id))
                     .await
-                    .map_err(|e| CanoError::checkpoint_store(format!("append checkpoint: {e}")))?;
-                notify_observers(&self.observers, |o| o.on_checkpoint(workflow_id, sequence));
+                {
+                    let err = CanoError::checkpoint_store(format!("append checkpoint: {e}"));
+                    return self
+                        .run_compensations(workflow_id.as_deref(), compensation_stack, err)
+                        .await;
+                }
+                notify_observers(&self.observers, |o| o.on_checkpoint(wf_id, sequence));
                 sequence += 1;
             }
 
-            // Check if we've reached an exit state
+            // Reached an exit state — the run succeeded. Clear the log (best-effort) and return.
             if self.exit_states.contains(&current_state) {
                 #[cfg(feature = "tracing")]
                 info!(final_state = ?current_state, "Workflow completed successfully");
+                self.clear_checkpoint_log(workflow_id.as_deref()).await;
                 return Ok(current_state);
             }
 
-            // Get the state entry — borrow from map, clone only the Arc handles
-            let state_entry = self.states.get(&current_state).ok_or_else(|| {
-                CanoError::workflow(format!("No task registered for state: {:?}", current_state))
-            })?;
+            // Get the state entry — borrow from the map, clone only Arc handles below.
+            let state_entry = match self.states.get(&current_state) {
+                Some(e) => e,
+                None => {
+                    let err = CanoError::workflow(format!(
+                        "No task registered for state: {:?}",
+                        current_state
+                    ));
+                    return self
+                        .run_compensations(workflow_id.as_deref(), compensation_stack, err)
+                        .await;
+                }
+            };
 
             #[cfg(feature = "tracing")]
             debug!(current_state = ?current_state, "Executing state");
 
-            // Execute based on entry type — deref the Arc then clone only the inner Arc handles
-            current_state = match state_entry.as_ref() {
+            // Dispatch by entry type. Any `Err` triggers a compensation drain.
+            let step: Result<TState, CanoError> = match state_entry.as_ref() {
                 StateEntry::Single { task, config } => {
                     self.execute_single_task(task.clone(), Arc::clone(config))
-                        .await?
+                        .await
                 }
                 StateEntry::Split {
                     tasks,
@@ -895,10 +996,197 @@ where
                     join_config,
                 } => {
                     self.execute_split_join(tasks.clone(), Arc::clone(configs), join_config.clone())
-                        .await?
+                        .await
+                }
+                StateEntry::CompensatableSingle { task, config } => {
+                    match self
+                        .execute_compensatable_task(task.clone(), Arc::clone(config))
+                        .await
+                    {
+                        Ok((next_state, output_blob)) => {
+                            let task_name = task.name().into_owned();
+                            // Persist a completion row carrying the output so a resumed
+                            // run rehydrates this compensation entry.
+                            if let (Some(store), Some(wf_id)) =
+                                (&self.checkpoint_store, workflow_id.as_deref())
+                            {
+                                let label = state_label.as_deref().unwrap_or_default();
+                                let row = CheckpointRow::new(sequence, label, task_name.clone())
+                                    .with_output(output_blob.clone());
+                                if let Err(e) = store.append(wf_id, row).await {
+                                    let err = CanoError::checkpoint_store(format!(
+                                        "append compensation checkpoint: {e}"
+                                    ));
+                                    compensation_stack.push(CompensationEntry {
+                                        task_id: task_name,
+                                        output_blob,
+                                    });
+                                    return self
+                                        .run_compensations(
+                                            workflow_id.as_deref(),
+                                            compensation_stack,
+                                            err,
+                                        )
+                                        .await;
+                                }
+                                notify_observers(&self.observers, |o| {
+                                    o.on_checkpoint(wf_id, sequence)
+                                });
+                                sequence += 1;
+                            }
+                            compensation_stack.push(CompensationEntry {
+                                task_id: task_name,
+                                output_blob,
+                            });
+                            Ok(next_state)
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+            };
+
+            current_state = match step {
+                Ok(s) => s,
+                Err(e) => {
+                    return self
+                        .run_compensations(workflow_id.as_deref(), compensation_stack, e)
+                        .await;
                 }
             };
         }
+    }
+
+    /// Drain the compensation stack (LIFO) after a terminal workflow failure.
+    ///
+    /// Each entry's [`compensate`](crate::saga::CompensatableTask::compensate) runs;
+    /// errors are collected and the drain never stops early. If every compensation
+    /// succeeds, `original` is returned unchanged and — when a checkpoint store is
+    /// attached — its log is cleared. If any compensation fails (including a stack entry
+    /// with no matching registered compensator), the result is
+    /// [`CanoError::CompensationFailed`] carrying `original` followed by every
+    /// compensation error, and the log is left intact for manual recovery. An empty stack
+    /// is a no-op: `original` is returned and nothing is cleared.
+    async fn run_compensations(
+        &self,
+        workflow_id: Option<&str>,
+        mut stack: Vec<CompensationEntry>,
+        original: CanoError,
+    ) -> Result<TState, CanoError> {
+        if stack.is_empty() {
+            return Err(original);
+        }
+        let mut errors = vec![original];
+        while let Some(entry) = stack.pop() {
+            match self.compensators.get(&entry.task_id) {
+                None => errors.push(CanoError::workflow(format!(
+                    "no compensator registered for task {:?} — cannot roll it back",
+                    entry.task_id
+                ))),
+                Some(compensator) => {
+                    #[cfg(feature = "tracing")]
+                    debug!(task_id = %entry.task_id, "compensating");
+                    if let Err(e) = compensator
+                        .compensate(&self.resources, &entry.output_blob)
+                        .await
+                    {
+                        #[cfg(feature = "tracing")]
+                        tracing::error!(task_id = %entry.task_id, error = %e, "compensation failed");
+                        errors.push(e);
+                    }
+                }
+            }
+        }
+        if errors.len() == 1 {
+            // Clean rollback — clear the log (best-effort), surface the original error.
+            self.clear_checkpoint_log(workflow_id).await;
+            Err(errors
+                .into_iter()
+                .next()
+                .expect("errors has exactly one element"))
+        } else {
+            Err(CanoError::compensation_failed(errors))
+        }
+    }
+
+    /// Best-effort `clear` on the checkpoint store: a successful run, or a run that was
+    /// fully rolled back, shouldn't leave a recovery log behind — but a hiccup cleaning
+    /// it up shouldn't turn the run's result into an error, so a `clear` failure is logged
+    /// and swallowed. No-op when no store or no workflow id is in play.
+    async fn clear_checkpoint_log(&self, workflow_id: Option<&str>) {
+        let Some((store, wf_id)) = self.checkpoint_store.as_ref().zip(workflow_id) else {
+            return;
+        };
+        #[cfg(feature = "tracing")]
+        if let Err(e) = store.clear(wf_id).await {
+            tracing::warn!(workflow_id = %wf_id, error = %e, "failed to clear checkpoint log");
+        }
+        #[cfg(not(feature = "tracing"))]
+        let _ = store.clear(wf_id).await;
+    }
+
+    async fn execute_compensatable_task(
+        &self,
+        task: Arc<dyn ErasedCompensatable<TState, TResourceKey>>,
+        config: Arc<crate::task::TaskConfig>,
+    ) -> Result<(TState, Vec<u8>), CanoError> {
+        use crate::task::run_with_retries;
+
+        let observers = self.observer_slice();
+        let task_name = task.name();
+        if let Some(ref slice) = observers {
+            notify_observers(slice, |o| o.on_task_start(task_name.as_ref()));
+        }
+        let config = Self::config_with_observers(&config, &observers, &task_name);
+
+        #[cfg(feature = "tracing")]
+        let task_span = if tracing::enabled!(tracing::Level::INFO) {
+            info_span!("compensatable_task_execution")
+        } else {
+            tracing::Span::none()
+        };
+
+        let run_future = async {
+            run_with_retries(&config, || {
+                let task_clone = task.clone();
+                let resources_clone = Arc::clone(&self.resources);
+                async move { task_clone.run(&*resources_clone).await }
+            })
+            .await
+        };
+
+        #[cfg(feature = "tracing")]
+        let unwind_result = {
+            let _enter = task_span.enter();
+            AssertUnwindSafe(run_future).catch_unwind().await
+        };
+        #[cfg(not(feature = "tracing"))]
+        let unwind_result = AssertUnwindSafe(run_future).catch_unwind().await;
+
+        let result: Result<(TaskResult<TState>, Vec<u8>), CanoError> = match unwind_result {
+            Ok(inner) => inner,
+            Err(payload) => {
+                let payload_str = panic_payload_message(&*payload);
+                #[cfg(feature = "tracing")]
+                tracing::error!(panic = %payload_str, "Compensatable task panicked");
+                Err(CanoError::task_execution(format!("panic: {payload_str}")))
+            }
+        };
+
+        let outcome: Result<(TState, Vec<u8>), CanoError> = match result {
+            Ok((TaskResult::Single(next_state), blob)) => Ok((next_state, blob)),
+            Ok((TaskResult::Split(_), _)) => Err(CanoError::workflow(
+                "Compensatable task returned a split result — split states cannot be compensatable",
+            )),
+            Err(e) => Err(e),
+        };
+
+        if let Some(ref slice) = observers {
+            match &outcome {
+                Ok(_) => notify_observers(slice, |o| o.on_task_success(task_name.as_ref())),
+                Err(e) => notify_observers(slice, |o| o.on_task_failure(task_name.as_ref(), e)),
+            }
+        }
+        outcome
     }
 
     /// Map a checkpoint state label (the `Debug` rendering of a `TState`) back to
@@ -927,8 +1215,9 @@ where
     /// [`orchestrate`](Self::orchestrate). Subsequent checkpoint rows are recorded
     /// under the same `workflow_id` and continue the sequence.
     ///
-    /// `output_blob`s carried on the loaded rows are not yet consumed (they will feed
-    /// the compensation stack once that lands).
+    /// The [compensation stack](crate::saga) is rehydrated from the loaded rows: every
+    /// row that carries an `output_blob` becomes a stack entry (in sequence order), so a
+    /// failure after the resume point can still compensate work done before the crash.
     ///
     /// # Errors
     ///
@@ -980,14 +1269,32 @@ where
         })?;
         let start_sequence = last.sequence + 1;
 
+        // Rehydrate the compensation stack from rows carrying an output blob. `rows` is
+        // ascending by sequence (the `load_run` contract), so the stack is in the right
+        // order for a LIFO drain.
+        let compensation_stack: Vec<CompensationEntry> = rows
+            .iter()
+            .filter_map(|r| {
+                r.output_blob.as_ref().map(|blob| CompensationEntry {
+                    task_id: r.task_id.clone(),
+                    output_blob: blob.clone(),
+                })
+            })
+            .collect();
+
         #[cfg(feature = "tracing")]
-        info!(workflow_id = %workflow_id, resume_state = ?resume_state, last_sequence = last.sequence, "Resuming workflow from checkpoint");
+        info!(workflow_id = %workflow_id, resume_state = ?resume_state, last_sequence = last.sequence, compensation_entries = compensation_stack.len(), "Resuming workflow from checkpoint");
         notify_observers(&self.observers, |o| {
             o.on_resume(&workflow_id, last.sequence)
         });
 
         self.resources.setup_all().await?;
-        let exec = self.execute_workflow_from(resume_state, start_sequence, Some(workflow_id));
+        let exec = self.execute_workflow_from(
+            resume_state,
+            start_sequence,
+            Some(workflow_id),
+            compensation_stack,
+        );
         let result = if let Some(timeout_duration) = self.workflow_timeout {
             match tokio::time::timeout(timeout_duration, exec).await {
                 Ok(result) => result,
@@ -1399,6 +1706,7 @@ where
             // Fresh OnceLock: cloned workflows re-validate on first orchestrate.
             validated: OnceLock::new(),
             observers: self.observers.clone(),
+            compensators: self.compensators.clone(),
             checkpoint_store: self.checkpoint_store.clone(),
             workflow_id: self.workflow_id.clone(),
             #[cfg(feature = "tracing")]
@@ -1461,6 +1769,10 @@ where
             .field("workflow_timeout", &self.workflow_timeout)
             .field("workflow_id", &self.workflow_id)
             .field("checkpoint_store", &self.checkpoint_store.is_some())
+            .field(
+                "compensators",
+                &format!("{} compensators", self.compensators.len()),
+            )
             .finish()
     }
 }
@@ -2798,14 +3110,24 @@ mod tests {
     use crate::recovery::{CheckpointRow, CheckpointStore};
     use std::sync::Mutex;
 
-    /// In-memory [`CheckpointStore`] for workflow tests.
+    /// In-memory [`CheckpointStore`] test double. `live` is the real store state (`clear`
+    /// empties it); `audit` records every row ever appended, in order, and is *never*
+    /// cleared — so tests can inspect what was written even after a successful run cleared
+    /// the live log. (Linear scans; fine for the tiny test scenarios here, not for scale.)
     #[derive(Default)]
-    struct MemCheckpoints(Mutex<HashMap<String, Vec<CheckpointRow>>>);
+    struct MemCheckpoints {
+        live: Mutex<HashMap<String, Vec<CheckpointRow>>>,
+        audit: Mutex<Vec<(String, CheckpointRow)>>,
+    }
 
     #[cano_macros::checkpoint_store]
     impl CheckpointStore for MemCheckpoints {
         async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
-            self.0
+            self.audit
+                .lock()
+                .unwrap()
+                .push((workflow_id.to_string(), row.clone()));
+            self.live
                 .lock()
                 .unwrap()
                 .entry(workflow_id.to_string())
@@ -2817,15 +3139,16 @@ mod tests {
             Ok(self.rows(workflow_id))
         }
         async fn clear(&self, workflow_id: &str) -> Result<(), CanoError> {
-            self.0.lock().unwrap().remove(workflow_id);
+            self.live.lock().unwrap().remove(workflow_id);
             Ok(())
         }
     }
 
     impl MemCheckpoints {
+        /// Live rows for `workflow_id`, sorted by sequence (empty after a `clear`).
         fn rows(&self, workflow_id: &str) -> Vec<CheckpointRow> {
             let mut rows = self
-                .0
+                .live
                 .lock()
                 .unwrap()
                 .get(workflow_id)
@@ -2834,8 +3157,18 @@ mod tests {
             rows.sort_by_key(|r| r.sequence);
             rows
         }
-        fn states(&self, workflow_id: &str) -> Vec<(u64, String)> {
-            self.rows(workflow_id)
+        /// Every row ever appended for `workflow_id`, in append order — survives `clear`.
+        fn audit_rows(&self, workflow_id: &str) -> Vec<CheckpointRow> {
+            self.audit
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(id, _)| id == workflow_id)
+                .map(|(_, r)| r.clone())
+                .collect()
+        }
+        fn audit_states(&self, workflow_id: &str) -> Vec<(u64, String)> {
+            self.audit_rows(workflow_id)
                 .into_iter()
                 .map(|r| (r.sequence, r.state))
                 .collect()
@@ -2882,14 +3215,14 @@ mod tests {
 
         // One row per state entered, in order — including the terminal exit state.
         assert_eq!(
-            store.states("run-1"),
+            store.audit_states("run-1"),
             vec![
                 (0, "Start".to_string()),
                 (1, "Process".to_string()),
                 (2, "Complete".to_string()),
             ]
         );
-        let rows = store.rows("run-1");
+        let rows = store.audit_rows("run-1");
         assert!(
             !rows[0].task_id.is_empty() && !rows[1].task_id.is_empty(),
             "rows for registered states carry the task name"
@@ -2898,6 +3231,8 @@ mod tests {
             rows[2].task_id.is_empty(),
             "the exit state has no task, so its row's task_id is empty"
         );
+        // A successful run clears its live log.
+        assert!(store.rows("run-1").is_empty());
     }
 
     #[tokio::test]
@@ -2956,7 +3291,7 @@ mod tests {
 
         // Continuation appended rows from sequence 2 onward (re-entering `Process`, then `Complete`).
         assert_eq!(
-            store.states("run-2"),
+            store.audit_states("run-2"),
             vec![
                 (0, "Start".to_string()),
                 (1, "Process".to_string()),
@@ -3021,14 +3356,14 @@ mod tests {
         );
 
         // The 5-way split is one state ⇒ one entry row, not five.
-        let rows = store.rows("split-run");
+        let rows = store.audit_rows("split-run");
         assert_eq!(
             rows.iter().filter(|r| r.state == "Start").count(),
             1,
             "the split state is checkpointed exactly once"
         );
         assert_eq!(
-            store.states("split-run"),
+            store.audit_states("split-run"),
             vec![(0, "Start".to_string()), (1, "Complete".to_string())]
         );
         assert!(
@@ -3079,5 +3414,308 @@ mod tests {
         let err = workflow.resume_from("wrong-defn").await.unwrap_err();
         assert_eq!(err.category(), "workflow");
         assert!(err.message().contains("is not a registered or exit state"));
+    }
+
+    // ---- Saga / compensation ----
+
+    use crate::task::TaskConfig;
+    use cano_macros::compensatable_task;
+
+    /// Shared, ordered log of `(task name, output value)` for every `compensate` call.
+    type CompLog = Arc<Mutex<Vec<(String, u32)>>>;
+
+    /// A compensatable test task. Its forward `run` returns `next_state` and `value`
+    /// (unless `fail_forward`); `compensate` records `(name, output)` onto `log` (and
+    /// errors if `fail_compensate`). No retries, so a forward failure surfaces immediately.
+    #[derive(Clone)]
+    struct CompTask {
+        name: &'static str,
+        value: u32,
+        next_state: TestState,
+        log: CompLog,
+        fail_forward: bool,
+        fail_compensate: bool,
+    }
+
+    impl CompTask {
+        fn ok(name: &'static str, value: u32, next_state: TestState, log: &CompLog) -> Self {
+            Self {
+                name,
+                value,
+                next_state,
+                log: log.clone(),
+                fail_forward: false,
+                fail_compensate: false,
+            }
+        }
+    }
+
+    #[compensatable_task]
+    impl CompensatableTask<TestState> for CompTask {
+        type Output = u32;
+        fn config(&self) -> TaskConfig {
+            TaskConfig::minimal()
+        }
+        fn name(&self) -> Cow<'static, str> {
+            Cow::Borrowed(self.name)
+        }
+        async fn run(&self, _res: &Resources) -> Result<(TaskResult<TestState>, u32), CanoError> {
+            if self.fail_forward {
+                return Err(CanoError::task_execution(format!(
+                    "{} forward failed",
+                    self.name
+                )));
+            }
+            Ok((TaskResult::Single(self.next_state.clone()), self.value))
+        }
+        async fn compensate(&self, _res: &Resources, output: u32) -> Result<(), CanoError> {
+            self.log
+                .lock()
+                .unwrap()
+                .push((self.name.to_string(), output));
+            if self.fail_compensate {
+                return Err(CanoError::generic(format!(
+                    "{} compensate failed",
+                    self.name
+                )));
+            }
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn compensations_run_in_reverse_on_terminal_failure() {
+        let log: CompLog = Arc::new(Mutex::new(Vec::new()));
+        let workflow = Workflow::bare()
+            .register_with_compensation(
+                TestState::Start,
+                CompTask::ok("A", 1, TestState::Process, &log),
+            )
+            .register_with_compensation(
+                TestState::Process,
+                CompTask::ok("B", 2, TestState::Split, &log),
+            )
+            .register_with_compensation(
+                TestState::Split,
+                CompTask::ok("C", 3, TestState::Join, &log),
+            )
+            .register_with_compensation(
+                TestState::Join,
+                CompTask {
+                    name: "D",
+                    value: 4,
+                    next_state: TestState::Complete,
+                    log: log.clone(),
+                    fail_forward: true,
+                    fail_compensate: false,
+                },
+            )
+            .add_exit_state(TestState::Complete);
+
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        // Clean rollback → the original failure is surfaced unchanged.
+        assert_eq!(err.category(), "task_execution");
+        assert_eq!(err.message(), "D forward failed");
+        // A, B, C were compensated in reverse registration order. D failed forward, so it
+        // never produced an output and is not on the stack.
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                ("C".to_string(), 3),
+                ("B".to_string(), 2),
+                ("A".to_string(), 1),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn only_compensatable_tasks_are_compensated() {
+        let log: CompLog = Arc::new(Mutex::new(Vec::new()));
+        let workflow = Workflow::bare()
+            .register_with_compensation(
+                TestState::Start,
+                CompTask::ok("A", 10, TestState::Process, &log),
+            )
+            // Plain task — produces no compensation-stack entry.
+            .register(TestState::Process, SimpleTask::new(TestState::Split))
+            .register_with_compensation(
+                TestState::Split,
+                CompTask::ok("C", 30, TestState::Join, &log),
+            )
+            .register_with_compensation(
+                TestState::Join,
+                CompTask {
+                    name: "D",
+                    value: 40,
+                    next_state: TestState::Complete,
+                    log: log.clone(),
+                    fail_forward: true,
+                    fail_compensate: false,
+                },
+            )
+            .add_exit_state(TestState::Complete);
+
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        assert_eq!(err.message(), "D forward failed");
+        // Only the two compensatable tasks rolled back — the plain `Process` task didn't.
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![("C".to_string(), 30), ("A".to_string(), 10)]
+        );
+    }
+
+    #[tokio::test]
+    async fn compensation_failure_aggregates_errors_and_keeps_going() {
+        let log: CompLog = Arc::new(Mutex::new(Vec::new()));
+        let workflow = Workflow::bare()
+            .register_with_compensation(
+                TestState::Start,
+                CompTask::ok("A", 1, TestState::Process, &log),
+            )
+            .register_with_compensation(
+                TestState::Process,
+                CompTask {
+                    name: "B",
+                    value: 2,
+                    next_state: TestState::Split,
+                    log: log.clone(),
+                    fail_forward: false,
+                    fail_compensate: true, // B's compensate errors
+                },
+            )
+            .register_with_compensation(
+                TestState::Split,
+                CompTask::ok("C", 3, TestState::Join, &log),
+            )
+            .register_with_compensation(
+                TestState::Join,
+                CompTask {
+                    name: "D",
+                    value: 4,
+                    next_state: TestState::Complete,
+                    log: log.clone(),
+                    fail_forward: true,
+                    fail_compensate: false,
+                },
+            )
+            .add_exit_state(TestState::Complete);
+
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        match err {
+            CanoError::CompensationFailed { errors } => {
+                // [original (D forward failed), B's compensate failure].
+                assert_eq!(errors.len(), 2);
+                assert_eq!(errors[0].message(), "D forward failed");
+                assert!(errors[1].message().contains("B compensate failed"));
+            }
+            other => panic!("expected CompensationFailed, got {other:?}"),
+        }
+        // All three compensations ran (C, B, A) even though B's errored.
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                ("C".to_string(), 3),
+                ("B".to_string(), 2),
+                ("A".to_string(), 1),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_rehydrates_compensation_stack_and_rolls_back() {
+        let store = Arc::new(MemCheckpoints::default());
+        let log: CompLog = Arc::new(Mutex::new(Vec::new()));
+
+        // Seed a log as if a previous process: entered Start, ran compensatable A (output 7),
+        // entered Process, ran compensatable B (output 8), entered Split — then crashed
+        // before C ran.
+        store
+            .append("saga-run", CheckpointRow::new(0, "Start", "A"))
+            .await
+            .unwrap();
+        store
+            .append(
+                "saga-run",
+                CheckpointRow::new(1, "Start", "A").with_output(serde_json::to_vec(&7u32).unwrap()),
+            )
+            .await
+            .unwrap();
+        store
+            .append("saga-run", CheckpointRow::new(2, "Process", "B"))
+            .await
+            .unwrap();
+        store
+            .append(
+                "saga-run",
+                CheckpointRow::new(3, "Process", "B")
+                    .with_output(serde_json::to_vec(&8u32).unwrap()),
+            )
+            .await
+            .unwrap();
+        store
+            .append("saga-run", CheckpointRow::new(4, "Split", "C"))
+            .await
+            .unwrap();
+
+        let workflow = Workflow::bare()
+            .register_with_compensation(
+                TestState::Start,
+                CompTask::ok("A", 7, TestState::Process, &log),
+            )
+            .register_with_compensation(
+                TestState::Process,
+                CompTask::ok("B", 8, TestState::Split, &log),
+            )
+            .register_with_compensation(
+                TestState::Split,
+                CompTask {
+                    name: "C",
+                    value: 9,
+                    next_state: TestState::Join,
+                    log: log.clone(),
+                    fail_forward: true, // C fails when re-run on resume
+                    fail_compensate: false,
+                },
+            )
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone());
+
+        let err = workflow.resume_from("saga-run").await.unwrap_err();
+        assert_eq!(err.message(), "C forward failed");
+        // The rehydrated stack [A=7, B=8] drains in reverse, using the outputs persisted
+        // before the crash. C never produced an output (it failed forward).
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![("B".to_string(), 8), ("A".to_string(), 7)]
+        );
+    }
+
+    #[test]
+    fn re_registering_a_state_drops_the_stale_compensator() {
+        let log: CompLog = Arc::new(Mutex::new(Vec::new()));
+        // Replacing a compensatable state with a different compensatable task.
+        let workflow = Workflow::bare()
+            .register_with_compensation(
+                TestState::Start,
+                CompTask::ok("A", 1, TestState::Process, &log),
+            )
+            .register_with_compensation(
+                TestState::Start,
+                CompTask::ok("A2", 2, TestState::Process, &log),
+            );
+        assert!(
+            !workflow.compensators.contains_key("A"),
+            "the replaced task's compensator must not linger"
+        );
+        assert!(workflow.compensators.contains_key("A2"));
+
+        // Replacing a compensatable state with a plain `register` also drops it.
+        let workflow = Workflow::bare()
+            .register_with_compensation(
+                TestState::Start,
+                CompTask::ok("B", 1, TestState::Process, &log),
+            )
+            .register(TestState::Start, SimpleTask::new(TestState::Process));
+        assert!(!workflow.compensators.contains_key("B"));
     }
 }

@@ -148,6 +148,18 @@
 //! `RedbCheckpointStore` is a ready-made embedded, ACID implementation. Workflows
 //! without a checkpoint store pay nothing. See the `workflow_recovery` example.
 //!
+//! ### Sagas & Compensation
+//!
+//! For steps that mutate external systems, implement [`CompensatableTask`] (its `run`
+//! returns the next state *and* an `Output`; its `compensate` undoes the step given that
+//! `Output`) and register it with [`Workflow::register_with_compensation`]. The engine
+//! keeps a per-run compensation stack; if a later state fails, it drains the stack in
+//! reverse and runs each `compensate`. A clean rollback returns the original error (and
+//! clears the checkpoint log if one is attached); a failed `compensate` produces
+//! [`CanoError::CompensationFailed`] with the original error plus every compensation
+//! error. With a checkpoint store, outputs are persisted, so a resumed run can still
+//! compensate work done before the crash. See the `saga_payment` example.
+//!
 //! ## Processing Lifecycle
 //!
 //! **Task**: Single `run()` method — full control over execution flow.
@@ -166,6 +178,7 @@
 //! - [`mod@resource`]: [`Resource`] trait, [`Resources`] dictionary, and [`HealthStatus`] — lifecycle-aware resource management and health probes
 //! - [`observer`]: [`WorkflowObserver`] — synchronous lifecycle/failure event hooks (and [`TracingObserver`], behind the `tracing` feature)
 //! - [`recovery`]: [`CheckpointStore`] / [`CheckpointRow`] — append-only checkpoint log for crash recovery (and `RedbCheckpointStore`, behind the `recovery` feature)
+//! - [`saga`]: [`CompensatableTask`] — pair a forward step with a compensating action; failures roll back via [`Workflow::register_with_compensation`]
 //! - [`store`]: [`MemoryStore`] — a typed in-memory store that implements [`Resource`]
 //! - [`error`]: [`CanoError`] variants and the [`CanoResult`] alias
 //!
@@ -181,6 +194,7 @@ pub mod node;
 pub mod observer;
 pub mod recovery;
 pub mod resource;
+pub mod saga;
 pub mod store;
 pub mod task;
 pub mod workflow;
@@ -198,6 +212,7 @@ pub use node::{DefaultNodeResult, DynNode, Node, NodeObject};
 pub use observer::WorkflowObserver;
 pub use recovery::{CheckpointRow, CheckpointStore};
 pub use resource::{HealthStatus, Resource, Resources};
+pub use saga::{CompensatableTask, ErasedCompensatable};
 
 #[cfg(feature = "recovery")]
 pub use recovery::RedbCheckpointStore;
@@ -241,6 +256,13 @@ pub use cano_macros::resource;
 /// differs only in name.
 pub use cano_macros::checkpoint_store;
 
+/// Attribute macro applied to the `CompensatableTask` trait definition and
+/// `impl CompensatableTask` blocks.
+///
+/// See [`macro@task`] for the rewrite shape; this macro is functionally identical and
+/// differs only in name.
+pub use cano_macros::compensatable_task;
+
 /// Derive macro that generates a `from_resources` associated function for a struct.
 ///
 /// See [`FromResources`] for the full specification. Each
@@ -266,9 +288,10 @@ pub mod prelude {
 
     pub use crate::{
         CanoError, CanoResult, CheckpointRow, CheckpointStore, CircuitBreaker, CircuitPermit,
-        CircuitPolicy, CircuitState, DefaultNodeResult, HealthStatus, JoinConfig, JoinStrategy,
-        MemoryStore, Node, Resource, Resources, RetryMode, SplitResult, SplitTaskResult,
-        StateEntry, Task, TaskConfig, TaskObject, TaskResult, Workflow, WorkflowObserver,
+        CircuitPolicy, CircuitState, CompensatableTask, DefaultNodeResult, HealthStatus,
+        JoinConfig, JoinStrategy, MemoryStore, Node, Resource, Resources, RetryMode, SplitResult,
+        SplitTaskResult, StateEntry, Task, TaskConfig, TaskObject, TaskResult, Workflow,
+        WorkflowObserver,
     };
 
     #[cfg(feature = "scheduler")]
@@ -281,7 +304,7 @@ pub mod prelude {
     pub use crate::RedbCheckpointStore;
 
     // Re-export the cano async-trait macros for convenience.
-    pub use crate::{checkpoint_store, node, resource, task};
+    pub use crate::{checkpoint_store, compensatable_task, node, resource, task};
 
     // Re-export derive macros alongside their trait counterparts. Rust's separate
     // macro and type namespaces let the derive `Resource` coexist with the

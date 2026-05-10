@@ -32,6 +32,7 @@
 //! | `Timeout` | Per-attempt timeout reached | Increase `attempt_timeout` or speed up the task |
 //! | `CircuitOpen` | Circuit breaker rejected the call | Wait for the breaker's `reset_timeout` or fix the upstream dependency |
 //! | `CheckpointStore` | Checkpoint persistence failed | Check the recovery store backend (disk, permissions, encoding) |
+//! | `CompensationFailed` | A `compensate` run failed during rollback | Inspect the aggregated errors; the original failure is `errors[0]` |
 //! | `Generic` | General errors | Check the specific error message |
 //!
 //! ## Using Errors in Your Nodes
@@ -207,6 +208,18 @@ pub enum CanoError {
     /// problem, or a row that fails to encode/decode.
     CheckpointStore(String),
 
+    /// A workflow failed and at least one [`compensate`](crate::saga::CompensatableTask::compensate)
+    /// run also failed while rolling it back.
+    ///
+    /// `errors[0]` is the original failure that triggered compensation; `errors[1..]`
+    /// are the compensation errors, in the order they occurred (LIFO over the
+    /// compensation stack). A clean rollback — every `compensate` succeeded — does *not*
+    /// produce this variant: the original error is returned unchanged instead.
+    CompensationFailed {
+        /// The original failure followed by every compensation error.
+        errors: Vec<CanoError>,
+    },
+
     /// General-purpose error for other scenarios
     ///
     /// Use this for errors that don't fit the other categories.
@@ -274,6 +287,12 @@ impl CanoError {
         CanoError::CheckpointStore(msg.into())
     }
 
+    /// Create a new compensation-failed error from the original failure plus the
+    /// compensation errors (the convention is `errors[0]` = original failure).
+    pub fn compensation_failed(errors: Vec<CanoError>) -> Self {
+        CanoError::CompensationFailed { errors }
+    }
+
     /// Create a new generic error
     pub fn generic<S: Into<String>>(msg: S) -> Self {
         CanoError::Generic(msg.into())
@@ -307,6 +326,9 @@ impl CanoError {
             CanoError::Timeout(msg) => msg,
             CanoError::CircuitOpen(msg) => msg,
             CanoError::CheckpointStore(msg) => msg,
+            CanoError::CompensationFailed { errors } => errors
+                .first()
+                .map_or("compensation failed", CanoError::message),
             CanoError::Generic(msg) => msg,
             CanoError::ResourceNotFound(msg) => msg,
             CanoError::ResourceTypeMismatch(msg) => msg,
@@ -327,6 +349,7 @@ impl CanoError {
             CanoError::Timeout(_) => "timeout",
             CanoError::CircuitOpen(_) => "circuit_open",
             CanoError::CheckpointStore(_) => "checkpoint_store",
+            CanoError::CompensationFailed { .. } => "compensation_failed",
             CanoError::Generic(_) => "generic",
             CanoError::ResourceNotFound(_) => "resource_not_found",
             CanoError::ResourceTypeMismatch(_) => "resource_type_mismatch",
@@ -348,6 +371,17 @@ impl std::fmt::Display for CanoError {
             CanoError::Timeout(msg) => write!(f, "Timeout error: {msg}"),
             CanoError::CircuitOpen(msg) => write!(f, "Circuit open: {msg}"),
             CanoError::CheckpointStore(msg) => write!(f, "Checkpoint store error: {msg}"),
+            CanoError::CompensationFailed { errors } => {
+                write!(f, "Compensation failed ({} error(s))", errors.len())?;
+                for (i, e) in errors.iter().enumerate() {
+                    if i == 0 {
+                        write!(f, "; original: {e}")?;
+                    } else {
+                        write!(f, "; compensation #{i}: {e}")?;
+                    }
+                }
+                Ok(())
+            }
             CanoError::Generic(msg) => write!(f, "Error: {msg}"),
             CanoError::ResourceNotFound(msg) => write!(f, "Resource not found: {msg}"),
             CanoError::ResourceTypeMismatch(msg) => write!(f, "Resource type mismatch: {msg}"),
@@ -371,6 +405,10 @@ impl PartialEq for CanoError {
             (CanoError::Timeout(a), CanoError::Timeout(b)) => a == b,
             (CanoError::CircuitOpen(a), CanoError::CircuitOpen(b)) => a == b,
             (CanoError::CheckpointStore(a), CanoError::CheckpointStore(b)) => a == b,
+            (
+                CanoError::CompensationFailed { errors: a },
+                CanoError::CompensationFailed { errors: b },
+            ) => a == b,
             (CanoError::Generic(a), CanoError::Generic(b)) => a == b,
             (CanoError::ResourceNotFound(a), CanoError::ResourceNotFound(b)) => a == b,
             (CanoError::ResourceTypeMismatch(a), CanoError::ResourceTypeMismatch(b)) => a == b,
@@ -645,6 +683,45 @@ mod tests {
         let circuit = CanoError::circuit_open("x");
         let checkpoint = CanoError::checkpoint_store("x");
         assert_ne!(circuit, checkpoint);
+    }
+
+    #[test]
+    fn test_compensation_failed_constructor_category_and_message() {
+        let err = CanoError::compensation_failed(vec![
+            CanoError::task_execution("charge declined"),
+            CanoError::generic("refund timed out"),
+        ]);
+        assert_eq!(err.category(), "compensation_failed");
+        // message() surfaces the original failure (errors[0]).
+        assert_eq!(err.message(), "charge declined");
+        let shown = format!("{err}");
+        assert!(shown.contains("Compensation failed (2 error(s))"));
+        assert!(shown.contains("original: Task execution error: charge declined"));
+        assert!(shown.contains("compensation #1: Error: refund timed out"));
+
+        // Empty-vec edge case: message() falls back to a static string.
+        assert_eq!(
+            CanoError::compensation_failed(vec![]).message(),
+            "compensation failed"
+        );
+    }
+
+    #[test]
+    fn test_compensation_failed_partial_eq() {
+        let a = CanoError::compensation_failed(vec![CanoError::generic("x")]);
+        let b = CanoError::compensation_failed(vec![CanoError::generic("x")]);
+        assert_eq!(a, b);
+
+        let c = CanoError::compensation_failed(vec![CanoError::generic("x")]);
+        let d =
+            CanoError::compensation_failed(vec![CanoError::generic("x"), CanoError::generic("y")]);
+        assert_ne!(c, d);
+
+        // Distinct from a same-message string variant.
+        assert_ne!(
+            CanoError::compensation_failed(vec![CanoError::generic("x")]),
+            CanoError::generic("x")
+        );
     }
 
     #[test]
