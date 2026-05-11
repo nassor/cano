@@ -135,11 +135,49 @@ async fn main() -> Result<(), CanoError> {
 
 <h2 id="builder-pattern"><a href="#builder-pattern" class="anchor-link" aria-hidden="true">#</a>Builder Pattern and #[must_use]</h2>
 <p>
-Workflow uses a builder pattern where <code>register()</code>, <code>register_split()</code>, and
+Workflow uses a builder pattern where the <code>register*</code> methods and
 <code>add_exit_state()</code> all consume <code>self</code> and return a new <code>Workflow</code>.
 The <code>#[must_use]</code> attribute on <code>Workflow</code> and <code>JoinConfig</code> means the compiler
 will warn you if you discard the return value. If you forget to capture it, the registration is silently lost.
 </p>
+
+<p>Each <code>register*</code> method maps a state to a kind of <code>StateEntry</code>:</p>
+<table class="styled-table">
+<thead>
+<tr>
+<th>Builder method</th>
+<th><code>StateEntry</code> kind</th>
+<th>What runs at that state</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>register(state, task)</code></td>
+<td><code>Single</code></td>
+<td>One <a href="../task/">Task</a> (or <a href="../nodes/">Node</a>, <a href="../poll-task/">PollTask</a>, <a href="../batch-task/">BatchTask</a> — all dispatch as <code>Task</code>).</td>
+</tr>
+<tr>
+<td><code>register_split(state, tasks, join_config)</code></td>
+<td><code>Split</code></td>
+<td>Many tasks in parallel; a <code>JoinConfig</code> picks the <a href="../split-join/">join strategy</a> and the next state.</td>
+</tr>
+<tr>
+<td><code>register_router(state, task)</code></td>
+<td><code>Router</code></td>
+<td>A <a href="../router-task/">RouterTask</a> — dispatched like <code>Single</code>, but writes <strong>no checkpoint row</strong> (pure routing, nothing to recover).</td>
+</tr>
+<tr>
+<td><code>register_stepped(state, task)</code></td>
+<td><code>Stepped</code></td>
+<td>A <a href="../stepped-task/">SteppedTask</a> — the engine owns the step loop and, with a checkpoint store attached, persists the cursor after each step.</td>
+</tr>
+<tr>
+<td><code>register_with_compensation(state, task)</code></td>
+<td><code>CompensatableSingle</code></td>
+<td>A <a href="../saga/">CompensatableTask</a> — single-task states only; pushes onto the compensation stack on success.</td>
+</tr>
+</tbody>
+</table>
 
 <div class="callout callout-warning">
 <div class="callout-label">Warning: Do not discard the return value</div>

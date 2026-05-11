@@ -195,11 +195,15 @@ With a <a href="../recovery/">checkpoint store</a> attached
 </p>
 <ul>
 <li>A successful compensatable state writes a second <em>completion</em>
-<a href="../recovery/"><code>CheckpointRow</code></a> with <code>output_blob</code> set to the
-serialized output (so the state's entry row and completion row consume two sequence numbers).</li>
-<li><code>Workflow::resume_from</code> rehydrates the compensation stack from every loaded row that
-carries an <code>output_blob</code>, in sequence order — so a failure after the resume point can
-still roll back work the original process did before the crash.</li>
+<a href="../recovery/"><code>CheckpointRow</code></a> — <code>kind == RowKind::CompensationCompletion</code>,
+<code>output_blob</code> set to the serialized output (so the state's entry row and completion row
+consume two sequence numbers).</li>
+<li><code>Workflow::resume_from</code> rehydrates the compensation stack from every loaded row whose
+<code>kind</code> is <code>RowKind::CompensationCompletion</code>, in sequence order — so a failure
+after the resume point can still roll back work the original process did before the crash. (A
+<code>RowKind::StepCursor</code> row also carries an <code>output_blob</code>, but it's a
+<a href="../stepped-task/">SteppedTask</a> cursor, not a compensation entry — the <code>kind</code>
+discriminant keeps the two apart.)</li>
 <li>Because <code>compensate(res, output)</code> may run in a <strong>different process</strong>, it must
 work purely from <code>(res, output)</code>, and the workflow definition (state labels +
 <code>register_with_compensation</code> calls) must match across processes — the same constraint that

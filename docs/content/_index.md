@@ -44,8 +44,8 @@ It excels at managing complex lifecycles where state transitions matter:
 <div class="feature-grid">
 <div class="feature-card animate-in">
 <div class="feature-icon" aria-hidden="true">&#9881;</div>
-<h3>Tasks & Nodes</h3>
-<p>Single <code>Task</code> trait for simple logic, or <code>Node</code> trait for structured three-phase lifecycle.</p>
+<h3>Processing Models</h3>
+<p>A whole <code>Task</code> family: plain <code>Task</code>, structured <code>Node</code>, side-effect-free <code>RouterTask</code>, wait-until <code>PollTask</code>, fan-out <code>BatchTask</code>, resumable <code>SteppedTask</code> — mixed freely in one workflow.</p>
 </div>
 <div class="feature-card animate-in">
 <div class="feature-icon secondary" aria-hidden="true">&#9670;</div>
@@ -123,7 +123,7 @@ the FSM dispatch hot path stays allocation-light whether or not you wire any of 
 
 ```toml
 [dependencies]
-cano = { version = "0.11", features = ["all"] }
+cano = { version = "0.12", features = ["all"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 ```

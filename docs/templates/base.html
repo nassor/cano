@@ -38,8 +38,19 @@
         <details class="nav-section" id="nav-concepts" open>
             <summary class="nav-section-label">Concepts</summary>
             <ul class="nav-links">
-                <li><a href="{{ get_url(path='@/task.md') }}">Tasks</a></li>
-                <li><a href="{{ get_url(path='@/nodes.md') }}">Nodes</a></li>
+                <li>
+                    <details class="nav-subsection" id="nav-processing-models" open>
+                        <summary class="nav-subsection-label">Processing Models</summary>
+                        <ul class="nav-links nav-sublinks">
+                            <li><a href="{{ get_url(path='@/task.md') }}">Task</a></li>
+                            <li><a href="{{ get_url(path='@/nodes.md') }}">Node</a></li>
+                            <li><a href="{{ get_url(path='@/router-task.md') }}">RouterTask</a></li>
+                            <li><a href="{{ get_url(path='@/poll-task.md') }}">PollTask</a></li>
+                            <li><a href="{{ get_url(path='@/batch-task.md') }}">BatchTask</a></li>
+                            <li><a href="{{ get_url(path='@/stepped-task.md') }}">SteppedTask</a></li>
+                        </ul>
+                    </details>
+                </li>
                 <li><a href="{{ get_url(path='@/workflows.md') }}">Workflows</a></li>
                 <li><a href="{{ get_url(path='@/split-join.md') }}">Split &amp; Join</a></li>
                 <li><a href="{{ get_url(path='@/scheduler.md') }}">Scheduler</a></li>

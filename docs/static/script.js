@@ -88,7 +88,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const readSectionState = (section) => {
     try { return localStorage.getItem(sectionStateKey(section)); } catch (e) { return null; }
   };
-  document.querySelectorAll('details.nav-section').forEach((section) => {
+  // Covers both top-level sections and nested sub-dropdowns.
+  document.querySelectorAll('details.nav-section, details.nav-subsection').forEach((section) => {
     const stored = readSectionState(section);
     if (stored === 'open') section.open = true;
     else if (stored === 'closed') section.open = false;
@@ -110,9 +111,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (linkPath === currentPath) {
       link.classList.add('active');
       link.setAttribute('aria-current', 'page');
-      // Reveal the section containing the current page — unless the user collapsed it.
-      const section = link.closest('details.nav-section');
-      if (section && readSectionState(section) !== 'closed') section.open = true;
+      // Reveal every <details> ancestor of the current page — section *and* any nested
+      // sub-dropdown — unless the user explicitly collapsed it.
+      let el = link.parentElement;
+      while (el) {
+        if (el.tagName === 'DETAILS' && readSectionState(el) !== 'closed') el.open = true;
+        el = el.parentElement;
+      }
     } else {
       link.classList.remove('active');
       link.removeAttribute('aria-current');

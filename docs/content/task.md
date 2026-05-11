@@ -23,6 +23,7 @@ dependencies. For a structured prep / exec / post lifecycle, see <a href="../nod
 <li><a href="#resource-free">Resource-Free Tasks</a></li>
 <li><a href="#config-retries">Configuration &amp; Retries</a></li>
 <li><a href="#patterns">Real-World Task Patterns</a></li>
+<li><a href="#task-family">The Task Family: Four More Processing Models</a></li>
 <li><a href="#task-vs-node">Task vs Node</a></li>
 <li><a href="#when-to-use">When to Use Tasks vs Nodes</a></li>
 </ol>
@@ -457,6 +458,55 @@ impl AggregatorTask {
 ```
 </div>
 </section>
+
+<!-- Section: The Task Family -->
+<hr class="section-divider">
+<h2 id="task-family"><a href="#task-family" class="anchor-link" aria-hidden="true">#</a>The Task Family: Four More Processing Models</h2>
+<p>
+Beyond the plain <code>Task</code> and the structured <a href="../nodes/">Node</a>, Cano ships
+<strong>four more <code>Task</code>-derived processing models</strong>. Each is a specialised shape —
+they all ultimately dispatch as a <code>Task</code>, so you mix them freely in one workflow — and
+each has its own page with the full reference.
+</p>
+
+<div class="card-stack">
+<div class="card">
+<h3><a href="../router-task/">RouterTask</a></h3>
+<p>Side-effect-free branching: a <code>route</code> method that picks the next state and writes
+nothing. Registered with <code>register_router</code>; leaves no checkpoint row.</p>
+<p><strong>Reach for it when:</strong> branching on a flag / data shape with no side effects.</p>
+</div>
+<div class="card">
+<h3><a href="../poll-task/">PollTask</a></h3>
+<p>"Wait-until" loops: a <code>poll</code> method that returns <code>Ready</code> or
+<code>Pending { delay_ms }</code>, looping with adaptive backoff — no blocked thread.</p>
+<p><strong>Reach for it when:</strong> waiting on an external job, queue, or flag flip.</p>
+</div>
+<div class="card">
+<h3><a href="../batch-task/">BatchTask</a></h3>
+<p>Fan out over data: <code>load → process_item (×N, bounded concurrency, per-item retry) → finish</code>,
+re-joined in one state.</p>
+<p><strong>Reach for it when:</strong> mapping a sub-operation over a collection with a single re-join.</p>
+</div>
+<div class="card">
+<h3><a href="../stepped-task/">SteppedTask</a></h3>
+<p>Resumable iterative work: a <code>step(cursor)</code> method whose cursor is checkpointed each
+step, so a crash resumes mid-loop. Registered with <code>register_stepped</code>.</p>
+<p><strong>Reach for it when:</strong> long page-by-page scans, chunked migrations — crash-resume finer than per-state.</p>
+</div>
+</div>
+
+<div class="callout callout-info">
+<div class="callout-label">When to reach for which</div>
+<p>
+Need a <em>structured</em> task with retries spanning load / compute / store? <a href="../nodes/">Node</a>.
+Just <em>deciding</em> the next state with no side effects? <a href="../router-task/">RouterTask</a>.
+<em>Waiting</em> on something to become ready? <a href="../poll-task/">PollTask</a>.
+Doing the <em>same thing to many items</em>? <a href="../batch-task/">BatchTask</a>.
+A <em>long iterative job</em> you want to crash-resume mid-flight? <a href="../stepped-task/">SteppedTask</a>.
+Anything else — a plain <code>Task</code>.
+</p>
+</div>
 
 <!-- Section: Task vs Node -->
 <hr class="section-divider">

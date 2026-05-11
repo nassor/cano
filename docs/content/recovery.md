@@ -10,10 +10,21 @@ template = "page.html"
 
 <p>
 Attach a <strong><code>CheckpointStore</code></strong> to a <a href="../workflows/">Workflow</a>
-and the FSM records one <strong><code>CheckpointRow</code></strong> for every state it enters —
+and the FSM records a <strong><code>CheckpointRow</code></strong> for the states it enters —
 written <em>before</em> that state's task runs. After a crash, <code>Workflow::resume_from</code>
 reloads the run, re-enters the FSM at the last checkpointed state, and continues forward.
 </p>
+
+<div class="callout callout-warning">
+<span class="callout-label">Breaking change in 0.12.0</span>
+<p>
+<code>CheckpointRow</code> gained a <code>kind: RowKind</code> field. <strong>Any custom
+<code>CheckpointStore</code> implementation must add <code>kind</code> to its row mapping</strong>
+(persist it, return it on load). The built-in <code>RedbCheckpointStore</code> handles this, with a
+legacy fallback so pre-0.12 redb files still load (old rows decode as <code>RowKind::StateEntry</code>).
+See <a href="#what-is-recorded">What Gets Recorded</a> and <a href="#trait">The <code>CheckpointStore</code> Trait</a> below.
+</p>
+</div>
 <p>
 The <code>CheckpointStore</code> trait is <strong>backend-agnostic and always available</strong> —
 implement it over Postgres, an HTTP service, a file, anything. With the <code>recovery</code>
@@ -86,7 +97,8 @@ workflow.orchestrate(Step::Start).await?;
 
 <h2 id="what-is-recorded"><a href="#what-is-recorded" class="anchor-link" aria-hidden="true">#</a>What Gets Recorded</h2>
 <p>
-Each loop iteration of the FSM, <em>before</em> dispatching the state's task, appends one row:
+Each loop iteration of the FSM, <em>before</em> dispatching the state's task, appends a row (with a
+couple of exceptions noted below):
 </p>
 
 ```rust
@@ -94,21 +106,34 @@ pub struct CheckpointRow {
     pub sequence: u64,            // monotonically increasing within the run
     pub state: String,            // the Debug rendering of the state value
     pub task_id: String,          // Task::name() for a single-task state; "" for split / exit
-    pub output_blob: Option<Vec<u8>>,  // serialized output of a compensatable task (else None)
+    pub kind: RowKind,            // what this row records — see RowKind
+    pub output_blob: Option<Vec<u8>>,  // serialized payload for compensation / stepped cursor (else None)
+}
+
+#[non_exhaustive]
+pub enum RowKind {
+    StateEntry,              // the engine entered this state (the usual case)
+    CompensationCompletion,  // a compensatable task finished; output_blob = its serialized output
+    StepCursor,              // a SteppedTask advanced; output_blob = the serde_json-encoded cursor
 }
 ```
 
 <ul>
-<li>One row per <strong>state entered</strong> — including the initial state and the terminal
-exit state. A <code>Start → Work → Done</code> workflow records three rows.</li>
+<li><strong>Ordinary states</strong> get one <code>StateEntry</code> row when entered — including the
+initial state and the terminal exit state. A <code>Start → Work → Done</code> workflow records three
+<code>StateEntry</code> rows.</li>
 <li>A <strong>split state is one state ⇒ one row</strong>, not one row per parallel task.</li>
+<li><strong><a href="../router-task/">Router</a> states write <em>no</em> row</strong> (and consume
+no sequence number) — a pure router has no side effects, so there's nothing to recover.</li>
+<li>A <strong><a href="../saga/">compensatable</a> state that succeeds</strong> writes a second
+<code>CompensationCompletion</code> row whose <code>output_blob</code> is the serialized output (so
+its entry row and completion row consume two sequence numbers).</li>
+<li>A <strong><a href="../stepped-task/">SteppedTask</a> registered with <code>register_stepped</code></strong>
+writes a <code>StepCursor</code> row after each step, carrying the <code>serde_json</code>-encoded
+cursor.</li>
 <li><code>state</code> is <code>format!("{state:?}")</code>; resume maps it back to the matching
 registered or exit state, so each state must have a distinct <code>Debug</code> form (true for any
 <code>#[derive(Debug)]</code> enum).</li>
-<li><code>output_blob</code> carries a <a href="../saga/">compensatable task</a>'s serialized
-output: a successful compensatable state writes a second <em>completion</em> row with it set, and
-<code>resume_from</code> rehydrates the compensation stack from those rows. Plain rows leave it
-<code>None</code>.</li>
 </ul>
 
 <p>Rows are <strong>append-only</strong>. Reconstructing a run is "load every row for this id, in
@@ -117,11 +142,25 @@ sequence order" — which is exactly what <code>CheckpointStore::load_run</code>
 
 <h2 id="resuming"><a href="#resuming" class="anchor-link" aria-hidden="true">#</a>Resuming a Run</h2>
 <p>
-<code>Workflow::resume_from(workflow_id)</code> loads the run via <code>load_run</code>, takes the
-highest-<code>sequence</code> row, maps its label back to a state, and re-enters the FSM loop from
-there — continuing the same sequence. Resources' <code>setup</code> / <code>teardown</code> wrap it
-exactly as in <code>orchestrate</code>. If the last recorded row is an exit state, the run had
-already finished, so <code>resume_from</code> returns it immediately.
+<code>Workflow::resume_from(workflow_id)</code> loads the run via <code>load_run</code> and routes by
+each row's <code>kind</code>:
+</p>
+<ul>
+<li><code>StateEntry</code> rows drive the <strong>state replay</strong> — it takes the highest-<code>sequence</code>
+<code>StateEntry</code> row, maps its label back to a state, and re-enters the FSM loop from there,
+continuing the same sequence.</li>
+<li><code>CompensationCompletion</code> rows rehydrate the <a href="../saga/">compensation stack</a>
+(in sequence order) — so a failure after the resume point can still roll back work an earlier process
+did. (The resume point's <em>own</em> entry row is excluded — that state re-runs and re-pushes its
+entry, so replaying both would compensate it twice.)</li>
+<li><code>StepCursor</code> rows feed the resumed <a href="../stepped-task/">SteppedTask</a>: the
+latest cursor for the resumed state is decoded and handed to the first <code>step</code> call instead
+of <code>None</code>.</li>
+</ul>
+<p>
+Resources' <code>setup</code> / <code>teardown</code> wrap it exactly as in <code>orchestrate</code>.
+If the last recorded row is an exit state, the run had already finished, so <code>resume_from</code>
+returns it immediately.
 </p>
 
 ```rust
@@ -197,11 +236,17 @@ impl InMemoryStore {
 ```
 
 <p>
-Contract: <code>append</code> durably persists the row; <code>load_run</code> returns every row
-ever appended for the id, <strong>sorted ascending by <code>sequence</code></strong>, or an empty
-<code>Vec</code> for an unknown id; <code>clear</code> removes a run's rows and must not touch any
-other id (clearing an unknown id is a no-op). The engine calls <code>clear</code> automatically
-when a run reaches an exit state — and after a fully successful
+Contract: <code>append</code> durably persists the row — <strong>including its <code>kind</code> and
+<code>output_blob</code></strong> — and must <strong>reject a duplicate <code>(workflow_id, sequence)</code></strong>
+with an <code>Err</code> rather than overwriting (a collision means two runs share a workflow id;
+<code>RedbCheckpointStore</code> enforces this via its composite key, as does the Postgres impl in
+<code>cano-e2e</code> via its primary key). <code>load_run</code> returns every row ever appended for
+the id, <strong>sorted ascending by <code>sequence</code></strong>, or an empty <code>Vec</code> for
+an unknown id; <code>clear</code> removes a run's rows and must not touch any other id (clearing an
+unknown id is a no-op). The example above stores the whole <code>CheckpointRow</code>, so it carries
+<code>kind</code> for free — a store that maps rows to columns must add a <code>kind</code> column
+(this is the <strong>0.12.0 breaking change</strong> for custom impls). The engine calls
+<code>clear</code> automatically when a run reaches an exit state — and after a fully successful
 <a href="../saga/">compensation rollback</a> — so a finished run leaves no recovery log behind
 (it's best-effort: a <code>clear</code> failure is logged, not fatal). Implementations must be
 <code>Send + Sync + 'static</code> so one store can be shared (typically as
@@ -232,7 +277,10 @@ let store: Arc<RedbCheckpointStore> = Arc::new(RedbCheckpointStore::new("workflo
 Internally a single table maps <code>(workflow_id, sequence)</code> to the
 <a href="https://docs.rs/postcard"><code>postcard</code></a>-encoded payload. redb orders composite
 keys element by element, so a workflow's rows are stored — and range-scanned — in ascending
-<code>sequence</code> order; the <code>sequence</code> lives in the key, not the value.
+<code>sequence</code> order; the <code>sequence</code> lives in the key, not the value. The on-disk
+row now carries the <code>kind</code> discriminant; <code>RedbCheckpointStore</code> keeps a legacy
+fallback so a pre-0.12 redb file still loads — rows written without a <code>kind</code> field decode
+as <code>RowKind::StateEntry</code>.
 </p>
 <hr class="section-divider">
 
@@ -264,7 +312,11 @@ A <code>Start → Process → Finalize → Done</code> workflow whose <code>Proc
 first time (standing in for a crash) — so <code>orchestrate</code> returns an error — and then
 completes on a follow-up <code>resume_from</code>. This is the <code>workflow_recovery</code> example
 shipped with the crate; run it with
-<code>cargo run --example workflow_recovery --features recovery</code>.
+<code>cargo run --example workflow_recovery --features recovery</code>. For a <em>real</em> crash
+(SIGKILL mid-flight, then restart-and-resume in a fresh process), see the integration tests
+<code>tests/recovery_e2e.rs</code> and <code>tests/stepped_resume_e2e.rs</code>, the
+<code>examples/stepped_task.rs</code> example, and the Docker/Postgres end-to-end suite in the
+<code>cano-e2e</code> workspace member.
 </p>
 
 ```rust
@@ -330,9 +382,10 @@ let _ = workflow.orchestrate(Step::Start).await;
 let final_state = workflow.resume_from("demo-run").await?;
 assert_eq!(final_state, Step::Done);
 
-// The append-only log: Start, Process (crash), Process (re-run), Finalize, Done.
+// The append-only log: Start, Process (crash), Process (re-run), Finalize, Done —
+// all RowKind::StateEntry here, since this workflow has no compensatable or stepped states.
 for row in store.load_run("demo-run").await? {
-    println!("#{} {}  {}", row.sequence, row.state, row.task_id);
+    println!("#{} {:?} {}  {}", row.sequence, row.kind, row.state, row.task_id);
 }
 ```
 </div>

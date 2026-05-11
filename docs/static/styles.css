@@ -249,6 +249,74 @@ details.nav-section[open] > summary.nav-section-label::after {
     transform: translateY(2px) rotate(-135deg);
 }
 
+/* Nested dropdown inside a nav section (a <details> living in .nav-links) */
+.nav-subsection {
+    /* sits in a <li> — let it span the full width of the list */
+    width: 100%;
+}
+
+summary.nav-subsection-label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+    /* align with the .nav-links a padding so the group reads as a peer of the flat links */
+    padding: var(--space-3) var(--space-4);
+    border-radius: var(--radius-sm);
+    font-size: var(--text-sm);
+    font-weight: 600;
+    color: var(--text-muted);
+    transition:
+        background-color var(--duration-fast) ease,
+        color var(--duration-fast) ease;
+}
+
+summary.nav-subsection-label::-webkit-details-marker {
+    display: none;
+}
+
+summary.nav-subsection-label:hover {
+    background-color: var(--primary-muted);
+    color: var(--text-color);
+}
+
+summary.nav-subsection-label:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -2px;
+}
+
+summary.nav-subsection-label::after {
+    content: '';
+    flex: none;
+    width: 5px;
+    height: 5px;
+    border-right: 1.5px solid currentColor;
+    border-bottom: 1.5px solid currentColor;
+    transform: translateY(-1px) rotate(45deg);
+    opacity: 0.7;
+    transition: transform var(--duration-fast) ease;
+}
+
+details.nav-subsection[open] > summary.nav-subsection-label::after {
+    transform: translateY(1px) rotate(-135deg);
+}
+
+/* Indent the sub-links and give them a guide rail so the nesting is legible */
+.nav-sublinks {
+    margin: 2px 0 var(--space-1);
+    padding-left: var(--space-4);
+    border-left: 1px solid var(--border-subtle);
+}
+
+.nav-sublinks a {
+    font-size: var(--text-sm);
+    padding-top: var(--space-2);
+    padding-bottom: var(--space-2);
+}
+
 .nav-links {
     list-style: none;
     display: flex;
