@@ -89,9 +89,23 @@ impl CheckpointStore for RedbCheckpointStore {
         let tx = self.db.begin_write().map_err(redb_err)?;
         {
             let mut table = tx.open_table(CHECKPOINTS).map_err(redb_err)?;
-            table
+            // Reject a duplicate `(workflow_id, sequence)`: `insert` would silently
+            // overwrite the existing row. That only happens when two runs share a
+            // `workflow_id` (a misuse — `resume_from` the existing run, or `clear` it
+            // first), so surface it instead of corrupting the log. The uncommitted write
+            // is rolled back when `tx` drops on the early return. (`resume_from` always
+            // appends *new* sequences, so a legitimate resume never trips this.)
+            if table
                 .insert((workflow_id, sequence), bytes.as_slice())
-                .map_err(redb_err)?;
+                .map_err(redb_err)?
+                .is_some()
+            {
+                return Err(CanoError::CheckpointStore(format!(
+                    "checkpoint conflict: workflow {workflow_id:?} already has a row at \
+                     sequence {sequence}; resume the existing run or clear it before starting \
+                     a new one"
+                )));
+            }
         }
         tx.commit().map_err(redb_err)?;
         Ok(())
@@ -245,5 +259,165 @@ mod tests {
         let dir = tempdir().unwrap();
         let store = RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap();
         assert!(store.load_run("nope").await.unwrap().is_empty());
+    }
+
+    // -- hardening ---------------------------------------------------------
+
+    #[tokio::test]
+    async fn append_rejects_duplicate_sequence() {
+        let dir = tempdir().unwrap();
+        let store = RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap();
+
+        store
+            .append("run", CheckpointRow::new(0, "A", "t0"))
+            .await
+            .unwrap();
+        let err = store
+            .append("run", CheckpointRow::new(0, "A-again", "t0"))
+            .await
+            .expect_err("duplicate (workflow_id, sequence) must be rejected");
+        assert_eq!(err.category(), "checkpoint_store");
+        assert!(
+            err.message().contains("conflict"),
+            "unexpected message: {err}"
+        );
+
+        // The original row survives the rejected write; new sequences still append.
+        store
+            .append("run", CheckpointRow::new(1, "B", "t1"))
+            .await
+            .unwrap();
+        let rows = store.load_run("run").await.unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.sequence, r.state.clone()))
+                .collect::<Vec<_>>(),
+            vec![(0, "A".to_string()), (1, "B".to_string())]
+        );
+        // A different workflow id can reuse sequence 0 freely.
+        store
+            .append("other", CheckpointRow::new(0, "A", "t0"))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_appends_distinct_ids_stay_isolated_and_monotonic() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap());
+
+        const RUNS: u64 = 16;
+        const ROWS_PER_RUN: u64 = 12;
+
+        let mut handles = Vec::new();
+        for r in 0..RUNS {
+            let store = Arc::clone(&store);
+            handles.push(tokio::spawn(async move {
+                let id = format!("run-{r}");
+                for s in 0..ROWS_PER_RUN {
+                    store
+                        .append(&id, CheckpointRow::new(s, format!("S{r}-{s}"), "t"))
+                        .await
+                        .unwrap();
+                    // Yield so the redb write lock changes hands between runs.
+                    tokio::task::yield_now().await;
+                }
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        for r in 0..RUNS {
+            let rows = store.load_run(&format!("run-{r}")).await.unwrap();
+            assert_eq!(rows.len() as u64, ROWS_PER_RUN, "run {r} row count");
+            assert_eq!(
+                rows.iter().map(|r| r.sequence).collect::<Vec<_>>(),
+                (0..ROWS_PER_RUN).collect::<Vec<_>>(),
+                "run {r} sequences"
+            );
+            assert!(
+                rows.iter()
+                    .enumerate()
+                    .all(|(i, row)| row.state == format!("S{r}-{i}")),
+                "run {r} rows belong only to that run"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_appends_same_id_distinct_sequences_all_land() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap());
+
+        const N: u64 = 32;
+        let mut handles = Vec::new();
+        for s in 0..N {
+            let store = Arc::clone(&store);
+            handles.push(tokio::spawn(async move {
+                store
+                    .append("run", CheckpointRow::new(s, format!("S{s}"), "t"))
+                    .await
+                    .unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+
+        let rows = store.load_run("run").await.unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.sequence).collect::<Vec<_>>(),
+            (0..N).collect::<Vec<_>>(),
+            "every distinct sequence landed exactly once, in order"
+        );
+    }
+
+    #[tokio::test]
+    async fn large_output_blob_roundtrips() {
+        let dir = tempdir().unwrap();
+        let store = RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap();
+        let blob: Vec<u8> = (0..5 * 1024 * 1024usize).map(|i| (i % 251) as u8).collect();
+        store
+            .append(
+                "run",
+                CheckpointRow::new(0, "Big", "t").with_output(blob.clone()),
+            )
+            .await
+            .unwrap();
+        let rows = store.load_run("run").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].output_blob.as_deref(), Some(blob.as_slice()));
+    }
+
+    #[tokio::test]
+    async fn corrupted_stored_row_is_a_decode_error_not_a_panic() {
+        let dir = tempdir().unwrap();
+        let store = RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap();
+        store
+            .append("run", CheckpointRow::new(0, "A", "t0"))
+            .await
+            .unwrap();
+        // Overwrite sequence 1's slot with bytes that aren't a valid `StoredRow`.
+        // (We reach past the public API on purpose to simulate an on-disk corruption.)
+        {
+            let tx = store.db.begin_write().unwrap();
+            {
+                let mut table = tx.open_table(CHECKPOINTS).unwrap();
+                table
+                    .insert(("run", 1u64), [0xFFu8, 0xFF, 0xFF, 0xFF].as_slice())
+                    .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let err = store
+            .load_run("run")
+            .await
+            .expect_err("a corrupted row must surface as an error, not panic");
+        assert_eq!(err.category(), "checkpoint_store");
+        assert!(
+            err.message().contains("decode"),
+            "unexpected message: {err}"
+        );
     }
 }

@@ -37,7 +37,14 @@
 //! #[cano::checkpoint_store]
 //! impl InMemoryStore {
 //!     async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
-//!         self.0.lock().unwrap().entry(workflow_id.to_string()).or_default().push(row);
+//!         let mut runs = self.0.lock().unwrap();
+//!         let rows = runs.entry(workflow_id.to_string()).or_default();
+//!         if rows.iter().any(|r| r.sequence == row.sequence) {
+//!             return Err(CanoError::checkpoint_store(format!(
+//!                 "checkpoint conflict: {workflow_id:?} already has sequence {}", row.sequence
+//!             )));
+//!         }
+//!         rows.push(row);
 //!         Ok(())
 //!     }
 //!     async fn load_run(&self, workflow_id: &str) -> Result<Vec<CheckpointRow>, CanoError> {
@@ -111,7 +118,12 @@ impl CheckpointRow {
 /// Implementations record one [`CheckpointRow`] per FSM transition and can
 /// replay them in sequence order to resume a crashed run. The contract:
 ///
-/// - [`append`](Self::append) durably persists `row` for `workflow_id`.
+/// - [`append`](Self::append) durably persists `row` for `workflow_id`. It **must
+///   reject a duplicate `(workflow_id, row.sequence)`** with an `Err` rather than
+///   overwriting the existing row — the engine assigns sequences densely from `0`, so a
+///   collision means two runs are sharing a `workflow_id` (a misuse: resume the existing
+///   run, or [`clear`](Self::clear) it first). A legitimate [`resume_from`] only ever
+///   appends sequences past the last persisted one, so it never collides.
 /// - [`load_run`](Self::load_run) returns every row ever appended for
 ///   `workflow_id`, **sorted ascending by `sequence`**, or an empty `Vec` if the
 ///   id is unknown.
@@ -119,10 +131,14 @@ impl CheckpointRow {
 ///   affect any other id. Clearing an unknown id is a no-op (`Ok`).
 ///
 /// Backends must be `Send + Sync + 'static` so a single store can be shared
-/// (typically as `Arc<dyn CheckpointStore>`) across concurrent workflows.
+/// (typically as `Arc<dyn CheckpointStore>`) across concurrent workflows; `append`,
+/// `load_run` and `clear` may be called concurrently for the same or different ids.
+///
+/// [`resume_from`]: crate::workflow::Workflow::resume_from
 #[checkpoint_store]
 pub trait CheckpointStore: Send + Sync + 'static {
-    /// Durably append `row` to the log for `workflow_id`.
+    /// Durably append `row` to the log for `workflow_id`. Returns an error if a row
+    /// already exists at `(workflow_id, row.sequence)` (see the trait-level contract).
     async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError>;
 
     /// Load every row for `workflow_id`, sorted ascending by `sequence`.
@@ -145,12 +161,15 @@ mod tests {
     #[checkpoint_store]
     impl CheckpointStore for InMemoryStore {
         async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
-            self.0
-                .lock()
-                .unwrap()
-                .entry(workflow_id.to_string())
-                .or_default()
-                .push(row);
+            let mut runs = self.0.lock().unwrap();
+            let rows = runs.entry(workflow_id.to_string()).or_default();
+            if rows.iter().any(|r| r.sequence == row.sequence) {
+                return Err(CanoError::checkpoint_store(format!(
+                    "checkpoint conflict: {workflow_id:?} already has sequence {}",
+                    row.sequence
+                )));
+            }
+            rows.push(row);
             Ok(())
         }
 
@@ -229,5 +248,37 @@ mod tests {
     async fn load_run_unknown_id_is_empty() {
         let store = InMemoryStore::default();
         assert!(store.load_run("nope").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn append_rejects_duplicate_sequence() {
+        let store = InMemoryStore::default();
+        store
+            .append("run", CheckpointRow::new(0, "A", "t0"))
+            .await
+            .unwrap();
+        // Same `(workflow_id, sequence)` again — must be rejected, not overwrite.
+        let err = store
+            .append("run", CheckpointRow::new(0, "A-again", "t0"))
+            .await
+            .expect_err("duplicate sequence must be rejected");
+        assert_eq!(err.category(), "checkpoint_store");
+        // The original row is untouched and a *different* sequence still appends fine.
+        store
+            .append("run", CheckpointRow::new(1, "B", "t1"))
+            .await
+            .unwrap();
+        let rows = store.load_run("run").await.unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|r| (r.sequence, r.state.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, "A"), (1, "B")]
+        );
+        // Distinct ids never collide.
+        store
+            .append("other", CheckpointRow::new(0, "A", "t0"))
+            .await
+            .unwrap();
     }
 }
