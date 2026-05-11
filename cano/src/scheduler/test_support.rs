@@ -4,10 +4,9 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use cano_macros::node;
-
 use crate::error::{CanoError, CanoResult};
 use crate::resource::Resources;
+use crate::task;
 use crate::task::node::Node;
 use crate::workflow::Workflow;
 
@@ -40,7 +39,7 @@ impl TestNode {
     }
 }
 
-#[node]
+#[task::node]
 impl Node<TestState> for TestNode {
     type PrepResult = ();
     type ExecResult = ();

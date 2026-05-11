@@ -291,9 +291,9 @@ mod tests {
     use crate::resource::Resources;
     use crate::scheduler::test_support::*;
     use crate::scheduler::{BackoffPolicy, Scheduler};
+    use crate::task;
     use crate::task::node::Node;
     use crate::workflow::Workflow;
-    use cano_macros::node;
     use std::sync::atomic::{AtomicU32, Ordering};
     use tokio::time::{Duration, sleep};
 
@@ -536,7 +536,7 @@ mod tests {
         #[derive(Clone)]
         struct SlowNode;
 
-        #[node]
+        #[task::node]
         impl Node<TestState> for SlowNode {
             type PrepResult = ();
             type ExecResult = ();
@@ -672,7 +672,7 @@ mod tests {
         #[derive(Clone)]
         struct SlowNode;
 
-        #[node]
+        #[task::node]
         impl Node<TestState> for SlowNode {
             type PrepResult = ();
             type ExecResult = ();
@@ -790,7 +790,7 @@ mod tests {
         }
     }
 
-    #[node]
+    #[task::node]
     impl Node<TestState> for FlakyNode {
         type PrepResult = ();
         type ExecResult = bool;

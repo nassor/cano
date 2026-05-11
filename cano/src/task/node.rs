@@ -90,7 +90,6 @@
 use crate::error::CanoError;
 use crate::resource::Resources;
 use crate::task::TaskConfig;
-use cano_macros::node;
 use std::borrow::Cow;
 use std::fmt;
 use std::hash::Hash;
@@ -173,7 +172,7 @@ pub type DefaultNodeResult = Result<Box<dyn std::any::Any + Send + Sync>, CanoEr
 ///     }
 /// }
 /// ```
-#[node]
+#[crate::task::node]
 pub trait Node<TState, TResourceKey = Cow<'static, str>>: Send + Sync
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
@@ -443,8 +442,8 @@ pub type NodeObject<TState, TResourceKey = Cow<'static, str>> =
 mod tests {
     use super::*;
     use crate::resource::Resources;
+    use crate::task;
     use crate::task::RetryMode;
-    use cano_macros::node;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::Duration;
@@ -478,7 +477,7 @@ mod tests {
         }
     }
 
-    #[node]
+    #[task::node]
     impl Node<TestAction> for SimpleSuccessNode {
         type PrepResult = String;
         type ExecResult = bool;
@@ -518,7 +517,7 @@ mod tests {
         }
     }
 
-    #[node]
+    #[task::node]
     impl Node<TestAction> for PrepFailureNode {
         type PrepResult = String;
         type ExecResult = bool;
@@ -543,7 +542,7 @@ mod tests {
     // Node that fails in post phase
     struct PostFailureNode;
 
-    #[node]
+    #[task::node]
     impl Node<TestAction> for PostFailureNode {
         type PrepResult = ();
         type ExecResult = ();
@@ -729,7 +728,7 @@ mod tests {
             }
         }
 
-        #[node]
+        #[task::node]
         impl Node<TestAction> for RetryNode {
             type PrepResult = ();
             type ExecResult = ();
@@ -782,7 +781,7 @@ mod tests {
         // Test minimal config
         struct MinimalNode;
 
-        #[node]
+        #[task::node]
         impl Node<TestAction> for MinimalNode {
             type PrepResult = ();
             type ExecResult = ();
@@ -1026,7 +1025,7 @@ mod tests {
             }
         }
 
-        #[node]
+        #[task::node]
         impl Node<TestAction> for FailNTimesNode {
             type PrepResult = ();
             type ExecResult = ();
@@ -1077,7 +1076,7 @@ mod tests {
 
         struct AlwaysFailNode;
 
-        #[node]
+        #[task::node]
         impl Node<TestAction> for AlwaysFailNode {
             type PrepResult = ();
             type ExecResult = ();
@@ -1124,7 +1123,7 @@ mod tests {
             post_counter: Arc<AtomicUsize>,
         }
 
-        #[node]
+        #[task::node]
         impl Node<TestAction> for CountedNode {
             type PrepResult = ();
             type ExecResult = ();
@@ -1183,7 +1182,7 @@ mod tests {
             attempt_counter: Arc<AtomicUsize>,
         }
 
-        #[node]
+        #[task::node]
         impl Node<TestAction> for AlwaysFailNode {
             type PrepResult = ();
             type ExecResult = ();
@@ -1232,7 +1231,7 @@ mod tests {
             attempt_counter: Arc<AtomicUsize>,
         }
 
-        #[node]
+        #[task::node]
         impl Node<TestAction> for PrepFailNode {
             type PrepResult = ();
             type ExecResult = ();
@@ -1272,7 +1271,7 @@ mod tests {
 
         struct PostFailNode;
 
-        #[node]
+        #[task::node]
         impl Node<TestAction> for PostFailNode {
             type PrepResult = ();
             type ExecResult = ();

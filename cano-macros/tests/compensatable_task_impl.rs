@@ -1,4 +1,4 @@
-//! UI test: `#[cano::saga::compensatable_task(state = S)]` on an inherent `impl T { ... }`
+//! UI test: `#[cano::saga::task(state = S)]` on an inherent `impl T { ... }`
 //! block builds the `impl CompensatableTask<S> for T` header — only `type Output`,
 //! `run`, and `compensate` need writing (with optional `config` / `name`).
 
@@ -17,7 +17,7 @@ enum Step {
 #[derive(Clone)]
 struct Reserve(Arc<AtomicBool>);
 
-#[saga::compensatable_task(state = Step)]
+#[saga::task(state = Step)]
 impl Reserve {
     type Output = u32;
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, u32), CanoError> {
@@ -34,7 +34,7 @@ impl Reserve {
 #[derive(Clone)]
 struct ReserveNamed;
 
-#[saga::compensatable_task(state = Step)]
+#[saga::task(state = Step)]
 impl ReserveNamed {
     type Output = ();
     fn config(&self) -> TaskConfig {

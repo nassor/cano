@@ -353,9 +353,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::PollErrorPolicy;
     use crate::observer::WorkflowObserver;
     use crate::resource::Resources;
+    use crate::saga;
     use crate::saga::CompensatableTask;
+    use crate::task as task_mod;
     use crate::task::Task;
     use crate::workflow::test_support::*;
     use crate::workflow::{JoinConfig, JoinStrategy};
@@ -683,15 +686,14 @@ mod tests {
 
     #[tokio::test]
     async fn router_state_produces_no_checkpoint_row_and_sequences_are_dense() {
-        // Note: inside the `cano` crate the inherent `#[router_task(state = S)]` form emits
+        // Note: inside the `cano` crate the inherent `#[task::router(state = S)]` form emits
         // `::cano::RouterTask<...>` paths that don't resolve. Use the trait-impl form instead.
         use crate::observer::WorkflowObserver;
         use crate::task::{RouterTask, TaskConfig};
-        use cano_macros::router_task;
 
         struct RouteToWork;
 
-        #[router_task]
+        #[task_mod::router]
         impl RouterTask<TestState> for RouteToWork {
             fn config(&self) -> TaskConfig {
                 TaskConfig::minimal()
@@ -762,11 +764,10 @@ mod tests {
         // because `Start` was a router state (skipped). `resume_from` should re-enter at
         // `Process` and finish normally.
         use crate::task::{RouterTask, TaskConfig};
-        use cano_macros::router_task;
 
         struct RouteToWork;
 
-        #[router_task]
+        #[task_mod::router]
         impl RouterTask<TestState> for RouteToWork {
             fn config(&self) -> TaskConfig {
                 TaskConfig::minimal()
@@ -814,7 +815,6 @@ mod tests {
     // ---- Saga / compensation ----
 
     use crate::task::TaskConfig;
-    use cano_macros::compensatable_task;
 
     /// Shared, ordered log of `(task name, output value)` for every `compensate` call.
     type CompLog = Arc<Mutex<Vec<(String, u32)>>>;
@@ -845,7 +845,7 @@ mod tests {
         }
     }
 
-    #[compensatable_task]
+    #[saga::task]
     impl CompensatableTask<TestState> for CompTask {
         type Output = u32;
         fn config(&self) -> TaskConfig {
@@ -1388,7 +1388,7 @@ mod tests {
         Panic,
         Hang,
     }
-    #[compensatable_task]
+    #[saga::task]
     impl CompensatableTask<TestState> for CompFault {
         type Output = u32;
         fn config(&self) -> TaskConfig {
@@ -1592,10 +1592,9 @@ mod tests {
     ///    audit log under `RowKind::StateEntry` / `RowKind::StepCursor`.
     #[tokio::test]
     async fn cross_model_chain_router_poll_batch_stepped_interop() {
+        use crate::PollOutcome;
         use crate::recovery::RowKind;
         use crate::task::{BatchTask, PollTask, RouterTask, StepOutcome, SteppedTask, TaskConfig};
-        use crate::{PollErrorPolicy, PollOutcome};
-        use cano_macros::{batch_task, poll_task, router_task, stepped_task};
         use serde::{Deserialize, Serialize};
         use std::sync::atomic::AtomicU32;
 
@@ -1613,7 +1612,7 @@ mod tests {
         // Reads nothing meaningful, unconditionally routes to Wait.
         struct TourRouter;
 
-        #[router_task]
+        #[task_mod::router]
         impl RouterTask<TourStage> for TourRouter {
             fn config(&self) -> TaskConfig {
                 TaskConfig::minimal()
@@ -1629,7 +1628,7 @@ mod tests {
             counter: Arc<AtomicU32>,
         }
 
-        #[poll_task]
+        #[task_mod::poll]
         impl PollTask<TourStage> for TourPoller {
             fn config(&self) -> TaskConfig {
                 TaskConfig::minimal()
@@ -1648,7 +1647,7 @@ mod tests {
         // Fan-out over [1,2,3]: each item → item * item. finish sums them.
         struct TourBatch;
 
-        #[batch_task]
+        #[task_mod::batch]
         impl BatchTask<TourStage> for TourBatch {
             type Item = u32;
             type ItemOutput = u32;
@@ -1683,7 +1682,7 @@ mod tests {
         #[derive(Serialize, Deserialize)]
         struct GrindCursor(u32);
 
-        #[stepped_task]
+        #[task_mod::stepped]
         impl SteppedTask<TourStage> for TourStepper {
             type Cursor = GrindCursor;
 
@@ -1848,7 +1847,7 @@ mod tests {
             fail: bool,
             log: Arc<Mutex<Vec<u32>>>,
         }
-        #[compensatable_task]
+        #[saga::task]
         impl CompensatableTask<u32> for NumComp {
             type Output = u32;
             fn config(&self) -> TaskConfig {
@@ -1900,7 +1899,7 @@ mod tests {
             fail_at: u32,
             log: Arc<Mutex<Vec<u32>>>,
         }
-        #[compensatable_task]
+        #[saga::task]
         impl CompensatableTask<u32> for Step {
             type Output = u32;
             fn config(&self) -> TaskConfig {
@@ -1958,7 +1957,6 @@ mod tests {
 
     use crate::recovery::RowKind;
     use crate::task::stepped::{StepOutcome, SteppedTask};
-    use cano_macros::stepped_task;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
     /// A counting stepper: each step increments the cursor by 1 until it hits `target`.
@@ -1981,7 +1979,7 @@ mod tests {
         }
     }
 
-    #[stepped_task]
+    #[task_mod::stepped]
     impl SteppedTask<TestState> for CountStepper {
         type Cursor = u32;
         fn config(&self) -> TaskConfig {
@@ -2199,7 +2197,7 @@ mod tests {
         // Process is a Stepped state; it's the resume point. Make the stepper fail so
         // the compensation stack (rehydrated A) drains and we can inspect it.
         struct FailingStepper;
-        #[stepped_task]
+        #[task_mod::stepped]
         impl SteppedTask<TestState> for FailingStepper {
             type Cursor = u32;
             fn config(&self) -> TaskConfig {

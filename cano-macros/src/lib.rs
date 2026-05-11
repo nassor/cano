@@ -17,7 +17,7 @@
 //! - `#[cano::task::poll]` — for `impl PollTask` and the `PollTask` trait
 //! - `#[cano::task::batch]` — for `impl BatchTask` and the `BatchTask` trait
 //! - `#[cano::task::stepped]` — for `impl SteppedTask` and the `SteppedTask` trait
-//! - `#[cano::saga::compensatable_task]` — for `impl CompensatableTask`
+//! - `#[cano::saga::task]` — for `impl CompensatableTask`
 //! - `#[cano::resource]` — for `impl Resource` and the `Resource` trait
 //! - `#[cano::checkpoint_store]` — for `impl CheckpointStore` and the `CheckpointStore` trait
 //!
@@ -84,7 +84,7 @@ pub fn derive_from_resources(input: TokenStream) -> TokenStream {
 ///    user writes only the inherent block; the macro builds the trait header
 ///    and enforces that exactly one of `run` / `run_bare` is present.
 ///
-/// For compensatable (saga) tasks, use [`#[cano::saga::compensatable_task]`](compensatable_task)
+/// For compensatable (saga) tasks, use [`#[cano::saga::task]`](compensatable_task)
 /// instead.
 ///
 /// # Example
@@ -212,13 +212,13 @@ pub fn checkpoint_store(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// `impl CompensatableTask<S [, K]> for T` block, or — for less boilerplate — an
 /// inherent `impl T { ... }` block.
 ///
-/// Use as `#[cano::saga::compensatable_task]`.
+/// Use as `#[cano::saga::task]`.
 ///
 /// Two surface forms on impl blocks:
 ///
-/// 1. **Trait-impl form:** `#[saga::compensatable_task] impl CompensatableTask<S> for T { type Output =
+/// 1. **Trait-impl form:** `#[saga::task] impl CompensatableTask<S> for T { type Output =
 ///    O; async fn run(..); async fn compensate(..); }` — user writes the trait header.
-/// 2. **Inherent-impl form:** `#[saga::compensatable_task(state = S [, key = K])] impl T { type Output =
+/// 2. **Inherent-impl form:** `#[saga::task(state = S [, key = K])] impl T { type Output =
 ///    O; async fn run(..); async fn compensate(..); }` — the macro builds the
 ///    `impl CompensatableTask<S [, K]> for T` header from the attribute args and enforces that
 ///    `type Output`, `run`, and `compensate` are present (`config` / `name` may be overridden).

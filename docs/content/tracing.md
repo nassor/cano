@@ -297,7 +297,7 @@ struct DataEnrichmentNode {
     source: String,
 }
 
-#[node(state = PipelineState)]
+#[task::node(state = PipelineState)]
 impl DataEnrichmentNode {
     type PrepResult = Vec<String>;
     type ExecResult = Vec<String>;

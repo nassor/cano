@@ -107,7 +107,6 @@
 use crate::error::CanoError;
 use crate::resource::Resources;
 use crate::task::{TaskConfig, TaskResult};
-use cano_macros::stepped_task;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::borrow::Cow;
@@ -185,7 +184,7 @@ pub enum StepOutcome<TCursor, TState> {
 ///     }
 /// }
 /// ```
-#[stepped_task]
+#[crate::task::stepped]
 pub trait SteppedTask<TState, TResourceKey = Cow<'static, str>>: Send + Sync
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
@@ -392,12 +391,12 @@ where
 mod tests {
     use super::*;
     use crate::resource::Resources;
+    use crate::task;
     use crate::task::Task;
-    use cano_macros::stepped_task;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    // Note: all `#[stepped_task]` usages inside the `cano` crate itself use the
+    // Note: all `#[task::stepped]` usages inside the `cano` crate itself use the
     // trait-impl form (`impl SteppedTask<S> for T`), because the inherent form emits
     // `::cano::SteppedTask<...>` paths that don't resolve inside this crate. The
     // inherent form is tested in `cano-macros/tests/stepped_task_impl.rs` where
@@ -416,7 +415,7 @@ mod tests {
 
     struct ImmediateStepper;
 
-    #[stepped_task]
+    #[task::stepped]
     impl SteppedTask<MyState> for ImmediateStepper {
         type Cursor = u32;
 
@@ -459,7 +458,7 @@ mod tests {
         }
     }
 
-    #[stepped_task]
+    #[task::stepped]
     impl SteppedTask<MyState> for CountingStepper {
         type Cursor = u32;
 
@@ -510,7 +509,7 @@ mod tests {
 
     struct ErrorStepper;
 
-    #[stepped_task]
+    #[task::stepped]
     impl SteppedTask<MyState> for ErrorStepper {
         type Cursor = u32;
 
@@ -537,7 +536,7 @@ mod tests {
 
     struct SplitStepper;
 
-    #[stepped_task]
+    #[task::stepped]
     impl SteppedTask<MyState> for SplitStepper {
         type Cursor = u32;
 
@@ -570,7 +569,7 @@ mod tests {
 
     struct CustomStepper;
 
-    #[stepped_task]
+    #[task::stepped]
     impl SteppedTask<MyState> for CustomStepper {
         type Cursor = u32;
 
@@ -621,7 +620,7 @@ mod tests {
 
     struct DefaultConfigStepper;
 
-    #[stepped_task]
+    #[task::stepped]
     impl SteppedTask<MyState> for DefaultConfigStepper {
         type Cursor = u32;
 
@@ -749,7 +748,7 @@ mod tests {
         }
     }
 
-    #[stepped_task]
+    #[task::stepped]
     impl SteppedTask<MyState> for TrackedStepper {
         type Cursor = u32;
 

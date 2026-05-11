@@ -118,7 +118,6 @@
 use crate::error::CanoError;
 use crate::resource::Resources;
 use crate::task::{TaskConfig, TaskResult};
-use cano_macros::poll_task;
 use std::borrow::Cow;
 use std::fmt;
 use std::hash::Hash;
@@ -203,7 +202,7 @@ pub enum PollErrorPolicy {
 ///     }
 /// }
 /// ```
-#[poll_task]
+#[crate::task::poll]
 pub trait PollTask<TState, TResourceKey = Cow<'static, str>>: Send + Sync
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
@@ -340,12 +339,12 @@ pub type PollTaskObject<TState, TResourceKey = Cow<'static, str>> =
 mod tests {
     use super::*;
     use crate::resource::Resources;
+    use crate::task;
     use crate::task::Task;
-    use cano_macros::{poll_task, task};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    // Note: all `#[poll_task]` usages inside the `cano` crate itself use the
+    // Note: all `#[task::poll]` usages inside the `cano` crate itself use the
     // trait-impl form (`impl PollTask<S> for T`), because the inherent form emits
     // `::cano::PollTask<...>` paths that don't resolve inside this crate. The
     // inherent form is tested in `cano-macros/tests/poll_task_impl.rs` where
@@ -364,7 +363,7 @@ mod tests {
 
     struct ImmediatePoller;
 
-    #[poll_task]
+    #[task::poll]
     impl PollTask<Step> for ImmediatePoller {
         async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
             Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
@@ -405,7 +404,7 @@ mod tests {
         }
     }
 
-    #[poll_task]
+    #[task::poll]
     impl PollTask<Step> for CountingPoller {
         async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
             let n = self.count.fetch_add(1, Ordering::Relaxed) + 1;
@@ -432,7 +431,7 @@ mod tests {
 
     struct ErrorPoller;
 
-    #[poll_task]
+    #[task::poll]
     impl PollTask<Step> for ErrorPoller {
         async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
             Err(CanoError::task_execution("poll failed"))
@@ -453,7 +452,7 @@ mod tests {
 
     struct SplitPoller;
 
-    #[poll_task]
+    #[task::poll]
     impl PollTask<Step> for SplitPoller {
         async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
             Ok(PollOutcome::Ready(TaskResult::Split(vec![
@@ -477,7 +476,7 @@ mod tests {
 
     struct CustomPoller;
 
-    #[poll_task]
+    #[task::poll]
     impl PollTask<Step> for CustomPoller {
         fn config(&self) -> TaskConfig {
             TaskConfig::minimal()
@@ -518,7 +517,7 @@ mod tests {
 
     struct DefaultConfigPoller;
 
-    #[poll_task]
+    #[task::poll]
     impl PollTask<Step> for DefaultConfigPoller {
         async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
             Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
@@ -620,7 +619,7 @@ mod tests {
         }
     }
 
-    #[poll_task]
+    #[task::poll]
     impl PollTask<Step> for ErrorThenReadyPoller {
         fn on_poll_error(&self) -> PollErrorPolicy {
             PollErrorPolicy::RetryOnError { max_errors: 2 }
@@ -678,7 +677,7 @@ mod tests {
         }
     }
 
-    #[poll_task]
+    #[task::poll]
     impl PollTask<Step> for ErrorPendingErrorReadyPoller {
         fn on_poll_error(&self) -> PollErrorPolicy {
             PollErrorPolicy::RetryOnError { max_errors: 1 }
@@ -729,7 +728,7 @@ mod tests {
 
     struct InfinitePendingPoller;
 
-    #[poll_task]
+    #[task::poll]
     impl PollTask<Step> for InfinitePendingPoller {
         fn config(&self) -> TaskConfig {
             TaskConfig::minimal().with_attempt_timeout(std::time::Duration::from_millis(20))

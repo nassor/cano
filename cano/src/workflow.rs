@@ -785,8 +785,9 @@ mod tests {
     use super::test_support::*;
     use super::*;
     use crate::resource::Resources;
+    use crate::task;
     use crate::task::{Task, TaskResult};
-    use cano_macros::task;
+    use cano_macros::task as task_macro;
     use tokio;
 
     #[tokio::test]
@@ -1001,7 +1002,7 @@ mod tests {
 
     struct BareWorkflowTask;
 
-    #[task]
+    #[task_macro]
     impl Task<TestState> for BareWorkflowTask {
         async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
             Ok(TaskResult::Single(TestState::Complete))
@@ -1029,12 +1030,11 @@ mod tests {
     #[tokio::test]
     async fn test_register_router_orchestration_round_trip() {
         use crate::task::{RouterTask, TaskConfig};
-        use cano_macros::router_task;
 
         // A router that unconditionally routes Start → Process → Complete.
         struct RouteToProcess;
 
-        #[router_task]
+        #[task::router]
         impl RouterTask<TestState> for RouteToProcess {
             fn config(&self) -> TaskConfig {
                 TaskConfig::minimal()
@@ -1058,11 +1058,10 @@ mod tests {
     #[test]
     fn test_validate_passes_with_router_state() {
         use crate::task::{RouterTask, TaskConfig};
-        use cano_macros::router_task;
 
         struct RouteToComplete;
 
-        #[router_task]
+        #[task::router]
         impl RouterTask<TestState> for RouteToComplete {
             fn config(&self) -> TaskConfig {
                 TaskConfig::minimal()

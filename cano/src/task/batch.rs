@@ -174,7 +174,6 @@
 use crate::error::CanoError;
 use crate::resource::Resources;
 use crate::task::{RetryMode, TaskConfig, TaskResult};
-use cano_macros::batch_task;
 use std::borrow::Cow;
 use std::fmt;
 use std::hash::Hash;
@@ -248,7 +247,7 @@ pub type DefaultBatchItemOutput = Box<dyn std::any::Any + Send>;
 ///     }
 /// }
 /// ```
-#[batch_task]
+#[crate::task::batch]
 pub trait BatchTask<TState, TResourceKey = Cow<'static, str>>: Send + Sync
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
@@ -453,13 +452,13 @@ pub type BatchTaskObject<TState, TResourceKey = Cow<'static, str>> =
 mod tests {
     use super::*;
     use crate::resource::Resources;
+    use crate::task;
     use crate::task::Task;
-    use cano_macros::batch_task;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::time::Duration;
 
-    // Note: all `#[batch_task]` usages inside the `cano` crate itself use the
+    // Note: all `#[task::batch]` usages inside the `cano` crate itself use the
     // trait-impl form (`impl BatchTask<S> for T`), because the inherent form emits
     // `::cano::BatchTask<...>` paths that don't resolve inside this crate. The
     // inherent form is tested in `cano-macros/tests/batch_task_impl.rs` where
@@ -479,7 +478,7 @@ mod tests {
         n: usize,
     }
 
-    #[batch_task]
+    #[task::batch]
     impl BatchTask<Step> for IndexedBatch {
         type Item = usize;
         type ItemOutput = usize;
@@ -523,7 +522,7 @@ mod tests {
         n: usize,
     }
 
-    #[batch_task]
+    #[task::batch]
     impl BatchTask<Step> for ConcurrentBatch {
         type Item = usize;
         type ItemOutput = usize;
@@ -576,7 +575,7 @@ mod tests {
 
     struct PartialFailBatch;
 
-    #[batch_task]
+    #[task::batch]
     impl BatchTask<Step> for PartialFailBatch {
         type Item = usize;
         type ItemOutput = usize;
@@ -624,7 +623,7 @@ mod tests {
         call_count: AtomicU32,
     }
 
-    #[batch_task]
+    #[task::batch]
     impl BatchTask<Step> for FlakySingleBatch {
         type Item = u32;
         type ItemOutput = u32;
@@ -682,7 +681,7 @@ mod tests {
         finish_called: Arc<AtomicBool>,
     }
 
-    #[batch_task]
+    #[task::batch]
     impl BatchTask<Step> for LoadFailsBatch {
         type Item = u32;
         type ItemOutput = u32;
@@ -729,7 +728,7 @@ mod tests {
 
     struct FinishFailsBatch;
 
-    #[batch_task]
+    #[task::batch]
     impl BatchTask<Step> for FinishFailsBatch {
         type Item = u32;
         type ItemOutput = u32;
@@ -768,7 +767,7 @@ mod tests {
 
     struct ZeroConcurrencyBatch;
 
-    #[batch_task]
+    #[task::batch]
     impl BatchTask<Step> for ZeroConcurrencyBatch {
         type Item = u32;
         type ItemOutput = u32;
@@ -809,7 +808,7 @@ mod tests {
 
     struct SimpleBatch;
 
-    #[batch_task]
+    #[task::batch]
     impl BatchTask<Step> for SimpleBatch {
         type Item = u32;
         type ItemOutput = u32;

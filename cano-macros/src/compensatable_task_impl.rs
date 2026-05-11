@@ -1,8 +1,8 @@
-//! Boilerplate-filling pass for `#[cano::saga::compensatable_task]` on inherent
+//! Boilerplate-filling pass for `#[cano::saga::task]` on inherent
 //! `impl T { ... }` blocks.
 //!
 //! When the user writes
-//! `#[compensatable_task(state = S [, key = K])] impl T { type Output = O; ... }`,
+//! `#[saga::task(state = S [, key = K])] impl T { type Output = O; ... }`,
 //! this pass:
 //!
 //! 1. Enforces that `type Output`, `run`, and `compensate` are all present (and
@@ -12,7 +12,7 @@
 //! 3. Hands the synthesised impl to `async_rewrite::rewrite_impl_block` so every
 //!    `async fn` becomes a `Pin<Box<dyn Future + Send>>`-returning method.
 //!
-//! The legacy `#[compensatable_task] impl CompensatableTask<S> for T { ... }`
+//! The legacy `#[saga::task] impl CompensatableTask<S> for T { ... }`
 //! form is unchanged and goes through the plain async rewriter in `lib.rs`.
 
 use proc_macro2::TokenStream;
@@ -29,7 +29,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     if item_impl.trait_.is_some() {
         return Err(syn::Error::new(
             item_impl.span(),
-            "#[cano::saga::compensatable_task]: `state` / `key` args only apply to inherent \
+            "#[cano::saga::task]: `state` / `key` args only apply to inherent \
              `impl T { ... }` blocks; when writing `impl CompensatableTask<...> for T` the \
              trait header already specifies them",
         ));
@@ -38,8 +38,8 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     let state_ty = args.state.ok_or_else(|| {
         syn::Error::new(
             item_impl.span(),
-            "#[cano::saga::compensatable_task] on an inherent `impl T { ... }` block requires \
-             `state = T` (e.g. `#[saga::compensatable_task(state = MyState)]`)",
+            "#[cano::saga::task] on an inherent `impl T { ... }` block requires \
+             `state = T` (e.g. `#[saga::task(state = MyState)]`)",
         )
     })?;
     expand_inherent_impl(item_impl, state_ty, args.key)

@@ -386,7 +386,8 @@ pub type TaskObject<TState, TResourceKey = Cow<'static, str>> =
 mod tests {
     use super::*;
     use crate::resource::Resources;
-    use cano_macros::{node, task};
+    use crate::task as task_mod;
+    use cano_macros::task;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
     use tokio;
@@ -564,7 +565,7 @@ mod tests {
 
     struct TestNode;
 
-    #[node]
+    #[task_mod::node]
     impl Node<TestAction> for TestNode {
         type PrepResult = String;
         type ExecResult = bool;

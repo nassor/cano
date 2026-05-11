@@ -92,7 +92,6 @@
 use crate::error::CanoError;
 use crate::resource::Resources;
 use crate::task::{TaskConfig, TaskResult};
-use cano_macros::router_task;
 use std::borrow::Cow;
 use std::fmt;
 use std::hash::Hash;
@@ -156,7 +155,7 @@ use std::hash::Hash;
 ///     }
 /// }
 /// ```
-#[router_task]
+#[crate::task::router]
 pub trait RouterTask<TState, TResourceKey = Cow<'static, str>>: Send + Sync
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
@@ -210,11 +209,11 @@ pub type RouterTaskObject<TState, TResourceKey = Cow<'static, str>> =
 mod tests {
     use super::*;
     use crate::resource::Resources;
+    use crate::task;
     use crate::task::Task;
-    use cano_macros::{router_task, task};
     use std::sync::Arc;
 
-    // Note: all `#[router_task]` usages inside the `cano` crate itself use the
+    // Note: all `#[task::router]` usages inside the `cano` crate itself use the
     // trait-impl form (`impl RouterTask<S> for T`), because the inherent form emits
     // `::cano::RouterTask<...>` paths that don't resolve inside this crate. The
     // inherent form is tested in `cano-macros/tests/router_task_impl.rs` where
@@ -234,7 +233,7 @@ mod tests {
 
     struct SingleRouter;
 
-    #[router_task]
+    #[task::router]
     impl RouterTask<Step> for SingleRouter {
         async fn route(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
             Ok(TaskResult::Single(Step::PathA))
@@ -264,7 +263,7 @@ mod tests {
 
     struct SplitRouter;
 
-    #[router_task]
+    #[task::router]
     impl RouterTask<Step> for SplitRouter {
         async fn route(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
             Ok(TaskResult::Split(vec![Step::PathA, Step::PathB]))
@@ -299,7 +298,7 @@ mod tests {
 
     struct CustomRouter;
 
-    #[router_task]
+    #[task::router]
     impl RouterTask<Step> for CustomRouter {
         fn config(&self) -> TaskConfig {
             TaskConfig::minimal()
@@ -367,7 +366,7 @@ mod tests {
 
     struct DefaultConfigRouter;
 
-    #[router_task]
+    #[task::router]
     impl RouterTask<Step> for DefaultConfigRouter {
         async fn route(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
             Ok(TaskResult::Single(Step::Done))

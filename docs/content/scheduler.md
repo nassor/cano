@@ -214,7 +214,7 @@ struct DailyReportNode {
     report_type: String,
 }
 
-#[node(state = State)]
+#[task::node(state = State)]
 impl DailyReportNode {
     type PrepResult = Vec<String>;
     type ExecResult = String;

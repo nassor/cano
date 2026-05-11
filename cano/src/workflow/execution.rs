@@ -857,8 +857,9 @@ where
 mod tests {
     use super::*;
     use crate::resource::Resources;
+    use crate::task as task_mod;
     use crate::workflow::test_support::*;
-    use cano_macros::{node, task};
+    use cano_macros::task;
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
@@ -1525,7 +1526,7 @@ mod tests {
             call_count: Arc<std::sync::atomic::AtomicUsize>,
         }
 
-        #[node]
+        #[task_mod::node]
         impl Node<TestState> for CountingNode {
             type PrepResult = ();
             type ExecResult = ();
@@ -1840,7 +1841,6 @@ mod tests {
 
     use crate::TaskConfig;
     use crate::task::stepped::{StepOutcome, SteppedTask};
-    use cano_macros::stepped_task;
 
     #[tokio::test]
     async fn test_register_stepped_no_store_runs_to_completion() {
@@ -1849,7 +1849,7 @@ mod tests {
             target: u32,
         }
 
-        #[stepped_task]
+        #[task_mod::stepped]
         impl SteppedTask<TestState> for Counter {
             type Cursor = u32;
             fn config(&self) -> crate::task::TaskConfig {
@@ -1883,7 +1883,7 @@ mod tests {
         // StepOutcome::Done(TaskResult::Split) must return a workflow error.
         struct SplitStepper;
 
-        #[stepped_task]
+        #[task_mod::stepped]
         impl SteppedTask<TestState> for SplitStepper {
             type Cursor = u32;
             fn config(&self) -> crate::task::TaskConfig {

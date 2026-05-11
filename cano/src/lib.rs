@@ -266,7 +266,7 @@ pub use scheduler::{BackoffPolicy, FlowInfo, RunningScheduler, Schedule, Schedul
 /// - `#[cano::task::poll]` — for `impl PollTask` blocks
 /// - `#[cano::task::batch]` — for `impl BatchTask` blocks
 /// - `#[cano::task::stepped]` — for `impl SteppedTask` blocks
-/// - `#[cano::saga::compensatable_task]` — for `impl CompensatableTask` blocks
+/// - `#[cano::saga::task]` — for `impl CompensatableTask` blocks
 ///
 /// [`cano-macros`]: https://docs.rs/cano-macros
 pub use cano_macros::task;
@@ -330,7 +330,7 @@ pub mod prelude {
 
     // Re-export the `task` and `saga` *modules* so that path-qualified macros resolve:
     // `#[task::router]`, `#[task::poll]`, `#[task::batch]`, `#[task::stepped]`,
-    // `#[task::node]`, `#[saga::compensatable_task]` — all available via `use cano::prelude::*`.
+    // `#[task::node]`, `#[saga::task]` — all available via `use cano::prelude::*`.
     // (Modules and macros occupy different namespaces; `task` the module coexists with
     // `task` the macro imported above via `pub use crate::{..., task}`.)
     pub use crate::saga;

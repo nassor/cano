@@ -40,10 +40,9 @@ use std::hash::Hash;
 use std::pin::Pin;
 use std::sync::Arc;
 
-// Re-export the attribute macro so it's accessible as `cano::saga::compensatable_task`,
-// enabling `#[saga::compensatable_task]` when `cano::saga` is in scope.
-// Also imported for in-module use on the `CompensatableTask` trait definition.
-pub use cano_macros::compensatable_task;
+// Re-export the attribute macro so it's accessible as `cano::saga::task`,
+// enabling `#[saga::task]` when `cano::saga` is in scope.
+pub use cano_macros::compensatable_task as task;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -55,10 +54,10 @@ use crate::task::{TaskConfig, TaskResult};
 /// undone via [`compensate`](Self::compensate).
 ///
 /// Register it with [`Workflow::register_with_compensation`](crate::workflow::Workflow::register_with_compensation).
-/// Use `#[saga::compensatable_task(state = S)]` on an inherent `impl` block — the macro builds
+/// Use `#[saga::task(state = S)]` on an inherent `impl` block — the macro builds
 /// the `impl CompensatableTask<S> for T` header, requiring only `type Output`, `run`, and
 /// `compensate` (plus optional `config` / `name` overrides). A bare
-/// `#[saga::compensatable_task]` accepts a hand-written `impl CompensatableTask<S> for T` header:
+/// `#[saga::task]` accepts a hand-written `impl CompensatableTask<S> for T` header:
 ///
 /// ```rust
 /// use cano::prelude::*;
@@ -72,7 +71,7 @@ use crate::task::{TaskConfig, TaskResult};
 ///
 /// struct ReserveInventory;
 ///
-/// #[saga::compensatable_task(state = Step)]
+/// #[saga::task(state = Step)]
 /// impl ReserveInventory {
 ///     type Output = Reservation;
 ///     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {
@@ -90,7 +89,7 @@ use crate::task::{TaskConfig, TaskResult};
 /// The `Output` is the **only** thing carried from `run` to `compensate`; the two may
 /// execute in different processes after a [crash-recovery](crate::recovery) resume, so
 /// `compensate` must work purely from `(res, output)`.
-#[compensatable_task]
+#[crate::saga::task]
 pub trait CompensatableTask<TState, TResourceKey = Cow<'static, str>>: Send + Sync
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,

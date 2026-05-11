@@ -43,7 +43,7 @@ persisted, so a resumed run can still compensate work done in an earlier process
 <p>
 <code>CompensatableTask</code> is a standalone trait (not an extension of <a href="../task/">Task</a>) —
 its <code>run</code> returns <code>(next_state, Output)</code>, which <code>Task::run</code> has no slot
-for. You write the <code>impl</code> using <code>#[saga::compensatable_task(state = …)]</code> on an
+for. You write the <code>impl</code> using <code>#[saga::task(state = …)]</code> on an
 inherent <code>impl</code> block — the macro builds the <code>impl CompensatableTask&lt;…&gt; for …</code> header
 for you. You write only <code>type Output</code>, <code>run</code>, and <code>compensate</code> (plus
 <code>config</code> / <code>name</code> if you want them). The associated <code>Output</code> must be
@@ -63,7 +63,7 @@ struct Reservation { sku: String, qty: u32 }
 
 struct ReserveInventory;
 
-#[saga::compensatable_task(state = Step)]
+#[saga::task(state = Step)]
 impl ReserveInventory {
     type Output = Reservation;
 
@@ -81,12 +81,12 @@ impl ReserveInventory {
 ```
 
 <p>
-Use <code>#[saga::compensatable_task(state = Step)]</code> on an inherent <code>impl</code> block —
+Use <code>#[saga::task(state = Step)]</code> on an inherent <code>impl</code> block —
 the macro builds the <code>impl CompensatableTask&lt;Step&gt; for …</code> header. If you'd rather
 write the trait header yourself — e.g. for a non-default resource-key type, or a generic impl — a
-bare <code>#[saga::compensatable_task] impl CompensatableTask&lt;Step, MyKey&gt; for ReserveInventory { … }</code>
+bare <code>#[saga::task] impl CompensatableTask&lt;Step, MyKey&gt; for ReserveInventory { … }</code>
 works too (pass <code>key = MyKey</code> to the inherent form:
-<code>#[saga::compensatable_task(state = Step, key = MyKey)]</code>).
+<code>#[saga::task(state = Step, key = MyKey)]</code>).
 </p>
 
 <p>
@@ -252,7 +252,7 @@ struct ValidateOrder;
 struct ChargeCard;
 struct ShipOrder;
 
-#[saga::compensatable_task(state = Step)]
+#[saga::task(state = Step)]
 impl ReserveInventory {
     type Output = Reservation;
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {
@@ -276,7 +276,7 @@ impl ValidateOrder {
     }
 }
 
-#[task(state = Step, compensatable)]
+#[saga::task(state = Step)]
 impl ChargeCard {
     type Output = Charge;
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Charge), CanoError> {
