@@ -313,8 +313,9 @@ pub type StepFuture<'a, TState> =
 
 /// Object-safe, type-erased view of a [`SteppedTask`].
 ///
-/// All cursor serialization/deserialization is handled inside the blanket
-/// [`SteppedAdapter`] impl; callers work purely with `Vec<u8>` cursors.
+/// All cursor serialization/deserialization is handled inside the internal
+/// adapter that bridges a concrete `SteppedTask` to this trait; callers work
+/// purely with `Vec<u8>` cursors.
 pub trait ErasedSteppedTask<TState, TResourceKey>: Send + Sync
 where
     TState: Clone + Send + Sync + 'static,

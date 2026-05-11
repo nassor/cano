@@ -223,8 +223,9 @@ where
     /// A router only reads resources and returns the next state — it never writes.
     /// Use this for conditional branching without side effects. Router states are
     /// dispatched like [`StateEntry::Single`] but **skipped by the checkpoint writer**:
-    /// no [`CheckpointRow`] is appended and no sequence number is consumed when a
-    /// router state is entered. The `on_state_enter` observer is still fired.
+    /// no [`CheckpointRow`](crate::recovery::CheckpointRow) is appended and no sequence
+    /// number is consumed when a router state is entered. The `on_state_enter` observer
+    /// is still fired.
     ///
     /// **Recovery note:** if the *initial* state is a router and the workflow crashes
     /// before any non-router state has been checkpointed, `resume_from` will find zero

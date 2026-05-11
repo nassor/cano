@@ -220,12 +220,10 @@ where
     ///
     /// The [compensation stack](crate::saga) is rehydrated from the loaded rows: every
     /// row whose [`kind`](crate::recovery::CheckpointRow::kind) is
-    /// [`RowKind::CompensationCompletion`](crate::recovery::RowKind::CompensationCompletion)
-    /// becomes a stack entry (in sequence order), so a failure after the resume point can
-    /// still compensate work done before the crash. Rows with other kinds — ordinary
-    /// [`RowKind::StateEntry`](crate::recovery::RowKind::StateEntry) rows and
-    /// [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) rows — are ignored
-    /// by the rehydration.
+    /// [`RowKind::CompensationCompletion`] becomes a stack entry (in sequence order), so a
+    /// failure after the resume point can still compensate work done before the crash.
+    /// Rows with other kinds — ordinary [`RowKind::StateEntry`] rows and
+    /// [`RowKind::StepCursor`] rows — are ignored by the rehydration.
     ///
     /// # Errors
     ///

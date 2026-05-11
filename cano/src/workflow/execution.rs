@@ -78,7 +78,8 @@ where
     /// [`Workflow::register_stepped`](crate::workflow::Workflow::register_stepped).
     ///
     /// The engine drives the step loop, persisting each cursor as a
-    /// [`RowKind::StepCursor`] row after each `Step::More`. On
+    /// [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row after each
+    /// `Step::More`. On
     /// [`resume_from`](crate::workflow::Workflow::resume_from), the latest persisted
     /// cursor for this state is rehydrated and passed to the first `step` call instead
     /// of `None`, so processing continues from where it left off.

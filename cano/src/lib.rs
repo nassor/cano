@@ -189,9 +189,11 @@
 //! ## Module Overview
 //!
 //! - [`mod@task`]: The [`Task`] trait — single `run()` method
-//! - [`task::node`](crate::task::node): The [`Node`] trait — three-phase lifecycle with retry via [`TaskConfig`]
-//! - [`task::router`](crate::task::router): The [`RouterTask`] trait — side-effect-free branching via `route()`; registered with [`Workflow::register_router`]
-//! - [`task::poll`](crate::task::poll): The [`PollTask`] trait — wait-until loop via `poll()`; registered with [`Workflow::register`]
+//! - [`task::node`]: The [`Node`] trait — three-phase lifecycle with retry via [`TaskConfig`]
+//! - [`task::router`]: The [`RouterTask`] trait — side-effect-free branching via `route()`; registered with [`Workflow::register_router`]
+//! - [`task::poll`]: The [`PollTask`] trait — wait-until loop via `poll()`; registered with [`Workflow::register`]
+//! - [`task::batch`]: The [`BatchTask`] trait — fan-out over data items via `load`/`process_item`/`finish`; registered with [`Workflow::register`]
+//! - [`task::stepped`]: The [`SteppedTask`] trait — resumable iterative work via `step()` with a serializable cursor; registered with [`Workflow::register_stepped`] (persists the cursor when a checkpoint store is attached)
 //! - [`workflow`]: [`Workflow`] — FSM orchestration with Split/Join support
 //! - `scheduler` (requires `scheduler` feature): `Scheduler` (builder) and `RunningScheduler` (live handle) — cron and interval scheduling
 //! - [`mod@resource`]: [`Resource`] trait, [`Resources`] dictionary, and [`HealthStatus`] — lifecycle-aware resource management and health probes
