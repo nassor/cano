@@ -503,13 +503,30 @@ where
         let outcome: Result<TState, CanoError> = loop {
             // Capture the cursor for this attempt so that the retry closure can clone it.
             let attempt_cursor = current_cursor.clone();
-            let step_result = run_with_retries(&config, || {
-                let c = attempt_cursor.clone();
-                let t = Arc::clone(&task);
-                let r = Arc::clone(&self.resources);
-                async move { t.step(&*r, c).await }
-            })
-            .await;
+            // Wrap the retry-driving future in `catch_unwind` so a panic
+            // inside the `step` body becomes a `CanoError::TaskExecution`
+            // instead of unwinding through the step loop and the FSM,
+            // bypassing the compensation drain and resource teardown.
+            // Matches the pattern in `execute_single_task`,
+            // `execute_split_join`, and `execute_compensatable_task`.
+            let run_future = async {
+                run_with_retries(&config, || {
+                    let c = attempt_cursor.clone();
+                    let t = Arc::clone(&task);
+                    let r = Arc::clone(&self.resources);
+                    async move { t.step(&*r, c).await }
+                })
+                .await
+            };
+            let step_result = match AssertUnwindSafe(run_future).catch_unwind().await {
+                Ok(inner) => inner,
+                Err(payload) => {
+                    let payload_str = panic_payload_message(&*payload);
+                    #[cfg(feature = "tracing")]
+                    tracing::error!(panic = %payload_str, "Stepped task panicked");
+                    Err(CanoError::task_execution(format!("panic: {payload_str}")))
+                }
+            };
 
             match step_result {
                 Err(e) => break Err(e),

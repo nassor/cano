@@ -324,7 +324,7 @@ struct Reserve {
     wf: String,
     faults: Faults,
 }
-#[cano::task(state = Phase, compensatable)]
+#[cano::saga::task(state = Phase)]
 impl Reserve {
     type Output = i64;
     fn config(&self) -> TaskConfig {

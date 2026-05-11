@@ -415,8 +415,10 @@ where
                     return Err(e);
                 }
                 // Sleep before retry (fixed or exponential back-off).
-                // `delay_for_attempt` takes the 0-based attempt index.
-                if let Some(delay) = retry_mode.delay_for_attempt(attempt)
+                // `delay_for_attempt` takes the 0-based index of the attempt
+                // that just failed — i.e. `attempt - 1` after the increment
+                // above. This mirrors `run_with_retries` in `task/retry.rs`.
+                if let Some(delay) = retry_mode.delay_for_attempt(attempt - 1)
                     && delay.as_millis() > 0
                 {
                     tokio::time::sleep(delay).await;

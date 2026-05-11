@@ -309,11 +309,11 @@ pub mod prelude {
 
     pub use crate::{
         BatchTask, CanoError, CanoResult, CheckpointRow, CheckpointStore, CircuitBreaker,
-        CircuitPermit, CircuitPolicy, CircuitState, CompensatableTask, DefaultNodeResult,
-        HealthStatus, JoinConfig, JoinStrategy, MemoryStore, Node, PollErrorPolicy, PollOutcome,
-        PollTask, Resource, Resources, RetryMode, RouterTask, RowKind, SplitResult,
+        CircuitPermit, CircuitPolicy, CircuitState, CompensatableTask, DefaultNodeResult, DynNode,
+        HealthStatus, JoinConfig, JoinStrategy, MemoryStore, Node, NodeObject, PollErrorPolicy,
+        PollOutcome, PollTask, Resource, Resources, RetryMode, RouterTask, RowKind, SplitResult,
         SplitTaskResult, StateEntry, StepOutcome, SteppedTask, Task, TaskConfig, TaskObject,
-        TaskResult, Workflow, WorkflowObserver,
+        TaskResult, Workflow, WorkflowObserver, run_stepped,
     };
 
     #[cfg(feature = "scheduler")]
