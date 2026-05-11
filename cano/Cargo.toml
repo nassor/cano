@@ -54,6 +54,13 @@ name = "recovery_resume"
 path = "src/bin/recovery_resume.rs"
 required-features = ["recovery"]
 
+# Subprocess driver for the SIGKILL SteppedTask cursor-persistence e2e test
+# (tests/stepped_resume_e2e.rs).
+[[bin]]
+name = "stepped_resume"
+path = "src/bin/stepped_resume.rs"
+required-features = ["recovery"]
+
 [[example]]
 name = "ai_workflow_yes_and"
 path = "examples/ai_workflow_yes_and.rs"
