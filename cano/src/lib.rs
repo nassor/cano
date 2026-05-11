@@ -172,7 +172,7 @@
 //! ## Module Overview
 //!
 //! - [`mod@task`]: The [`Task`] trait — single `run()` method
-//! - [`mod@node`]: The [`Node`] trait — three-phase lifecycle with retry via [`TaskConfig`]
+//! - [`task::node`](crate::task::node): The [`Node`] trait — three-phase lifecycle with retry via [`TaskConfig`]
 //! - [`workflow`]: [`Workflow`] — FSM orchestration with Split/Join support
 //! - `scheduler` (requires `scheduler` feature): `Scheduler` (builder) and `RunningScheduler` (live handle) — cron and interval scheduling
 //! - [`mod@resource`]: [`Resource`] trait, [`Resources`] dictionary, and [`HealthStatus`] — lifecycle-aware resource management and health probes
@@ -190,7 +190,6 @@
 
 pub mod circuit;
 pub mod error;
-pub mod node;
 pub mod observer;
 pub mod recovery;
 pub mod resource;
@@ -202,17 +201,14 @@ pub mod workflow;
 #[cfg(feature = "scheduler")]
 pub mod scheduler;
 
-#[cfg(all(test, feature = "tracing"))]
-mod tracing_tests;
-
 // Core public API - simplified imports
 pub use circuit::{CircuitBreaker, CircuitPolicy, CircuitState, Permit as CircuitPermit};
 pub use error::{CanoError, CanoResult};
-pub use node::{DefaultNodeResult, DynNode, Node, NodeObject};
 pub use observer::WorkflowObserver;
 pub use recovery::{CheckpointRow, CheckpointStore};
 pub use resource::{HealthStatus, Resource, Resources};
 pub use saga::{CompensatableTask, ErasedCompensatable};
+pub use task::node::{DefaultNodeResult, DynNode, Node, NodeObject};
 
 #[cfg(feature = "recovery")]
 pub use recovery::RedbCheckpointStore;
