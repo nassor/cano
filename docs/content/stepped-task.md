@@ -35,7 +35,7 @@ the step at and after the resume point may re-run.
 <div class="page-toc-title">On this page</div>
 <ol>
 <li><a href="#how-it-works">How the Step Loop Works</a></li>
-<li><a href="#quick-start">Quick Start with <code>#[stepped_task]</code></a></li>
+<li><a href="#quick-start">Quick Start with <code>#[task::stepped]</code></a></li>
 <li><a href="#registering">Registering a Stepped Task</a></li>
 <li><a href="#persistence">Cursor Persistence &amp; Resume</a></li>
 <li><a href="#idempotency">The Idempotency Contract</a></li>
@@ -63,7 +63,7 @@ R -->|"step(Some c2)"| C
 <p>
 A <code>SteppedTask</code> has one associated type — <code>type Cursor: serde::Serialize +
 serde::de::DeserializeOwned + Send + Sync + 'static</code> (inferred by
-<code>#[stepped_task(state = ...)]</code> from the <code>step</code> signature, or written explicitly)
+<code>#[task::stepped(state = ...)]</code> from the <code>step</code> signature, or written explicitly)
 — and one required method:
 </p>
 
@@ -91,9 +91,9 @@ Optional: <code>fn config(&amp;self) -&gt; TaskConfig</code> (defaults to <code>
 
 <!-- Section: Quick Start -->
 <hr class="section-divider">
-<h2 id="quick-start"><a href="#quick-start" class="anchor-link" aria-hidden="true">#</a>Quick Start with <code>#[stepped_task]</code></h2>
+<h2 id="quick-start"><a href="#quick-start" class="anchor-link" aria-hidden="true">#</a>Quick Start with <code>#[task::stepped]</code></h2>
 <p>
-Attach <code>#[stepped_task(state = MyState)]</code> to an inherent <code>impl</code> block. The macro
+Attach <code>#[task::stepped(state = MyState)]</code> to an inherent <code>impl</code> block. The macro
 infers <code>Cursor</code> from the <code>Option&lt;_&gt;</code> / <code>StepOutcome&lt;_, _&gt;</code>
 types, injects default <code>config</code> / <code>name</code> if absent, synthesises the
 <code>impl SteppedTask&lt;MyState&gt; for Cruncher</code> header, and emits a companion
@@ -111,7 +111,7 @@ next to it. <code>Stage</code> or <code>Phase</code> are clearer choices for the
 </div>
 
 <div class="code-block">
-<span class="code-block-label"><span class="label-icon">&#128260;</span> Inference form — <code>#[stepped_task(state = ...)]</code> on an inherent impl</span>
+<span class="code-block-label"><span class="label-icon">&#128260;</span> Inference form — <code>#[task::stepped(state = ...)]</code> on an inherent impl</span>
 
 ```rust
 use cano::prelude::*;
@@ -125,7 +125,7 @@ struct Progress { processed: u32, total: u32 }
 
 struct Cruncher;
 
-#[stepped_task(state = Stage)]
+#[task::stepped(state = Stage)]
 impl Cruncher {
     async fn step(&self, _res: &Resources, cursor: Option<Progress>)
         -> Result<StepOutcome<Progress, Stage>, CanoError>
@@ -218,13 +218,13 @@ already processed" guards, conditional writes). Steps before the resume point ar
 <h2 id="explicit"><a href="#explicit" class="anchor-link" aria-hidden="true">#</a>Explicit Trait-Impl Form</h2>
 <p>
 Prefer the trait header explicit — e.g. to declare a named <code>Cursor</code> type, or for a
-generic impl? Put a bare <code>#[stepped_task]</code> on an
+generic impl? Put a bare <code>#[task::stepped]</code> on an
 <code>impl SteppedTask&lt;...&gt; for ...</code> block and declare <code>type Cursor</code> yourself.
 The companion <code>impl Task</code> is still emitted.
 </p>
 
 <div class="code-block">
-<span class="code-block-label"><span class="label-icon">&#9998;</span> Explicit form — <code>#[stepped_task]</code> on a trait impl</span>
+<span class="code-block-label"><span class="label-icon">&#9998;</span> Explicit form — <code>#[task::stepped]</code> on a trait impl</span>
 
 ```rust
 use cano::prelude::*;
@@ -238,7 +238,7 @@ struct MyCursor { offset: u64 }
 
 struct Cruncher;
 
-#[stepped_task]
+#[task::stepped]
 impl SteppedTask<Stage> for Cruncher {
     type Cursor = MyCursor;
 

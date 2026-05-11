@@ -1,4 +1,4 @@
-//! Boilerplate-filling pass for `#[cano::stepped_task]` on `impl SteppedTask<S [, K]> for T`
+//! Boilerplate-filling pass for `#[cano::task::stepped]` on `impl SteppedTask<S [, K]> for T`
 //! blocks and on inherent `impl T { ... }` blocks.
 //!
 //! ## Why a sibling `impl Task` is emitted
@@ -53,7 +53,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         if !attr.is_empty() {
             return Err(syn::Error::new(
                 trait_def.span(),
-                "#[cano::stepped_task]: no attribute args are accepted on a trait definition",
+                "#[cano::task::stepped]: no attribute args are accepted on a trait definition",
             ));
         }
         let rewritten = async_rewrite::rewrite_trait_def(trait_def);
@@ -68,8 +68,8 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             let state_ty = args.state.ok_or_else(|| {
                 syn::Error::new(
                     item_impl.span(),
-                    "#[cano::stepped_task] on an inherent `impl T { ... }` block requires \
-                     `state = T` (e.g. `#[stepped_task(state = MyState)]`)",
+                    "#[cano::task::stepped] on an inherent `impl T { ... }` block requires \
+                     `state = T` (e.g. `#[task::stepped(state = MyState)]`)",
                 )
             })?;
             return expand_inherent_impl(item_impl, state_ty, args.key);
@@ -77,7 +77,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             if args.state.is_some() || args.key.is_some() {
                 return Err(syn::Error::new(
                     item_impl.span(),
-                    "#[cano::stepped_task]: `state` / `key` args only apply to inherent \
+                    "#[cano::task::stepped]: `state` / `key` args only apply to inherent \
                      `impl T { ... }` blocks; when writing `impl SteppedTask<...> for T` the \
                      trait header already specifies them",
                 ));
@@ -88,7 +88,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
 
     Err(syn::Error::new(
         proc_macro2::Span::call_site(),
-        "#[cano::stepped_task]: expected a trait definition or impl block",
+        "#[cano::task::stepped]: expected a trait definition or impl block",
     ))
 }
 
@@ -141,7 +141,7 @@ fn expand_inherent_impl(
                     errors.push(syn::Error::new_spanned(
                         &f.sig.ident,
                         format!(
-                            "#[cano::stepped_task]: unexpected method `{other}` in inherent impl; \
+                            "#[cano::task::stepped]: unexpected method `{other}` in inherent impl; \
                              only `step`, `config`, and `name` are allowed"
                         ),
                     ));
@@ -153,7 +153,7 @@ fn expand_inherent_impl(
                     errors.push(syn::Error::new_spanned(
                         &t.ident,
                         format!(
-                            "#[cano::stepped_task]: unexpected associated type `{other}`; \
+                            "#[cano::task::stepped]: unexpected associated type `{other}`; \
                              only `Cursor` is recognised (and it can be inferred)"
                         ),
                     ));
@@ -166,7 +166,7 @@ fn expand_inherent_impl(
     if step_fn.is_none() {
         errors.push(syn::Error::new(
             item_impl.span(),
-            "#[cano::stepped_task] requires an \
+            "#[cano::task::stepped] requires an \
              `async fn step(&self, res: &Resources<_>, cursor: Option<_>) \
              -> Result<StepOutcome<_, _>, CanoError>` method",
         ));
@@ -463,7 +463,7 @@ fn peel_option_param(f: &ImplItemFn, fn_name: &str) -> syn::Result<Type> {
         syn::Error::new_spanned(
             &f.sig,
             format!(
-                "#[cano::stepped_task]: `{fn_name}` must have a third parameter \
+                "#[cano::task::stepped]: `{fn_name}` must have a third parameter \
                  `cursor: Option<T>` from which `type Cursor` can be inferred"
             ),
         )
@@ -475,7 +475,7 @@ fn peel_option_param(f: &ImplItemFn, fn_name: &str) -> syn::Result<Type> {
             return Err(syn::Error::new_spanned(
                 third,
                 format!(
-                    "#[cano::stepped_task]: `{fn_name}` third parameter must be a typed argument, not `self`"
+                    "#[cano::task::stepped]: `{fn_name}` third parameter must be a typed argument, not `self`"
                 ),
             ));
         }
@@ -486,7 +486,7 @@ fn peel_option_param(f: &ImplItemFn, fn_name: &str) -> syn::Result<Type> {
         return Err(syn::Error::new_spanned(
             ty,
             format!(
-                "#[cano::stepped_task]: `{fn_name}` third parameter must be `Option<T>` \
+                "#[cano::task::stepped]: `{fn_name}` third parameter must be `Option<T>` \
                  so that `type Cursor = T` can be inferred; found `{}`",
                 quote! { #ty }
             ),
@@ -496,7 +496,7 @@ fn peel_option_param(f: &ImplItemFn, fn_name: &str) -> syn::Result<Type> {
     let last = tp.path.segments.last().ok_or_else(|| {
         syn::Error::new_spanned(
             ty,
-            format!("#[cano::stepped_task]: cannot read type of `{fn_name}` third parameter"),
+            format!("#[cano::task::stepped]: cannot read type of `{fn_name}` third parameter"),
         )
     })?;
 
@@ -504,7 +504,7 @@ fn peel_option_param(f: &ImplItemFn, fn_name: &str) -> syn::Result<Type> {
         return Err(syn::Error::new_spanned(
             ty,
             format!(
-                "#[cano::stepped_task]: `{fn_name}` third parameter must be `Option<T>` \
+                "#[cano::task::stepped]: `{fn_name}` third parameter must be `Option<T>` \
                  so that `type Cursor = T` can be inferred; found `{}`",
                 quote! { #ty }
             ),
@@ -515,7 +515,7 @@ fn peel_option_param(f: &ImplItemFn, fn_name: &str) -> syn::Result<Type> {
         return Err(syn::Error::new_spanned(
             ty,
             format!(
-                "#[cano::stepped_task]: `{fn_name}` third parameter `Option` must have \
+                "#[cano::task::stepped]: `{fn_name}` third parameter `Option` must have \
                  an angle-bracketed type argument"
             ),
         ));
@@ -537,7 +537,7 @@ fn peel_option_param(f: &ImplItemFn, fn_name: &str) -> syn::Result<Type> {
         return Err(syn::Error::new_spanned(
             ty,
             format!(
-                "#[cano::stepped_task]: `{fn_name}` third parameter `Option` must have \
+                "#[cano::task::stepped]: `{fn_name}` third parameter `Option` must have \
                  exactly one type argument"
             ),
         ));

@@ -18,7 +18,7 @@
 //!   restart.
 //!
 //! Every [`SteppedTask`] automatically implements [`Task`](crate::task::Task) via a
-//! per-impl-site companion `impl Task<S> for T` emitted by the `#[stepped_task]` macro.
+//! per-impl-site companion `impl Task<S> for T` emitted by the `#[task::stepped]` macro.
 //! This means you can register a `SteppedTask` with
 //! [`Workflow::register`](crate::workflow::Workflow::register) exactly like any other task.
 //!
@@ -33,7 +33,7 @@
 //!
 //! struct PageScanner { total_pages: u32 }
 //!
-//! #[stepped_task(state = MyState)]
+//! #[task::stepped(state = MyState)]
 //! impl PageScanner {
 //!     async fn step(
 //!         &self,
@@ -78,7 +78,7 @@
 //!
 //! struct TraitStepper;
 //!
-//! #[stepped_task]
+//! #[task::stepped]
 //! impl SteppedTask<MyState> for TraitStepper {
 //!     type Cursor = MyCursor;
 //!
@@ -159,7 +159,7 @@ pub enum StepOutcome<TCursor, TState> {
 ///
 /// # Implementing SteppedTask
 ///
-/// Prefer the inherent `#[stepped_task(state = S)]` form:
+/// Prefer the inherent `#[task::stepped(state = S)]` form:
 ///
 /// ```rust
 /// use cano::prelude::*;
@@ -169,7 +169,7 @@ pub enum StepOutcome<TCursor, TState> {
 ///
 /// struct MyProcessor { limit: u32 }
 ///
-/// #[stepped_task(state = MyState)]
+/// #[task::stepped(state = MyState)]
 /// impl MyProcessor {
 ///     async fn step(
 ///         &self,
@@ -237,7 +237,7 @@ where
 
 /// Run the [`SteppedTask`] step loop for `s`.
 ///
-/// The synthesised `Task::run` method emitted by `#[stepped_task]` delegates here so
+/// The synthesised `Task::run` method emitted by `#[task::stepped]` delegates here so
 /// that the loop body lives in a single place. This in-memory loop is used when a
 /// `SteppedTask` is registered via [`Workflow::register`](crate::workflow::Workflow::register).
 ///

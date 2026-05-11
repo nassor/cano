@@ -30,7 +30,7 @@ impl TestNode {
     }
 }
 
-#[cano::node]
+#[cano::task::node]
 impl Node<TestState> for TestNode {
     type PrepResult = String;
     type ExecResult = String;

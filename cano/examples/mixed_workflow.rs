@@ -86,7 +86,7 @@ impl ProcessorNode {
     }
 }
 
-#[node(state = WorkflowState)]
+#[task::node(state = WorkflowState)]
 impl ProcessorNode {
     type PrepResult = Vec<f64>;
     type ExecResult = (Vec<f64>, DataStats);
@@ -215,7 +215,7 @@ impl ValidatorTask {
 /// Structured Node for report generation
 struct ReportNode;
 
-#[node(state = WorkflowState)]
+#[task::node(state = WorkflowState)]
 impl ReportNode {
     type PrepResult = ();
     type ExecResult = ();

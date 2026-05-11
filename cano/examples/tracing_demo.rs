@@ -48,7 +48,7 @@ impl TracedDataProcessor {
     }
 }
 
-#[node(state = WorkflowState)]
+#[task::node(state = WorkflowState)]
 impl TracedDataProcessor {
     type PrepResult = Vec<String>;
     type ExecResult = Vec<String>;
@@ -131,7 +131,7 @@ impl ValidationNode {
     }
 }
 
-#[node(state = WorkflowState)]
+#[task::node(state = WorkflowState)]
 impl ValidationNode {
     type PrepResult = String;
     type ExecResult = bool;

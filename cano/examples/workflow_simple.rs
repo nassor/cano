@@ -8,7 +8,7 @@
 //! 2. [`#[derive(FromResources)]`](cano::FromResources) — generates a
 //!    `from_resources(&Resources<_>)` constructor that pulls each declared
 //!    field out of the map. Field-level `#[res("key")]` declares the lookup key.
-//! 3. [`#[node(state = ...)]`](cano::node) on an inherent `impl` block — the
+//! 3. [`#[task::node(state = ...)]`](cano::node) on an inherent `impl` block — the
 //!    macro builds the `impl Node<State> for X` header from the attribute,
 //!    enforces that `prep` / `exec` / `post` are present, and infers
 //!    `type PrepResult` / `type ExecResult` from the return types of `prep`
@@ -75,7 +75,7 @@ struct StoreDeps {
 #[derive(Clone)]
 struct GeneratorNode;
 
-#[node(state = WorkflowAction)]
+#[task::node(state = WorkflowAction)]
 impl GeneratorNode {
     /// Prep: pull configuration from the resource map and produce a random vector.
     async fn prep(&self, res: &Resources) -> Result<Vec<u32>, CanoError> {
@@ -114,7 +114,7 @@ impl GeneratorNode {
 #[derive(Clone)]
 struct CounterNode;
 
-#[node(state = WorkflowAction)]
+#[task::node(state = WorkflowAction)]
 impl CounterNode {
     /// Prep: pull the filtered numbers out of the store.
     async fn prep(&self, res: &Resources) -> Result<Vec<u32>, CanoError> {

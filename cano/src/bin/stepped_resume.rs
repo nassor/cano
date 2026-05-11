@@ -56,7 +56,7 @@ impl Cruncher {
     }
 }
 
-#[stepped_task(state = State)]
+#[task::stepped(state = State)]
 impl Cruncher {
     async fn step(
         &self,

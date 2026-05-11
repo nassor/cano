@@ -34,7 +34,7 @@ impl ProcessingNode {
     }
 }
 
-#[node(state = TaskState)]
+#[task::node(state = TaskState)]
 impl ProcessingNode {
     type PrepResult = String;
     type ExecResult = String;

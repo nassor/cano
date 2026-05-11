@@ -195,7 +195,7 @@ struct Actor1Prep {
     history: String,
 }
 
-#[node(state = ConversationState)]
+#[task::node(state = ConversationState)]
 impl Actor1Node {
     type PrepResult = Actor1Prep;
     type ExecResult = String;
@@ -286,7 +286,7 @@ struct Actor2Prep {
     history: String,
 }
 
-#[node(state = ConversationState)]
+#[task::node(state = ConversationState)]
 impl Actor2Node {
     type PrepResult = Actor2Prep;
     type ExecResult = String;

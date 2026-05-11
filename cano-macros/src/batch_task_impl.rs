@@ -1,4 +1,4 @@
-//! Boilerplate-filling pass for `#[cano::batch_task]` on `impl BatchTask<S [, K]> for T`
+//! Boilerplate-filling pass for `#[cano::task::batch]` on `impl BatchTask<S [, K]> for T`
 //! blocks and on inherent `impl T { ... }` blocks.
 //!
 //! ## Why a sibling `impl Task` is emitted
@@ -57,7 +57,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         if !attr.is_empty() {
             return Err(syn::Error::new(
                 trait_def.span(),
-                "#[cano::batch_task]: no attribute args are accepted on a trait definition",
+                "#[cano::task::batch]: no attribute args are accepted on a trait definition",
             ));
         }
         let rewritten = async_rewrite::rewrite_trait_def(trait_def);
@@ -72,8 +72,8 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             let state_ty = args.state.ok_or_else(|| {
                 syn::Error::new(
                     item_impl.span(),
-                    "#[cano::batch_task] on an inherent `impl T { ... }` block requires \
-                     `state = T` (e.g. `#[batch_task(state = MyState)]`)",
+                    "#[cano::task::batch] on an inherent `impl T { ... }` block requires \
+                     `state = T` (e.g. `#[task::batch(state = MyState)]`)",
                 )
             })?;
             return expand_inherent_impl(item_impl, state_ty, args.key);
@@ -81,7 +81,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             if args.state.is_some() || args.key.is_some() {
                 return Err(syn::Error::new(
                     item_impl.span(),
-                    "#[cano::batch_task]: `state` / `key` args only apply to inherent \
+                    "#[cano::task::batch]: `state` / `key` args only apply to inherent \
                      `impl T { ... }` blocks; when writing `impl BatchTask<...> for T` the \
                      trait header already specifies them",
                 ));
@@ -92,7 +92,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
 
     Err(syn::Error::new(
         proc_macro2::Span::call_site(),
-        "#[cano::batch_task]: expected a trait definition or impl block",
+        "#[cano::task::batch]: expected a trait definition or impl block",
     ))
 }
 
@@ -155,7 +155,7 @@ fn expand_inherent_impl(
                     errors.push(syn::Error::new_spanned(
                         &f.sig.ident,
                         format!(
-                            "#[cano::batch_task]: unexpected method `{other}` in inherent impl; \
+                            "#[cano::task::batch]: unexpected method `{other}` in inherent impl; \
                              allowed: `load`, `process_item`, `finish`, `concurrency`, \
                              `item_retry`, `config`, `name`"
                         ),
@@ -169,7 +169,7 @@ fn expand_inherent_impl(
                     errors.push(syn::Error::new_spanned(
                         &t.ident,
                         format!(
-                            "#[cano::batch_task]: unexpected associated type `{other}`; \
+                            "#[cano::task::batch]: unexpected associated type `{other}`; \
                              only `Item` and `ItemOutput` are recognised"
                         ),
                     ));
@@ -182,21 +182,21 @@ fn expand_inherent_impl(
     if process_item_fn.is_none() {
         errors.push(syn::Error::new(
             item_impl.span(),
-            "#[cano::batch_task] requires a \
+            "#[cano::task::batch] requires a \
              `async fn process_item(&self, item: &T) -> Result<U, CanoError>` method",
         ));
     }
     if !has_load {
         errors.push(syn::Error::new(
             item_impl.span(),
-            "#[cano::batch_task] requires a \
+            "#[cano::task::batch] requires a \
              `async fn load(&self, res: &Resources<_>) -> Result<Vec<_>, CanoError>` method",
         ));
     }
     if !has_finish {
         errors.push(syn::Error::new(
             item_impl.span(),
-            "#[cano::batch_task] requires a \
+            "#[cano::task::batch] requires a \
              `async fn finish(&self, res: &Resources<_>, outputs: Vec<Result<_, CanoError>>) \
               -> Result<TaskResult<_>, CanoError>` method",
         ));
@@ -528,7 +528,7 @@ fn peel_ref_param(f: &ImplItemFn, fn_name: &str) -> syn::Result<Type> {
         syn::Error::new_spanned(
             &f.sig,
             format!(
-                "#[cano::batch_task]: `{fn_name}` must have a second parameter \
+                "#[cano::task::batch]: `{fn_name}` must have a second parameter \
                  `item: &T` from which `type Item` can be inferred"
             ),
         )
@@ -540,7 +540,7 @@ fn peel_ref_param(f: &ImplItemFn, fn_name: &str) -> syn::Result<Type> {
             return Err(syn::Error::new_spanned(
                 second,
                 format!(
-                    "#[cano::batch_task]: `{fn_name}` second parameter must be a typed argument, not `self`"
+                    "#[cano::task::batch]: `{fn_name}` second parameter must be a typed argument, not `self`"
                 ),
             ));
         }
@@ -552,7 +552,7 @@ fn peel_ref_param(f: &ImplItemFn, fn_name: &str) -> syn::Result<Type> {
         other => Err(syn::Error::new_spanned(
             other,
             format!(
-                "#[cano::batch_task]: `{fn_name}` second parameter must be `&T` \
+                "#[cano::task::batch]: `{fn_name}` second parameter must be `&T` \
                  (a shared reference) so that `type Item = T` can be inferred; \
                  found `{}`",
                 quote! { #other }
@@ -568,7 +568,7 @@ fn peel_result_return(ret: &ReturnType, fn_name: &str) -> syn::Result<Type> {
             return Err(syn::Error::new(
                 ret.span(),
                 format!(
-                    "#[cano::batch_task]: `{fn_name}` must have an explicit return type \
+                    "#[cano::task::batch]: `{fn_name}` must have an explicit return type \
                      (Result<T, _> or CanoResult<T>)"
                 ),
             ));
@@ -580,7 +580,7 @@ fn peel_result_return(ret: &ReturnType, fn_name: &str) -> syn::Result<Type> {
         return Err(syn::Error::new_spanned(
             ty,
             format!(
-                "#[cano::batch_task]: `{fn_name}` return type must be \
+                "#[cano::task::batch]: `{fn_name}` return type must be \
                  Result<T, _> or CanoResult<T>"
             ),
         ));
@@ -589,7 +589,7 @@ fn peel_result_return(ret: &ReturnType, fn_name: &str) -> syn::Result<Type> {
     let last = tp.path.segments.last().ok_or_else(|| {
         syn::Error::new_spanned(
             ty,
-            format!("#[cano::batch_task]: cannot read return type of `{fn_name}`"),
+            format!("#[cano::task::batch]: cannot read return type of `{fn_name}`"),
         )
     })?;
 
@@ -598,7 +598,7 @@ fn peel_result_return(ret: &ReturnType, fn_name: &str) -> syn::Result<Type> {
         return Err(syn::Error::new_spanned(
             ty,
             format!(
-                "#[cano::batch_task]: `{fn_name}` return type must be Result<T, _> or \
+                "#[cano::task::batch]: `{fn_name}` return type must be Result<T, _> or \
                  CanoResult<T>; found `{ident}` without type parameters"
             ),
         ));
@@ -609,7 +609,7 @@ fn peel_result_return(ret: &ReturnType, fn_name: &str) -> syn::Result<Type> {
             syn::Error::new_spanned(
                 args,
                 format!(
-                    "#[cano::batch_task]: `{fn_name}` Result<...> needs at least one \
+                    "#[cano::task::batch]: `{fn_name}` Result<...> needs at least one \
                      type parameter"
                 ),
             )
@@ -618,7 +618,7 @@ fn peel_result_return(ret: &ReturnType, fn_name: &str) -> syn::Result<Type> {
             return Err(syn::Error::new_spanned(
                 args,
                 format!(
-                    "#[cano::batch_task]: `{fn_name}` Result<T, _> first parameter \
+                    "#[cano::task::batch]: `{fn_name}` Result<T, _> first parameter \
                      must be a type"
                 ),
             ));
@@ -628,13 +628,13 @@ fn peel_result_return(ret: &ReturnType, fn_name: &str) -> syn::Result<Type> {
         let GenericArgument::Type(t) = args.args.iter().next().ok_or_else(|| {
             syn::Error::new_spanned(
                 args,
-                format!("#[cano::batch_task]: `{fn_name}` CanoResult<T> needs a type parameter"),
+                format!("#[cano::task::batch]: `{fn_name}` CanoResult<T> needs a type parameter"),
             )
         })?
         else {
             return Err(syn::Error::new_spanned(
                 args,
-                format!("#[cano::batch_task]: `{fn_name}` CanoResult<T> parameter must be a type"),
+                format!("#[cano::task::batch]: `{fn_name}` CanoResult<T> parameter must be a type"),
             ));
         };
         Ok(t.clone())
@@ -642,7 +642,7 @@ fn peel_result_return(ret: &ReturnType, fn_name: &str) -> syn::Result<Type> {
         Err(syn::Error::new_spanned(
             ty,
             format!(
-                "#[cano::batch_task]: `{fn_name}` return type must be Result<T, _> or \
+                "#[cano::task::batch]: `{fn_name}` return type must be Result<T, _> or \
                  CanoResult<T>; found `{ident}<...>`"
             ),
         ))

@@ -1,4 +1,4 @@
-//! Integration tests for `#[cano::batch_task]` — both the inherent form (which emits
+//! Integration tests for `#[cano::task::batch]` — both the inherent form (which emits
 //! `::cano::` paths) and the trait-impl form. These run outside the `cano` crate so
 //! `::cano::` paths resolve correctly and the synthesised `impl Task` companion impl
 //! with `::cano::task::batch::run_batch` in its body compiles as expected.
@@ -33,7 +33,7 @@ enum Key {
 /// and return type respectively.
 struct InherentInferred;
 
-#[batch_task(state = Step)]
+#[task::batch(state = Step)]
 impl InherentInferred {
     // concurrency() and item_retry() deliberately omitted — defaults injected by macro.
 
@@ -117,7 +117,7 @@ async fn inherent_inferred_integrates_with_workflow() {
 /// The macro must not infer them (they already exist) and must still compile.
 struct InherentExplicitTypes;
 
-#[batch_task(state = Step)]
+#[task::batch(state = Step)]
 impl InherentExplicitTypes {
     type Item = i64;
     type ItemOutput = i64;
@@ -154,7 +154,7 @@ async fn explicit_types_compile_and_run() {
 
 struct InherentWithKey;
 
-#[batch_task(state = Step, key = Key)]
+#[task::batch(state = Step, key = Key)]
 impl InherentWithKey {
     async fn load(&self, res: &Resources<Key>) -> Result<Vec<u32>, CanoError> {
         let store = res.get::<MemoryStore, _>(&Key::Store)?;
@@ -209,7 +209,7 @@ struct InherentWithOverrides {
     call_count: AtomicU32,
 }
 
-#[batch_task(state = Step)]
+#[task::batch(state = Step)]
 impl InherentWithOverrides {
     fn concurrency(&self) -> usize {
         4
@@ -290,7 +290,7 @@ async fn inherent_overrides_retry_recovers_first_item() {
 
 struct InherentCustomMeta;
 
-#[batch_task(state = Step)]
+#[task::batch(state = Step)]
 impl InherentCustomMeta {
     fn config(&self) -> TaskConfig {
         TaskConfig::minimal()
@@ -340,12 +340,12 @@ fn inherent_custom_config_minimal_forwarded_to_task() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. Trait-impl form: `#[batch_task] impl BatchTask<S> for T { ... }`
+// 6. Trait-impl form: `#[task::batch] impl BatchTask<S> for T { ... }`
 // ---------------------------------------------------------------------------
 
 struct TraitBatch;
 
-#[batch_task]
+#[task::batch]
 impl BatchTask<Step> for TraitBatch {
     type Item = u32;
     type ItemOutput = u32;
@@ -404,7 +404,7 @@ async fn trait_form_integrates_with_workflow() {
 
 struct PartialFailInherent;
 
-#[batch_task(state = Step)]
+#[task::batch(state = Step)]
 impl PartialFailInherent {
     async fn load(&self, _res: &Resources) -> Result<Vec<u32>, CanoError> {
         Ok(vec![1, 2, 3])
@@ -450,7 +450,7 @@ struct LoadErrInherent {
     finish_called: Arc<std::sync::atomic::AtomicBool>,
 }
 
-#[batch_task(state = Step)]
+#[task::batch(state = Step)]
 impl LoadErrInherent {
     async fn load(&self, _res: &Resources) -> Result<Vec<u32>, CanoError> {
         Err(CanoError::task_execution("load failed"))
@@ -495,7 +495,7 @@ async fn load_error_propagates_finish_never_called() {
 
 struct LoadStep;
 
-#[batch_task(state = Step)]
+#[task::batch(state = Step)]
 impl LoadStep {
     fn concurrency(&self) -> usize {
         3

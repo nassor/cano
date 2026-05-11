@@ -33,7 +33,7 @@ retry rarely makes sense, since the loop already keeps trying. For tolerating tr
 <div class="page-toc-title">On this page</div>
 <ol>
 <li><a href="#how-it-works">How the Poll Loop Works</a></li>
-<li><a href="#quick-start">Quick Start with <code>#[poll_task]</code></a></li>
+<li><a href="#quick-start">Quick Start with <code>#[task::poll]</code></a></li>
 <li><a href="#registering">Registering a Poll Task</a></li>
 <li><a href="#error-policy">The Poll Error Policy</a></li>
 <li><a href="#caps">Bounding the Loop</a></li>
@@ -79,9 +79,9 @@ Its return value drives the loop:
 
 <!-- Section: Quick Start -->
 <hr class="section-divider">
-<h2 id="quick-start"><a href="#quick-start" class="anchor-link" aria-hidden="true">#</a>Quick Start with <code>#[poll_task]</code></h2>
+<h2 id="quick-start"><a href="#quick-start" class="anchor-link" aria-hidden="true">#</a>Quick Start with <code>#[task::poll]</code></h2>
 <p>
-Attach <code>#[poll_task(state = MyState)]</code> to an inherent <code>impl</code> block. You write
+Attach <code>#[task::poll(state = MyState)]</code> to an inherent <code>impl</code> block. You write
 <code>poll</code>; the macro injects default bodies for any of <code>config</code>, <code>name</code>,
 or <code>on_poll_error</code> you don't write, synthesises the
 <code>impl PollTask&lt;MyState&gt; for MyPoller</code> header, and emits a companion
@@ -91,7 +91,7 @@ whose <code>run</code> happens to loop. No engine changes.
 </p>
 
 <div class="code-block">
-<span class="code-block-label"><span class="label-icon">&#9889;</span> Inference form — <code>#[poll_task(state = ...)]</code> on an inherent impl</span>
+<span class="code-block-label"><span class="label-icon">&#9889;</span> Inference form — <code>#[task::poll(state = ...)]</code> on an inherent impl</span>
 
 ```rust
 use cano::prelude::*;
@@ -108,7 +108,7 @@ impl Resource for Job {}
 
 struct AwaitJob;
 
-#[poll_task(state = Step)]
+#[task::poll(state = Step)]
 impl AwaitJob {
     fn config(&self) -> TaskConfig {
         // cap the whole wait at 30s
@@ -176,7 +176,7 @@ absorbed.</p>
 <span class="code-block-label">Tolerating a few transient errors mid-loop</span>
 
 ```rust
-#[poll_task(state = Step)]
+#[task::poll(state = Step)]
 impl AwaitJob {
     fn on_poll_error(&self) -> PollErrorPolicy {
         // up to 3 consecutive Errs from `poll` are absorbed; a
@@ -221,13 +221,13 @@ inside your <code>poll</code> body.
 <hr class="section-divider">
 <h2 id="explicit"><a href="#explicit" class="anchor-link" aria-hidden="true">#</a>Explicit Trait-Impl Form</h2>
 <p>
-Prefer writing the trait header yourself? Put a bare <code>#[poll_task]</code> on an
+Prefer writing the trait header yourself? Put a bare <code>#[task::poll]</code> on an
 <code>impl PollTask&lt;...&gt; for ...</code> block. The companion <code>impl Task</code> is still
 emitted; explicit method definitions always win.
 </p>
 
 <div class="code-block">
-<span class="code-block-label"><span class="label-icon">&#9998;</span> Explicit form — <code>#[poll_task]</code> on a trait impl</span>
+<span class="code-block-label"><span class="label-icon">&#9998;</span> Explicit form — <code>#[task::poll]</code> on a trait impl</span>
 
 ```rust
 use cano::prelude::*;
@@ -237,7 +237,7 @@ enum Step { AwaitJob, Process, Done }
 
 struct AwaitJob;
 
-#[poll_task]
+#[task::poll]
 impl PollTask<Step> for AwaitJob {
     async fn poll(&self, res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
         let job = res.get::<Job, _>("job")?;

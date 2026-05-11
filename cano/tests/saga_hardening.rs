@@ -41,7 +41,7 @@ struct Charge {
     amount: i64,
     next: u32,
 }
-#[task(state = u32, compensatable)]
+#[saga::compensatable_task(state = u32)]
 impl Charge {
     type Output = (String, i64);
     fn config(&self) -> TaskConfig {
@@ -169,7 +169,7 @@ mod recovery {
         next: St,
         fail_forward: bool,
     }
-    #[task(state = St, compensatable)]
+    #[saga::compensatable_task(state = St)]
     impl Step {
         type Output = u32;
         fn config(&self) -> TaskConfig {

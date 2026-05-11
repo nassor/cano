@@ -1,4 +1,4 @@
-//! Integration tests for `#[cano::router_task]` — both the inherent form (which emits
+//! Integration tests for `#[cano::task::router]` — both the inherent form (which emits
 //! `::cano::` paths) and the trait-impl form. These run outside the `cano` crate so
 //! `::cano::` paths resolve correctly.
 
@@ -19,7 +19,7 @@ enum Step {
 
 struct InherentRouter;
 
-#[router_task(state = Step)]
+#[task::router(state = Step)]
 impl InherentRouter {
     async fn route(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
         Ok(TaskResult::Single(Step::PathA))
@@ -64,7 +64,7 @@ async fn inherent_router_task_run_works() {
 
 struct InherentCustomRouter;
 
-#[router_task(state = Step)]
+#[task::router(state = Step)]
 impl InherentCustomRouter {
     fn config(&self) -> TaskConfig {
         TaskConfig::minimal()
@@ -118,7 +118,7 @@ fn inherent_companion_task_forwards_name() {
 
 struct InherentSplitRouter;
 
-#[router_task(state = Step)]
+#[task::router(state = Step)]
 impl InherentSplitRouter {
     async fn route(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
         Ok(TaskResult::Split(vec![Step::PathA, Step::PathB]))
@@ -133,12 +133,12 @@ async fn inherent_router_can_return_split() {
 }
 
 // ---------------------------------------------------------------------------
-// Trait-impl form: `#[router_task] impl RouterTask<S> for T { ... }`
+// Trait-impl form: `#[task::router] impl RouterTask<S> for T { ... }`
 // ---------------------------------------------------------------------------
 
 struct TraitRouter;
 
-#[router_task]
+#[task::router]
 impl RouterTask<Step> for TraitRouter {
     async fn route(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
         Ok(TaskResult::Single(Step::PathA))

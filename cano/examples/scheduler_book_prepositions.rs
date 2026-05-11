@@ -127,7 +127,7 @@ impl BookDownloadNode {
     }
 }
 
-#[node(state = WorkflowPhase)]
+#[task::node(state = WorkflowPhase)]
 impl BookDownloadNode {
     type PrepResult = ();
     type ExecResult = Option<Book>;
@@ -215,7 +215,7 @@ impl PrepositionAnalysisNode {
     }
 }
 
-#[node(state = WorkflowPhase)]
+#[task::node(state = WorkflowPhase)]
 impl PrepositionAnalysisNode {
     type PrepResult = Vec<Book>;
     type ExecResult = Vec<BookAnalysis>;
@@ -259,7 +259,7 @@ impl PrepositionAnalysisNode {
 #[derive(Clone)]
 struct BookRankingNode;
 
-#[node(state = WorkflowPhase)]
+#[task::node(state = WorkflowPhase)]
 impl BookRankingNode {
     type PrepResult = Vec<BookAnalysis>;
     type ExecResult = Vec<BookRanking>;

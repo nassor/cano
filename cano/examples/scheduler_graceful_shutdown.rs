@@ -45,7 +45,7 @@ impl LongProcessingNode {
     }
 }
 
-#[node(state = MyState)]
+#[task::node(state = MyState)]
 impl LongProcessingNode {
     type PrepResult = ();
     type ExecResult = String;
@@ -76,7 +76,7 @@ impl LongProcessingNode {
 #[derive(Clone)]
 struct ProcessingNode;
 
-#[node(state = MyState)]
+#[task::node(state = MyState)]
 impl ProcessingNode {
     type PrepResult = String;
     type ExecResult = String;
@@ -107,7 +107,7 @@ impl ProcessingNode {
 #[derive(Clone)]
 struct QuickNode;
 
-#[node(state = MyState)]
+#[task::node(state = MyState)]
 impl QuickNode {
     type PrepResult = ();
     type ExecResult = ();

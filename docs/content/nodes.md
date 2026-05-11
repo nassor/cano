@@ -95,11 +95,11 @@ is the safest approach.
 </p>
 </div>
 
-<!-- Section: Quick Start with #[node] inference -->
+<!-- Section: Quick Start with #[task::node] inference -->
 <hr class="section-divider">
-<h2 id="quick-start"><a href="#quick-start" class="anchor-link" aria-hidden="true">#</a>Quick Start with <code>#[node(state = ...)]</code></h2>
+<h2 id="quick-start"><a href="#quick-start" class="anchor-link" aria-hidden="true">#</a>Quick Start with <code>#[task::node(state = ...)]</code></h2>
 <p>
-The recommended form attaches <code>#[node(state = MyState)]</code> to an inherent
+The recommended form attaches <code>#[task::node(state = MyState)]</code> to an inherent
 <code>impl MyNode { ... }</code> block. The macro:
 </p>
 
@@ -113,7 +113,7 @@ The recommended form attaches <code>#[node(state = MyState)]</code> to an inhere
 
 <p>
 You can still write any of these explicitly — explicit always wins. For workflows that
-use a custom resource-key type, pass it via <code>#[node(state = S, key = K)]</code>.
+use a custom resource-key type, pass it via <code>#[task::node(state = S, key = K)]</code>.
 </p>
 
 <div class="code-block">
@@ -129,7 +129,7 @@ enum WorkflowAction { Generate, Count, Complete, Error }
 #[derive(Clone)]
 struct GeneratorNode;
 
-#[node(state = WorkflowAction)]
+#[task::node(state = WorkflowAction)]
 impl GeneratorNode {
     // prep: return type Vec<u32> is inferred as PrepResult
     async fn prep(&self, _res: &Resources) -> Result<Vec<u32>, CanoError> {
@@ -196,7 +196,7 @@ enum WorkflowAction { Generate, Count, Complete, Error }
 #[derive(Clone)]
 struct GeneratorNode;
 
-#[node(state = WorkflowAction)]
+#[task::node(state = WorkflowAction)]
 impl GeneratorNode {
     // Explicit associated types override inference
     type PrepResult = Vec<u32>;
@@ -342,7 +342,7 @@ struct ETLNode {
     destination: String,
 }
 
-#[node(state = State)]
+#[task::node(state = State)]
 impl ETLNode {
     type PrepResult = Vec<Record>;
     type ExecResult = Vec<ProcessedRecord>;
@@ -433,7 +433,7 @@ impl NegotiationData {
 #[derive(Clone)]
 struct SellerNode;
 
-#[node(state = NegotiationState)]
+#[task::node(state = NegotiationState)]
 impl SellerNode {
     type PrepResult = NegotiationData;
     type ExecResult = NegotiationData;
@@ -497,7 +497,7 @@ fn count_prepositions(_words: &[&str]) -> usize { 0 }
 #[derive(Clone)]
 struct BookAnalyzerNode;
 
-#[node(state = State)]
+#[task::node(state = State)]
 impl BookAnalyzerNode {
     type PrepResult = String;  // Book content
     type ExecResult = BookAnalysis;
@@ -572,7 +572,7 @@ struct Stats { count: usize, sum: u32, avg: f64 }
 #[derive(Clone)]
 struct GeneratorNode;
 
-#[node(state = State)]
+#[task::node(state = State)]
 impl GeneratorNode {
     type PrepResult = ();
     type ExecResult = Vec<u32>;
@@ -598,7 +598,7 @@ impl GeneratorNode {
 #[derive(Clone)]
 struct FilterNode;
 
-#[node(state = State)]
+#[task::node(state = State)]
 impl FilterNode {
     type PrepResult = Vec<u32>;
     type ExecResult = Vec<u32>;
@@ -624,7 +624,7 @@ impl FilterNode {
 #[derive(Clone)]
 struct AggregatorNode;
 
-#[node(state = State)]
+#[task::node(state = State)]
 impl AggregatorNode {
     type PrepResult = Vec<u32>;
     type ExecResult = Stats;

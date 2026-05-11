@@ -43,10 +43,9 @@ persisted, so a resumed run can still compensate work done in an earlier process
 <p>
 <code>CompensatableTask</code> is a standalone trait (not an extension of <a href="../task/">Task</a>) —
 its <code>run</code> returns <code>(next_state, Output)</code>, which <code>Task::run</code> has no slot
-for. But you write the <code>impl</code> just like a plain <a href="../task/"><code>#[task]</code></a>
-one, with the <code>compensatable</code> flag: <code>#[task(state = …, compensatable)]</code> on an
-inherent <code>impl</code> block builds the <code>impl CompensatableTask&lt;…&gt; for …</code> header
-for you — you write only <code>type Output</code>, <code>run</code>, and <code>compensate</code> (plus
+for. You write the <code>impl</code> using <code>#[saga::compensatable_task(state = …)]</code> on an
+inherent <code>impl</code> block — the macro builds the <code>impl CompensatableTask&lt;…&gt; for …</code> header
+for you. You write only <code>type Output</code>, <code>run</code>, and <code>compensate</code> (plus
 <code>config</code> / <code>name</code> if you want them). The associated <code>Output</code> must be
 <code>serde</code>-serializable; it's the <strong>only</strong> thing carried from <code>run</code> to
 <code>compensate</code> (they may run in different processes after a resume), so make it self-contained.
@@ -64,7 +63,7 @@ struct Reservation { sku: String, qty: u32 }
 
 struct ReserveInventory;
 
-#[task(state = Step, compensatable)]
+#[saga::compensatable_task(state = Step)]
 impl ReserveInventory {
     type Output = Reservation;
 
@@ -82,12 +81,12 @@ impl ReserveInventory {
 ```
 
 <p>
-<code>#[compensatable_task(state = Step)]</code> is exactly equivalent to
-<code>#[task(state = Step, compensatable)]</code> — use whichever name you prefer. And if you'd rather
+Use <code>#[saga::compensatable_task(state = Step)]</code> on an inherent <code>impl</code> block —
+the macro builds the <code>impl CompensatableTask&lt;Step&gt; for …</code> header. If you'd rather
 write the trait header yourself — e.g. for a non-default resource-key type, or a generic impl — a
-bare <code>#[compensatable_task] impl CompensatableTask&lt;Step, MyKey&gt; for ReserveInventory { … }</code>
-works too (or pass <code>key = MyKey</code> to the inherent form:
-<code>#[task(state = Step, key = MyKey, compensatable)]</code>).
+bare <code>#[saga::compensatable_task] impl CompensatableTask&lt;Step, MyKey&gt; for ReserveInventory { … }</code>
+works too (pass <code>key = MyKey</code> to the inherent form:
+<code>#[saga::compensatable_task(state = Step, key = MyKey)]</code>).
 </p>
 
 <p>
@@ -253,7 +252,7 @@ struct ValidateOrder;
 struct ChargeCard;
 struct ShipOrder;
 
-#[task(state = Step, compensatable)]
+#[saga::compensatable_task(state = Step)]
 impl ReserveInventory {
     type Output = Reservation;
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {

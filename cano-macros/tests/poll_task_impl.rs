@@ -1,4 +1,4 @@
-//! Integration tests for `#[cano::poll_task]` — both the inherent form (which emits
+//! Integration tests for `#[cano::task::poll]` — both the inherent form (which emits
 //! `::cano::` paths) and the trait-impl form. These run outside the `cano` crate so
 //! `::cano::` paths resolve correctly.
 
@@ -20,7 +20,7 @@ enum Step {
 
 struct InherentPoller;
 
-#[poll_task(state = Step)]
+#[task::poll(state = Step)]
 impl InherentPoller {
     async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
         Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
@@ -66,7 +66,7 @@ async fn inherent_poller_task_run_works() {
 
 struct InherentCustomPoller;
 
-#[poll_task(state = Step)]
+#[task::poll(state = Step)]
 impl InherentCustomPoller {
     fn config(&self) -> TaskConfig {
         TaskConfig::minimal()
@@ -123,7 +123,7 @@ struct InherentCountingPoller {
     count: AtomicU32,
 }
 
-#[poll_task(state = Step)]
+#[task::poll(state = Step)]
 impl InherentCountingPoller {
     async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
         let n = self.count.fetch_add(1, Ordering::Relaxed) + 1;
@@ -153,7 +153,7 @@ async fn inherent_poller_multiple_polls() {
 
 struct InherentSplitPoller;
 
-#[poll_task(state = Step)]
+#[task::poll(state = Step)]
 impl InherentSplitPoller {
     async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
         Ok(PollOutcome::Ready(TaskResult::Split(vec![
@@ -171,12 +171,12 @@ async fn inherent_poller_can_return_split() {
 }
 
 // ---------------------------------------------------------------------------
-// Trait-impl form: `#[poll_task] impl PollTask<S> for T { ... }`
+// Trait-impl form: `#[task::poll] impl PollTask<S> for T { ... }`
 // ---------------------------------------------------------------------------
 
 struct TraitPoller;
 
-#[poll_task]
+#[task::poll]
 impl PollTask<Step> for TraitPoller {
     async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
         Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
@@ -239,7 +239,7 @@ async fn trait_poller_integrates_with_workflow() {
 
 struct ErrorPoller;
 
-#[poll_task(state = Step)]
+#[task::poll(state = Step)]
 impl ErrorPoller {
     async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
         Err(CanoError::task_execution("poll failed deliberately"))
@@ -275,7 +275,7 @@ struct InherentResilientPoller {
     errors_before_ready: u32,
 }
 
-#[poll_task(state = Step)]
+#[task::poll(state = Step)]
 impl InherentResilientPoller {
     fn on_poll_error(&self) -> PollErrorPolicy {
         PollErrorPolicy::RetryOnError { max_errors: 2 }

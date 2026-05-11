@@ -34,7 +34,7 @@ for "map this one operation over N <em>items</em>".
 <div class="page-toc-title">On this page</div>
 <ol>
 <li><a href="#shape">The Three Methods</a></li>
-<li><a href="#quick-start">Quick Start with <code>#[batch_task]</code></a></li>
+<li><a href="#quick-start">Quick Start with <code>#[task::batch]</code></a></li>
 <li><a href="#registering">Registering a Batch Task</a></li>
 <li><a href="#tuning">Concurrency &amp; Retry Tuning</a></li>
 <li><a href="#vs-split">BatchTask vs Split &amp; Join</a></li>
@@ -57,8 +57,8 @@ C -->|TaskResult| D[Next State]
 
 <p>
 A <code>BatchTask</code> has two associated types — <code>type Item: Send + Sync + 'static</code> and
-<code>type ItemOutput: Send + 'static</code> (inferred by <code>#[batch_task(state = ...)]</code> from
-the method signatures, à la <code>#[node]</code>'s <code>PrepResult</code> / <code>ExecResult</code>,
+<code>type ItemOutput: Send + 'static</code> (inferred by <code>#[task::batch(state = ...)]</code> from
+the method signatures, à la <code>#[task::node]</code>'s <code>PrepResult</code> / <code>ExecResult</code>,
 or written explicitly) — and three methods:
 </p>
 <table class="styled-table">
@@ -119,9 +119,9 @@ or written explicitly) — and three methods:
 
 <!-- Section: Quick Start -->
 <hr class="section-divider">
-<h2 id="quick-start"><a href="#quick-start" class="anchor-link" aria-hidden="true">#</a>Quick Start with <code>#[batch_task]</code></h2>
+<h2 id="quick-start"><a href="#quick-start" class="anchor-link" aria-hidden="true">#</a>Quick Start with <code>#[task::batch]</code></h2>
 <p>
-Attach <code>#[batch_task(state = MyState)]</code> (optionally <code>key = MyKey</code>) to an
+Attach <code>#[task::batch(state = MyState)]</code> (optionally <code>key = MyKey</code>) to an
 inherent <code>impl</code> block. The macro infers <code>Item</code> / <code>ItemOutput</code> from
 the signatures, injects default bodies for <code>concurrency</code> / <code>item_retry</code> /
 <code>config</code> / <code>name</code> if absent, synthesises the
@@ -143,7 +143,7 @@ enum Step { Fetch, Summarise, Done }
 
 struct FetchUrls;
 
-#[batch_task(state = Step)]
+#[task::batch(state = Step)]
 impl FetchUrls {
     fn concurrency(&self) -> usize { 8 }
     fn item_retry(&self) -> RetryMode { RetryMode::fixed(2, Duration::from_millis(50)) }
@@ -260,13 +260,13 @@ slot becomes an <code>Err</code> — orthogonal to the outer <code>config()</cod
 <hr class="section-divider">
 <h2 id="explicit"><a href="#explicit" class="anchor-link" aria-hidden="true">#</a>Explicit Trait-Impl Form</h2>
 <p>
-Prefer the trait header explicit? Put a bare <code>#[batch_task]</code> on an
+Prefer the trait header explicit? Put a bare <code>#[task::batch]</code> on an
 <code>impl BatchTask&lt;...&gt; for ...</code> block and declare <code>type Item</code> /
 <code>type ItemOutput</code> yourself. The companion <code>impl Task</code> is still emitted.
 </p>
 
 <div class="code-block">
-<span class="code-block-label"><span class="label-icon">&#9998;</span> Explicit form — <code>#[batch_task]</code> on a trait impl</span>
+<span class="code-block-label"><span class="label-icon">&#9998;</span> Explicit form — <code>#[task::batch]</code> on a trait impl</span>
 
 ```rust
 use cano::prelude::*;
@@ -276,7 +276,7 @@ enum Step { Fetch, Summarise, Done }
 
 struct FetchUrls;
 
-#[batch_task]
+#[task::batch]
 impl BatchTask<Step> for FetchUrls {
     type Item = String;
     type ItemOutput = usize;

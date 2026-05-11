@@ -1,4 +1,4 @@
-//! Boilerplate-filling pass for `#[cano::poll_task]` on `impl PollTask<S [, K]> for T`
+//! Boilerplate-filling pass for `#[cano::task::poll]` on `impl PollTask<S [, K]> for T`
 //! blocks and on inherent `impl T { ... }` blocks.
 //!
 //! ## Why a sibling `impl Task` is emitted
@@ -47,7 +47,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         if !attr.is_empty() {
             return Err(syn::Error::new(
                 trait_def.span(),
-                "#[cano::poll_task]: no attribute args are accepted on a trait definition",
+                "#[cano::task::poll]: no attribute args are accepted on a trait definition",
             ));
         }
         let rewritten = async_rewrite::rewrite_trait_def(trait_def);
@@ -62,8 +62,8 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             let state_ty = args.state.ok_or_else(|| {
                 syn::Error::new(
                     item_impl.span(),
-                    "#[cano::poll_task] on an inherent `impl T { ... }` block requires \
-                     `state = T` (e.g. `#[poll_task(state = MyState)]`)",
+                    "#[cano::task::poll] on an inherent `impl T { ... }` block requires \
+                     `state = T` (e.g. `#[task::poll(state = MyState)]`)",
                 )
             })?;
             return expand_inherent_impl(item_impl, state_ty, args.key);
@@ -71,7 +71,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             if args.state.is_some() || args.key.is_some() {
                 return Err(syn::Error::new(
                     item_impl.span(),
-                    "#[cano::poll_task]: `state` / `key` args only apply to inherent \
+                    "#[cano::task::poll]: `state` / `key` args only apply to inherent \
                      `impl T { ... }` blocks; when writing `impl PollTask<...> for T` the \
                      trait header already specifies them",
                 ));
@@ -82,7 +82,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
 
     Err(syn::Error::new(
         proc_macro2::Span::call_site(),
-        "#[cano::poll_task]: expected a trait definition or impl block",
+        "#[cano::task::poll]: expected a trait definition or impl block",
     ))
 }
 
@@ -136,7 +136,7 @@ fn expand_inherent_impl(
                     errors.push(syn::Error::new_spanned(
                         &f.sig.ident,
                         format!(
-                            "#[cano::poll_task]: unexpected method `{other}` in inherent impl; \
+                            "#[cano::task::poll]: unexpected method `{other}` in inherent impl; \
                              only `poll`, `config`, `name`, and `on_poll_error` are allowed"
                         ),
                     ));
@@ -146,7 +146,7 @@ fn expand_inherent_impl(
                 errors.push(syn::Error::new_spanned(
                     &t.ident,
                     format!(
-                        "#[cano::poll_task]: unexpected associated type `{}`; \
+                        "#[cano::task::poll]: unexpected associated type `{}`; \
                          `PollTask` has no associated types",
                         t.ident
                     ),
@@ -159,7 +159,7 @@ fn expand_inherent_impl(
     if poll_fn.is_none() {
         errors.push(syn::Error::new(
             item_impl.span(),
-            "#[cano::poll_task] requires an `async fn poll(&self, res: &Resources<_>) \
+            "#[cano::task::poll] requires an `async fn poll(&self, res: &Resources<_>) \
              -> Result<PollOutcome<_>, CanoError>` method",
         ));
     }

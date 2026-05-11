@@ -69,7 +69,7 @@ impl SellerNode {
     }
 }
 
-#[node(state = NegotiationAction)]
+#[task::node(state = NegotiationAction)]
 impl SellerNode {
     type PrepResult = NegotiationState;
     type ExecResult = NegotiationState;
@@ -178,7 +178,7 @@ impl BuyerNode {
     }
 }
 
-#[node(state = NegotiationAction)]
+#[task::node(state = NegotiationAction)]
 impl BuyerNode {
     type PrepResult = NegotiationState;
     type ExecResult = (NegotiationState, bool);

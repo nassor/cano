@@ -60,7 +60,7 @@ impl Resource for Config {}
 /// side-effect-free: it reads, never writes.
 struct Classifier;
 
-#[router_task(state = Step)]
+#[task::router(state = Step)]
 impl Classifier {
     async fn route(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
         let config = res.get::<Config, _>("config")?;

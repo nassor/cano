@@ -18,7 +18,7 @@
 //!   over *data*, all within a single state transition.
 //!
 //! Every [`BatchTask`] automatically implements [`Task`](crate::task::Task) via a
-//! per-impl-site companion `impl Task<S> for T` emitted by the `#[batch_task]` macro.
+//! per-impl-site companion `impl Task<S> for T` emitted by the `#[task::batch]` macro.
 //! This means you can register a `BatchTask` with
 //! [`Workflow::register`](crate::workflow::Workflow::register) exactly like any other task.
 //!
@@ -43,7 +43,7 @@
 //!
 //! struct CsvProcessor;
 //!
-//! #[batch_task(state = Step)]
+//! #[task::batch(state = Step)]
 //! impl CsvProcessor {
 //!     fn concurrency(&self) -> usize { 4 }
 //!
@@ -88,7 +88,7 @@
 //!
 //! struct TolerantProcessor;
 //!
-//! #[batch_task(state = Step)]
+//! #[task::batch(state = Step)]
 //! impl TolerantProcessor {
 //!     async fn load(&self, _res: &Resources) -> Result<Vec<u32>, CanoError> {
 //!         Ok(vec![1, 2, 3])
@@ -136,7 +136,7 @@
 //!
 //! struct RetryingProcessor;
 //!
-//! #[batch_task(state = Step)]
+//! #[task::batch(state = Step)]
 //! impl RetryingProcessor {
 //!     fn item_retry(&self) -> RetryMode {
 //!         RetryMode::fixed(2, Duration::from_millis(1))
@@ -215,7 +215,7 @@ pub type DefaultBatchItemOutput = Box<dyn std::any::Any + Send>;
 ///
 /// # Inherent form
 ///
-/// Prefer the `#[batch_task(state = S)]` inherent form:
+/// Prefer the `#[task::batch(state = S)]` inherent form:
 ///
 /// ```rust
 /// use cano::prelude::*;
@@ -225,7 +225,7 @@ pub type DefaultBatchItemOutput = Box<dyn std::any::Any + Send>;
 ///
 /// struct FileUploader;
 ///
-/// #[batch_task(state = Step)]
+/// #[task::batch(state = Step)]
 /// impl FileUploader {
 ///     fn concurrency(&self) -> usize { 8 }
 ///
@@ -333,7 +333,7 @@ where
 
 /// Run the [`BatchTask`] fan-out loop for `b`.
 ///
-/// The synthesised `Task::run` method emitted by `#[batch_task]` delegates here so
+/// The synthesised `Task::run` method emitted by `#[task::batch]` delegates here so
 /// that the loop body (which needs `futures_util::{StreamExt, stream::iter}`) lives
 /// in one place that can reference those types directly.
 ///

@@ -44,7 +44,7 @@ impl ReportNode {
     }
 }
 
-#[node(state = WorkflowAction)]
+#[task::node(state = WorkflowAction)]
 impl ReportNode {
     type PrepResult = String;
     type ExecResult = String;
@@ -93,7 +93,7 @@ impl CleanupNode {
     }
 }
 
-#[node(state = WorkflowAction)]
+#[task::node(state = WorkflowAction)]
 impl CleanupNode {
     type PrepResult = Vec<String>;
     type ExecResult = usize;
@@ -147,7 +147,7 @@ impl ManualTaskNode {
     }
 }
 
-#[node(state = WorkflowAction)]
+#[task::node(state = WorkflowAction)]
 impl ManualTaskNode {
     type PrepResult = String;
     type ExecResult = String;
@@ -196,7 +196,7 @@ impl SetupNode {
     }
 }
 
-#[node(state = WorkflowAction)]
+#[task::node(state = WorkflowAction)]
 impl SetupNode {
     type PrepResult = Vec<String>;
     type ExecResult = bool;

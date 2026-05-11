@@ -63,7 +63,7 @@ enum Key {
 /// `outputs` that `finish` counts and either accepts or rejects.
 struct ParseUrls;
 
-#[batch_task(state = Step, key = Key)]
+#[task::batch(state = Step, key = Key)]
 impl ParseUrls {
     fn concurrency(&self) -> usize {
         4
@@ -120,7 +120,7 @@ impl ParseUrls {
 /// twice on failure so transient network blips don't abort the whole batch.
 struct FetchUrls;
 
-#[batch_task(state = Step, key = Key)]
+#[task::batch(state = Step, key = Key)]
 impl FetchUrls {
     fn concurrency(&self) -> usize {
         3
@@ -172,7 +172,7 @@ struct Summarise {
     url_count: usize,
 }
 
-#[batch_task(state = Step, key = Key)]
+#[task::batch(state = Step, key = Key)]
 impl Summarise {
     async fn load(&self, res: &Resources<Key>) -> Result<Vec<(String, usize)>, CanoError> {
         let store = res.get::<MemoryStore, _>(&Key::Store)?;

@@ -1,4 +1,4 @@
-//! UI test: `#[cano::compensatable_task(state = S)]` on an inherent `impl T { ... }`
+//! UI test: `#[cano::saga::compensatable_task(state = S)]` on an inherent `impl T { ... }`
 //! block builds the `impl CompensatableTask<S> for T` header — only `type Output`,
 //! `run`, and `compensate` need writing (with optional `config` / `name`).
 
@@ -17,7 +17,7 @@ enum Step {
 #[derive(Clone)]
 struct Reserve(Arc<AtomicBool>);
 
-#[compensatable_task(state = Step)]
+#[saga::compensatable_task(state = Step)]
 impl Reserve {
     type Output = u32;
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, u32), CanoError> {
@@ -34,7 +34,7 @@ impl Reserve {
 #[derive(Clone)]
 struct ReserveNamed;
 
-#[compensatable_task(state = Step)]
+#[saga::compensatable_task(state = Step)]
 impl ReserveNamed {
     type Output = ();
     fn config(&self) -> TaskConfig {
@@ -47,24 +47,6 @@ impl ReserveNamed {
         Ok((TaskResult::Single(Step::Done), ()))
     }
     async fn compensate(&self, _res: &Resources, _output: ()) -> Result<(), CanoError> {
-        Ok(())
-    }
-}
-
-/// Same task, written with the `#[task(state = …, compensatable)]` spelling — must be
-/// equivalent to `#[compensatable_task(state = …)]`.
-#[derive(Clone)]
-struct ReserveViaTaskFlag(Arc<AtomicBool>);
-
-#[task(state = Step, compensatable)]
-impl ReserveViaTaskFlag {
-    type Output = u32;
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, u32), CanoError> {
-        Ok((TaskResult::Single(Step::Boom), 7))
-    }
-    async fn compensate(&self, _res: &Resources, output: u32) -> Result<(), CanoError> {
-        assert_eq!(output, 7);
-        self.0.store(true, Ordering::SeqCst);
         Ok(())
     }
 }
@@ -91,7 +73,7 @@ async fn inherent_compensatable_impl_registers_and_compensates() {
         .add_exit_state(Step::Done);
 
     let err = workflow.orchestrate(Step::Reserve).await.unwrap_err();
-    assert_eq!(err.message(), "boom"); // clean rollback → the original failure is surfaced
+    assert_eq!(err.message(), "boom"); // clean rollback -> the original failure is surfaced
     assert!(
         compensated.load(Ordering::SeqCst),
         "Reserve::compensate must have run"
@@ -105,21 +87,5 @@ async fn inherent_compensatable_impl_registers_and_compensates() {
     assert_eq!(
         workflow.orchestrate(Step::Reserve).await.unwrap(),
         Step::Done
-    );
-}
-
-#[tokio::test]
-async fn task_compensatable_flag_is_equivalent() {
-    let compensated = Arc::new(AtomicBool::new(false));
-    let workflow = Workflow::bare()
-        .register_with_compensation(Step::Reserve, ReserveViaTaskFlag(compensated.clone()))
-        .register(Step::Boom, Boom)
-        .add_exit_state(Step::Done);
-
-    let err = workflow.orchestrate(Step::Reserve).await.unwrap_err();
-    assert_eq!(err.message(), "boom");
-    assert!(
-        compensated.load(Ordering::SeqCst),
-        "`#[task(.., compensatable)]` must produce a working CompensatableTask"
     );
 }

@@ -84,7 +84,7 @@ impl Resource for Job {}
 /// Polls the `Job` resource until all ticks are done.
 struct AwaitJob;
 
-#[poll_task(state = Step)]
+#[task::poll(state = Step)]
 impl AwaitJob {
     async fn poll(&self, res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
         let job = res.get::<Job, _>("job")?;

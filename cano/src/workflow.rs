@@ -233,7 +233,7 @@ where
     /// routers have no side effects.
     ///
     /// `T` must implement both [`RouterTask`] (signals read-only intent) and [`Task`]
-    /// (provides the `run` method the engine calls). Use the `#[router_task]` macro to
+    /// (provides the `run` method the engine calls). Use the `#[task::router]` macro to
     /// derive the companion [`Task`] impl from your [`RouterTask`] implementation.
     ///
     /// Associates `task` with `state`. If a handler was already registered for `state`,
@@ -1023,7 +1023,7 @@ mod tests {
     // register_router tests
     // ------------------------------------------------------------------
 
-    // Note: inside the `cano` crate the inherent `#[router_task(state = S)]` form emits
+    // Note: inside the `cano` crate the inherent `#[task::router(state = S)]` form emits
     // `::cano::RouterTask<...>` paths that don't resolve. Use the trait-impl form instead.
 
     #[tokio::test]

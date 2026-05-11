@@ -22,7 +22,7 @@
 //!
 //! ## Quick Start
 //!
-//! Implement the `Node` trait for your custom processing logic. The `#[cano::node]`
+//! Implement the `Node` trait for your custom processing logic. The `#[cano::task::node]`
 //! attribute infers `type PrepResult` and `type ExecResult` from the return types of
 //! your `prep` and `exec` methods, and supplies a default `fn config()` if absent —
 //! you only write the business logic:
@@ -35,7 +35,7 @@
 //!
 //! struct MyNode;
 //!
-//! #[node]
+//! #[task::node]
 //! impl Node<Step> for MyNode {
 //!     async fn prep(&self, _res: &Resources) -> Result<Vec<u32>, CanoError> {
 //!         Ok((1..=10).collect())
@@ -141,7 +141,7 @@ pub type DefaultNodeResult = Result<Box<dyn std::any::Any + Send + Sync>, CanoEr
 ///
 /// struct MyNode;
 ///
-/// #[node]
+/// #[task::node]
 /// impl Node<String> for MyNode {
 ///     type PrepResult = Vec<u32>;
 ///     type ExecResult = u32;

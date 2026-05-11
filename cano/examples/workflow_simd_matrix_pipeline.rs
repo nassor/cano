@@ -209,7 +209,7 @@ impl MatrixGenerator {
     }
 }
 
-#[cano::node]
+#[cano::task::node]
 impl Node<PipelineState> for MatrixGenerator {
     type PrepResult = ();
     type ExecResult = Vec<SimdMatrix>;
@@ -266,7 +266,7 @@ impl Node<PipelineState> for MatrixGenerator {
 #[derive(Clone)]
 struct SimdMatrixMultiplier;
 
-#[cano::node]
+#[cano::task::node]
 impl Node<PipelineState> for SimdMatrixMultiplier {
     type PrepResult = Vec<SimdMatrix>;
     type ExecResult = Vec<SimdMatrix>;
@@ -329,7 +329,7 @@ impl SimdMatrixTransformer {
     }
 }
 
-#[cano::node]
+#[cano::task::node]
 impl Node<PipelineState> for SimdMatrixTransformer {
     type PrepResult = Vec<SimdMatrix>;
     type ExecResult = Vec<SimdMatrix>;
@@ -393,7 +393,7 @@ impl Node<PipelineState> for SimdMatrixTransformer {
 #[derive(Clone)]
 struct SimdStatisticsCalculator;
 
-#[cano::node]
+#[cano::task::node]
 impl Node<PipelineState> for SimdStatisticsCalculator {
     type PrepResult = Vec<SimdMatrix>;
     type ExecResult = Vec<(f32, f32, f32)>; // (sum, mean, variance)

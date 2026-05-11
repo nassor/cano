@@ -28,7 +28,7 @@ struct FlakyJob {
     fail_count: u32,
 }
 
-#[node(state = FlowState)]
+#[task::node(state = FlowState)]
 impl FlakyJob {
     type PrepResult = ();
     type ExecResult = bool;

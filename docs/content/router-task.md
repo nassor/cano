@@ -33,7 +33,7 @@ nothing to replay. If your branching logic also needs to write something, reach 
 <nav class="page-toc" aria-label="Table of contents">
 <div class="page-toc-title">On this page</div>
 <ol>
-<li><a href="#quick-start">Quick Start with <code>#[router_task]</code></a></li>
+<li><a href="#quick-start">Quick Start with <code>#[task::router]</code></a></li>
 <li><a href="#registering">Registering a Router</a></li>
 <li><a href="#explicit">Explicit Trait-Impl Form</a></li>
 <li><a href="#object-safe">Type-Erased Aliases</a></li>
@@ -43,12 +43,12 @@ nothing to replay. If your branching logic also needs to write something, reach 
 
 <!-- Section: Quick Start -->
 <hr class="section-divider">
-<h2 id="quick-start"><a href="#quick-start" class="anchor-link" aria-hidden="true">#</a>Quick Start with <code>#[router_task]</code></h2>
+<h2 id="quick-start"><a href="#quick-start" class="anchor-link" aria-hidden="true">#</a>Quick Start with <code>#[task::router]</code></h2>
 <p>
 The required method is <code>async fn route(&amp;self, res: &amp;Resources) -&gt; Result&lt;TaskResult&lt;TState&gt;, CanoError&gt;</code>.
 Everything else has a default: <code>fn config(&amp;self) -&gt; TaskConfig</code> (defaults to
 <code>TaskConfig::default()</code>) and <code>fn name(&amp;self) -&gt; Cow&lt;'static, str&gt;</code>
-(defaults to the type name). The recommended form attaches <code>#[router_task(state = MyState)]</code>
+(defaults to the type name). The recommended form attaches <code>#[task::router(state = MyState)]</code>
 to an inherent <code>impl</code> block — the macro synthesises the
 <code>impl RouterTask&lt;MyState&gt; for MyRouter</code> header and emits a companion
 <code>impl Task&lt;MyState&gt; for MyRouter</code> so the same struct can also be passed to
@@ -56,7 +56,7 @@ to an inherent <code>impl</code> block — the macro synthesises the
 </p>
 
 <div class="code-block">
-<span class="code-block-label"><span class="label-icon">&#9889;</span> Inference form — <code>#[router_task(state = ...)]</code> on an inherent impl</span>
+<span class="code-block-label"><span class="label-icon">&#9889;</span> Inference form — <code>#[task::router(state = ...)]</code> on an inherent impl</span>
 
 ```rust
 use cano::prelude::*;
@@ -70,7 +70,7 @@ impl Resource for Config {}
 
 struct Classifier;
 
-#[router_task(state = Step)]
+#[task::router(state = Step)]
 impl Classifier {
     async fn route(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
         let config = res.get::<Config, _>("config")?;
@@ -135,13 +135,13 @@ the resume point happens to land before it.
 <h2 id="explicit"><a href="#explicit" class="anchor-link" aria-hidden="true">#</a>Explicit Trait-Impl Form</h2>
 <p>
 If you prefer to write the trait header yourself — e.g. for a generic impl, or a custom resource-key
-type — drop the <code>state = ...</code> argument and put a bare <code>#[router_task]</code> on a
+type — drop the <code>state = ...</code> argument and put a bare <code>#[task::router]</code> on a
 <code>impl RouterTask&lt;...&gt; for ...</code> block. Both forms emit the companion
 <code>impl Task&lt;...&gt; for T</code>.
 </p>
 
 <div class="code-block">
-<span class="code-block-label"><span class="label-icon">&#9998;</span> Explicit form — <code>#[router_task]</code> on a trait impl</span>
+<span class="code-block-label"><span class="label-icon">&#9998;</span> Explicit form — <code>#[task::router]</code> on a trait impl</span>
 
 ```rust
 use cano::prelude::*;
@@ -151,7 +151,7 @@ enum Step { Classify, FastPath, SlowPath, Done }
 
 struct Classifier;
 
-#[router_task]
+#[task::router]
 impl RouterTask<Step> for Classifier {
     fn name(&self) -> std::borrow::Cow<'static, str> {
         "classifier".into()

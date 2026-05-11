@@ -1,4 +1,4 @@
-//! Boilerplate-filling pass for `#[cano::compensatable_task]` on inherent
+//! Boilerplate-filling pass for `#[cano::saga::compensatable_task]` on inherent
 //! `impl T { ... }` blocks.
 //!
 //! When the user writes
@@ -29,7 +29,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     if item_impl.trait_.is_some() {
         return Err(syn::Error::new(
             item_impl.span(),
-            "#[cano::compensatable_task]: `state` / `key` args only apply to inherent \
+            "#[cano::saga::compensatable_task]: `state` / `key` args only apply to inherent \
              `impl T { ... }` blocks; when writing `impl CompensatableTask<...> for T` the \
              trait header already specifies them",
         ));
@@ -38,8 +38,8 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     let state_ty = args.state.ok_or_else(|| {
         syn::Error::new(
             item_impl.span(),
-            "#[cano::compensatable_task] on an inherent `impl T { ... }` block requires \
-             `state = T` (e.g. `#[compensatable_task(state = MyState)]`)",
+            "#[cano::saga::compensatable_task] on an inherent `impl T { ... }` block requires \
+             `state = T` (e.g. `#[saga::compensatable_task(state = MyState)]`)",
         )
     })?;
     expand_inherent_impl(item_impl, state_ty, args.key)

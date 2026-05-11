@@ -128,6 +128,17 @@ pub use stepped::{
     DefaultStepCursor, DynSteppedTask, StepOutcome, SteppedTask, SteppedTaskObject, run_stepped,
 };
 
+// Attribute macros namespaced under `cano::task::` so that
+// `#[task::router]`, `#[task::poll]`, `#[task::batch]`, `#[task::stepped]`,
+// and `#[task::node]` all resolve as path-qualified attribute macros.
+// (Modules and macros occupy different namespaces, so these coexist with the
+// `router`, `poll`, `batch`, `stepped`, and `node` submodules above.)
+pub use cano_macros::batch_task as batch;
+pub use cano_macros::node;
+pub use cano_macros::poll_task as poll;
+pub use cano_macros::router_task as router;
+pub use cano_macros::stepped_task as stepped;
+
 /// Result type for task execution that supports both single and split transitions
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskResult<TState> {

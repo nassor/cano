@@ -250,7 +250,7 @@ impl BookDownloaderNode {
     }
 }
 
-#[node(state = BookPrepositionAction)]
+#[task::node(state = BookPrepositionAction)]
 impl BookDownloaderNode {
     type PrepResult = Vec<(u32, String, String)>;
     type ExecResult = Vec<Book>;
@@ -383,7 +383,7 @@ impl PrepositionNode {
     }
 }
 
-#[node(state = BookPrepositionAction)]
+#[task::node(state = BookPrepositionAction)]
 impl PrepositionNode {
     type PrepResult = Vec<Book>;
     type ExecResult = Vec<BookAnalysis>;
@@ -463,7 +463,7 @@ impl BookRankingByPrepositionNode {
     }
 }
 
-#[node(state = BookPrepositionAction)]
+#[task::node(state = BookPrepositionAction)]
 impl BookRankingByPrepositionNode {
     type PrepResult = Vec<BookAnalysis>;
     type ExecResult = Vec<BookRanking>;

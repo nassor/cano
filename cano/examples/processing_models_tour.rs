@@ -105,7 +105,7 @@ impl Resource for Counter {}
 /// Reads `Config` from resources and routes to `Wait`.
 struct Router;
 
-#[router_task(state = Stage)]
+#[task::router(state = Stage)]
 impl Router {
     async fn route(&self, res: &Resources) -> Result<TaskResult<Stage>, CanoError> {
         let config = res.get::<Config, _>("config")?;
@@ -128,7 +128,7 @@ impl Router {
 /// Polls the `Counter` resource until the background job completes.
 struct Waiter;
 
-#[poll_task(state = Stage)]
+#[task::poll(state = Stage)]
 impl Waiter {
     async fn poll(&self, res: &Resources) -> Result<PollOutcome<Stage>, CanoError> {
         let counter = res.get::<Counter, _>("counter")?;
@@ -148,7 +148,7 @@ impl Waiter {
 /// Squares each item in the batch and sums them in `finish`.
 struct Cruncher;
 
-#[batch_task(state = Stage)]
+#[task::batch(state = Stage)]
 impl Cruncher {
     fn concurrency(&self) -> usize {
         4
@@ -185,7 +185,7 @@ impl Cruncher {
 /// checkpoint store is attached.
 struct Grinder;
 
-#[stepped_task(state = Stage)]
+#[task::stepped(state = Stage)]
 impl Grinder {
     async fn step(
         &self,

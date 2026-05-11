@@ -12,7 +12,7 @@
 //! - **Condition checks**: loop until a database row exists, a flag flips, etc.
 //!
 //! Every [`PollTask`] automatically implements [`Task`](crate::task::Task) via a
-//! per-impl-site companion `impl Task<S> for T` emitted by the `#[poll_task]` macro.
+//! per-impl-site companion `impl Task<S> for T` emitted by the `#[task::poll]` macro.
 //! This means you can register a `PollTask` with
 //! [`Workflow::register`](crate::workflow::Workflow::register) exactly like any other task.
 //!
@@ -28,7 +28,7 @@
 //!
 //! struct Counter(Arc<AtomicU32>);
 //!
-//! #[poll_task(state = Step)]
+//! #[task::poll(state = Step)]
 //! impl Counter {
 //!     async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
 //!         let n = self.0.fetch_add(1, Ordering::Relaxed);
@@ -67,7 +67,7 @@
 //!
 //! struct BoundedPoller;
 //!
-//! #[poll_task(state = Step)]
+//! #[task::poll(state = Step)]
 //! impl BoundedPoller {
 //!     fn config(&self) -> TaskConfig {
 //!         TaskConfig::minimal().with_attempt_timeout(Duration::from_secs(30))
@@ -96,7 +96,7 @@
 //!
 //! struct TraitPoller;
 //!
-//! #[poll_task]
+//! #[task::poll]
 //! impl PollTask<Step> for TraitPoller {
 //!     async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
 //!         Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
@@ -186,7 +186,7 @@ pub enum PollErrorPolicy {
 ///
 /// # Implementing PollTask
 ///
-/// Prefer the inherent `#[poll_task(state = S)]` form:
+/// Prefer the inherent `#[task::poll(state = S)]` form:
 ///
 /// ```rust
 /// use cano::prelude::*;
@@ -196,7 +196,7 @@ pub enum PollErrorPolicy {
 ///
 /// struct MyPoller;
 ///
-/// #[poll_task(state = Step)]
+/// #[task::poll(state = Step)]
 /// impl MyPoller {
 ///     async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
 ///         Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
@@ -240,7 +240,7 @@ where
     ///
     /// struct ResilientPoller;
     ///
-    /// #[poll_task]
+    /// #[task::poll]
     /// impl PollTask<Step> for ResilientPoller {
     ///     fn on_poll_error(&self) -> PollErrorPolicy {
     ///         PollErrorPolicy::RetryOnError { max_errors: 3 }
@@ -272,7 +272,7 @@ where
 
 /// Run the [`PollTask`] poll loop for `p`.
 ///
-/// The synthesised `Task::run` method emitted by `#[poll_task]` delegates here so
+/// The synthesised `Task::run` method emitted by `#[task::poll]` delegates here so
 /// that the loop body (which needs `tokio::time::sleep`) lives in a single place that
 /// can reference `tokio` directly.
 ///

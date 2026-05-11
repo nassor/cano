@@ -3,7 +3,7 @@
 //! Run with: `cargo run --example saga_payment`
 //!
 //! `Reserve → Validate → Charge → Ship → Done`. `Reserve` and `Charge` are *compensatable*
-//! (`#[task(state = Step, compensatable)]`): each forward step returns an `Output`, and a
+//! (`#[saga::compensatable_task(state = Step)]`): each forward step returns an `Output`, and a
 //! matching `compensate` undoes it. `Validate` and `Ship` are *plain* (`#[task(state = Step)]`,
 //! registered with `register`) — they have nothing to roll back, so they never appear on the
 //! compensation stack.
@@ -46,7 +46,7 @@ struct ValidateOrder;
 struct ChargeCard;
 struct ShipOrder;
 
-#[task(state = Step, compensatable)]
+#[saga::compensatable_task(state = Step)]
 impl ReserveInventory {
     type Output = Reservation;
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {
@@ -75,7 +75,7 @@ impl ValidateOrder {
     }
 }
 
-#[task(state = Step, compensatable)]
+#[saga::compensatable_task(state = Step)]
 impl ChargeCard {
     type Output = Charge;
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Charge), CanoError> {

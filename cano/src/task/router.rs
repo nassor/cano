@@ -13,7 +13,7 @@
 //!   safe to retry or re-execute without idempotency concerns.
 //!
 //! Every [`RouterTask`] automatically implements [`Task`](crate::task::Task) via a
-//! per-impl-site companion `impl Task<S> for T` emitted by the `#[router_task]` macro
+//! per-impl-site companion `impl Task<S> for T` emitted by the `#[task::router]` macro
 //! (a blanket impl would conflict with the existing `Node → Task` blanket). This means
 //! you can register a `RouterTask` with [`Workflow::register`](crate::workflow::Workflow::register)
 //! using the same call as for `Task` and `Node` implementations.
@@ -28,7 +28,7 @@
 //!
 //! struct MyRouter;
 //!
-//! #[router_task(state = Step)]
+//! #[task::router(state = Step)]
 //! impl MyRouter {
 //!     async fn route(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
 //!         // Pure decision: no writes to the store.
@@ -70,7 +70,7 @@
 //!
 //! struct SimpleRouter;
 //!
-//! #[router_task]
+//! #[task::router]
 //! impl RouterTask<Step> for SimpleRouter {
 //!     async fn route(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
 //!         Ok(TaskResult::Single(Step::Done))
@@ -112,7 +112,7 @@ use std::hash::Hash;
 ///
 /// # Implementing RouterTask
 ///
-/// Prefer the inherent `#[router_task(state = S)]` form — it builds the trait header for
+/// Prefer the inherent `#[task::router(state = S)]` form — it builds the trait header for
 /// you and only requires the `route` method:
 ///
 /// ```rust
@@ -123,7 +123,7 @@ use std::hash::Hash;
 ///
 /// struct ThresholdRouter { threshold: u32 }
 ///
-/// #[router_task(state = Step)]
+/// #[task::router(state = Step)]
 /// impl ThresholdRouter {
 ///     async fn route(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
 ///         let store = res.get::<MemoryStore, _>("store")?;
@@ -149,7 +149,7 @@ use std::hash::Hash;
 ///
 /// struct FanOutRouter;
 ///
-/// #[router_task(state = Step)]
+/// #[task::router(state = Step)]
 /// impl FanOutRouter {
 ///     async fn route(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
 ///         Ok(TaskResult::Split(vec![Step::WorkerA, Step::WorkerB]))

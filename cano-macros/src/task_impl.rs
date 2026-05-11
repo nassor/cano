@@ -21,7 +21,6 @@ use syn::{ImplItem, ImplItemFn, ItemImpl, Type, parse2, spanned::Spanned};
 
 use crate::async_rewrite;
 use crate::attr_args::AttrArgs;
-use crate::compensatable_task_impl;
 
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
     let item_impl: ItemImpl = parse2(item)?;
@@ -30,7 +29,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     if item_impl.trait_.is_some() {
         return Err(syn::Error::new(
             item_impl.span(),
-            "#[cano::task]: `state` / `key` / `compensatable` args only apply to inherent \
+            "#[cano::task]: `state` / `key` args only apply to inherent \
              `impl T { ... }` blocks; when writing `impl Task<...> for T` the trait header \
              already specifies them",
         ));
@@ -43,12 +42,6 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
              (e.g. `#[task(state = MyState)]`)",
         )
     })?;
-
-    // `#[task(state = …, compensatable)]` is sugar for `#[compensatable_task(state = …)]`:
-    // build `impl CompensatableTask<…> for T` instead of `impl Task<…> for T`.
-    if args.compensatable {
-        return compensatable_task_impl::expand_inherent_impl(item_impl, state_ty, args.key);
-    }
 
     expand_inherent_impl(item_impl, state_ty, args.key)
 }

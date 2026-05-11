@@ -40,7 +40,10 @@ use std::hash::Hash;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use cano_macros::compensatable_task;
+// Re-export the attribute macro so it's accessible as `cano::saga::compensatable_task`,
+// enabling `#[saga::compensatable_task]` when `cano::saga` is in scope.
+// Also imported for in-module use on the `CompensatableTask` trait definition.
+pub use cano_macros::compensatable_task;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 
@@ -52,11 +55,10 @@ use crate::task::{TaskConfig, TaskResult};
 /// undone via [`compensate`](Self::compensate).
 ///
 /// Register it with [`Workflow::register_with_compensation`](crate::workflow::Workflow::register_with_compensation).
-/// Write the `impl` like a plain [`#[task(state = …)]`](macro@crate::task) one, plus the
-/// `compensatable` flag — the macro builds the `impl CompensatableTask<…> for …` header for
-/// you (the dedicated [`#[cano::compensatable_task(state = …)]`](macro@crate::compensatable_task)
-/// is exactly equivalent, and a bare `#[cano::compensatable_task]` accepts a hand-written
-/// trait header):
+/// Use `#[saga::compensatable_task(state = S)]` on an inherent `impl` block — the macro builds
+/// the `impl CompensatableTask<S> for T` header, requiring only `type Output`, `run`, and
+/// `compensate` (plus optional `config` / `name` overrides). A bare
+/// `#[saga::compensatable_task]` accepts a hand-written `impl CompensatableTask<S> for T` header:
 ///
 /// ```rust
 /// use cano::prelude::*;
@@ -70,7 +72,7 @@ use crate::task::{TaskConfig, TaskResult};
 ///
 /// struct ReserveInventory;
 ///
-/// #[cano::task(state = Step, compensatable)]
+/// #[saga::compensatable_task(state = Step)]
 /// impl ReserveInventory {
 ///     type Output = Reservation;
 ///     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {

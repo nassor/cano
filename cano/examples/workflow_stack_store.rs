@@ -50,7 +50,7 @@ pub enum RequestState {
 #[derive(Clone)]
 pub struct MetricsNode;
 
-#[node(state = RequestState)]
+#[task::node(state = RequestState)]
 impl MetricsNode {
     type PrepResult = (String, String);
     type ExecResult = (f64, String, u32);
@@ -115,7 +115,7 @@ impl MetricsNode {
 #[derive(Clone)]
 pub struct ResponseNode;
 
-#[node(state = RequestState)]
+#[task::node(state = RequestState)]
 impl ResponseNode {
     type PrepResult = (f64, String, u32, u64);
     type ExecResult = (String, u16);

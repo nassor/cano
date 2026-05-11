@@ -65,7 +65,7 @@ enum TestState {
     Complete,
 }
 
-#[node]
+#[task::node]
 impl Node<TestState> for SimpleNode {
     type PrepResult = String;
     type ExecResult = String;
@@ -90,7 +90,7 @@ impl Node<TestState> for SimpleNode {
     }
 }
 
-#[node]
+#[task::node]
 impl Node<TestState> for IOBoundNode {
     type PrepResult = String;
     type ExecResult = String;
@@ -130,7 +130,7 @@ impl Node<TestState> for IOBoundNode {
     }
 }
 
-#[node]
+#[task::node]
 impl Node<TestState> for CPUBoundNode {
     type PrepResult = Vec<u64>;
     type ExecResult = u64;

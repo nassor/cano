@@ -1,4 +1,4 @@
-//! UI tests for `#[cano::node]` type inference on `impl Node` blocks.
+//! UI tests for `#[cano::task::node]` type inference on `impl Node` blocks.
 //!
 //! Verifies that:
 //! - `type PrepResult` is inferred from `prep`'s `Result<T, _>` return type.
@@ -7,7 +7,6 @@
 //! - Explicit associated types override inference.
 
 use cano::prelude::*;
-use cano_macros::node;
 
 // ── State type shared by all tests ───────────────────────────────────────────
 
@@ -21,7 +20,7 @@ enum Step {
 
 struct BasicNode;
 
-#[node]
+#[task::node]
 impl Node<Step> for BasicNode {
     // No `type PrepResult` or `type ExecResult` — the macro infers them.
 
@@ -53,7 +52,7 @@ async fn basic_inference_compiles_and_runs() {
 
 struct CanoResultNode;
 
-#[node]
+#[task::node]
 impl Node<Step> for CanoResultNode {
     async fn prep(&self, _res: &Resources) -> CanoResult<String> {
         Ok("hello".to_string())
@@ -83,7 +82,7 @@ async fn cano_result_alias_inference_works() {
 
 struct OverrideNode;
 
-#[node]
+#[task::node]
 impl Node<Step> for OverrideNode {
     // Explicit associated types — inference is skipped for these.
     // (The macro only infers when types are absent, so this routes through
@@ -119,7 +118,7 @@ async fn explicit_types_are_preserved() {
 
 struct DefaultConfigNode;
 
-#[node]
+#[task::node]
 impl Node<Step> for DefaultConfigNode {
     // No `fn config` — the macro should inject the default.
 

@@ -72,7 +72,7 @@ struct Cruncher {
     total: u32,
 }
 
-#[stepped_task(state = Stage)]
+#[task::stepped(state = Stage)]
 impl Cruncher {
     async fn step(
         &self,

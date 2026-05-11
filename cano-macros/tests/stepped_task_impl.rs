@@ -1,4 +1,4 @@
-//! Integration tests for `#[cano::stepped_task]` — both the inherent form (which emits
+//! Integration tests for `#[cano::task::stepped]` — both the inherent form (which emits
 //! `::cano::` paths) and the trait-impl form. These run outside the `cano` crate so
 //! `::cano::` paths resolve correctly and the synthesised `impl Task` companion impl
 //! with `::cano::task::stepped::run_stepped` in its body compiles as expected.
@@ -35,7 +35,7 @@ struct InherentInferred {
     total: u32,
 }
 
-#[stepped_task(state = MyState)]
+#[task::stepped(state = MyState)]
 impl InherentInferred {
     // config() and name() deliberately omitted — defaults injected by macro.
 
@@ -91,7 +91,7 @@ struct InherentExplicitCursor {
     total: u32,
 }
 
-#[stepped_task(state = MyState)]
+#[task::stepped(state = MyState)]
 impl InherentExplicitCursor {
     type Cursor = u32;
 
@@ -123,7 +123,7 @@ async fn inherent_explicit_cursor_compiles_and_runs() {
 
 struct InherentWithKey;
 
-#[stepped_task(state = MyState, key = Key)]
+#[task::stepped(state = MyState, key = Key)]
 impl InherentWithKey {
     async fn step(
         &self,
@@ -149,7 +149,7 @@ async fn inherent_with_key_runs() {
 
 struct InherentWithOverrides;
 
-#[stepped_task(state = MyState)]
+#[task::stepped(state = MyState)]
 impl InherentWithOverrides {
     fn config(&self) -> TaskConfig {
         TaskConfig::minimal()
@@ -205,7 +205,7 @@ struct PageCursor {
 
 struct PagedProcessor;
 
-#[stepped_task(state = MyState)]
+#[task::stepped(state = MyState)]
 impl PagedProcessor {
     async fn step(
         &self,
@@ -238,7 +238,7 @@ async fn struct_cursor_inferred_and_runs() {
 
 struct TraitStepper;
 
-#[stepped_task]
+#[task::stepped]
 impl SteppedTask<MyState> for TraitStepper {
     type Cursor = u32;
 
@@ -266,7 +266,7 @@ async fn trait_impl_form_runs() {
 
 struct TraitStepperWithOverrides;
 
-#[stepped_task]
+#[task::stepped]
 impl SteppedTask<MyState> for TraitStepperWithOverrides {
     type Cursor = u32;
 
@@ -342,7 +342,7 @@ impl TrackedStepper {
     }
 }
 
-#[stepped_task(state = MyState)]
+#[task::stepped(state = MyState)]
 impl TrackedStepper {
     async fn step(
         &self,
@@ -390,7 +390,7 @@ async fn stepped_task_in_workflow() {
 
 struct CursorThreader;
 
-#[stepped_task(state = MyState)]
+#[task::stepped(state = MyState)]
 impl CursorThreader {
     async fn step(
         &self,
@@ -441,7 +441,7 @@ async fn cursor_accumulates_across_steps() {
 
 struct ErrorStepper;
 
-#[stepped_task(state = MyState)]
+#[task::stepped(state = MyState)]
 impl ErrorStepper {
     async fn step(
         &self,
@@ -475,7 +475,7 @@ enum SplitState {
     Done,
 }
 
-#[stepped_task(state = SplitState)]
+#[task::stepped(state = SplitState)]
 impl SplitStepper {
     async fn step(
         &self,

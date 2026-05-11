@@ -45,7 +45,7 @@ impl SimpleTask {
     }
 }
 
-#[cano::node]
+#[cano::task::node]
 impl Node<TaskState> for SimpleTask {
     type PrepResult = String;
     type ExecResult = String;

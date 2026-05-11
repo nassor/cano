@@ -1,4 +1,4 @@
-//! Boilerplate-filling pass for `#[cano::node]` on `impl Node<...> for T` blocks
+//! Boilerplate-filling pass for `#[cano::task::node]` on `impl Node<...> for T` blocks
 //! and on inherent `impl T { ... }` blocks.
 //!
 //! Two entry shapes:
@@ -38,7 +38,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         if args.state.is_some() || args.key.is_some() {
             return Err(syn::Error::new(
                 item_impl.span(),
-                "#[cano::node]: `state` / `key` args only apply to inherent `impl T { ... }` \
+                "#[cano::task::node]: `state` / `key` args only apply to inherent `impl T { ... }` \
                  blocks; when writing `impl Node<...> for T` the trait header already \
                  specifies them",
             ));
@@ -50,8 +50,8 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     let state_ty = args.state.ok_or_else(|| {
         syn::Error::new(
             item_impl.span(),
-            "#[cano::node] on an inherent `impl T { ... }` block requires `state = T` \
-             (e.g. `#[node(state = MyState)]`)",
+            "#[cano::task::node] on an inherent `impl T { ... }` block requires `state = T` \
+             (e.g. `#[task::node(state = MyState)]`)",
         )
     })?;
     expand_inherent_impl(item_impl, state_ty, args.key)
@@ -91,7 +91,7 @@ fn expand_trait_impl(mut item_impl: ItemImpl) -> syn::Result<TokenStream> {
         let prep = prep_fn.ok_or_else(|| {
             syn::Error::new(
                 item_impl.span(),
-                "#[cano::node] requires either an explicit `type PrepResult = ...;` \
+                "#[cano::task::node] requires either an explicit `type PrepResult = ...;` \
                  or a `prep` method whose return type can be inferred",
             )
         })?;
@@ -103,7 +103,7 @@ fn expand_trait_impl(mut item_impl: ItemImpl) -> syn::Result<TokenStream> {
         let exec = exec_fn.ok_or_else(|| {
             syn::Error::new(
                 item_impl.span(),
-                "#[cano::node] requires either an explicit `type ExecResult = ...;` \
+                "#[cano::task::node] requires either an explicit `type ExecResult = ...;` \
                  or an `exec` method whose return type can be read",
             )
         })?;
@@ -159,7 +159,7 @@ fn expand_inherent_impl(
                 "run" | "run_with_retries" => {
                     errors.push(syn::Error::new_spanned(
                         &f.sig.ident,
-                        "#[cano::node]: do not override `run` / `run_with_retries` in the \
+                        "#[cano::task::node]: do not override `run` / `run_with_retries` in the \
                          inherent form; the trait blanket implementation handles them",
                     ));
                 }
@@ -167,7 +167,7 @@ fn expand_inherent_impl(
                     errors.push(syn::Error::new_spanned(
                         &f.sig.ident,
                         format!(
-                            "#[cano::node]: unexpected method `{other}` in inherent impl; \
+                            "#[cano::task::node]: unexpected method `{other}` in inherent impl; \
                              only `prep`, `exec`, `post`, and `config` are allowed"
                         ),
                     ));
@@ -184,7 +184,7 @@ fn expand_inherent_impl(
                     errors.push(syn::Error::new_spanned(
                         &t.ident,
                         format!(
-                            "#[cano::node]: unexpected associated type `{other}`; only \
+                            "#[cano::task::node]: unexpected associated type `{other}`; only \
                              `PrepResult` and `ExecResult` are recognised"
                         ),
                     ));
@@ -197,21 +197,21 @@ fn expand_inherent_impl(
     if prep_fn.is_none() {
         errors.push(syn::Error::new(
             item_impl.span(),
-            "#[cano::node] requires a `prep` method: \
+            "#[cano::task::node] requires a `prep` method: \
              `async fn prep(&self, res: &Resources<_>) -> Result<_, CanoError>`",
         ));
     }
     if exec_fn.is_none() {
         errors.push(syn::Error::new(
             item_impl.span(),
-            "#[cano::node] requires an `exec` method: \
+            "#[cano::task::node] requires an `exec` method: \
              `async fn exec(&self, prep: Self::PrepResult) -> Self::ExecResult`",
         ));
     }
     if post_fn.is_none() {
         errors.push(syn::Error::new(
             item_impl.span(),
-            "#[cano::node] requires a `post` method: \
+            "#[cano::task::node] requires a `post` method: \
              `async fn post(&self, res: &Resources<_>, exec: Self::ExecResult) \
               -> Result<TState, CanoError>`",
         ));
@@ -308,7 +308,7 @@ fn peel_result_return(ret: &ReturnType, fn_name: &str) -> syn::Result<Type> {
             return Err(syn::Error::new(
                 ret.span(),
                 format!(
-                    "#[cano::node]: `{fn_name}` must have an explicit return type \
+                    "#[cano::task::node]: `{fn_name}` must have an explicit return type \
                      (Result<T, _> or CanoResult<T>)"
                 ),
             ));
@@ -319,14 +319,16 @@ fn peel_result_return(ret: &ReturnType, fn_name: &str) -> syn::Result<Type> {
     let Type::Path(tp) = ty else {
         return Err(syn::Error::new_spanned(
             ty,
-            format!("#[cano::node]: `{fn_name}` return type must be Result<T, _> or CanoResult<T>"),
+            format!(
+                "#[cano::task::node]: `{fn_name}` return type must be Result<T, _> or CanoResult<T>"
+            ),
         ));
     };
 
     let last = tp.path.segments.last().ok_or_else(|| {
         syn::Error::new_spanned(
             ty,
-            format!("#[cano::node]: cannot read return type of `{fn_name}`"),
+            format!("#[cano::task::node]: cannot read return type of `{fn_name}`"),
         )
     })?;
 
@@ -335,7 +337,7 @@ fn peel_result_return(ret: &ReturnType, fn_name: &str) -> syn::Result<Type> {
         return Err(syn::Error::new_spanned(
             ty,
             format!(
-                "#[cano::node]: `{fn_name}` return type must be Result<T, _> or \
+                "#[cano::task::node]: `{fn_name}` return type must be Result<T, _> or \
                  CanoResult<T>; found `{ident}` without type parameters"
             ),
         ));
@@ -345,13 +347,17 @@ fn peel_result_return(ret: &ReturnType, fn_name: &str) -> syn::Result<Type> {
         let GenericArgument::Type(t) = args.args.iter().next().ok_or_else(|| {
             syn::Error::new_spanned(
                 args,
-                format!("#[cano::node]: `{fn_name}` Result<...> needs at least one type parameter"),
+                format!(
+                    "#[cano::task::node]: `{fn_name}` Result<...> needs at least one type parameter"
+                ),
             )
         })?
         else {
             return Err(syn::Error::new_spanned(
                 args,
-                format!("#[cano::node]: `{fn_name}` Result<T, _> first parameter must be a type"),
+                format!(
+                    "#[cano::task::node]: `{fn_name}` Result<T, _> first parameter must be a type"
+                ),
             ));
         };
         Ok(t.clone())
@@ -359,13 +365,13 @@ fn peel_result_return(ret: &ReturnType, fn_name: &str) -> syn::Result<Type> {
         let GenericArgument::Type(t) = args.args.iter().next().ok_or_else(|| {
             syn::Error::new_spanned(
                 args,
-                format!("#[cano::node]: `{fn_name}` CanoResult<T> needs a type parameter"),
+                format!("#[cano::task::node]: `{fn_name}` CanoResult<T> needs a type parameter"),
             )
         })?
         else {
             return Err(syn::Error::new_spanned(
                 args,
-                format!("#[cano::node]: `{fn_name}` CanoResult<T> parameter must be a type"),
+                format!("#[cano::task::node]: `{fn_name}` CanoResult<T> parameter must be a type"),
             ));
         };
         Ok(t.clone())
@@ -373,7 +379,7 @@ fn peel_result_return(ret: &ReturnType, fn_name: &str) -> syn::Result<Type> {
         Err(syn::Error::new_spanned(
             ty,
             format!(
-                "#[cano::node]: `{fn_name}` return type must be Result<T, _> or CanoResult<T>; \
+                "#[cano::task::node]: `{fn_name}` return type must be Result<T, _> or CanoResult<T>; \
                  found `{ident}<...>`"
             ),
         ))

@@ -32,7 +32,7 @@ enum TaskState {
 #[derive(Clone)]
 struct DailyTask;
 
-#[node(state = TaskState)]
+#[task::node(state = TaskState)]
 impl DailyTask {
     type PrepResult = ();
     type ExecResult = ();
@@ -60,7 +60,7 @@ impl DailyTask {
 #[derive(Clone)]
 struct HourlyTask;
 
-#[node(state = TaskState)]
+#[task::node(state = TaskState)]
 impl HourlyTask {
     type PrepResult = ();
     type ExecResult = ();
@@ -88,7 +88,7 @@ impl HourlyTask {
 #[derive(Clone)]
 struct FrequentTask;
 
-#[node(state = TaskState)]
+#[task::node(state = TaskState)]
 impl FrequentTask {
     type PrepResult = ();
     type ExecResult = ();

@@ -1,4 +1,4 @@
-//! Boilerplate-filling pass for `#[cano::router_task]` on `impl RouterTask<S [, K]> for T`
+//! Boilerplate-filling pass for `#[cano::task::router]` on `impl RouterTask<S [, K]> for T`
 //! blocks and on inherent `impl T { ... }` blocks.
 //!
 //! ## Why a sibling `impl Task` is emitted
@@ -52,7 +52,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         if !attr.is_empty() {
             return Err(syn::Error::new(
                 trait_def.span(),
-                "#[cano::router_task]: no attribute args are accepted on a trait definition",
+                "#[cano::task::router]: no attribute args are accepted on a trait definition",
             ));
         }
         let rewritten = async_rewrite::rewrite_trait_def(trait_def);
@@ -67,8 +67,8 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             let state_ty = args.state.ok_or_else(|| {
                 syn::Error::new(
                     item_impl.span(),
-                    "#[cano::router_task] on an inherent `impl T { ... }` block requires \
-                     `state = T` (e.g. `#[router_task(state = MyState)]`)",
+                    "#[cano::task::router] on an inherent `impl T { ... }` block requires \
+                     `state = T` (e.g. `#[task::router(state = MyState)]`)",
                 )
             })?;
             return expand_inherent_impl(item_impl, state_ty, args.key);
@@ -77,7 +77,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
             if args.state.is_some() || args.key.is_some() {
                 return Err(syn::Error::new(
                     item_impl.span(),
-                    "#[cano::router_task]: `state` / `key` args only apply to inherent \
+                    "#[cano::task::router]: `state` / `key` args only apply to inherent \
                      `impl T { ... }` blocks; when writing `impl RouterTask<...> for T` the \
                      trait header already specifies them",
                 ));
@@ -88,7 +88,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
 
     Err(syn::Error::new(
         proc_macro2::Span::call_site(),
-        "#[cano::router_task]: expected a trait definition or impl block",
+        "#[cano::task::router]: expected a trait definition or impl block",
     ))
 }
 
@@ -147,7 +147,7 @@ fn expand_inherent_impl(
                     errors.push(syn::Error::new_spanned(
                         &f.sig.ident,
                         format!(
-                            "#[cano::router_task]: unexpected method `{other}` in inherent impl; \
+                            "#[cano::task::router]: unexpected method `{other}` in inherent impl; \
                              only `route`, `config`, and `name` are allowed"
                         ),
                     ));
@@ -157,7 +157,7 @@ fn expand_inherent_impl(
                 errors.push(syn::Error::new_spanned(
                     &t.ident,
                     format!(
-                        "#[cano::router_task]: unexpected associated type `{}`; \
+                        "#[cano::task::router]: unexpected associated type `{}`; \
                          `RouterTask` has no associated types",
                         t.ident
                     ),
@@ -170,7 +170,7 @@ fn expand_inherent_impl(
     if route_fn.is_none() {
         errors.push(syn::Error::new(
             item_impl.span(),
-            "#[cano::router_task] requires an `async fn route(&self, res: &Resources<_>) \
+            "#[cano::task::router] requires an `async fn route(&self, res: &Resources<_>) \
              -> Result<TaskResult<_>, CanoError>` method",
         ));
     }

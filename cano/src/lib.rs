@@ -124,7 +124,7 @@
 //! Every [`Node`] automatically implements [`Task`] via a blanket impl, so both can be
 //! registered with the same [`Workflow::register`] method. Every [`RouterTask`] and
 //! [`PollTask`] automatically implement [`Task`] via companion impls emitted by the
-//! `#[router_task]` and `#[poll_task]` macros respectively.
+//! `#[task::router]` and `#[task::poll]` macros respectively.
 //!
 //! ### Parallel Execution (Split/Join)
 //!
@@ -257,18 +257,19 @@ pub use scheduler::{BackoffPolicy, FlowInfo, RunningScheduler, Schedule, Schedul
 /// to rewrite `async fn` methods into ones returning
 /// `Pin<Box<dyn Future<Output = ...> + Send + 'async_trait>>`.
 ///
-/// Functionally identical to [`macro@node`] and [`macro@resource`]; the separate name makes
-/// `#[cano::task]` self-documenting at impl sites. The implementation lives in
-/// the [`cano-macros`] sibling crate.
+/// The separate name makes `#[cano::task]` self-documenting at impl sites.
+/// The implementation lives in the [`cano-macros`] sibling crate.
+///
+/// Processing-model macros are namespaced under `cano::task::` and `cano::saga::`:
+/// - `#[cano::task::node]` — for `impl Node` blocks
+/// - `#[cano::task::router]` — for `impl RouterTask` blocks
+/// - `#[cano::task::poll]` — for `impl PollTask` blocks
+/// - `#[cano::task::batch]` — for `impl BatchTask` blocks
+/// - `#[cano::task::stepped]` — for `impl SteppedTask` blocks
+/// - `#[cano::saga::compensatable_task]` — for `impl CompensatableTask` blocks
 ///
 /// [`cano-macros`]: https://docs.rs/cano-macros
 pub use cano_macros::task;
-
-/// Attribute macro applied to the `Node` trait definition and `impl Node` blocks.
-///
-/// See [`macro@task`] for the rewrite shape; this macro is functionally identical and
-/// differs only in name.
-pub use cano_macros::node;
 
 /// Attribute macro applied to the `Resource` trait definition and `impl Resource` blocks.
 ///
@@ -282,73 +283,6 @@ pub use cano_macros::resource;
 /// See [`macro@task`] for the rewrite shape; this macro is functionally identical and
 /// differs only in name.
 pub use cano_macros::checkpoint_store;
-
-/// Attribute macro applied to the `CompensatableTask` trait definition and
-/// `impl CompensatableTask` blocks.
-///
-/// See [`macro@task`] for the rewrite shape; this macro is functionally identical and
-/// differs only in name.
-pub use cano_macros::compensatable_task;
-
-/// Attribute macro applied to the `BatchTask` trait definition and
-/// `impl BatchTask` blocks.
-///
-/// Two surface forms:
-/// - `#[batch_task] impl BatchTask<S> for T { type Item = I; type ItemOutput = O; ... }` — user
-///   writes the trait header; the macro async-rewrites it AND emits a companion `impl Task<S> for T`.
-/// - `#[batch_task(state = S [, key = K])] impl T { async fn load(...); async fn process_item(...); async fn finish(...); }` —
-///   user writes only the inherent block; the macro builds the trait header and companion Task impl,
-///   inferring `type Item` from `process_item`'s `&T` parameter and `type ItemOutput` from its return type.
-///
-/// Because a blanket `impl<B: BatchTask<..>> Task<..> for B` would conflict (E0119) with the
-/// existing `impl<N: Node<..>> Task<..> for N`, the companion `Task` impl is synthesised
-/// per-use-site rather than as a blanket.
-pub use cano_macros::batch_task;
-
-/// Attribute macro applied to the `RouterTask` trait definition and
-/// `impl RouterTask` blocks.
-///
-/// Two surface forms:
-/// - `#[router_task] impl RouterTask<S> for T { ... }` — user writes the trait header; the
-///   macro async-rewrites it AND emits a companion `impl Task<S> for T`.
-/// - `#[router_task(state = S [, key = K])] impl T { async fn route(...) { ... } }` — user
-///   writes only the inherent block; the macro builds the trait header and companion Task impl.
-///
-/// Because a blanket `impl<R: RouterTask<..>> Task<..> for R` would conflict (E0119) with the
-/// existing `impl<N: Node<..>> Task<..> for N`, the companion `Task` impl is synthesised
-/// per-use-site rather than as a blanket.
-pub use cano_macros::router_task;
-
-/// Attribute macro applied to the `PollTask` trait definition and
-/// `impl PollTask` blocks.
-///
-/// Two surface forms:
-/// - `#[poll_task] impl PollTask<S> for T { ... }` — user writes the trait header; the
-///   macro async-rewrites it AND emits a companion `impl Task<S> for T`.
-/// - `#[poll_task(state = S [, key = K])] impl T { async fn poll(...) { ... } }` — user
-///   writes only the inherent block; the macro builds the trait header and companion Task impl.
-///
-/// Because a blanket `impl<P: PollTask<..>> Task<..> for P` would conflict (E0119) with the
-/// existing `impl<N: Node<..>> Task<..> for N`, the companion `Task` impl is synthesised
-/// per-use-site rather than as a blanket.
-pub use cano_macros::poll_task;
-
-/// Attribute macro applied to the `SteppedTask` trait definition and
-/// `impl SteppedTask` blocks.
-///
-/// Two surface forms:
-/// - `#[stepped_task] impl SteppedTask<S> for T { type Cursor = C; async fn step(...) { ... } }` —
-///   user writes the trait header; the macro async-rewrites it AND emits a companion
-///   `impl Task<S> for T`.
-/// - `#[stepped_task(state = S [, key = K])] impl T { async fn step(&self, res: &Resources<_>, cursor: Option<C>) { ... } }` —
-///   user writes only the inherent block; the macro builds the trait header, infers
-///   `type Cursor = C` from the `Option<C>` third parameter of `step`, and emits the
-///   companion `impl Task<S [, K]> for T`.
-///
-/// Because a blanket `impl<S: SteppedTask<..>> Task<..> for S` would conflict (E0119) with the
-/// existing `impl<N: Node<..>> Task<..> for N`, the companion `Task` impl is synthesised
-/// per-use-site rather than as a blanket.
-pub use cano_macros::stepped_task;
 
 /// Derive macro that generates a `from_resources` associated function for a struct.
 ///
@@ -391,11 +325,16 @@ pub mod prelude {
     #[cfg(feature = "recovery")]
     pub use crate::RedbCheckpointStore;
 
-    // Re-export the cano async-trait macros for convenience.
-    pub use crate::{
-        batch_task, checkpoint_store, compensatable_task, node, poll_task, resource, router_task,
-        stepped_task, task,
-    };
+    // Attribute macros kept at the crate root: `#[task]`, `#[resource]`, `#[checkpoint_store]`.
+    pub use crate::{checkpoint_store, resource, task};
+
+    // Re-export the `task` and `saga` *modules* so that path-qualified macros resolve:
+    // `#[task::router]`, `#[task::poll]`, `#[task::batch]`, `#[task::stepped]`,
+    // `#[task::node]`, `#[saga::compensatable_task]` — all available via `use cano::prelude::*`.
+    // (Modules and macros occupy different namespaces; `task` the module coexists with
+    // `task` the macro imported above via `pub use crate::{..., task}`.)
+    pub use crate::saga;
+    // `task` module already in scope via the `pub use crate::{..., task}` line above.
 
     // Re-export derive macros alongside their trait counterparts. Rust's separate
     // macro and type namespaces let the derive `Resource` coexist with the
