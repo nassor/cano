@@ -218,6 +218,7 @@ pub use recovery::{CheckpointRow, CheckpointStore};
 pub use resource::{HealthStatus, Resource, Resources};
 pub use saga::{CompensatableTask, ErasedCompensatable};
 pub use task::node::{DefaultNodeResult, DynNode, Node, NodeObject};
+pub use task::poll::{DynPollTask, Poll, PollErrorPolicy, PollTask, PollTaskObject, run_poll_loop};
 pub use task::router::{DynRouterTask, RouterTask, RouterTaskObject};
 
 #[cfg(feature = "recovery")]
@@ -283,6 +284,20 @@ pub use cano_macros::compensatable_task;
 /// per-use-site rather than as a blanket.
 pub use cano_macros::router_task;
 
+/// Attribute macro applied to the `PollTask` trait definition and
+/// `impl PollTask` blocks.
+///
+/// Two surface forms:
+/// - `#[poll_task] impl PollTask<S> for T { ... }` — user writes the trait header; the
+///   macro async-rewrites it AND emits a companion `impl Task<S> for T`.
+/// - `#[poll_task(state = S [, key = K])] impl T { async fn poll(...) { ... } }` — user
+///   writes only the inherent block; the macro builds the trait header and companion Task impl.
+///
+/// Because a blanket `impl<P: PollTask<..>> Task<..> for P` would conflict (E0119) with the
+/// existing `impl<N: Node<..>> Task<..> for N`, the companion `Task` impl is synthesised
+/// per-use-site rather than as a blanket.
+pub use cano_macros::poll_task;
+
 /// Derive macro that generates a `from_resources` associated function for a struct.
 ///
 /// See [`FromResources`] for the full specification. Each
@@ -309,9 +324,9 @@ pub mod prelude {
     pub use crate::{
         CanoError, CanoResult, CheckpointRow, CheckpointStore, CircuitBreaker, CircuitPermit,
         CircuitPolicy, CircuitState, CompensatableTask, DefaultNodeResult, HealthStatus,
-        JoinConfig, JoinStrategy, MemoryStore, Node, Resource, Resources, RetryMode, RouterTask,
-        SplitResult, SplitTaskResult, StateEntry, Task, TaskConfig, TaskObject, TaskResult,
-        Workflow, WorkflowObserver,
+        JoinConfig, JoinStrategy, MemoryStore, Node, Poll, PollErrorPolicy, PollTask, Resource,
+        Resources, RetryMode, RouterTask, SplitResult, SplitTaskResult, StateEntry, Task,
+        TaskConfig, TaskObject, TaskResult, Workflow, WorkflowObserver,
     };
 
     #[cfg(feature = "scheduler")]
@@ -324,7 +339,9 @@ pub mod prelude {
     pub use crate::RedbCheckpointStore;
 
     // Re-export the cano async-trait macros for convenience.
-    pub use crate::{checkpoint_store, compensatable_task, node, resource, router_task, task};
+    pub use crate::{
+        checkpoint_store, compensatable_task, node, poll_task, resource, router_task, task,
+    };
 
     // Re-export derive macros alongside their trait counterparts. Rust's separate
     // macro and type namespaces let the derive `Resource` coexist with the

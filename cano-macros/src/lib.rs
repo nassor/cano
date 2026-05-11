@@ -30,6 +30,7 @@ mod checkpoint_store_impl;
 mod compensatable_task_impl;
 mod from_resources;
 mod node_impl;
+mod poll_task_impl;
 mod resource_derive;
 mod router_task_impl;
 mod task_impl;
@@ -257,6 +258,36 @@ pub fn compensatable_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn router_task(attr: TokenStream, item: TokenStream) -> TokenStream {
     router_task_impl::expand(attr.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Apply to the `PollTask` trait definition, an
+/// `impl PollTask<S [, K]> for T` block, or — for less boilerplate — an
+/// inherent `impl T { ... }` block.
+///
+/// Two surface forms on impl blocks:
+///
+/// 1. **Trait-impl form:** `#[poll_task] impl PollTask<S> for T { async fn poll(..) { ... } }` —
+///    user writes the trait header. The macro async-rewrites the `PollTask` impl AND emits a
+///    companion `impl Task<S> for T` that delegates `Task::run` via the `run_poll_loop` helper.
+/// 2. **Inherent-impl form:** `#[poll_task(state = S [, key = K])] impl T { async fn poll(..) { ... } }` —
+///    the macro builds the `impl PollTask<S [, K]> for T` header from the attribute args, enforces
+///    that `poll` is present (`config` / `name` may be overridden), and emits the same companion
+///    `impl Task<S [, K]> for T`.
+///
+/// On a trait definition (`#[poll_task] pub trait PollTask ...`) the macro just performs the
+/// async-fn-in-trait rewrite.
+///
+/// Because a blanket `impl<P: PollTask<..>> Task<..> for P` would conflict with the existing
+/// `impl<N: Node<..>> Task<..> for N` (E0119), the companion `Task` impl is generated
+/// per-use-site rather than as a blanket.
+///
+/// The default `config()` injected by the inherent form is [`TaskConfig::minimal()`]
+/// (no retries) — the poll loop itself is the resilience mechanism.
+#[proc_macro_attribute]
+pub fn poll_task(attr: TokenStream, item: TokenStream) -> TokenStream {
+    poll_task_impl::expand(attr.into(), item.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

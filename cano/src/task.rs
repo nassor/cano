@@ -109,10 +109,12 @@ use std::hash::Hash;
 use tracing::{debug, info, instrument};
 
 pub mod node;
+pub mod poll;
 mod retry;
 pub mod router;
 
 pub use node::{DefaultNodeResult, DynNode, Node, NodeObject};
+pub use poll::{DynPollTask, Poll, PollErrorPolicy, PollTask, PollTaskObject, run_poll_loop};
 pub use retry::{RetryMode, TaskConfig, run_with_retries};
 pub use router::{DynRouterTask, RouterTask, RouterTaskObject};
 
