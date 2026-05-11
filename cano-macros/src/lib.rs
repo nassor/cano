@@ -34,6 +34,7 @@ mod node_impl;
 mod poll_task_impl;
 mod resource_derive;
 mod router_task_impl;
+mod stepped_task_impl;
 mod task_impl;
 
 /// Derive a `from_resources(&Resources<_>) -> CanoResult<Self>` constructor that
@@ -322,6 +323,36 @@ pub fn batch_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn poll_task(attr: TokenStream, item: TokenStream) -> TokenStream {
     poll_task_impl::expand(attr.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Apply to the `SteppedTask` trait definition, an
+/// `impl SteppedTask<S [, K]> for T` block, or — for less boilerplate — an
+/// inherent `impl T { ... }` block.
+///
+/// Two surface forms on impl blocks:
+///
+/// 1. **Trait-impl form:** `#[stepped_task] impl SteppedTask<S> for T { type Cursor = C; async fn step(..) { ... } }` —
+///    user writes the trait header. The macro async-rewrites the `SteppedTask` impl AND emits a
+///    companion `impl Task<S> for T` that delegates `Task::run` via the `run_stepped` helper.
+/// 2. **Inherent-impl form:** `#[stepped_task(state = S [, key = K])] impl T { async fn step(..) { ... } }` —
+///    the macro builds the `impl SteppedTask<S [, K]> for T` header from the attribute args, infers
+///    `type Cursor` from the `Option<C>` third parameter of `step`, enforces that `step` is present
+///    (`config` / `name` may be overridden), and emits the same companion `impl Task<S [, K]> for T`.
+///
+/// On a trait definition (`#[stepped_task] pub trait SteppedTask ...`) the macro just performs the
+/// async-fn-in-trait rewrite.
+///
+/// Because a blanket `impl<S: SteppedTask<..>> Task<..> for S` would conflict (E0119) with the
+/// existing `impl<N: Node<..>> Task<..> for N`, the companion `Task` impl is generated
+/// per-use-site rather than as a blanket.
+///
+/// The default `config()` injected by the inherent form is [`TaskConfig::default()`]
+/// (exponential backoff with 3 retries).
+#[proc_macro_attribute]
+pub fn stepped_task(attr: TokenStream, item: TokenStream) -> TokenStream {
+    stepped_task_impl::expand(attr.into(), item.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

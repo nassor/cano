@@ -233,6 +233,9 @@ pub use task::batch::{
 pub use task::node::{DefaultNodeResult, DynNode, Node, NodeObject};
 pub use task::poll::{DynPollTask, Poll, PollErrorPolicy, PollTask, PollTaskObject, run_poll_loop};
 pub use task::router::{DynRouterTask, RouterTask, RouterTaskObject};
+pub use task::stepped::{
+    DefaultStepCursor, DynSteppedTask, Step, SteppedTask, SteppedTaskObject, run_stepped,
+};
 
 #[cfg(feature = "recovery")]
 pub use recovery::RedbCheckpointStore;
@@ -326,6 +329,23 @@ pub use cano_macros::router_task;
 /// per-use-site rather than as a blanket.
 pub use cano_macros::poll_task;
 
+/// Attribute macro applied to the `SteppedTask` trait definition and
+/// `impl SteppedTask` blocks.
+///
+/// Two surface forms:
+/// - `#[stepped_task] impl SteppedTask<S> for T { type Cursor = C; async fn step(...) { ... } }` —
+///   user writes the trait header; the macro async-rewrites it AND emits a companion
+///   `impl Task<S> for T`.
+/// - `#[stepped_task(state = S [, key = K])] impl T { async fn step(&self, res: &Resources<_>, cursor: Option<C>) { ... } }` —
+///   user writes only the inherent block; the macro builds the trait header, infers
+///   `type Cursor = C` from the `Option<C>` third parameter of `step`, and emits the
+///   companion `impl Task<S [, K]> for T`.
+///
+/// Because a blanket `impl<S: SteppedTask<..>> Task<..> for S` would conflict (E0119) with the
+/// existing `impl<N: Node<..>> Task<..> for N`, the companion `Task` impl is synthesised
+/// per-use-site rather than as a blanket.
+pub use cano_macros::stepped_task;
+
 /// Derive macro that generates a `from_resources` associated function for a struct.
 ///
 /// See [`FromResources`] for the full specification. Each
@@ -354,7 +374,8 @@ pub mod prelude {
         CircuitPermit, CircuitPolicy, CircuitState, CompensatableTask, DefaultNodeResult,
         HealthStatus, JoinConfig, JoinStrategy, MemoryStore, Node, Poll, PollErrorPolicy, PollTask,
         Resource, Resources, RetryMode, RouterTask, RowKind, SplitResult, SplitTaskResult,
-        StateEntry, Task, TaskConfig, TaskObject, TaskResult, Workflow, WorkflowObserver,
+        StateEntry, Step, SteppedTask, Task, TaskConfig, TaskObject, TaskResult, Workflow,
+        WorkflowObserver,
     };
 
     #[cfg(feature = "scheduler")]
@@ -369,7 +390,7 @@ pub mod prelude {
     // Re-export the cano async-trait macros for convenience.
     pub use crate::{
         batch_task, checkpoint_store, compensatable_task, node, poll_task, resource, router_task,
-        task,
+        stepped_task, task,
     };
 
     // Re-export derive macros alongside their trait counterparts. Rust's separate

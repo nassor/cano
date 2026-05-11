@@ -380,6 +380,7 @@ dependencies = [
  "cano",
  "proc-macro2",
  "quote",
+ "serde",
  "syn",
  "tokio",
 ]

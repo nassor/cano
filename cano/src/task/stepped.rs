@@ -1,0 +1,686 @@
+//! # SteppedTask — Resumable-Iterative Processing Model
+//!
+//! A [`SteppedTask`] processes work in discrete, resumable steps. Each call to
+//! [`step`](SteppedTask::step) either advances the cursor (`Step::More(cursor)`) or signals
+//! completion with a workflow state transition (`Step::Done(state)`). The cursor threading
+//! enables crash-resume: the cursor can be persisted between steps and recovered after a
+//! failure (Task 17 — persistence is not yet wired; see `TODO(task 17)` below).
+//!
+//! ## When to use `SteppedTask`
+//!
+//! - **Large dataset processing**: scan a table page-by-page using a continuation token.
+//! - **Chunked uploads or migrations**: advance an offset cursor through a large payload.
+//! - **Progress-saving long jobs**: the cursor captures exactly where to resume after a
+//!   restart.
+//!
+//! Every [`SteppedTask`] automatically implements [`Task`](crate::task::Task) via a
+//! per-impl-site companion `impl Task<S> for T` emitted by the `#[stepped_task]` macro.
+//! This means you can register a `SteppedTask` with
+//! [`Workflow::register`](crate::workflow::Workflow::register) exactly like any other task.
+//!
+//! ## Quick Start
+//!
+//! ```rust
+//! use cano::prelude::*;
+//! use serde::{Serialize, Deserialize};
+//!
+//! #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+//! enum MyState { Process, Done }
+//!
+//! struct PageScanner { total_pages: u32 }
+//!
+//! #[stepped_task(state = MyState)]
+//! impl PageScanner {
+//!     async fn step(
+//!         &self,
+//!         _res: &Resources,
+//!         cursor: Option<u32>,
+//!     ) -> Result<Step<u32, MyState>, CanoError> {
+//!         let page = cursor.unwrap_or(0);
+//!         if page + 1 >= self.total_pages {
+//!             Ok(Step::Done(TaskResult::Single(MyState::Done)))
+//!         } else {
+//!             Ok(Step::More(page + 1))
+//!         }
+//!     }
+//! }
+//!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), CanoError> {
+//! let scanner = PageScanner { total_pages: 3 };
+//! let workflow = Workflow::bare()
+//!     .register(MyState::Process, scanner)
+//!     .add_exit_state(MyState::Done);
+//!
+//! let result = workflow.orchestrate(MyState::Process).await?;
+//! assert_eq!(result, MyState::Done);
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! ## The trait-impl form
+//!
+//! You can also write the full `impl SteppedTask<S> for T` header explicitly:
+//!
+//! ```rust
+//! use cano::prelude::*;
+//! use serde::{Serialize, Deserialize};
+//!
+//! #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+//! enum MyState { Process, Done }
+//!
+//! #[derive(Serialize, Deserialize)]
+//! struct MyCursor { offset: u64 }
+//!
+//! struct TraitStepper;
+//!
+//! #[stepped_task]
+//! impl SteppedTask<MyState> for TraitStepper {
+//!     type Cursor = MyCursor;
+//!
+//!     async fn step(
+//!         &self,
+//!         _res: &Resources,
+//!         cursor: Option<MyCursor>,
+//!     ) -> Result<Step<MyCursor, MyState>, CanoError> {
+//!         let _ = cursor;
+//!         Ok(Step::Done(TaskResult::Single(MyState::Done)))
+//!     }
+//! }
+//!
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), CanoError> {
+//! let workflow = Workflow::bare()
+//!     .register(MyState::Process, TraitStepper)
+//!     .add_exit_state(MyState::Done);
+//!
+//! let result = workflow.orchestrate(MyState::Process).await?;
+//! assert_eq!(result, MyState::Done);
+//! # Ok(())
+//! # }
+//! ```
+
+use crate::error::CanoError;
+use crate::resource::Resources;
+use crate::task::{TaskConfig, TaskResult};
+use cano_macros::stepped_task;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use std::borrow::Cow;
+use std::fmt;
+use std::hash::Hash;
+
+// ---------------------------------------------------------------------------
+// Step<TCursor, TState> — the outcome of a single step() call
+// ---------------------------------------------------------------------------
+
+/// The outcome returned by a single [`SteppedTask::step`] call.
+///
+/// - [`Step::More`] — more work remains; the cursor is threaded to the next call.
+/// - [`Step::Done`] — processing is complete; carry the [`TaskResult`] forward to the FSM.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step<TCursor, TState> {
+    /// More steps remain. The cursor will be passed to the next `step` call.
+    More(TCursor),
+    /// All steps are complete. The inner [`TaskResult`] is forwarded to the FSM.
+    Done(TaskResult<TState>),
+}
+
+// ---------------------------------------------------------------------------
+// SteppedTask trait
+// ---------------------------------------------------------------------------
+
+/// A resumable-iterative processing model that advances work step by step via a cursor.
+///
+/// # Generic Types
+///
+/// - **`TState`**: The state enum used by the workflow (`Clone + Debug + Send + Sync`).
+/// - **`TResourceKey`**: The key type used to look up resources (defaults to
+///   [`Cow<'static, str>`]).
+///
+/// # Associated Types
+///
+/// - **`Cursor`**: Serialisable position marker threaded through each step call.
+///   Must implement `Serialize + DeserializeOwned + Send + Sync + 'static` so it can be
+///   persisted for crash-resume (Task 17).
+///
+/// # Default config
+///
+/// `SteppedTask` defaults to [`TaskConfig::default()`] (exponential backoff with 3 retries).
+/// The step loop is the forward-progress mechanism; outer retry wrapping guards against
+/// transient errors on individual step calls.
+///
+/// # Implementing SteppedTask
+///
+/// Prefer the inherent `#[stepped_task(state = S)]` form:
+///
+/// ```rust
+/// use cano::prelude::*;
+///
+/// #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// enum MyState { Process, Done }
+///
+/// struct MyProcessor { limit: u32 }
+///
+/// #[stepped_task(state = MyState)]
+/// impl MyProcessor {
+///     async fn step(
+///         &self,
+///         _res: &Resources,
+///         cursor: Option<u32>,
+///     ) -> Result<Step<u32, MyState>, CanoError> {
+///         let n = cursor.unwrap_or(0);
+///         if n + 1 >= self.limit {
+///             Ok(Step::Done(TaskResult::Single(MyState::Done)))
+///         } else {
+///             Ok(Step::More(n + 1))
+///         }
+///     }
+/// }
+/// ```
+#[stepped_task]
+pub trait SteppedTask<TState, TResourceKey = Cow<'static, str>>: Send + Sync
+where
+    TState: Clone + fmt::Debug + Send + Sync + 'static,
+    TResourceKey: Hash + Eq + Send + Sync + 'static,
+{
+    /// The cursor type that tracks progress between steps.
+    ///
+    /// Must be serialisable so it can be persisted for crash-resume (Task 17).
+    type Cursor: Serialize + DeserializeOwned + Send + Sync + 'static;
+
+    /// Get the task configuration that controls execution behaviour.
+    ///
+    /// Defaults to [`TaskConfig::default()`] (exponential backoff with 3 retries).
+    fn config(&self) -> TaskConfig {
+        TaskConfig::default()
+    }
+
+    /// Human-readable identifier for this stepper, reported to [`WorkflowObserver`] hooks.
+    ///
+    /// Defaults to [`std::any::type_name`] of the implementing type. Override for a
+    /// stable, friendly name.
+    ///
+    /// [`WorkflowObserver`]: crate::observer::WorkflowObserver
+    fn name(&self) -> Cow<'static, str> {
+        Cow::Borrowed(std::any::type_name::<Self>())
+    }
+
+    /// Execute one step of the task.
+    ///
+    /// - `cursor`: `None` on the first call; `Some(cursor)` on subsequent calls with
+    ///   the value returned by the previous `step` via [`Step::More`].
+    ///
+    /// Return [`Step::More`] with an updated cursor to continue, or [`Step::Done`] with
+    /// a [`TaskResult`] when processing is complete.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CanoError`] on a non-recoverable error.
+    async fn step(
+        &self,
+        res: &Resources<TResourceKey>,
+        cursor: Option<Self::Cursor>,
+    ) -> Result<Step<Self::Cursor, TState>, CanoError>;
+}
+
+// ---------------------------------------------------------------------------
+// run_stepped — the loop body called by the macro-synthesised Task::run
+// ---------------------------------------------------------------------------
+
+/// Run the [`SteppedTask`] step loop for `s`.
+///
+/// The synthesised `Task::run` method emitted by `#[stepped_task]` delegates here so
+/// that the loop body lives in a single place.
+///
+/// The loop calls `s.step(res, cursor)` repeatedly:
+///
+/// - `Step::More(new_cursor)` → update the cursor and call `step` again.
+/// - `Step::Done(result)` → return `Ok(result)`.
+/// - `Err(e)` → return `Err(e)` immediately (outer retry wrapping, if any, is applied
+///   by the workflow dispatcher via `run_with_retries`).
+///
+/// # TODO(task 17)
+///
+/// Cursor persistence between steps is not yet implemented. Task 17 will wire
+/// `CheckpointStore` cursor serialisation here: after each `Step::More`, the cursor
+/// will be serialised to `Vec<u8>` and appended as a `RowKind::StepCursor` checkpoint
+/// row. On resume, the last cursor row will be deserialised and passed as the initial
+/// `cursor` argument instead of `None`.
+pub async fn run_stepped<S, S2, K>(s: &S, res: &Resources<K>) -> Result<TaskResult<S2>, CanoError>
+where
+    S: SteppedTask<S2, K> + ?Sized,
+    S2: Clone + fmt::Debug + Send + Sync + 'static,
+    K: Hash + Eq + Send + Sync + 'static,
+{
+    let mut cursor: Option<S::Cursor> = None;
+
+    loop {
+        match s.step(res, cursor).await? {
+            Step::More(new_cursor) => {
+                cursor = Some(new_cursor);
+                // TODO(task 17): persist cursor to CheckpointStore here before
+                // continuing to the next step, enabling crash-resume.
+            }
+            Step::Done(result) => return Ok(result),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Default cursor type alias
+// ---------------------------------------------------------------------------
+
+/// Default cursor type for [`DynSteppedTask`] trait objects.
+///
+/// Using `Vec<u8>` pins the cursor to an opaque byte buffer, enabling object-safe
+/// dynamic dispatch at the cost of requiring manual serialisation in `step`.
+pub type DefaultStepCursor = Vec<u8>;
+
+// ---------------------------------------------------------------------------
+// Type aliases
+// ---------------------------------------------------------------------------
+
+/// Type alias for a dynamic [`SteppedTask`] trait object with a `Vec<u8>` cursor.
+///
+/// Pins `Cursor = Vec<u8>` for object safety — the cursor is an opaque byte buffer.
+pub type DynSteppedTask<TState, TResourceKey = Cow<'static, str>> =
+    dyn SteppedTask<TState, TResourceKey, Cursor = Vec<u8>> + Send + Sync;
+
+/// Type alias for an `Arc`-wrapped dynamic [`SteppedTask`] trait object.
+pub type SteppedTaskObject<TState, TResourceKey = Cow<'static, str>> =
+    std::sync::Arc<DynSteppedTask<TState, TResourceKey>>;
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::resource::Resources;
+    use crate::task::Task;
+    use cano_macros::stepped_task;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    // Note: all `#[stepped_task]` usages inside the `cano` crate itself use the
+    // trait-impl form (`impl SteppedTask<S> for T`), because the inherent form emits
+    // `::cano::SteppedTask<...>` paths that don't resolve inside this crate. The
+    // inherent form is tested in `cano-macros/tests/stepped_task_impl.rs` where
+    // `::cano` resolves correctly.
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    enum MyState {
+        Work,
+        Done,
+        Next,
+    }
+
+    // ---------------------------------------------------------------------------
+    // (a) SteppedTask that completes on the first step
+    // ---------------------------------------------------------------------------
+
+    struct ImmediateStepper;
+
+    #[stepped_task]
+    impl SteppedTask<MyState> for ImmediateStepper {
+        type Cursor = u32;
+
+        async fn step(
+            &self,
+            _res: &Resources,
+            _cursor: Option<u32>,
+        ) -> Result<Step<u32, MyState>, CanoError> {
+            Ok(Step::Done(TaskResult::Single(MyState::Done)))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stepped_task_immediate_via_step() {
+        let stepper = ImmediateStepper;
+        let res = Resources::new();
+        let result = SteppedTask::step(&stepper, &res, None).await.unwrap();
+        assert_eq!(result, Step::Done(TaskResult::Single(MyState::Done)));
+    }
+
+    #[tokio::test]
+    async fn test_stepped_task_immediate_via_task_run() {
+        let stepper = ImmediateStepper;
+        let res = Resources::new();
+        let result = Task::run(&stepper, &res).await.unwrap();
+        assert_eq!(result, TaskResult::Single(MyState::Done));
+    }
+
+    // ---------------------------------------------------------------------------
+    // (b) SteppedTask that takes multiple steps before Done
+    // ---------------------------------------------------------------------------
+
+    struct CountingStepper {
+        target: u32,
+    }
+
+    impl CountingStepper {
+        fn new(target: u32) -> Self {
+            Self { target }
+        }
+    }
+
+    #[stepped_task]
+    impl SteppedTask<MyState> for CountingStepper {
+        type Cursor = u32;
+
+        async fn step(
+            &self,
+            _res: &Resources,
+            cursor: Option<u32>,
+        ) -> Result<Step<u32, MyState>, CanoError> {
+            let n = cursor.unwrap_or(0) + 1;
+            if n >= self.target {
+                Ok(Step::Done(TaskResult::Single(MyState::Done)))
+            } else {
+                Ok(Step::More(n))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stepped_task_multiple_steps() {
+        let stepper = CountingStepper::new(5);
+        let res = Resources::new();
+        let result = Task::run(&stepper, &res).await.unwrap();
+        assert_eq!(result, TaskResult::Single(MyState::Done));
+    }
+
+    #[tokio::test]
+    async fn test_stepped_task_cursor_threading() {
+        // Verify that cursor is correctly threaded: starts at None, ends at target-1
+        let stepper = CountingStepper::new(3);
+        let res = Resources::new();
+
+        // Step 1: cursor None → More(1)
+        let r1 = SteppedTask::step(&stepper, &res, None).await.unwrap();
+        assert_eq!(r1, Step::More(1));
+
+        // Step 2: cursor Some(1) → More(2)
+        let r2 = SteppedTask::step(&stepper, &res, Some(1)).await.unwrap();
+        assert_eq!(r2, Step::More(2));
+
+        // Step 3: cursor Some(2) → Done
+        let r3 = SteppedTask::step(&stepper, &res, Some(2)).await.unwrap();
+        assert_eq!(r3, Step::Done(TaskResult::Single(MyState::Done)));
+    }
+
+    // ---------------------------------------------------------------------------
+    // (c) Error propagates immediately
+    // ---------------------------------------------------------------------------
+
+    struct ErrorStepper;
+
+    #[stepped_task]
+    impl SteppedTask<MyState> for ErrorStepper {
+        type Cursor = u32;
+
+        async fn step(
+            &self,
+            _res: &Resources,
+            _cursor: Option<u32>,
+        ) -> Result<Step<u32, MyState>, CanoError> {
+            Err(CanoError::task_execution("step failed"))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stepped_task_error_propagates() {
+        let stepper = ErrorStepper;
+        let res = Resources::new();
+        let err = Task::run(&stepper, &res).await.unwrap_err();
+        assert!(matches!(err, CanoError::TaskExecution(_)));
+    }
+
+    // ---------------------------------------------------------------------------
+    // (d) SteppedTask returning Split
+    // ---------------------------------------------------------------------------
+
+    struct SplitStepper;
+
+    #[stepped_task]
+    impl SteppedTask<MyState> for SplitStepper {
+        type Cursor = u32;
+
+        async fn step(
+            &self,
+            _res: &Resources,
+            _cursor: Option<u32>,
+        ) -> Result<Step<u32, MyState>, CanoError> {
+            Ok(Step::Done(TaskResult::Split(vec![
+                MyState::Work,
+                MyState::Next,
+            ])))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stepped_task_split() {
+        let stepper = SplitStepper;
+        let res = Resources::new();
+        let result = Task::run(&stepper, &res).await.unwrap();
+        assert_eq!(
+            result,
+            TaskResult::Split(vec![MyState::Work, MyState::Next])
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // (e) Config + name overrides
+    // ---------------------------------------------------------------------------
+
+    struct CustomStepper;
+
+    #[stepped_task]
+    impl SteppedTask<MyState> for CustomStepper {
+        type Cursor = u32;
+
+        fn config(&self) -> TaskConfig {
+            TaskConfig::minimal()
+        }
+
+        fn name(&self) -> Cow<'static, str> {
+            Cow::Borrowed("my-custom-stepper")
+        }
+
+        async fn step(
+            &self,
+            _res: &Resources,
+            _cursor: Option<u32>,
+        ) -> Result<Step<u32, MyState>, CanoError> {
+            Ok(Step::Done(TaskResult::Single(MyState::Done)))
+        }
+    }
+
+    #[test]
+    fn test_stepped_task_config_override() {
+        let stepper = CustomStepper;
+        assert_eq!(
+            SteppedTask::<MyState>::config(&stepper)
+                .retry_mode
+                .max_attempts(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_stepped_task_name_override() {
+        let stepper = CustomStepper;
+        assert_eq!(SteppedTask::<MyState>::name(&stepper), "my-custom-stepper");
+    }
+
+    #[test]
+    fn test_companion_task_forwards_config_and_name() {
+        let stepper = CustomStepper;
+        assert_eq!(Task::config(&stepper).retry_mode.max_attempts(), 1);
+        assert_eq!(Task::name(&stepper), "my-custom-stepper");
+    }
+
+    // ---------------------------------------------------------------------------
+    // (f) Default config is TaskConfig::default() (exponential backoff)
+    // ---------------------------------------------------------------------------
+
+    struct DefaultConfigStepper;
+
+    #[stepped_task]
+    impl SteppedTask<MyState> for DefaultConfigStepper {
+        type Cursor = u32;
+
+        async fn step(
+            &self,
+            _res: &Resources,
+            _cursor: Option<u32>,
+        ) -> Result<Step<u32, MyState>, CanoError> {
+            Ok(Step::Done(TaskResult::Single(MyState::Done)))
+        }
+    }
+
+    #[test]
+    fn test_stepped_task_default_config_has_retries() {
+        let stepper = DefaultConfigStepper;
+        assert!(
+            SteppedTask::<MyState>::config(&stepper)
+                .retry_mode
+                .max_attempts()
+                > 1,
+            "SteppedTask default config must have retries"
+        );
+    }
+
+    #[test]
+    fn test_stepped_task_default_name_contains_type_name() {
+        let stepper = DefaultConfigStepper;
+        let name = SteppedTask::<MyState>::name(&stepper);
+        assert!(
+            name.contains("DefaultConfigStepper"),
+            "default name should contain the type name, got: {name}",
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // (g) Dynamic dispatch: Arc<dyn Task<S>>
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_stepped_task_as_dyn_task() {
+        let stepper: Arc<dyn Task<MyState>> = Arc::new(ImmediateStepper);
+        let res = Resources::new();
+        let result = Task::run(stepper.as_ref(), &res).await.unwrap();
+        assert_eq!(result, TaskResult::Single(MyState::Done));
+    }
+
+    // ---------------------------------------------------------------------------
+    // (h) run_stepped with dyn SteppedTask (?Sized)
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_run_stepped_dyn_dispatch() {
+        let stepper: &dyn SteppedTask<MyState, Cursor = u32> = &ImmediateStepper;
+        let res = Resources::new();
+        let result = run_stepped(stepper, &res).await.unwrap();
+        assert_eq!(result, TaskResult::Single(MyState::Done));
+    }
+
+    // ---------------------------------------------------------------------------
+    // (i) Step enum equality and clone
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn test_step_enum_more_clone_eq() {
+        let s1: Step<u32, MyState> = Step::More(42);
+        let s2 = s1.clone();
+        assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn test_step_enum_done_clone_eq() {
+        let s1: Step<u32, MyState> = Step::Done(TaskResult::Single(MyState::Done));
+        let s2 = s1.clone();
+        assert_eq!(s1, s2);
+    }
+
+    // ---------------------------------------------------------------------------
+    // (j) Workflow integration
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_stepped_task_in_workflow() {
+        use crate::workflow::Workflow;
+        use cano_macros::task;
+
+        struct NextTask;
+
+        #[task]
+        impl Task<MyState> for NextTask {
+            async fn run_bare(&self) -> Result<TaskResult<MyState>, CanoError> {
+                Ok(TaskResult::Single(MyState::Done))
+            }
+        }
+
+        let stepper = CountingStepper::new(3);
+
+        let workflow = Workflow::bare()
+            .register(MyState::Work, stepper)
+            .register(MyState::Next, NextTask)
+            .add_exit_state(MyState::Done);
+
+        let result = workflow.orchestrate(MyState::Work).await.unwrap();
+        assert_eq!(result, MyState::Done);
+    }
+
+    // ---------------------------------------------------------------------------
+    // (k) AtomicU32 step count verification
+    // ---------------------------------------------------------------------------
+
+    struct TrackedStepper {
+        calls: Arc<AtomicU32>,
+        target: u32,
+    }
+
+    impl TrackedStepper {
+        fn new(target: u32) -> (Self, Arc<AtomicU32>) {
+            let calls = Arc::new(AtomicU32::new(0));
+            (
+                Self {
+                    calls: Arc::clone(&calls),
+                    target,
+                },
+                calls,
+            )
+        }
+    }
+
+    #[stepped_task]
+    impl SteppedTask<MyState> for TrackedStepper {
+        type Cursor = u32;
+
+        async fn step(
+            &self,
+            _res: &Resources,
+            cursor: Option<u32>,
+        ) -> Result<Step<u32, MyState>, CanoError> {
+            let n = self.calls.fetch_add(1, Ordering::Relaxed);
+            let pos = cursor.unwrap_or(0) + 1;
+            if n + 1 >= self.target {
+                Ok(Step::Done(TaskResult::Single(MyState::Done)))
+            } else {
+                Ok(Step::More(pos))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_stepped_task_step_count() {
+        let (stepper, calls) = TrackedStepper::new(4);
+        let res = Resources::new();
+        let result = Task::run(&stepper, &res).await.unwrap();
+        assert_eq!(result, TaskResult::Single(MyState::Done));
+        assert_eq!(calls.load(Ordering::Relaxed), 4);
+    }
+}
