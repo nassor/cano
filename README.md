@@ -198,6 +198,20 @@ You can also find:
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
+## AI Disclosure
+
+The primary developer of this repository uses AI coding assistants while
+working on Cano. At the time of writing, the assistants in regular use are:
+
+- **Claude Code** (Anthropic API), and
+- **Qwen** and **DeepSeek** models running locally.
+
+All AI-assisted output is reviewed, edited, tested, and submitted by a human
+developer who is fully responsible for the resulting code. AI tools are
+treated as accelerators, not authors. See
+[AI_USAGE_POLICY.md](AI_USAGE_POLICY.md) for the full policy that contributors
+are expected to follow when using AI assistants on this project.
+
 ## License
 
 Licensed under either of
