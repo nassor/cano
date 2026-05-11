@@ -192,11 +192,9 @@ impl Summarise {
     ) -> Result<TaskResult<Step>, CanoError> {
         let total_bytes: usize = outputs.iter().filter_map(|r| r.as_ref().ok()).sum();
         let success_count = outputs.iter().filter(|r| r.is_ok()).count();
-        let pct = if self.url_count > 0 {
-            success_count * 100 / self.url_count
-        } else {
-            0
-        };
+        let pct = (success_count * 100)
+            .checked_div(self.url_count)
+            .unwrap_or(0);
         println!(
             "summarise  : {success_count}/{} succeeded ({pct}%), {total_bytes} bytes total",
             self.url_count
