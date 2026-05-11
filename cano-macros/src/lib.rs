@@ -26,6 +26,7 @@ use proc_macro::TokenStream;
 
 mod async_rewrite;
 mod attr_args;
+mod batch_task_impl;
 mod checkpoint_store_impl;
 mod compensatable_task_impl;
 mod from_resources;
@@ -258,6 +259,39 @@ pub fn compensatable_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn router_task(attr: TokenStream, item: TokenStream) -> TokenStream {
     router_task_impl::expand(attr.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Apply to the `BatchTask` trait definition, an
+/// `impl BatchTask<S [, K]> for T` block, or — for less boilerplate — an
+/// inherent `impl T { ... }` block.
+///
+/// Two surface forms are supported on impl blocks:
+///
+/// 1. **Trait-impl form:** `#[batch_task] impl BatchTask<S> for T { type Item = I; type ItemOutput = O; ... }` —
+///    user writes the trait header. The macro async-rewrites the `BatchTask` impl AND emits a
+///    companion `impl Task<S> for T` that delegates `Task::run` → `run_batch`.
+/// 2. **Inherent-impl form:** `#[batch_task(state = S [, key = K])] impl T { async fn load(..); async fn process_item(..); async fn finish(..); }` —
+///    the macro builds the `impl BatchTask<S [, K]> for T` header from the attribute args,
+///    infers `type Item` from the `&T` parameter of `process_item` and `type ItemOutput` from
+///    its return type, enforces that `load`, `process_item`, and `finish` are present
+///    (`concurrency`, `item_retry`, `config`, `name` may be overridden), and emits the same
+///    companion `impl Task<S [, K]> for T`.
+///
+/// On a trait definition (`#[batch_task] pub trait BatchTask ...`) the macro just performs the
+/// async-fn-in-trait rewrite.
+///
+/// Because a blanket `impl<B: BatchTask<..>> Task<..> for B` would conflict with the existing
+/// `impl<N: Node<..>> Task<..> for N` (E0119), the companion `Task` impl is generated
+/// per-use-site rather than as a blanket.
+///
+/// `Task::run` always delegates to the `::cano::task::batch::run_batch` free function (it is
+/// never inlined into the generated code) because the fan-out loop requires `futures_util`,
+/// which is not a direct dependency of external callers.
+#[proc_macro_attribute]
+pub fn batch_task(attr: TokenStream, item: TokenStream) -> TokenStream {
+    batch_task_impl::expand(attr.into(), item.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

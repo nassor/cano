@@ -108,11 +108,15 @@ use std::hash::Hash;
 #[cfg(feature = "tracing")]
 use tracing::{debug, info, instrument};
 
+pub mod batch;
 pub mod node;
 pub mod poll;
 mod retry;
 pub mod router;
 
+pub use batch::{
+    BatchTask, BatchTaskObject, DefaultBatchItem, DefaultBatchItemOutput, DynBatchTask, run_batch,
+};
 pub use node::{DefaultNodeResult, DynNode, Node, NodeObject};
 pub use poll::{DynPollTask, Poll, PollErrorPolicy, PollTask, PollTaskObject, run_poll_loop};
 pub use retry::{RetryMode, TaskConfig, run_with_retries};

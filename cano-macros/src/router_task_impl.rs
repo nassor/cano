@@ -471,4 +471,3 @@ fn synthesise_task_impl(
     let synth_impl: ItemImpl = parse2(synth)?;
     Ok(async_rewrite::rewrite_impl_block(synth_impl))
 }
-

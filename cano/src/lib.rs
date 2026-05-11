@@ -227,6 +227,9 @@ pub use observer::WorkflowObserver;
 pub use recovery::{CheckpointRow, CheckpointStore};
 pub use resource::{HealthStatus, Resource, Resources};
 pub use saga::{CompensatableTask, ErasedCompensatable};
+pub use task::batch::{
+    BatchTask, BatchTaskObject, DefaultBatchItem, DefaultBatchItemOutput, DynBatchTask, run_batch,
+};
 pub use task::node::{DefaultNodeResult, DynNode, Node, NodeObject};
 pub use task::poll::{DynPollTask, Poll, PollErrorPolicy, PollTask, PollTaskObject, run_poll_loop};
 pub use task::router::{DynRouterTask, RouterTask, RouterTaskObject};
@@ -280,6 +283,21 @@ pub use cano_macros::checkpoint_store;
 /// differs only in name.
 pub use cano_macros::compensatable_task;
 
+/// Attribute macro applied to the `BatchTask` trait definition and
+/// `impl BatchTask` blocks.
+///
+/// Two surface forms:
+/// - `#[batch_task] impl BatchTask<S> for T { type Item = I; type ItemOutput = O; ... }` — user
+///   writes the trait header; the macro async-rewrites it AND emits a companion `impl Task<S> for T`.
+/// - `#[batch_task(state = S [, key = K])] impl T { async fn load(...); async fn process_item(...); async fn finish(...); }` —
+///   user writes only the inherent block; the macro builds the trait header and companion Task impl,
+///   inferring `type Item` from `process_item`'s `&T` parameter and `type ItemOutput` from its return type.
+///
+/// Because a blanket `impl<B: BatchTask<..>> Task<..> for B` would conflict (E0119) with the
+/// existing `impl<N: Node<..>> Task<..> for N`, the companion `Task` impl is synthesised
+/// per-use-site rather than as a blanket.
+pub use cano_macros::batch_task;
+
 /// Attribute macro applied to the `RouterTask` trait definition and
 /// `impl RouterTask` blocks.
 ///
@@ -332,10 +350,10 @@ pub mod prelude {
     //! Use `use cano::prelude::*;` to import the most commonly used types and traits.
 
     pub use crate::{
-        CanoError, CanoResult, CheckpointRow, CheckpointStore, CircuitBreaker, CircuitPermit,
-        CircuitPolicy, CircuitState, CompensatableTask, DefaultNodeResult, HealthStatus,
-        JoinConfig, JoinStrategy, MemoryStore, Node, Poll, PollErrorPolicy, PollTask, Resource,
-        Resources, RetryMode, RouterTask, SplitResult, SplitTaskResult, StateEntry, Task,
+        BatchTask, CanoError, CanoResult, CheckpointRow, CheckpointStore, CircuitBreaker,
+        CircuitPermit, CircuitPolicy, CircuitState, CompensatableTask, DefaultNodeResult,
+        HealthStatus, JoinConfig, JoinStrategy, MemoryStore, Node, Poll, PollErrorPolicy, PollTask,
+        Resource, Resources, RetryMode, RouterTask, SplitResult, SplitTaskResult, StateEntry, Task,
         TaskConfig, TaskObject, TaskResult, Workflow, WorkflowObserver,
     };
 
@@ -350,7 +368,8 @@ pub mod prelude {
 
     // Re-export the cano async-trait macros for convenience.
     pub use crate::{
-        checkpoint_store, compensatable_task, node, poll_task, resource, router_task, task,
+        batch_task, checkpoint_store, compensatable_task, node, poll_task, resource, router_task,
+        task,
     };
 
     // Re-export derive macros alongside their trait counterparts. Rust's separate
