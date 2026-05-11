@@ -171,6 +171,22 @@ async fn checkpoint_rows(client: &Client, wf: &str) -> i64 {
         .unwrap_or(-1)
 }
 
+/// Load all (sequence, kind) pairs for a workflow, ordered by sequence.
+async fn checkpoint_kinds(client: &Client, wf: &str) -> Vec<(i64, i16)> {
+    client
+        .query(
+            "SELECT sequence, kind FROM cano_checkpoints WHERE workflow_id = $1 ORDER BY sequence ASC",
+            &[&wf],
+        )
+        .await
+        .map(|rows| {
+            rows.iter()
+                .map(|r| (r.get::<_, i64>(0), r.get::<_, i16>(1)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[tokio::test]
 async fn crash_mid_flight_then_resume_completes_without_losing_or_duplicating_effects() {
     let fx = Fixture::start().await;
@@ -195,6 +211,28 @@ async fn crash_mid_flight_then_resume_completes_without_losing_or_duplicating_ef
         );
         let ev = events(&db, wf).await;
         assert!(ev.contains(&"run:Reserve".to_string()) && ev.contains(&"run:Ship".to_string()));
+
+        // Verify RowKind is persisted correctly: Reserve produces a StateEntry row (kind=0)
+        // followed by a CompensationCompletion row (kind=1); Ship-entry is kind=0.
+        let kinds = checkpoint_kinds(&db, wf).await;
+        assert!(
+            !kinds.is_empty(),
+            "expected at least one checkpoint row with a kind value"
+        );
+        // There must be at least one CompensationCompletion row (kind=1) from Reserve's
+        // successful run before the crash.
+        assert!(
+            kinds.iter().any(|(_, k)| *k == 1),
+            "expected at least one CompensationCompletion row (kind=1) for Reserve; \
+             got: {kinds:?}"
+        );
+        // All rows must have a recognized kind (0, 1, or 2).
+        for (seq, k) in &kinds {
+            assert!(
+                matches!(k, 0..=2),
+                "checkpoint row at sequence {seq} has unrecognized kind {k}"
+            );
+        }
     }
 
     // Run 2: resume — must pick up at `Ship`, finish at `Done`, NOT re-run `Reserve`, and

@@ -10,8 +10,10 @@ explicitly with `-p cano-e2e`.
 - **`src/lib.rs` — `PostgresCheckpointStore`**: a real `cano::CheckpointStore` over
   Postgres (`tokio-postgres`). Demonstrates the pluggable storage contract; its primary key
   on `(workflow_id, sequence)` enforces the no-duplicate-checkpoint rule at the database
-  level. Also defines the saga workflow (`Reserve` → `Ship` → `Done`) with fault-injection
-  knobs, and query helpers.
+  level. The `kind` column (`SMALLINT NOT NULL DEFAULT 0`) maps `RowKind` to an integer
+  (`0=StateEntry`, `1=CompensationCompletion`, `2=StepCursor`); the `DEFAULT 0` ensures
+  pre-existing rows read back as `StateEntry`. Also defines the saga workflow
+  (`Reserve` → `Ship` → `Done`) with fault-injection knobs, and query helpers.
 - **`src/bin/cano_workflow_app.rs`** — the "custom software" the tests drive: a small Cano
   app behind a CLI (`<dsn> <workflow_id> <run|resume> [fail_at=PHASE] [pause_at=PHASE]`).
   Prints stdout markers (`READY`, `CHECKPOINT`, `RESUME`, `PAUSED`, `DONE`, `FAILED`).
