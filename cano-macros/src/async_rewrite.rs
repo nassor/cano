@@ -43,6 +43,13 @@ pub(crate) fn rewrite_impl_block(item: ItemImpl) -> TokenStream2 {
     rewrite_impl(item)
 }
 
+/// Rewrite a parsed `ItemTrait` directly. Used by callers that have already
+/// parsed the trait definition (e.g. `router_task_impl.rs`) before handing
+/// it back for the async rewrite.
+pub(crate) fn rewrite_trait_def(item: ItemTrait) -> TokenStream2 {
+    rewrite_trait(item)
+}
+
 // ---------------------------------------------------------------------------
 // Trait rewriter
 // ---------------------------------------------------------------------------

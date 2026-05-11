@@ -16,6 +16,7 @@
 //! - [`resource`] — for `impl Resource` and the `Resource` trait
 //! - [`checkpoint_store`] — for `impl CheckpointStore` and the `CheckpointStore` trait
 //! - [`compensatable_task`] — for `impl CompensatableTask` and the `CompensatableTask` trait
+//! - [`router_task`] — for `impl RouterTask` and the `RouterTask` trait
 //!
 //! All are functionally identical; they differ only in name. New traits
 //! that need async-fn-in-dyn rewriting can ship their own `cano-macros`
@@ -30,6 +31,7 @@ mod compensatable_task_impl;
 mod from_resources;
 mod node_impl;
 mod resource_derive;
+mod router_task_impl;
 mod task_impl;
 
 /// Derive a `from_resources(&Resources<_>) -> CanoResult<Self>` constructor that
@@ -230,6 +232,33 @@ pub fn compensatable_task(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
     async_rewrite::rewrite(item)
+}
+
+/// Apply to the `RouterTask` trait definition, an
+/// `impl RouterTask<S [, K]> for T` block, or — for less boilerplate — an
+/// inherent `impl T { ... }` block.
+///
+/// Two surface forms on impl blocks:
+///
+/// 1. **Trait-impl form:** `#[router_task] impl RouterTask<S> for T { async fn route(..) { ... } }` —
+///    user writes the trait header. The macro async-rewrites the `RouterTask` impl AND emits a
+///    companion `impl Task<S> for T` that delegates `Task::run` → `RouterTask::route`.
+/// 2. **Inherent-impl form:** `#[router_task(state = S [, key = K])] impl T { async fn route(..) { ... } }` —
+///    the macro builds the `impl RouterTask<S [, K]> for T` header from the attribute args, enforces
+///    that `route` is present (`config` / `name` may be overridden), and emits the same companion
+///    `impl Task<S [, K]> for T`.
+///
+/// On a trait definition (`#[router_task] pub trait RouterTask ...`) the macro just performs the
+/// async-fn-in-trait rewrite.
+///
+/// Because a blanket `impl<R: RouterTask<..>> Task<..> for R` would conflict with the existing
+/// `impl<N: Node<..>> Task<..> for N` (E0119), the companion `Task` impl is generated
+/// per-use-site rather than as a blanket.
+#[proc_macro_attribute]
+pub fn router_task(attr: TokenStream, item: TokenStream) -> TokenStream {
+    router_task_impl::expand(attr.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
 }
 
 /// Derive an empty `cano::Resource` impl (uses the trait's default no-op

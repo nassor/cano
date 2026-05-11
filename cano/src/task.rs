@@ -110,9 +110,11 @@ use tracing::{debug, info, instrument};
 
 pub mod node;
 mod retry;
+pub mod router;
 
 pub use node::{DefaultNodeResult, DynNode, Node, NodeObject};
 pub use retry::{RetryMode, TaskConfig, run_with_retries};
+pub use router::{DynRouterTask, RouterTask, RouterTaskObject};
 
 /// Result type for task execution that supports both single and split transitions
 #[derive(Debug, Clone, PartialEq, Eq)]
