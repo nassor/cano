@@ -13,6 +13,24 @@
 //! store it twice). redb orders composite keys element by element, so within one
 //! `workflow_id` the rows are stored — and range-scanned — in ascending
 //! `sequence` order, which is exactly what [`CheckpointStore::load_run`] returns.
+//!
+//! ## Schema evolution and backward compatibility
+//!
+//! The `StoredRow` struct was extended in cano v0.12 (Task 13) to include a
+//! `kind: RowKind` field. On read, `load_run` tries to decode the new 4-field shape
+//! first; if that fails (because the bytes were written by an older binary that used
+//! the 3-field `StoredRowLegacy` layout), it falls back to the legacy shape and
+//! synthesizes `kind = RowKind::StateEntry` (the only kind the old code produced).
+//!
+//! This ordering is unambiguous because postcard is **not** a self-describing
+//! format and does **not** detect trailing bytes: decoding new-format bytes
+//! (4 fields) as `StoredRow` succeeds; decoding old-format bytes (3 fields, no
+//! `kind`) as `StoredRow` fails with `DeserializeUnexpectedEnd` because there are
+//! no bytes left for the `kind` varint. The dangerous inverse (old bytes
+//! accidentally decoded as new) never happens because we try new first — and new
+//! bytes always succeed as new. Therefore: try `StoredRow` (new) first; on any
+//! decode error, try `StoredRowLegacy` (old); if both fail, surface the *new*
+//! decode error so the message says "decode checkpoint row: …".
 
 use std::ops::RangeInclusive;
 use std::path::Path;
@@ -29,8 +47,27 @@ const CHECKPOINTS: TableDefinition<(&str, u64), &[u8]> = TableDefinition::new("c
 
 /// The payload half of a [`CheckpointRow`]: everything except `sequence`, which
 /// is carried by the redb key. Kept private — callers only ever see `CheckpointRow`.
+///
+/// **Schema version:** this is the current (v0.12+) shape, including the `kind`
+/// discriminant. Old rows written before v0.12 are decoded by [`StoredRowLegacy`].
 #[derive(serde::Serialize, serde::Deserialize)]
 struct StoredRow {
+    state: String,
+    task_id: String,
+    output_blob: Option<Vec<u8>>,
+    kind: super::RowKind,
+}
+
+/// Legacy row payload shape from before cano v0.12, which did not persist `kind`.
+/// Used as the fallback in [`load_run`] when bytes fail to decode as [`StoredRow`].
+/// On upgrade, old rows are read back with `kind` synthesized as `RowKind::StateEntry`
+/// (the only kind the old code ever produced).
+///
+/// `Serialize` is derived only so the backward-compat test can produce a genuine
+/// legacy-format byte string to hand-insert into the redb table.  Production code
+/// never serializes this type.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredRowLegacy {
     state: String,
     task_id: String,
     output_blob: Option<Vec<u8>>,
@@ -82,6 +119,7 @@ impl CheckpointStore for RedbCheckpointStore {
             state: row.state,
             task_id: row.task_id,
             output_blob: row.output_blob,
+            kind: row.kind,
         };
         let bytes = postcard::to_stdvec(&payload)
             .map_err(|e| CanoError::CheckpointStore(format!("encode checkpoint row: {e}")))?;
@@ -118,14 +156,45 @@ impl CheckpointStore for RedbCheckpointStore {
         let mut rows = Vec::new();
         for entry in table.range(workflow_range(workflow_id)).map_err(redb_err)? {
             let (key, value) = entry.map_err(redb_err)?;
-            let payload = postcard::from_bytes::<StoredRow>(value.value())
-                .map_err(|e| CanoError::CheckpointStore(format!("decode checkpoint row: {e}")))?;
+            let bytes = value.value();
+            let sequence = key.value().1;
+
+            // Try the current (v0.12+) 4-field shape first.  On failure fall back to
+            // the legacy 3-field shape (written by binaries older than v0.12) and
+            // synthesize `kind = RowKind::StateEntry` — the only kind the old code
+            // ever produced.  See the module-level doc for the full rationale on why
+            // this ordering is unambiguous (postcard ignores trailing bytes on Old←New
+            // but errors with DeserializeUnexpectedEnd on New←Old).
+            let (state, task_id, output_blob, kind) = match postcard::from_bytes::<StoredRow>(bytes)
+            {
+                Ok(p) => (p.state, p.task_id, p.output_blob, p.kind),
+                Err(new_err) => {
+                    // Fall back to the legacy shape; if that also fails, surface
+                    // the *new* decode error so the message still says
+                    // "decode checkpoint row: …" and the existing test expectation
+                    // on the error message is met.
+                    match postcard::from_bytes::<StoredRowLegacy>(bytes) {
+                        Ok(p) => (
+                            p.state,
+                            p.task_id,
+                            p.output_blob,
+                            super::RowKind::StateEntry,
+                        ),
+                        Err(_) => {
+                            return Err(CanoError::CheckpointStore(format!(
+                                "decode checkpoint row: {new_err}"
+                            )));
+                        }
+                    }
+                }
+            };
+
             rows.push(CheckpointRow {
-                sequence: key.value().1,
-                state: payload.state,
-                task_id: payload.task_id,
-                output_blob: payload.output_blob,
-                kind: super::RowKind::StateEntry,
+                sequence,
+                state,
+                task_id,
+                output_blob,
+                kind,
             });
         }
         Ok(rows)
@@ -419,6 +488,122 @@ mod tests {
         assert!(
             err.message().contains("decode"),
             "unexpected message: {err}"
+        );
+    }
+
+    // -- RowKind round-trip ---------------------------------------------------
+
+    /// All three `RowKind` variants must survive an append → load_run cycle with
+    /// their kind and output_blob intact.
+    #[tokio::test]
+    async fn all_row_kinds_roundtrip() {
+        let dir = tempdir().unwrap();
+        let store = RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap();
+
+        // StateEntry: kind=StateEntry, output_blob=None
+        store
+            .append("run", CheckpointRow::new(0, "A", "task-a"))
+            .await
+            .unwrap();
+
+        // CompensationCompletion: kind=CompensationCompletion, output_blob=Some
+        store
+            .append(
+                "run",
+                CheckpointRow::new(1, "B", "task-b").with_output(vec![1, 2, 3]),
+            )
+            .await
+            .unwrap();
+
+        // StepCursor: kind=StepCursor, output_blob=Some
+        store
+            .append(
+                "run",
+                CheckpointRow::new(2, "C", "task-c").with_cursor(vec![4, 5]),
+            )
+            .await
+            .unwrap();
+
+        let rows = store.load_run("run").await.unwrap();
+        assert_eq!(rows.len(), 3);
+
+        assert_eq!(rows[0].sequence, 0);
+        assert_eq!(rows[0].state, "A");
+        assert_eq!(rows[0].kind, super::super::RowKind::StateEntry);
+        assert_eq!(rows[0].output_blob, None);
+
+        assert_eq!(rows[1].sequence, 1);
+        assert_eq!(rows[1].state, "B");
+        assert_eq!(rows[1].kind, super::super::RowKind::CompensationCompletion);
+        assert_eq!(rows[1].output_blob.as_deref(), Some(&[1u8, 2, 3][..]));
+
+        assert_eq!(rows[2].sequence, 2);
+        assert_eq!(rows[2].state, "C");
+        assert_eq!(rows[2].kind, super::super::RowKind::StepCursor);
+        assert_eq!(rows[2].output_blob.as_deref(), Some(&[4u8, 5][..]));
+    }
+
+    /// A row written in the legacy 3-field format (no `kind`) must be decoded by
+    /// the backward-compat fallback path and returned with `kind = StateEntry`.
+    ///
+    /// We simulate an "old binary" write by hand-inserting a postcard-encoded
+    /// `StoredRowLegacy` value directly into the redb table (bypassing the public
+    /// API, the same technique used in `corrupted_stored_row_is_a_decode_error_not_a_panic`).
+    /// A new-format row is also appended in the same run to confirm new and legacy
+    /// rows coexist correctly.
+    #[tokio::test]
+    async fn legacy_row_decoded_with_state_entry_kind() {
+        let dir = tempdir().unwrap();
+        let store = RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap();
+
+        // Encode a legacy (3-field, no `kind`) row value using postcard directly.
+        let legacy_bytes = postcard::to_stdvec(&StoredRowLegacy {
+            state: "LegacyState".to_string(),
+            task_id: "legacy-task".to_string(),
+            output_blob: None,
+        })
+        .unwrap();
+
+        // Insert the legacy bytes directly into the redb table at sequence 0,
+        // simulating a row written by a pre-v0.12 binary.
+        {
+            let tx = store.db.begin_write().unwrap();
+            {
+                let mut table = tx.open_table(CHECKPOINTS).unwrap();
+                table
+                    .insert(("run", 0u64), legacy_bytes.as_slice())
+                    .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        // Also append a new-format row at sequence 1 via the public API.
+        store
+            .append("run", CheckpointRow::new(1, "NewState", "new-task"))
+            .await
+            .unwrap();
+
+        let rows = store.load_run("run").await.unwrap();
+        assert_eq!(rows.len(), 2, "both legacy and new rows must load");
+
+        // Legacy row: kind synthesized as StateEntry.
+        assert_eq!(rows[0].sequence, 0);
+        assert_eq!(rows[0].state, "LegacyState");
+        assert_eq!(rows[0].task_id, "legacy-task");
+        assert_eq!(rows[0].output_blob, None);
+        assert_eq!(
+            rows[0].kind,
+            super::super::RowKind::StateEntry,
+            "legacy row must decode with kind=StateEntry"
+        );
+
+        // New-format row: kind must come from the persisted value.
+        assert_eq!(rows[1].sequence, 1);
+        assert_eq!(rows[1].state, "NewState");
+        assert_eq!(
+            rows[1].kind,
+            super::super::RowKind::StateEntry,
+            "new-format StateEntry row must round-trip correctly"
         );
     }
 }
