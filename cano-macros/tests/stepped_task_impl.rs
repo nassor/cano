@@ -29,7 +29,7 @@ enum Key {
 // 1. Inherent form — inferred `Cursor`, default `config` / `name`
 // ---------------------------------------------------------------------------
 
-/// `#[stepped_task(state = S)] impl T { ... }` with NO explicit `type Cursor`.
+/// `#[task::stepped(state = S)] impl T { ... }` with NO explicit `type Cursor`.
 /// The macro should infer `Cursor = u32` from `cursor: Option<u32>`.
 struct InherentInferred {
     total: u32,

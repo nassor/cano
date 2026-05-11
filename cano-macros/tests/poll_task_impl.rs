@@ -15,7 +15,7 @@ enum Step {
 }
 
 // ---------------------------------------------------------------------------
-// Inherent form: `#[poll_task(state = S)] impl T { async fn poll(...) }`
+// Inherent form: `#[task::poll(state = S)] impl T { async fn poll(...) }`
 // ---------------------------------------------------------------------------
 
 struct InherentPoller;

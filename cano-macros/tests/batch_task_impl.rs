@@ -28,7 +28,7 @@ enum Key {
 // 1. Inherent form — inferred `Item` and `ItemOutput`, default `concurrency` / `item_retry`
 // ---------------------------------------------------------------------------
 
-/// `#[batch_task(state = S)] impl T { ... }` with NO explicit `type Item` or
+/// `#[task::batch(state = S)] impl T { ... }` with NO explicit `type Item` or
 /// `type ItemOutput`. The macro should infer both from `process_item`'s parameter
 /// and return type respectively.
 struct InherentInferred;

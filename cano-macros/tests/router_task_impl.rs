@@ -14,7 +14,7 @@ enum Step {
 }
 
 // ---------------------------------------------------------------------------
-// Inherent form: `#[router_task(state = S)] impl T { async fn route(...) }`
+// Inherent form: `#[task::router(state = S)] impl T { async fn route(...) }`
 // ---------------------------------------------------------------------------
 
 struct InherentRouter;
