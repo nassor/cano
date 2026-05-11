@@ -41,7 +41,7 @@ use syn::{
 };
 
 use crate::async_rewrite;
-use crate::attr_args::AttrArgs;
+use crate::attr_args::{AttrArgs, combine_errors};
 
 /// Entry point — dispatches based on what `item` parses to.
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
@@ -472,11 +472,3 @@ fn synthesise_task_impl(
     Ok(async_rewrite::rewrite_impl_block(synth_impl))
 }
 
-fn combine_errors(mut errors: Vec<syn::Error>) -> syn::Error {
-    let mut iter = errors.drain(..);
-    let mut acc = iter.next().expect("combine_errors called with empty vec");
-    for e in iter {
-        acc.combine(e);
-    }
-    acc
-}

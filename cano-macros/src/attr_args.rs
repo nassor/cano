@@ -45,3 +45,18 @@ impl AttrArgs {
         Ok(out)
     }
 }
+
+/// Fold a non-empty `Vec<syn::Error>` into a single `syn::Error` by chaining
+/// all errors with [`syn::Error::combine`].
+///
+/// # Panics
+///
+/// Panics if `errors` is empty.
+pub(crate) fn combine_errors(mut errors: Vec<syn::Error>) -> syn::Error {
+    let mut iter = errors.drain(..);
+    let mut acc = iter.next().expect("combine_errors called with empty vec");
+    for e in iter {
+        acc.combine(e);
+    }
+    acc
+}
