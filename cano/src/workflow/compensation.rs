@@ -13,6 +13,7 @@ use std::sync::Arc;
 use futures_util::FutureExt;
 
 use crate::error::CanoError;
+use crate::recovery::RowKind;
 use crate::saga::{CompensationEntry, ErasedCompensatable};
 use crate::task::{TaskResult, run_with_retries};
 
@@ -217,8 +218,13 @@ where
     /// under the same `workflow_id` and continue the sequence.
     ///
     /// The [compensation stack](crate::saga) is rehydrated from the loaded rows: every
-    /// row that carries an `output_blob` becomes a stack entry (in sequence order), so a
-    /// failure after the resume point can still compensate work done before the crash.
+    /// row whose [`kind`](crate::recovery::CheckpointRow::kind) is
+    /// [`RowKind::CompensationCompletion`](crate::recovery::RowKind::CompensationCompletion)
+    /// becomes a stack entry (in sequence order), so a failure after the resume point can
+    /// still compensate work done before the crash. Rows with other kinds — ordinary
+    /// [`RowKind::StateEntry`](crate::recovery::RowKind::StateEntry) rows and
+    /// [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) rows — are ignored
+    /// by the rehydration.
     ///
     /// # Errors
     ///
@@ -270,19 +276,25 @@ where
         })?;
         let start_sequence = last.sequence + 1;
 
-        // Rehydrate the compensation stack from rows carrying an output blob. `rows` is
+        // Rehydrate the compensation stack from CompensationCompletion rows. `rows` is
         // ascending by sequence (the `load_run` contract), so the stack is in the right
-        // order for a LIFO drain.
+        // order for a LIFO drain. Rows with other kinds — StateEntry and StepCursor —
+        // are ignored; a StepCursor row also carries an output_blob but must not be
+        // mistaken for a compensation entry.
         //
         // Skip the resume point's own row: if the crash landed after a compensatable
         // state's completion row but before the next state's entry row, that state is the
         // resume point — it re-runs below and re-pushes its own compensation entry, so
         // keeping the persisted one too would compensate that step twice on a later
         // failure. Earlier compensatable states' rows are kept (their tasks don't re-run).
+        //
+        // TODO(task 17): collect StepCursor rows here and pass them to the resumed
+        // SteppedTask so it can continue from its persisted cursor rather than restarting.
         let resume_sequence = last.sequence;
         let compensation_stack: Vec<CompensationEntry> = rows
             .iter()
             .filter(|r| r.sequence != resume_sequence)
+            .filter(|r| r.kind == RowKind::CompensationCompletion)
             .filter_map(|r| {
                 r.output_blob.as_ref().map(|blob| CompensationEntry {
                     task_id: r.task_id.clone(),
@@ -1051,6 +1063,98 @@ mod tests {
         assert_eq!(
             *log.lock().unwrap(),
             vec![("B".to_string(), 8), ("A".to_string(), 7)]
+        );
+    }
+
+    /// Regression test: a `StepCursor` row (which also carries an `output_blob`) must NOT
+    /// be mistaken for a `CompensationCompletion` entry during compensation-stack rehydration.
+    /// Plain `StateEntry` rows must also be ignored. Only `CompensationCompletion` rows seed
+    /// the stack — everything else passes through silently.
+    #[tokio::test]
+    async fn resume_step_cursor_row_is_not_added_to_compensation_stack() {
+        use crate::recovery::RowKind;
+
+        let store = Arc::new(MemCheckpoints::default());
+        let log: CompLog = Arc::new(Mutex::new(Vec::new()));
+
+        // Seed a mixed log:
+        //  seq 0 — StateEntry for A          (kind = StateEntry,            no output_blob)
+        //  seq 1 — CompensationCompletion A  (kind = CompensationCompletion, output = 101)
+        //  seq 2 — StateEntry for B          (kind = StateEntry,            no output_blob)
+        //  seq 3 — CompensationCompletion B  (kind = CompensationCompletion, output = 202)
+        //  seq 4 — StepCursor for C          (kind = StepCursor,            cursor = [9,9])
+        //
+        // The highest-sequence row (seq 4) is the resume point → C is the resume state.
+        // Rehydration must produce exactly [A=101, B=202] (in that order), not [A, B, StepCursor-C].
+        store
+            .append("mixed-run", CheckpointRow::new(0, "Start", "A"))
+            .await
+            .unwrap();
+        store
+            .append(
+                "mixed-run",
+                CheckpointRow::new(1, "Start", "A")
+                    .with_output(serde_json::to_vec(&101u32).unwrap()),
+            )
+            .await
+            .unwrap();
+        store
+            .append("mixed-run", CheckpointRow::new(2, "Process", "B"))
+            .await
+            .unwrap();
+        store
+            .append(
+                "mixed-run",
+                CheckpointRow::new(3, "Process", "B")
+                    .with_output(serde_json::to_vec(&202u32).unwrap()),
+            )
+            .await
+            .unwrap();
+        // StepCursor row for the Split state — has output_blob but is NOT a CompensationCompletion.
+        let cursor_row = CheckpointRow::new(4, "Split", "C").with_cursor(vec![9, 9]);
+        assert_eq!(
+            cursor_row.kind,
+            RowKind::StepCursor,
+            "sanity: with_cursor sets RowKind::StepCursor"
+        );
+        store.append("mixed-run", cursor_row).await.unwrap();
+
+        // C (Split state) is the resume point; configure it to fail forward so the compensation
+        // stack drains and we can inspect which entries were rehydrated.
+        let workflow = Workflow::bare()
+            .register_with_compensation(
+                TestState::Start,
+                CompTask::ok("A", 101, TestState::Process, &log),
+            )
+            .register_with_compensation(
+                TestState::Process,
+                CompTask::ok("B", 202, TestState::Split, &log),
+            )
+            .register_with_compensation(
+                TestState::Split,
+                CompTask {
+                    name: "C",
+                    value: 999,
+                    next_state: TestState::Complete,
+                    log: log.clone(),
+                    fail_forward: true, // C fails when re-run → triggers rollback
+                    fail_compensate: false,
+                },
+            )
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone());
+
+        let err = workflow.resume_from("mixed-run").await.unwrap_err();
+        // C failed forward (original error is "C forward failed").
+        assert_eq!(err.message(), "C forward failed");
+
+        // Only B and A were in the rehydrated stack (in LIFO order: B first, then A).
+        // The StepCursor row for C must NOT appear — and C failed forward so it never
+        // pushed its own entry either.
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![("B".to_string(), 202), ("A".to_string(), 101)],
+            "StepCursor and StateEntry rows must not become compensation entries"
         );
     }
 
