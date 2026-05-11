@@ -82,7 +82,7 @@
 //! The timeout is enforced by the workflow engine when the task is dispatched via
 //! [`Workflow::orchestrate`](crate::workflow::Workflow::orchestrate). If the entire
 //! poll loop does not complete within the timeout, the workflow receives
-//! [`CanoError::Timeout`](crate::error::CanoError::Timeout).
+//! [`CanoError::Timeout`].
 //!
 //! ## The trait-impl form
 //!
@@ -278,8 +278,8 @@ where
 ///
 /// The loop calls `p.poll(res)` repeatedly:
 ///
-/// - [`Poll::Ready(result)`] → return `Ok(result)`.
-/// - [`Poll::Pending { delay_ms }`] → reset the consecutive-error counter, sleep
+/// - `Poll::Ready(result)` → return `Ok(result)`.
+/// - `Poll::Pending { delay_ms }` → reset the consecutive-error counter, sleep
 ///   `delay_ms` ms, then poll again.
 /// - `Err(e)` → consult [`PollTask::on_poll_error`]:
 ///   - [`PollErrorPolicy::FailFast`] → return `Err(e)` immediately.
