@@ -648,6 +648,138 @@ mod tests {
         assert!(err.message().contains("is not a registered or exit state"));
     }
 
+    // ---- Router checkpoint-skipping ----
+
+    #[tokio::test]
+    async fn router_state_produces_no_checkpoint_row_and_sequences_are_dense() {
+        // Note: inside the `cano` crate the inherent `#[router_task(state = S)]` form emits
+        // `::cano::RouterTask<...>` paths that don't resolve. Use the trait-impl form instead.
+        use crate::observer::WorkflowObserver;
+        use crate::task::{RouterTask, TaskConfig};
+        use cano_macros::router_task;
+
+        struct RouteToWork;
+
+        #[router_task]
+        impl RouterTask<TestState> for RouteToWork {
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+            async fn route(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
+                Ok(TaskResult::Single(TestState::Process))
+            }
+        }
+
+        // Observe on_state_enter and on_checkpoint to verify router fires the
+        // former but NOT the latter.
+        #[derive(Default)]
+        struct StateEnterObserver(Mutex<Vec<String>>);
+        impl WorkflowObserver for StateEnterObserver {
+            fn on_state_enter(&self, state: &str) {
+                self.0.lock().unwrap().push(state.to_string());
+            }
+        }
+
+        let store = Arc::new(MemCheckpoints::default());
+        let observer = Arc::new(StateEnterObserver::default());
+        let ckpt_obs = Arc::new(CkptObserver::default());
+
+        // Route (router) → Process (single) → Complete (exit)
+        let workflow = Workflow::bare()
+            .register_router(TestState::Start, RouteToWork)
+            .register(TestState::Process, SimpleTask::new(TestState::Complete))
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone())
+            .with_workflow_id("router-run")
+            .with_observer(observer.clone())
+            .with_observer(ckpt_obs.clone());
+
+        assert_eq!(
+            workflow.orchestrate(TestState::Start).await.unwrap(),
+            TestState::Complete
+        );
+
+        // `on_state_enter` fires for ALL states (including the router).
+        assert_eq!(
+            *observer.0.lock().unwrap(),
+            vec!["Start", "Process", "Complete"],
+            "on_state_enter fires for every state including the router"
+        );
+
+        // No router row: only Process (seq 0) and Complete (seq 1).
+        assert_eq!(
+            store.audit_states("router-run"),
+            vec![(0, "Process".to_string()), (1, "Complete".to_string())],
+            "router state leaves no checkpoint row; sequences are dense from 0"
+        );
+
+        // `on_checkpoint` must not have fired for the Start/router state.
+        let ckpt_events = ckpt_obs.events();
+        assert_eq!(
+            ckpt_events,
+            vec![
+                ("checkpoint", "router-run".to_string(), 0),
+                ("checkpoint", "router-run".to_string(), 1),
+            ],
+            "on_checkpoint fires only for non-router states"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_from_skips_router_rows_not_present_in_checkpoint_log() {
+        // Seed a run that was interrupted after `Process` (sequence 0). No Route row exists
+        // because `Start` was a router state (skipped). `resume_from` should re-enter at
+        // `Process` and finish normally.
+        use crate::task::{RouterTask, TaskConfig};
+        use cano_macros::router_task;
+
+        struct RouteToWork;
+
+        #[router_task]
+        impl RouterTask<TestState> for RouteToWork {
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+            async fn route(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
+                Ok(TaskResult::Single(TestState::Process))
+            }
+        }
+
+        let store = Arc::new(MemCheckpoints::default());
+        // Only the Process row exists — as if the run crashed right after entering Process
+        // (the Start router left no row).
+        store
+            .append("router-resume", CheckpointRow::new(0, "Process", ""))
+            .await
+            .unwrap();
+
+        let process_task = SimpleTask::new(TestState::Complete);
+        let workflow = Workflow::bare()
+            .register_router(TestState::Start, RouteToWork)
+            .register(TestState::Process, process_task.clone())
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone());
+
+        assert_eq!(
+            workflow.resume_from("router-resume").await.unwrap(),
+            TestState::Complete
+        );
+        assert_eq!(
+            process_task.count(),
+            1,
+            "Process task re-runs once on resume"
+        );
+        // Continuation wrote Process (seq 1) and Complete (seq 2).
+        assert_eq!(
+            store.audit_states("router-resume"),
+            vec![
+                (0, "Process".to_string()),
+                (1, "Process".to_string()),
+                (2, "Complete".to_string()),
+            ]
+        );
+    }
+
     // ---- Saga / compensation ----
 
     use crate::task::TaskConfig;

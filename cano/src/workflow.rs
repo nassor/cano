@@ -220,9 +220,15 @@ where
     /// Register a side-effect-free routing task for a state.
     ///
     /// A router only reads resources and returns the next state — it never writes.
-    /// Use this when you need conditional branching without side effects. The engine
-    /// currently dispatches a [`StateEntry::Router`] exactly like [`StateEntry::Single`];
-    /// Task 3 will add checkpoint-skipping so routers leave no recovery footprint.
+    /// Use this for conditional branching without side effects. Router states are
+    /// dispatched like [`StateEntry::Single`] but **skipped by the checkpoint writer**:
+    /// no [`CheckpointRow`] is appended and no sequence number is consumed when a
+    /// router state is entered. The `on_state_enter` observer is still fired.
+    ///
+    /// **Recovery note:** if the *initial* state is a router and the workflow crashes
+    /// before any non-router state has been checkpointed, `resume_from` will find zero
+    /// rows and return an error. Restarting from the initial state is safe because
+    /// routers have no side effects.
     ///
     /// `T` must implement both [`RouterTask`] (signals read-only intent) and [`Task`]
     /// (provides the `run` method the engine calls). Use the `#[router_task]` macro to

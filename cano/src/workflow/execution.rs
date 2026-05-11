@@ -41,8 +41,15 @@ where
     /// [`Workflow::register_router`](crate::workflow::Workflow::register_router)).
     ///
     /// A router only reads resources and returns the next state — it never
-    /// writes. The engine currently dispatches it exactly like `Single`; Task 3
-    /// will add the checkpoint-skipping behaviour that distinguishes the two.
+    /// writes. Router states are dispatched like `Single` but skipped by the
+    /// checkpoint writer: no [`CheckpointRow`] is appended and no sequence
+    /// number is consumed when a router state is entered. The `on_state_enter`
+    /// observer is still fired (the FSM did enter the state).
+    ///
+    /// Note: if the initial state is a router and the workflow crashes before
+    /// any non-router state is entered, `resume_from` will find zero rows and
+    /// error. Restarting from the initial state is safe — routers have no side
+    /// effects.
     Router {
         task: Arc<dyn Task<TState, TResourceKey> + Send + Sync>,
         /// TaskConfig captured at registration time (same rationale as `Single`).
@@ -181,9 +188,20 @@ where
                 notify_observers(&self.observers, |o| o.on_state_enter(label));
             }
 
+            // Router states are pure routing: no side effects, nothing to
+            // recover. Skip the checkpoint write and do not consume a sequence
+            // number so that sequence numbers remain dense for `resume_from`.
+            // `on_state_enter` was already fired above — the FSM did enter the
+            // state; only the recovery footprint is suppressed.
+            let is_router = matches!(
+                self.states.get(&current_state).map(|e| e.as_ref()),
+                Some(StateEntry::Router { .. }),
+            );
+
             // Checkpoint this state entry before touching its task. One row per
             // state — a split is one state, hence one row regardless of fan-out.
-            if let Some(ref store) = self.checkpoint_store {
+            // Skipped for Router states (see above).
+            if !is_router && let Some(ref store) = self.checkpoint_store {
                 let wf_id = match workflow_id.as_deref() {
                     Some(id) => id,
                     None => {
@@ -199,8 +217,8 @@ where
                 let label = state_label.as_deref().unwrap_or_default();
                 let task_id = match self.states.get(&current_state).map(|e| e.as_ref()) {
                     Some(StateEntry::Single { task, .. }) => task.name().into_owned(),
-                    Some(StateEntry::Router { task, .. }) => task.name().into_owned(),
                     Some(StateEntry::CompensatableSingle { task, .. }) => task.name().into_owned(),
+                    // Router is unreachable here (is_router guard above), Split has no single task_id.
                     _ => String::new(),
                 };
                 if let Err(e) = store
@@ -248,7 +266,8 @@ where
                         .await
                 }
                 StateEntry::Router { task, config } => {
-                    // TODO(task 3): skip the per-state checkpoint write for Router states
+                    // Dispatched like Single; checkpoint write is skipped in the
+                    // block above (is_router guard).
                     self.execute_single_task(task.clone(), Arc::clone(config))
                         .await
                 }
