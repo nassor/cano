@@ -1,11 +1,11 @@
 //! # SteppedTask — Resumable-Iterative Processing Model
 //!
 //! A [`SteppedTask`] processes work in discrete, resumable steps. Each call to
-//! [`step`](SteppedTask::step) either advances the cursor (`Step::More(cursor)`) or signals
-//! completion with a workflow state transition (`Step::Done(state)`). The cursor threading
+//! [`step`](SteppedTask::step) either advances the cursor (`StepOutcome::More(cursor)`) or signals
+//! completion with a workflow state transition (`StepOutcome::Done(state)`). The cursor threading
 //! enables crash-resume: when registered via
 //! [`Workflow::register_stepped`](crate::workflow::Workflow::register_stepped) with a
-//! checkpoint store attached, each `Step::More` persists the cursor as a
+//! checkpoint store attached, each `StepOutcome::More` persists the cursor as a
 //! [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row so
 //! [`Workflow::resume_from`](crate::workflow::Workflow::resume_from) can continue from the
 //! last persisted cursor rather than restarting from `None`.
@@ -39,12 +39,12 @@
 //!         &self,
 //!         _res: &Resources,
 //!         cursor: Option<u32>,
-//!     ) -> Result<Step<u32, MyState>, CanoError> {
+//!     ) -> Result<StepOutcome<u32, MyState>, CanoError> {
 //!         let page = cursor.unwrap_or(0);
 //!         if page + 1 >= self.total_pages {
-//!             Ok(Step::Done(TaskResult::Single(MyState::Done)))
+//!             Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
 //!         } else {
-//!             Ok(Step::More(page + 1))
+//!             Ok(StepOutcome::More(page + 1))
 //!         }
 //!     }
 //! }
@@ -86,9 +86,9 @@
 //!         &self,
 //!         _res: &Resources,
 //!         cursor: Option<MyCursor>,
-//!     ) -> Result<Step<MyCursor, MyState>, CanoError> {
+//!     ) -> Result<StepOutcome<MyCursor, MyState>, CanoError> {
 //!         let _ = cursor;
-//!         Ok(Step::Done(TaskResult::Single(MyState::Done)))
+//!         Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
 //!     }
 //! }
 //!
@@ -118,15 +118,15 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
-// Step<TCursor, TState> — the outcome of a single step() call
+// StepOutcome<TCursor, TState> — the outcome of a single step() call
 // ---------------------------------------------------------------------------
 
 /// The outcome returned by a single [`SteppedTask::step`] call.
 ///
-/// - [`Step::More`] — more work remains; the cursor is threaded to the next call.
-/// - [`Step::Done`] — processing is complete; carry the [`TaskResult`] forward to the FSM.
+/// - [`StepOutcome::More`] — more work remains; the cursor is threaded to the next call.
+/// - [`StepOutcome::Done`] — processing is complete; carry the [`TaskResult`] forward to the FSM.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Step<TCursor, TState> {
+pub enum StepOutcome<TCursor, TState> {
     /// More steps remain. The cursor will be passed to the next `step` call.
     More(TCursor),
     /// All steps are complete. The inner [`TaskResult`] is forwarded to the FSM.
@@ -175,12 +175,12 @@ pub enum Step<TCursor, TState> {
 ///         &self,
 ///         _res: &Resources,
 ///         cursor: Option<u32>,
-///     ) -> Result<Step<u32, MyState>, CanoError> {
+///     ) -> Result<StepOutcome<u32, MyState>, CanoError> {
 ///         let n = cursor.unwrap_or(0);
 ///         if n + 1 >= self.limit {
-///             Ok(Step::Done(TaskResult::Single(MyState::Done)))
+///             Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
 ///         } else {
-///             Ok(Step::More(n + 1))
+///             Ok(StepOutcome::More(n + 1))
 ///         }
 ///     }
 /// }
@@ -216,9 +216,9 @@ where
     /// Execute one step of the task.
     ///
     /// - `cursor`: `None` on the first call; `Some(cursor)` on subsequent calls with
-    ///   the value returned by the previous `step` via [`Step::More`].
+    ///   the value returned by the previous `step` via [`StepOutcome::More`].
     ///
-    /// Return [`Step::More`] with an updated cursor to continue, or [`Step::Done`] with
+    /// Return [`StepOutcome::More`] with an updated cursor to continue, or [`StepOutcome::Done`] with
     /// a [`TaskResult`] when processing is complete.
     ///
     /// # Errors
@@ -228,7 +228,7 @@ where
         &self,
         res: &Resources<TResourceKey>,
         cursor: Option<Self::Cursor>,
-    ) -> Result<Step<Self::Cursor, TState>, CanoError>;
+    ) -> Result<StepOutcome<Self::Cursor, TState>, CanoError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -244,12 +244,12 @@ where
 /// For checkpoint-backed cursor persistence, register via
 /// [`Workflow::register_stepped`](crate::workflow::Workflow::register_stepped) instead;
 /// the engine will use [`ErasedSteppedTask`] to persist each cursor as a
-/// [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row after each `Step::More`.
+/// [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row after each `StepOutcome::More`.
 ///
 /// The loop calls `s.step(res, cursor)` repeatedly:
 ///
-/// - `Step::More(new_cursor)` → update the cursor and call `step` again.
-/// - `Step::Done(result)` → return `Ok(result)`.
+/// - `StepOutcome::More(new_cursor)` → update the cursor and call `step` again.
+/// - `StepOutcome::Done(result)` → return `Ok(result)`.
 /// - `Err(e)` → return `Err(e)` immediately (outer retry wrapping, if any, is applied
 ///   by the workflow dispatcher via `run_with_retries`).
 pub async fn run_stepped<S, S2, K>(s: &S, res: &Resources<K>) -> Result<TaskResult<S2>, CanoError>
@@ -262,10 +262,10 @@ where
 
     loop {
         match s.step(res, cursor).await? {
-            Step::More(new_cursor) => {
+            StepOutcome::More(new_cursor) => {
                 cursor = Some(new_cursor);
             }
-            Step::Done(result) => return Ok(result),
+            StepOutcome::Done(result) => return Ok(result),
         }
     }
 }
@@ -369,7 +369,7 @@ where
                 })?),
             };
             match self.0.step(res, cursor).await? {
-                Step::More(c) => {
+                StepOutcome::More(c) => {
                     let blob = serde_json::to_vec(&c).map_err(|e| {
                         CanoError::task_execution(format!(
                             "serialize cursor for `{}`: {e}",
@@ -378,7 +378,7 @@ where
                     })?;
                     Ok(ErasedStep::More(blob))
                 }
-                Step::Done(result) => Ok(ErasedStep::Done(result)),
+                StepOutcome::Done(result) => Ok(ErasedStep::Done(result)),
             }
         })
     }
@@ -424,8 +424,8 @@ mod tests {
             &self,
             _res: &Resources,
             _cursor: Option<u32>,
-        ) -> Result<Step<u32, MyState>, CanoError> {
-            Ok(Step::Done(TaskResult::Single(MyState::Done)))
+        ) -> Result<StepOutcome<u32, MyState>, CanoError> {
+            Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
         }
     }
 
@@ -434,7 +434,7 @@ mod tests {
         let stepper = ImmediateStepper;
         let res = Resources::new();
         let result = SteppedTask::step(&stepper, &res, None).await.unwrap();
-        assert_eq!(result, Step::Done(TaskResult::Single(MyState::Done)));
+        assert_eq!(result, StepOutcome::Done(TaskResult::Single(MyState::Done)));
     }
 
     #[tokio::test]
@@ -467,12 +467,12 @@ mod tests {
             &self,
             _res: &Resources,
             cursor: Option<u32>,
-        ) -> Result<Step<u32, MyState>, CanoError> {
+        ) -> Result<StepOutcome<u32, MyState>, CanoError> {
             let n = cursor.unwrap_or(0) + 1;
             if n >= self.target {
-                Ok(Step::Done(TaskResult::Single(MyState::Done)))
+                Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
             } else {
-                Ok(Step::More(n))
+                Ok(StepOutcome::More(n))
             }
         }
     }
@@ -493,15 +493,15 @@ mod tests {
 
         // Step 1: cursor None → More(1)
         let r1 = SteppedTask::step(&stepper, &res, None).await.unwrap();
-        assert_eq!(r1, Step::More(1));
+        assert_eq!(r1, StepOutcome::More(1));
 
         // Step 2: cursor Some(1) → More(2)
         let r2 = SteppedTask::step(&stepper, &res, Some(1)).await.unwrap();
-        assert_eq!(r2, Step::More(2));
+        assert_eq!(r2, StepOutcome::More(2));
 
         // Step 3: cursor Some(2) → Done
         let r3 = SteppedTask::step(&stepper, &res, Some(2)).await.unwrap();
-        assert_eq!(r3, Step::Done(TaskResult::Single(MyState::Done)));
+        assert_eq!(r3, StepOutcome::Done(TaskResult::Single(MyState::Done)));
     }
 
     // ---------------------------------------------------------------------------
@@ -518,7 +518,7 @@ mod tests {
             &self,
             _res: &Resources,
             _cursor: Option<u32>,
-        ) -> Result<Step<u32, MyState>, CanoError> {
+        ) -> Result<StepOutcome<u32, MyState>, CanoError> {
             Err(CanoError::task_execution("step failed"))
         }
     }
@@ -545,8 +545,8 @@ mod tests {
             &self,
             _res: &Resources,
             _cursor: Option<u32>,
-        ) -> Result<Step<u32, MyState>, CanoError> {
-            Ok(Step::Done(TaskResult::Split(vec![
+        ) -> Result<StepOutcome<u32, MyState>, CanoError> {
+            Ok(StepOutcome::Done(TaskResult::Split(vec![
                 MyState::Work,
                 MyState::Next,
             ])))
@@ -586,8 +586,8 @@ mod tests {
             &self,
             _res: &Resources,
             _cursor: Option<u32>,
-        ) -> Result<Step<u32, MyState>, CanoError> {
-            Ok(Step::Done(TaskResult::Single(MyState::Done)))
+        ) -> Result<StepOutcome<u32, MyState>, CanoError> {
+            Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
         }
     }
 
@@ -629,8 +629,8 @@ mod tests {
             &self,
             _res: &Resources,
             _cursor: Option<u32>,
-        ) -> Result<Step<u32, MyState>, CanoError> {
-            Ok(Step::Done(TaskResult::Single(MyState::Done)))
+        ) -> Result<StepOutcome<u32, MyState>, CanoError> {
+            Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
         }
     }
 
@@ -686,14 +686,14 @@ mod tests {
 
     #[test]
     fn test_step_enum_more_clone_eq() {
-        let s1: Step<u32, MyState> = Step::More(42);
+        let s1: StepOutcome<u32, MyState> = StepOutcome::More(42);
         let s2 = s1.clone();
         assert_eq!(s1, s2);
     }
 
     #[test]
     fn test_step_enum_done_clone_eq() {
-        let s1: Step<u32, MyState> = Step::Done(TaskResult::Single(MyState::Done));
+        let s1: StepOutcome<u32, MyState> = StepOutcome::Done(TaskResult::Single(MyState::Done));
         let s2 = s1.clone();
         assert_eq!(s1, s2);
     }
@@ -757,13 +757,13 @@ mod tests {
             &self,
             _res: &Resources,
             cursor: Option<u32>,
-        ) -> Result<Step<u32, MyState>, CanoError> {
+        ) -> Result<StepOutcome<u32, MyState>, CanoError> {
             let n = self.calls.fetch_add(1, Ordering::Relaxed);
             let pos = cursor.unwrap_or(0) + 1;
             if n + 1 >= self.target {
-                Ok(Step::Done(TaskResult::Single(MyState::Done)))
+                Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
             } else {
-                Ok(Step::More(pos))
+                Ok(StepOutcome::More(pos))
             }
         }
     }

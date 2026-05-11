@@ -119,11 +119,13 @@ pub use batch::{
     BatchTask, BatchTaskObject, DefaultBatchItem, DefaultBatchItemOutput, DynBatchTask, run_batch,
 };
 pub use node::{DefaultNodeResult, DynNode, Node, NodeObject};
-pub use poll::{DynPollTask, Poll, PollErrorPolicy, PollTask, PollTaskObject, run_poll_loop};
+pub use poll::{
+    DynPollTask, PollErrorPolicy, PollOutcome, PollTask, PollTaskObject, run_poll_loop,
+};
 pub use retry::{RetryMode, TaskConfig, run_with_retries};
 pub use router::{DynRouterTask, RouterTask, RouterTaskObject};
 pub use stepped::{
-    DefaultStepCursor, DynSteppedTask, Step, SteppedTask, SteppedTaskObject, run_stepped,
+    DefaultStepCursor, DynSteppedTask, StepOutcome, SteppedTask, SteppedTaskObject, run_stepped,
 };
 
 /// Result type for task execution that supports both single and split transitions

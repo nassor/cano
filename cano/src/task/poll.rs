@@ -1,6 +1,6 @@
 //! # PollTask — Wait-Until Processing Model
 //!
-//! A [`PollTask`] repeatedly calls `poll()` until it returns [`Poll::Ready`] or until an
+//! A [`PollTask`] repeatedly calls `poll()` until it returns [`PollOutcome::Ready`] or until an
 //! optional wall-clock timeout is exceeded. This "wait-until" pattern is the canonical way
 //! to poll an external system for completion without blocking a thread.
 //!
@@ -30,12 +30,12 @@
 //!
 //! #[poll_task(state = Step)]
 //! impl Counter {
-//!     async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
+//!     async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
 //!         let n = self.0.fetch_add(1, Ordering::Relaxed);
 //!         if n >= 2 {
-//!             Ok(Poll::Ready(TaskResult::Single(Step::Done)))
+//!             Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
 //!         } else {
-//!             Ok(Poll::Pending { delay_ms: 0 })
+//!             Ok(PollOutcome::Pending { delay_ms: 0 })
 //!         }
 //!     }
 //! }
@@ -73,8 +73,8 @@
 //!         TaskConfig::minimal().with_attempt_timeout(Duration::from_secs(30))
 //!     }
 //!
-//!     async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
-//!         Ok(Poll::Pending { delay_ms: 100 })
+//!     async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
+//!         Ok(PollOutcome::Pending { delay_ms: 100 })
 //!     }
 //! }
 //! ```
@@ -98,8 +98,8 @@
 //!
 //! #[poll_task]
 //! impl PollTask<Step> for TraitPoller {
-//!     async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
-//!         Ok(Poll::Ready(TaskResult::Single(Step::Done)))
+//!     async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
+//!         Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
 //!     }
 //! }
 //!
@@ -124,18 +124,18 @@ use std::fmt;
 use std::hash::Hash;
 
 // ---------------------------------------------------------------------------
-// Poll<TState> — the outcome of a single poll() call
+// PollOutcome<TState> — the outcome of a single poll() call
 // ---------------------------------------------------------------------------
 
 /// The outcome returned by a single [`PollTask::poll`] call.
 ///
-/// - [`Poll::Ready`] — the condition is satisfied; carry the `TaskResult` forward to the FSM.
-/// - [`Poll::Pending`] — not yet ready; sleep for `delay_ms` milliseconds then poll again.
+/// - [`PollOutcome::Ready`] — the condition is satisfied; carry the `TaskResult` forward to the FSM.
+/// - [`PollOutcome::Pending`] — not yet ready; sleep for `delay_ms` milliseconds then poll again.
 ///
 /// This mirrors `std::task::Poll` conceptually but carries workflow-specific data and an
 /// explicit sleep duration to decouple the poller from async executor wakeup mechanics.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Poll<TState> {
+pub enum PollOutcome<TState> {
     /// The poll condition is satisfied. The inner [`TaskResult`] is forwarded to the FSM.
     Ready(TaskResult<TState>),
     /// Not yet ready. Sleep `delay_ms` milliseconds before the next poll.
@@ -170,7 +170,7 @@ pub enum PollErrorPolicy {
 // ---------------------------------------------------------------------------
 
 /// A "wait-until" processing model that repeatedly calls [`poll`](PollTask::poll) until
-/// it returns [`Poll::Ready`].
+/// it returns [`PollOutcome::Ready`].
 ///
 /// # Generic Types
 ///
@@ -198,8 +198,8 @@ pub enum PollErrorPolicy {
 ///
 /// #[poll_task(state = Step)]
 /// impl MyPoller {
-///     async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
-///         Ok(Poll::Ready(TaskResult::Single(Step::Done)))
+///     async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
+///         Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
 ///     }
 /// }
 /// ```
@@ -245,8 +245,8 @@ where
     ///     fn on_poll_error(&self) -> PollErrorPolicy {
     ///         PollErrorPolicy::RetryOnError { max_errors: 3 }
     ///     }
-    ///     async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
-    ///         Ok(Poll::Ready(TaskResult::Single(Step::Done)))
+    ///     async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
+    ///         Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
     ///     }
     /// }
     /// ```
@@ -256,14 +256,14 @@ where
 
     /// Call once per poll iteration.
     ///
-    /// Return [`Poll::Ready`] with the next [`TaskResult`] when the condition is met,
-    /// or [`Poll::Pending`] with a sleep duration when it is not yet ready.
+    /// Return [`PollOutcome::Ready`] with the next [`TaskResult`] when the condition is met,
+    /// or [`PollOutcome::Pending`] with a sleep duration when it is not yet ready.
     ///
     /// # Errors
     ///
     /// Returns [`CanoError`] on a non-recoverable error. The loop's response to the
     /// error is governed by [`on_poll_error`](PollTask::on_poll_error).
-    async fn poll(&self, res: &Resources<TResourceKey>) -> Result<Poll<TState>, CanoError>;
+    async fn poll(&self, res: &Resources<TResourceKey>) -> Result<PollOutcome<TState>, CanoError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -278,8 +278,8 @@ where
 ///
 /// The loop calls `p.poll(res)` repeatedly:
 ///
-/// - `Poll::Ready(result)` → return `Ok(result)`.
-/// - `Poll::Pending { delay_ms }` → reset the consecutive-error counter, sleep
+/// - `PollOutcome::Ready(result)` → return `Ok(result)`.
+/// - `PollOutcome::Pending { delay_ms }` → reset the consecutive-error counter, sleep
 ///   `delay_ms` ms, then poll again.
 /// - `Err(e)` → consult [`PollTask::on_poll_error`]:
 ///   - [`PollErrorPolicy::FailFast`] → return `Err(e)` immediately.
@@ -300,8 +300,8 @@ where
 
     loop {
         match p.poll(res).await {
-            Ok(Poll::Ready(result)) => return Ok(result),
-            Ok(Poll::Pending { delay_ms }) => {
+            Ok(PollOutcome::Ready(result)) => return Ok(result),
+            Ok(PollOutcome::Pending { delay_ms }) => {
                 consecutive_errors = 0;
                 if delay_ms > 0 {
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
@@ -366,8 +366,8 @@ mod tests {
 
     #[poll_task]
     impl PollTask<Step> for ImmediatePoller {
-        async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
-            Ok(Poll::Ready(TaskResult::Single(Step::Done)))
+        async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
+            Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
         }
     }
 
@@ -376,7 +376,7 @@ mod tests {
         let poller = ImmediatePoller;
         let res = Resources::new();
         let result = PollTask::poll(&poller, &res).await.unwrap();
-        assert_eq!(result, Poll::Ready(TaskResult::Single(Step::Done)));
+        assert_eq!(result, PollOutcome::Ready(TaskResult::Single(Step::Done)));
     }
 
     #[tokio::test]
@@ -407,12 +407,12 @@ mod tests {
 
     #[poll_task]
     impl PollTask<Step> for CountingPoller {
-        async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
+        async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
             let n = self.count.fetch_add(1, Ordering::Relaxed) + 1;
             if n >= self.target {
-                Ok(Poll::Ready(TaskResult::Single(Step::Done)))
+                Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
             } else {
-                Ok(Poll::Pending { delay_ms: 0 })
+                Ok(PollOutcome::Pending { delay_ms: 0 })
             }
         }
     }
@@ -434,7 +434,7 @@ mod tests {
 
     #[poll_task]
     impl PollTask<Step> for ErrorPoller {
-        async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
+        async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
             Err(CanoError::task_execution("poll failed"))
         }
     }
@@ -455,8 +455,11 @@ mod tests {
 
     #[poll_task]
     impl PollTask<Step> for SplitPoller {
-        async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
-            Ok(Poll::Ready(TaskResult::Split(vec![Step::Wait, Step::Next])))
+        async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
+            Ok(PollOutcome::Ready(TaskResult::Split(vec![
+                Step::Wait,
+                Step::Next,
+            ])))
         }
     }
 
@@ -482,8 +485,8 @@ mod tests {
         fn name(&self) -> Cow<'static, str> {
             Cow::Borrowed("my-custom-poller")
         }
-        async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
-            Ok(Poll::Ready(TaskResult::Single(Step::Done)))
+        async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
+            Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
         }
     }
 
@@ -517,8 +520,8 @@ mod tests {
 
     #[poll_task]
     impl PollTask<Step> for DefaultConfigPoller {
-        async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
-            Ok(Poll::Ready(TaskResult::Single(Step::Done)))
+        async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
+            Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
         }
     }
 
@@ -602,7 +605,7 @@ mod tests {
     // (j) PollErrorPolicy — RetryOnError succeeds when errors < max_errors
     // ---------------------------------------------------------------------------
 
-    // Emits `count` errors then Poll::Ready.
+    // Emits `count` errors then PollOutcome::Ready.
     struct ErrorThenReadyPoller {
         errors_before_ready: u32,
         count: AtomicU32,
@@ -623,12 +626,12 @@ mod tests {
             PollErrorPolicy::RetryOnError { max_errors: 2 }
         }
 
-        async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
+        async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
             let n = self.count.fetch_add(1, Ordering::Relaxed);
             if n < self.errors_before_ready {
                 Err(CanoError::task_execution("transient"))
             } else {
-                Ok(Poll::Ready(TaskResult::Single(Step::Done)))
+                Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
             }
         }
     }
@@ -681,12 +684,12 @@ mod tests {
             PollErrorPolicy::RetryOnError { max_errors: 1 }
         }
 
-        async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
+        async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
             match self.count.fetch_add(1, Ordering::Relaxed) {
                 0 => Err(CanoError::task_execution("first error")),
-                1 => Ok(Poll::Pending { delay_ms: 0 }),
+                1 => Ok(PollOutcome::Pending { delay_ms: 0 }),
                 2 => Err(CanoError::task_execution("second error after reset")),
-                _ => Ok(Poll::Ready(TaskResult::Single(Step::Done))),
+                _ => Ok(PollOutcome::Ready(TaskResult::Single(Step::Done))),
             }
         }
     }
@@ -732,8 +735,8 @@ mod tests {
             TaskConfig::minimal().with_attempt_timeout(std::time::Duration::from_millis(20))
         }
 
-        async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
-            Ok(Poll::Pending { delay_ms: 1 })
+        async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
+            Ok(PollOutcome::Pending { delay_ms: 1 })
         }
     }
 

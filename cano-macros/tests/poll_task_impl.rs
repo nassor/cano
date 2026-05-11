@@ -22,8 +22,8 @@ struct InherentPoller;
 
 #[poll_task(state = Step)]
 impl InherentPoller {
-    async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
-        Ok(Poll::Ready(TaskResult::Single(Step::Done)))
+    async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
+        Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
     }
 }
 
@@ -50,7 +50,7 @@ fn inherent_poller_has_default_name() {
 async fn inherent_poller_poll_works() {
     let res = Resources::new();
     let result = PollTask::poll(&InherentPoller, &res).await.unwrap();
-    assert_eq!(result, Poll::Ready(TaskResult::Single(Step::Done)));
+    assert_eq!(result, PollOutcome::Ready(TaskResult::Single(Step::Done)));
 }
 
 #[tokio::test]
@@ -76,8 +76,8 @@ impl InherentCustomPoller {
         Cow::Borrowed("my-inherent-poller")
     }
 
-    async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
-        Ok(Poll::Ready(TaskResult::Single(Step::Done)))
+    async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
+        Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
     }
 }
 
@@ -125,12 +125,12 @@ struct InherentCountingPoller {
 
 #[poll_task(state = Step)]
 impl InherentCountingPoller {
-    async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
+    async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
         let n = self.count.fetch_add(1, Ordering::Relaxed) + 1;
         if n >= self.target {
-            Ok(Poll::Ready(TaskResult::Single(Step::Done)))
+            Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
         } else {
-            Ok(Poll::Pending { delay_ms: 0 })
+            Ok(PollOutcome::Pending { delay_ms: 0 })
         }
     }
 }
@@ -155,8 +155,11 @@ struct InherentSplitPoller;
 
 #[poll_task(state = Step)]
 impl InherentSplitPoller {
-    async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
-        Ok(Poll::Ready(TaskResult::Split(vec![Step::Poll, Step::Next])))
+    async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
+        Ok(PollOutcome::Ready(TaskResult::Split(vec![
+            Step::Poll,
+            Step::Next,
+        ])))
     }
 }
 
@@ -175,8 +178,8 @@ struct TraitPoller;
 
 #[poll_task]
 impl PollTask<Step> for TraitPoller {
-    async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
-        Ok(Poll::Ready(TaskResult::Single(Step::Done)))
+    async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
+        Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
     }
 }
 
@@ -184,7 +187,7 @@ impl PollTask<Step> for TraitPoller {
 async fn trait_form_poll_works() {
     let res = Resources::new();
     let result = PollTask::poll(&TraitPoller, &res).await.unwrap();
-    assert_eq!(result, Poll::Ready(TaskResult::Single(Step::Done)));
+    assert_eq!(result, PollOutcome::Ready(TaskResult::Single(Step::Done)));
 }
 
 #[tokio::test]
@@ -238,7 +241,7 @@ struct ErrorPoller;
 
 #[poll_task(state = Step)]
 impl ErrorPoller {
-    async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
+    async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
         Err(CanoError::task_execution("poll failed deliberately"))
     }
 }
@@ -278,12 +281,12 @@ impl InherentResilientPoller {
         PollErrorPolicy::RetryOnError { max_errors: 2 }
     }
 
-    async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
+    async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
         let n = self.count.fetch_add(1, Ordering::Relaxed);
         if n < self.errors_before_ready {
             Err(CanoError::task_execution("transient"))
         } else {
-            Ok(Poll::Ready(TaskResult::Single(Step::Done)))
+            Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
         }
     }
 }

@@ -42,6 +42,7 @@ use syn::{
 
 use crate::async_rewrite;
 use crate::attr_args::{AttrArgs, combine_errors};
+use crate::path_prefix::{ModulePrefix, derive_module_prefix};
 
 /// Entry point — dispatches based on what `item` parses to.
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
@@ -249,37 +250,6 @@ fn expand_inherent_impl(
 }
 
 // ---------------------------------------------------------------------------
-// Module prefix — determines how cano types are referenced in the companion impl
-// ---------------------------------------------------------------------------
-
-/// The path prefix to use when referencing cano types in the companion `impl Task`.
-///
-/// - `Cano` → `::cano::TypeName` (for the inherent form or external users)
-/// - `Prefixed(path)` → `prefix::TypeName` (e.g. `cano::TypeName`)
-/// - `Bare` → unqualified `TypeName` (for the trait-impl form inside the cano crate itself,
-///   where types are in scope via `use super::*` or similar imports)
-enum ModulePrefix {
-    /// Use `::cano::TypeName`.
-    Cano,
-    /// Use `prefix::TypeName` where prefix is the path before the last segment.
-    Prefixed(proc_macro2::TokenStream),
-    /// Use bare `TypeName` (name only, no prefix).
-    Bare,
-}
-
-impl ModulePrefix {
-    /// Build a qualified path token stream: `{prefix}TypeName`.
-    fn qualify(&self, type_name: &str) -> proc_macro2::TokenStream {
-        let ident = syn::Ident::new(type_name, proc_macro2::Span::call_site());
-        match self {
-            ModulePrefix::Cano => quote! { ::cano::#ident },
-            ModulePrefix::Prefixed(prefix) => quote! { #prefix #ident },
-            ModulePrefix::Bare => quote! { #ident },
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -343,46 +313,6 @@ fn extract_state_key_task_path_and_prefix(
     let task_path = derive_task_path_from_router_path(trait_path, &state_ty, key_ty.as_ref())?;
 
     Ok((state_ty, key_ty, task_path, module_prefix))
-}
-
-/// Derive a `ModulePrefix` from a `RouterTask<S>` path.
-fn derive_module_prefix(router_path: &Path) -> ModulePrefix {
-    let seg_count = router_path.segments.len();
-
-    if seg_count <= 1 && router_path.leading_colon.is_none() {
-        // No prefix (bare `RouterTask<S>`).
-        return ModulePrefix::Bare;
-    }
-
-    // Collect all segments except the last one as the prefix.
-    let prefix_segs: syn::punctuated::Punctuated<PathSegment, syn::token::PathSep> = router_path
-        .segments
-        .iter()
-        .take(seg_count.saturating_sub(1))
-        .cloned()
-        .collect();
-
-    // Check if this is `::cano::` (leading colon + single "cano" prefix segment).
-    let has_leading_colon = router_path.leading_colon.is_some();
-    let is_cano_prefix = prefix_segs.len() == 1
-        && prefix_segs
-            .iter()
-            .next()
-            .map(|s| s.ident == "cano")
-            .unwrap_or(false);
-
-    if has_leading_colon && is_cano_prefix {
-        return ModulePrefix::Cano;
-    }
-
-    // Build a token stream for the prefix (e.g. `cano::` or `foo::bar::`).
-    let leading = if has_leading_colon {
-        quote! { :: }
-    } else {
-        quote! {}
-    };
-
-    ModulePrefix::Prefixed(quote! { #leading #prefix_segs :: })
 }
 
 /// Build a `Task<S[,K]>` path with the same path prefix as the given `RouterTask<S[,K]>` path.

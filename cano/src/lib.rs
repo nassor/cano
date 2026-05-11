@@ -116,8 +116,8 @@
 //! - [`RouterTask`] trait: side-effect-free branching; reads resources, returns the next
 //!   state without writing anything. Registered with [`Workflow::register_router`] — the
 //!   engine dispatches it like a normal state but writes **no** `CheckpointRow`.
-//! - [`PollTask`] trait: "wait-until" loop; `poll()` returns [`Poll::Ready`] or
-//!   [`Poll::Pending { delay_ms }`](Poll::Pending) on each call. Defaults to
+//! - [`PollTask`] trait: "wait-until" loop; `poll()` returns [`PollOutcome::Ready`] or
+//!   [`PollOutcome::Pending { delay_ms }`](PollOutcome::Pending) on each call. Defaults to
 //!   [`TaskConfig::minimal()`](task::TaskConfig::minimal) (no retries). Registered with
 //!   [`Workflow::register`] — the engine applies `attempt_timeout` if set via `config()`.
 //!
@@ -181,8 +181,8 @@
 //! **RouterTask**: Single `route()` method — side-effect-free; reads resources, returns
 //! the next state. Dispatched like a normal state but leaves no checkpoint row.
 //!
-//! **PollTask**: Single `poll()` method — returns [`Poll::Ready(TaskResult)`](Poll::Ready)
-//! or [`Poll::Pending { delay_ms }`](Poll::Pending); the engine loops until `Ready`. Defaults
+//! **PollTask**: Single `poll()` method — returns [`PollOutcome::Ready(TaskResult)`](PollOutcome::Ready)
+//! or [`PollOutcome::Pending { delay_ms }`](PollOutcome::Pending); the engine loops until `Ready`. Defaults
 //! to `TaskConfig::minimal()` (no retries). Use `config().with_attempt_timeout(dur)` to cap
 //! total wall-clock time; registered with [`Workflow::register`] like any other task.
 //!
@@ -233,10 +233,12 @@ pub use task::batch::{
     BatchTask, BatchTaskObject, DefaultBatchItem, DefaultBatchItemOutput, DynBatchTask, run_batch,
 };
 pub use task::node::{DefaultNodeResult, DynNode, Node, NodeObject};
-pub use task::poll::{DynPollTask, Poll, PollErrorPolicy, PollTask, PollTaskObject, run_poll_loop};
+pub use task::poll::{
+    DynPollTask, PollErrorPolicy, PollOutcome, PollTask, PollTaskObject, run_poll_loop,
+};
 pub use task::router::{DynRouterTask, RouterTask, RouterTaskObject};
 pub use task::stepped::{
-    DefaultStepCursor, DynSteppedTask, Step, SteppedTask, SteppedTaskObject, run_stepped,
+    DefaultStepCursor, DynSteppedTask, StepOutcome, SteppedTask, SteppedTaskObject, run_stepped,
 };
 
 #[cfg(feature = "recovery")]
@@ -374,10 +376,10 @@ pub mod prelude {
     pub use crate::{
         BatchTask, CanoError, CanoResult, CheckpointRow, CheckpointStore, CircuitBreaker,
         CircuitPermit, CircuitPolicy, CircuitState, CompensatableTask, DefaultNodeResult,
-        HealthStatus, JoinConfig, JoinStrategy, MemoryStore, Node, Poll, PollErrorPolicy, PollTask,
-        Resource, Resources, RetryMode, RouterTask, RowKind, SplitResult, SplitTaskResult,
-        StateEntry, Step, SteppedTask, Task, TaskConfig, TaskObject, TaskResult, Workflow,
-        WorkflowObserver,
+        HealthStatus, JoinConfig, JoinStrategy, MemoryStore, Node, PollErrorPolicy, PollOutcome,
+        PollTask, Resource, Resources, RetryMode, RouterTask, RowKind, SplitResult,
+        SplitTaskResult, StateEntry, StepOutcome, SteppedTask, Task, TaskConfig, TaskObject,
+        TaskResult, Workflow, WorkflowObserver,
     };
 
     #[cfg(feature = "scheduler")]

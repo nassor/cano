@@ -49,6 +49,7 @@ use syn::{
 
 use crate::async_rewrite;
 use crate::attr_args::{AttrArgs, combine_errors};
+use crate::path_prefix::{ModulePrefix, derive_module_prefix};
 
 /// Entry point — dispatches based on what `item` parses to.
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
@@ -314,27 +315,6 @@ fn expand_inherent_impl(
 }
 
 // ---------------------------------------------------------------------------
-// Module prefix — determines how cano types are referenced in the companion impl
-// ---------------------------------------------------------------------------
-
-enum ModulePrefix {
-    Cano,
-    Prefixed(proc_macro2::TokenStream),
-    Bare,
-}
-
-impl ModulePrefix {
-    fn qualify(&self, type_name: &str) -> proc_macro2::TokenStream {
-        let ident = syn::Ident::new(type_name, proc_macro2::Span::call_site());
-        match self {
-            ModulePrefix::Cano => quote! { ::cano::#ident },
-            ModulePrefix::Prefixed(prefix) => quote! { #prefix #ident },
-            ModulePrefix::Bare => quote! { #ident },
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -389,41 +369,6 @@ fn extract_state_key_paths_and_prefix(
     let run_batch_path = derive_run_batch_path_from_batch_path(trait_path, &module_prefix)?;
 
     Ok((state_ty, key_ty, task_path, run_batch_path, module_prefix))
-}
-
-fn derive_module_prefix(batch_path: &Path) -> ModulePrefix {
-    let seg_count = batch_path.segments.len();
-
-    if seg_count <= 1 && batch_path.leading_colon.is_none() {
-        return ModulePrefix::Bare;
-    }
-
-    let prefix_segs: syn::punctuated::Punctuated<PathSegment, syn::token::PathSep> = batch_path
-        .segments
-        .iter()
-        .take(seg_count.saturating_sub(1))
-        .cloned()
-        .collect();
-
-    let has_leading_colon = batch_path.leading_colon.is_some();
-    let is_cano_prefix = prefix_segs.len() == 1
-        && prefix_segs
-            .iter()
-            .next()
-            .map(|s| s.ident == "cano")
-            .unwrap_or(false);
-
-    if has_leading_colon && is_cano_prefix {
-        return ModulePrefix::Cano;
-    }
-
-    let leading = if has_leading_colon {
-        quote! { :: }
-    } else {
-        quote! {}
-    };
-
-    ModulePrefix::Prefixed(quote! { #leading #prefix_segs :: })
 }
 
 fn derive_task_path_from_batch_path(

@@ -41,8 +41,8 @@ use cano::prelude::*;
 
 /// Workflow states for this tour.
 ///
-/// Named `Stage` (not `Step`) to avoid shadowing the `cano::Step` outcome type
-/// imported via `cano::prelude::*`.
+/// Named `Stage` — `Step` would also work since `cano::StepOutcome` no longer
+/// collides with a plain identifier `Step`, but `Stage` is semantically fitting here.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Stage {
     /// Router state: reads config, routes to `Wait`.
@@ -130,13 +130,13 @@ struct Waiter;
 
 #[poll_task(state = Stage)]
 impl Waiter {
-    async fn poll(&self, res: &Resources) -> Result<Poll<Stage>, CanoError> {
+    async fn poll(&self, res: &Resources) -> Result<PollOutcome<Stage>, CanoError> {
         let counter = res.get::<Counter, _>("counter")?;
         if counter.is_done() {
             println!("wait       : counter reached threshold → Crunch");
-            Ok(Poll::Ready(TaskResult::Single(Stage::Crunch)))
+            Ok(PollOutcome::Ready(TaskResult::Single(Stage::Crunch)))
         } else {
-            Ok(Poll::Pending { delay_ms: 5 })
+            Ok(PollOutcome::Pending { delay_ms: 5 })
         }
     }
 }
@@ -191,14 +191,14 @@ impl Grinder {
         &self,
         _res: &Resources,
         cursor: Option<u32>,
-    ) -> Result<Step<u32, Stage>, CanoError> {
+    ) -> Result<StepOutcome<u32, Stage>, CanoError> {
         let n = cursor.unwrap_or(0);
         println!("grind      : step {}", n + 1);
         if n >= 6 {
             println!("grind      : complete → Done");
-            Ok(Step::Done(TaskResult::Single(Stage::Done)))
+            Ok(StepOutcome::Done(TaskResult::Single(Stage::Done)))
         } else {
-            Ok(Step::More(n + 1))
+            Ok(StepOutcome::More(n + 1))
         }
     }
 }

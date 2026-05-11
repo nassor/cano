@@ -43,12 +43,12 @@ impl InherentInferred {
         &self,
         _res: &Resources,
         cursor: Option<u32>,
-    ) -> Result<Step<u32, MyState>, CanoError> {
+    ) -> Result<StepOutcome<u32, MyState>, CanoError> {
         let n = cursor.unwrap_or(0) + 1;
         if n >= self.total {
-            Ok(Step::Done(TaskResult::Single(MyState::Done)))
+            Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
         } else {
-            Ok(Step::More(n))
+            Ok(StepOutcome::More(n))
         }
     }
 }
@@ -99,12 +99,12 @@ impl InherentExplicitCursor {
         &self,
         _res: &Resources,
         cursor: Option<u32>,
-    ) -> Result<Step<u32, MyState>, CanoError> {
+    ) -> Result<StepOutcome<u32, MyState>, CanoError> {
         let n = cursor.unwrap_or(0) + 1;
         if n >= self.total {
-            Ok(Step::Done(TaskResult::Single(MyState::Done)))
+            Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
         } else {
-            Ok(Step::More(n))
+            Ok(StepOutcome::More(n))
         }
     }
 }
@@ -129,9 +129,9 @@ impl InherentWithKey {
         &self,
         _res: &Resources<Key>,
         cursor: Option<u32>,
-    ) -> Result<Step<u32, MyState>, CanoError> {
+    ) -> Result<StepOutcome<u32, MyState>, CanoError> {
         let _ = cursor;
-        Ok(Step::Done(TaskResult::Single(MyState::Done)))
+        Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
     }
 }
 
@@ -163,9 +163,9 @@ impl InherentWithOverrides {
         &self,
         _res: &Resources,
         cursor: Option<u32>,
-    ) -> Result<Step<u32, MyState>, CanoError> {
+    ) -> Result<StepOutcome<u32, MyState>, CanoError> {
         let _ = cursor;
-        Ok(Step::Done(TaskResult::Single(MyState::Done)))
+        Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
     }
 }
 
@@ -211,12 +211,12 @@ impl PagedProcessor {
         &self,
         _res: &Resources,
         cursor: Option<PageCursor>,
-    ) -> Result<Step<PageCursor, MyState>, CanoError> {
+    ) -> Result<StepOutcome<PageCursor, MyState>, CanoError> {
         let c = cursor.unwrap_or(PageCursor { page: 0, total: 3 });
         if c.page + 1 >= c.total {
-            Ok(Step::Done(TaskResult::Single(MyState::Done)))
+            Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
         } else {
-            Ok(Step::More(PageCursor {
+            Ok(StepOutcome::More(PageCursor {
                 page: c.page + 1,
                 total: c.total,
             }))
@@ -246,9 +246,9 @@ impl SteppedTask<MyState> for TraitStepper {
         &self,
         _res: &Resources,
         cursor: Option<u32>,
-    ) -> Result<Step<u32, MyState>, CanoError> {
+    ) -> Result<StepOutcome<u32, MyState>, CanoError> {
         let _ = cursor;
-        Ok(Step::Done(TaskResult::Single(MyState::Done)))
+        Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
     }
 }
 
@@ -282,9 +282,9 @@ impl SteppedTask<MyState> for TraitStepperWithOverrides {
         &self,
         _res: &Resources,
         cursor: Option<u32>,
-    ) -> Result<Step<u32, MyState>, CanoError> {
+    ) -> Result<StepOutcome<u32, MyState>, CanoError> {
         let _ = cursor;
-        Ok(Step::Done(TaskResult::Single(MyState::Done)))
+        Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
     }
 }
 
@@ -348,13 +348,13 @@ impl TrackedStepper {
         &self,
         _res: &Resources,
         cursor: Option<u32>,
-    ) -> Result<Step<u32, MyState>, CanoError> {
+    ) -> Result<StepOutcome<u32, MyState>, CanoError> {
         let n = self.calls.fetch_add(1, Ordering::Relaxed);
         let pos = cursor.unwrap_or(0) + 1;
         if n + 1 >= self.target {
-            Ok(Step::Done(TaskResult::Single(MyState::Done)))
+            Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
         } else {
-            Ok(Step::More(pos))
+            Ok(StepOutcome::More(pos))
         }
     }
 }
@@ -396,13 +396,13 @@ impl CursorThreader {
         &self,
         _res: &Resources,
         cursor: Option<Vec<u32>>,
-    ) -> Result<Step<Vec<u32>, MyState>, CanoError> {
+    ) -> Result<StepOutcome<Vec<u32>, MyState>, CanoError> {
         let mut v = cursor.unwrap_or_default();
         v.push(v.len() as u32);
         if v.len() >= 3 {
-            Ok(Step::Done(TaskResult::Single(MyState::Done)))
+            Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
         } else {
-            Ok(Step::More(v))
+            Ok(StepOutcome::More(v))
         }
     }
 }
@@ -415,14 +415,14 @@ async fn cursor_accumulates_across_steps() {
 
     let r1 = SteppedTask::step(&stepper, &res, None).await.unwrap();
     let c1 = match r1 {
-        Step::More(c) => c,
+        StepOutcome::More(c) => c,
         other => panic!("expected More, got {other:?}"),
     };
     assert_eq!(c1, vec![0]);
 
     let r2 = SteppedTask::step(&stepper, &res, Some(c1)).await.unwrap();
     let c2 = match r2 {
-        Step::More(c) => c,
+        StepOutcome::More(c) => c,
         other => panic!("expected More, got {other:?}"),
     };
     assert_eq!(c2, vec![0, 1]);
@@ -430,7 +430,7 @@ async fn cursor_accumulates_across_steps() {
     let r3 = SteppedTask::step(&stepper, &res, Some(c2)).await.unwrap();
     assert_eq!(
         r3,
-        Step::Done(TaskResult::Single(MyState::Done)),
+        StepOutcome::Done(TaskResult::Single(MyState::Done)),
         "third step should be Done"
     );
 }
@@ -447,7 +447,7 @@ impl ErrorStepper {
         &self,
         _res: &Resources,
         _cursor: Option<u32>,
-    ) -> Result<Step<u32, MyState>, CanoError> {
+    ) -> Result<StepOutcome<u32, MyState>, CanoError> {
         Err(CanoError::task_execution("step failed"))
     }
 }
@@ -461,7 +461,7 @@ async fn error_in_step_propagates() {
 }
 
 // ---------------------------------------------------------------------------
-// 13. Step::Done with Split result
+// 13. StepOutcome::Done with Split result
 // ---------------------------------------------------------------------------
 
 struct SplitStepper;
@@ -481,8 +481,8 @@ impl SplitStepper {
         &self,
         _res: &Resources,
         _cursor: Option<u32>,
-    ) -> Result<Step<u32, SplitState>, CanoError> {
-        Ok(Step::Done(TaskResult::Split(vec![
+    ) -> Result<StepOutcome<u32, SplitState>, CanoError> {
+        Ok(StepOutcome::Done(TaskResult::Split(vec![
             SplitState::A,
             SplitState::B,
         ])))

@@ -5,7 +5,7 @@
 //! Demonstrates [`PollTask`] as a "wait-until" processing unit. A background job
 //! increments a progress counter over time; the `AwaitJob` poller reads the counter
 //! from [`Resources`] and loops until the job is complete — returning
-//! [`Poll::Pending`] on each tick and [`Poll::Ready`] once progress is full.
+//! [`PollOutcome::Pending`] on each tick and [`PollOutcome::Ready`] once progress is full.
 //!
 //! Workflow shape:
 //!
@@ -86,20 +86,20 @@ struct AwaitJob;
 
 #[poll_task(state = Step)]
 impl AwaitJob {
-    async fn poll(&self, res: &Resources) -> Result<Poll<Step>, CanoError> {
+    async fn poll(&self, res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
         let job = res.get::<Job, _>("job")?;
         let done = job.done();
         let total = job.ticks_total;
 
         if done >= total {
             println!("await job  : complete ({done}/{total} ticks)");
-            Ok(Poll::Ready(TaskResult::Single(Step::Process)))
+            Ok(PollOutcome::Ready(TaskResult::Single(Step::Process)))
         } else {
             // Adaptive delay: poll more frequently when close to completion.
             let remaining = total - done;
             let delay_ms = if remaining <= 2 { 2 } else { 5 };
             println!("await job  : progress {done}/{total} ticks, next poll in {delay_ms}ms");
-            Ok(Poll::Pending { delay_ms })
+            Ok(PollOutcome::Pending { delay_ms })
         }
 
         // To bound the entire poll loop by wall-clock time, override `config()`:

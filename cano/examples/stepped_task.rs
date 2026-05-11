@@ -3,7 +3,7 @@
 //! Run with: `cargo run --example stepped_task --features recovery`
 //!
 //! Demonstrates [`SteppedTask`] cursor persistence with a [`RedbCheckpointStore`] attached.
-//! A `Crunch` state processes items in discrete steps; each `Step::More` persists the cursor
+//! A `Crunch` state processes items in discrete steps; each `StepOutcome::More` persists the cursor
 //! so a crash mid-loop can resume from the last saved position rather than restarting from
 //! the beginning.
 //!
@@ -15,8 +15,8 @@
 //!
 //! The example shows the most common `SteppedTask` shape:
 //! - A small `Progress` cursor struct tracks how many items have been processed.
-//! - Each `step` call processes one item, prints progress, and returns `Step::More(cursor)`
-//!   until all items are done, then `Step::Done(Stage::Report)`.
+//! - Each `step` call processes one item, prints progress, and returns `StepOutcome::More(cursor)`
+//!   until all items are done, then `StepOutcome::Done(Stage::Report)`.
 //! - A plain `#[task]` at `Report` summarises the run and transitions to `Done`.
 //! - `RedbCheckpointStore` attached so cursors are persisted to disk after each step.
 //!
@@ -36,8 +36,8 @@ use serde::{Deserialize, Serialize};
 
 /// Workflow states for this example.
 ///
-/// Named `Stage` (not `Step`) to avoid shadowing the `cano::Step` outcome type
-/// imported via `cano::prelude::*`.
+/// Named `Stage` here; `Step` would also be fine since `cano::StepOutcome` no longer
+/// collides with a plain identifier `Step`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Stage {
     /// Step-loop state: processes items one by one, advancing the cursor.
@@ -55,7 +55,7 @@ enum Stage {
 /// Serialisable position marker threaded through each `step` call.
 ///
 /// The engine persists this struct as a `CheckpointRow` of `kind == RowKind::StepCursor`
-/// after every `Step::More`, so a crash mid-loop can resume from `processed` rather than
+/// after every `StepOutcome::More`, so a crash mid-loop can resume from `processed` rather than
 /// from zero.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Progress {
@@ -78,7 +78,7 @@ impl Cruncher {
         &self,
         _res: &Resources,
         cursor: Option<Progress>,
-    ) -> Result<Step<Progress, Stage>, CanoError> {
+    ) -> Result<StepOutcome<Progress, Stage>, CanoError> {
         let p = cursor.unwrap_or(Progress {
             processed: 0,
             total: self.total,
@@ -92,9 +92,9 @@ impl Cruncher {
         };
 
         if next.processed >= next.total {
-            Ok(Step::Done(TaskResult::Single(Stage::Report)))
+            Ok(StepOutcome::Done(TaskResult::Single(Stage::Report)))
         } else {
-            Ok(Step::More(next))
+            Ok(StepOutcome::More(next))
         }
     }
 }

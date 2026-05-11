@@ -62,7 +62,7 @@ impl Cruncher {
         &self,
         _res: &Resources,
         cursor: Option<u32>,
-    ) -> Result<Step<u32, State>, CanoError> {
+    ) -> Result<StepOutcome<u32, State>, CanoError> {
         let n = cursor.unwrap_or(0);
 
         // Print RESUMED on the first call in resume mode when the cursor is Some.
@@ -79,9 +79,9 @@ impl Cruncher {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         if n + 1 >= TARGET {
-            Ok(Step::Done(TaskResult::Single(State::Done)))
+            Ok(StepOutcome::Done(TaskResult::Single(State::Done)))
         } else {
-            Ok(Step::More(n + 1))
+            Ok(StepOutcome::More(n + 1))
         }
     }
 }

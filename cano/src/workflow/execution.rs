@@ -79,7 +79,7 @@ where
     ///
     /// The engine drives the step loop, persisting each cursor as a
     /// [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row after each
-    /// `Step::More`. On
+    /// `StepOutcome::More`. On
     /// [`resume_from`](crate::workflow::Workflow::resume_from), the latest persisted
     /// cursor for this state is rehydrated and passed to the first `step` call instead
     /// of `None`, so processing continues from where it left off.
@@ -477,8 +477,8 @@ where
     /// - `sequence`: mutated in-place — each persisted cursor row consumes one number.
     ///   The caller already consumed one for the state-entry row before calling here.
     ///
-    /// Returns the next `TState` on `Step::Done(TaskResult::Single)`. Returns an error
-    /// if `Step::Done(TaskResult::Split)` is returned (split is unsupported here), or on
+    /// Returns the next `TState` on `StepOutcome::Done(TaskResult::Single)`. Returns an error
+    /// if `StepOutcome::Done(TaskResult::Split)` is returned (split is unsupported here), or on
     /// any task / checkpoint failure.
     #[allow(clippy::too_many_arguments)]
     async fn execute_stepped_task(
@@ -1839,7 +1839,7 @@ mod tests {
     // ------------------------------------------------------------------
 
     use crate::TaskConfig;
-    use crate::task::stepped::{Step, SteppedTask};
+    use crate::task::stepped::{StepOutcome, SteppedTask};
     use cano_macros::stepped_task;
 
     #[tokio::test]
@@ -1859,12 +1859,12 @@ mod tests {
                 &self,
                 _res: &Resources,
                 cursor: Option<u32>,
-            ) -> Result<Step<u32, TestState>, CanoError> {
+            ) -> Result<StepOutcome<u32, TestState>, CanoError> {
                 let n = cursor.unwrap_or(0) + 1;
                 if n >= self.target {
-                    Ok(Step::Done(TaskResult::Single(TestState::Complete)))
+                    Ok(StepOutcome::Done(TaskResult::Single(TestState::Complete)))
                 } else {
-                    Ok(Step::More(n))
+                    Ok(StepOutcome::More(n))
                 }
             }
         }
@@ -1880,7 +1880,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_stepped_split_result_is_rejected() {
-        // Step::Done(TaskResult::Split) must return a workflow error.
+        // StepOutcome::Done(TaskResult::Split) must return a workflow error.
         struct SplitStepper;
 
         #[stepped_task]
@@ -1893,8 +1893,10 @@ mod tests {
                 &self,
                 _res: &Resources,
                 _cursor: Option<u32>,
-            ) -> Result<Step<u32, TestState>, CanoError> {
-                Ok(Step::Done(TaskResult::Split(vec![TestState::Complete])))
+            ) -> Result<StepOutcome<u32, TestState>, CanoError> {
+                Ok(StepOutcome::Done(TaskResult::Split(vec![
+                    TestState::Complete,
+                ])))
             }
         }
 

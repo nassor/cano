@@ -31,6 +31,7 @@ mod checkpoint_store_impl;
 mod compensatable_task_impl;
 mod from_resources;
 mod node_impl;
+mod path_prefix;
 mod poll_task_impl;
 mod resource_derive;
 mod router_task_impl;

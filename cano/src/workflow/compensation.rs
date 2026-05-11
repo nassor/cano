@@ -1593,8 +1593,8 @@ mod tests {
     #[tokio::test]
     async fn cross_model_chain_router_poll_batch_stepped_interop() {
         use crate::recovery::RowKind;
-        use crate::task::{BatchTask, PollTask, RouterTask, SteppedTask, TaskConfig};
-        use crate::{Poll, PollErrorPolicy};
+        use crate::task::{BatchTask, PollTask, RouterTask, StepOutcome, SteppedTask, TaskConfig};
+        use crate::{PollErrorPolicy, PollOutcome};
         use cano_macros::{batch_task, poll_task, router_task, stepped_task};
         use serde::{Deserialize, Serialize};
         use std::sync::atomic::AtomicU32;
@@ -1634,12 +1634,12 @@ mod tests {
             fn config(&self) -> TaskConfig {
                 TaskConfig::minimal()
             }
-            async fn poll(&self, _res: &Resources) -> Result<Poll<TourStage>, CanoError> {
+            async fn poll(&self, _res: &Resources) -> Result<PollOutcome<TourStage>, CanoError> {
                 let n = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
                 if n >= 2 {
-                    Ok(Poll::Ready(TaskResult::Single(TourStage::Crunch)))
+                    Ok(PollOutcome::Ready(TaskResult::Single(TourStage::Crunch)))
                 } else {
-                    Ok(Poll::Pending { delay_ms: 0 })
+                    Ok(PollOutcome::Pending { delay_ms: 0 })
                 }
             }
         }
@@ -1694,12 +1694,12 @@ mod tests {
                 &self,
                 _res: &Resources,
                 cursor: Option<GrindCursor>,
-            ) -> Result<Step<GrindCursor, TourStage>, CanoError> {
+            ) -> Result<StepOutcome<GrindCursor, TourStage>, CanoError> {
                 let n = cursor.map(|c| c.0).unwrap_or(0);
                 if n >= 3 {
-                    Ok(Step::Done(TaskResult::Single(TourStage::Done)))
+                    Ok(StepOutcome::Done(TaskResult::Single(TourStage::Done)))
                 } else {
-                    Ok(Step::More(GrindCursor(n + 1)))
+                    Ok(StepOutcome::More(GrindCursor(n + 1)))
                 }
             }
         }
@@ -1957,7 +1957,7 @@ mod tests {
     // ---- SteppedTask with checkpoint store ----
 
     use crate::recovery::RowKind;
-    use crate::task::stepped::{Step, SteppedTask};
+    use crate::task::stepped::{StepOutcome, SteppedTask};
     use cano_macros::stepped_task;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
@@ -1991,13 +1991,13 @@ mod tests {
             &self,
             _res: &Resources,
             cursor: Option<u32>,
-        ) -> Result<Step<u32, TestState>, CanoError> {
+        ) -> Result<StepOutcome<u32, TestState>, CanoError> {
             self.calls.fetch_add(1, AtomicOrdering::Relaxed);
             let n = cursor.unwrap_or(0) + 1;
             if n >= self.target {
-                Ok(Step::Done(TaskResult::Single(TestState::Complete)))
+                Ok(StepOutcome::Done(TaskResult::Single(TestState::Complete)))
             } else {
-                Ok(Step::More(n))
+                Ok(StepOutcome::More(n))
             }
         }
     }
@@ -2209,7 +2209,7 @@ mod tests {
                 &self,
                 _res: &Resources,
                 _cursor: Option<u32>,
-            ) -> Result<Step<u32, TestState>, CanoError> {
+            ) -> Result<StepOutcome<u32, TestState>, CanoError> {
                 Err(CanoError::task_execution("stepper failed"))
             }
         }

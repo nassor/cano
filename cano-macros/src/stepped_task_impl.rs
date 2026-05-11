@@ -45,6 +45,7 @@ use syn::{
 
 use crate::async_rewrite;
 use crate::attr_args::{AttrArgs, combine_errors};
+use crate::path_prefix::{ModulePrefix, derive_module_prefix};
 
 /// Entry point — dispatches based on what `item` parses to.
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {
@@ -167,7 +168,7 @@ fn expand_inherent_impl(
             item_impl.span(),
             "#[cano::stepped_task] requires an \
              `async fn step(&self, res: &Resources<_>, cursor: Option<_>) \
-             -> Result<Step<_, _>, CanoError>` method",
+             -> Result<StepOutcome<_, _>, CanoError>` method",
         ));
     }
 
@@ -252,27 +253,6 @@ fn expand_inherent_impl(
 }
 
 // ---------------------------------------------------------------------------
-// Module prefix — determines how cano types are referenced in the companion impl
-// ---------------------------------------------------------------------------
-
-enum ModulePrefix {
-    Cano,
-    Prefixed(proc_macro2::TokenStream),
-    Bare,
-}
-
-impl ModulePrefix {
-    fn qualify(&self, type_name: &str) -> proc_macro2::TokenStream {
-        let ident = syn::Ident::new(type_name, proc_macro2::Span::call_site());
-        match self {
-            ModulePrefix::Cano => quote! { ::cano::#ident },
-            ModulePrefix::Prefixed(prefix) => quote! { #prefix #ident },
-            ModulePrefix::Bare => quote! { #ident },
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -326,41 +306,6 @@ fn extract_state_key_task_path_and_prefix(
     let task_path = derive_task_path_from_stepped_path(trait_path, &state_ty, key_ty.as_ref())?;
 
     Ok((state_ty, key_ty, task_path, module_prefix))
-}
-
-fn derive_module_prefix(stepped_path: &Path) -> ModulePrefix {
-    let seg_count = stepped_path.segments.len();
-
-    if seg_count <= 1 && stepped_path.leading_colon.is_none() {
-        return ModulePrefix::Bare;
-    }
-
-    let prefix_segs: syn::punctuated::Punctuated<PathSegment, syn::token::PathSep> = stepped_path
-        .segments
-        .iter()
-        .take(seg_count.saturating_sub(1))
-        .cloned()
-        .collect();
-
-    let has_leading_colon = stepped_path.leading_colon.is_some();
-    let is_cano_prefix = prefix_segs.len() == 1
-        && prefix_segs
-            .iter()
-            .next()
-            .map(|s| s.ident == "cano")
-            .unwrap_or(false);
-
-    if has_leading_colon && is_cano_prefix {
-        return ModulePrefix::Cano;
-    }
-
-    let leading = if has_leading_colon {
-        quote! { :: }
-    } else {
-        quote! {}
-    };
-
-    ModulePrefix::Prefixed(quote! { #leading #prefix_segs :: })
 }
 
 fn derive_task_path_from_stepped_path(
@@ -428,7 +373,7 @@ fn synthesise_task_impl(
     let resources_ty = module_prefix.qualify("Resources");
     let task_result_ty = module_prefix.qualify("TaskResult");
     let cano_error_ty = module_prefix.qualify("CanoError");
-    let step_ty = module_prefix.qualify("Step");
+    let step_ty = module_prefix.qualify("StepOutcome");
 
     let key_ty_tok: TokenStream = match key_ty {
         Some(k) => quote! { #k },
