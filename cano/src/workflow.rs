@@ -82,6 +82,7 @@ use crate::observer::WorkflowObserver;
 use crate::recovery::CheckpointStore;
 use crate::resource::Resources;
 use crate::saga::{CompensatableTask, ErasedCompensatable};
+use crate::task::stepped::{ErasedSteppedTask, SteppedAdapter, SteppedTask};
 use crate::task::{RouterTask, Task};
 
 #[cfg(feature = "tracing")]
@@ -322,6 +323,39 @@ where
         self.states.insert(
             state,
             Arc::new(StateEntry::CompensatableSingle {
+                task: erased,
+                config,
+            }),
+        );
+        self
+    }
+
+    /// Register a [`SteppedTask`] for a state with cursor-level checkpoint persistence.
+    ///
+    /// Unlike [`register`](Self::register), which runs the step loop in-memory via the
+    /// macro-synthesised `Task::run`, this method hands the step loop to the engine so
+    /// it can persist each cursor as a
+    /// [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row after every
+    /// `Step::More`. A subsequent [`resume_from`](Self::resume_from) rehydrates the
+    /// latest cursor for this state and passes it to the first `step` call, so
+    /// processing resumes from exactly where it left off rather than from `None`.
+    ///
+    /// When no [`checkpoint store`](Self::with_checkpoint_store) is attached the
+    /// behavior is identical to `register` — the step loop runs in-memory with no
+    /// cursor persistence.
+    ///
+    /// Replaces any handler previously registered for `state`. Infallible.
+    pub fn register_stepped<T>(mut self, state: TState, task: T) -> Self
+    where
+        T: SteppedTask<TState, TResourceKey> + 'static,
+    {
+        self.forget_compensator_for(&state);
+        let config = Arc::new(SteppedTask::config(&task));
+        let erased: Arc<dyn ErasedSteppedTask<TState, TResourceKey>> =
+            Arc::new(SteppedAdapter(Arc::new(task)));
+        self.states.insert(
+            state,
+            Arc::new(StateEntry::Stepped {
                 task: erased,
                 config,
             }),

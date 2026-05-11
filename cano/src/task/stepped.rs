@@ -3,8 +3,12 @@
 //! A [`SteppedTask`] processes work in discrete, resumable steps. Each call to
 //! [`step`](SteppedTask::step) either advances the cursor (`Step::More(cursor)`) or signals
 //! completion with a workflow state transition (`Step::Done(state)`). The cursor threading
-//! enables crash-resume: the cursor can be persisted between steps and recovered after a
-//! failure (Task 17 — persistence is not yet wired; see `TODO(task 17)` below).
+//! enables crash-resume: when registered via
+//! [`Workflow::register_stepped`](crate::workflow::Workflow::register_stepped) with a
+//! checkpoint store attached, each `Step::More` persists the cursor as a
+//! [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row so
+//! [`Workflow::resume_from`](crate::workflow::Workflow::resume_from) can continue from the
+//! last persisted cursor rather than restarting from `None`.
 //!
 //! ## When to use `SteppedTask`
 //!
@@ -108,7 +112,10 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::borrow::Cow;
 use std::fmt;
+use std::future::Future;
 use std::hash::Hash;
+use std::pin::Pin;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // Step<TCursor, TState> — the outcome of a single step() call
@@ -231,7 +238,13 @@ where
 /// Run the [`SteppedTask`] step loop for `s`.
 ///
 /// The synthesised `Task::run` method emitted by `#[stepped_task]` delegates here so
-/// that the loop body lives in a single place.
+/// that the loop body lives in a single place. This in-memory loop is used when a
+/// `SteppedTask` is registered via [`Workflow::register`](crate::workflow::Workflow::register).
+///
+/// For checkpoint-backed cursor persistence, register via
+/// [`Workflow::register_stepped`](crate::workflow::Workflow::register_stepped) instead;
+/// the engine will use [`ErasedSteppedTask`] to persist each cursor as a
+/// [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row after each `Step::More`.
 ///
 /// The loop calls `s.step(res, cursor)` repeatedly:
 ///
@@ -239,14 +252,6 @@ where
 /// - `Step::Done(result)` → return `Ok(result)`.
 /// - `Err(e)` → return `Err(e)` immediately (outer retry wrapping, if any, is applied
 ///   by the workflow dispatcher via `run_with_retries`).
-///
-/// # TODO(task 17)
-///
-/// Cursor persistence between steps is not yet implemented. Task 17 will wire
-/// `CheckpointStore` cursor serialisation here: after each `Step::More`, the cursor
-/// will be serialised to `Vec<u8>` and appended as a `RowKind::StepCursor` checkpoint
-/// row. On resume, the last cursor row will be deserialised and passed as the initial
-/// `cursor` argument instead of `None`.
 pub async fn run_stepped<S, S2, K>(s: &S, res: &Resources<K>) -> Result<TaskResult<S2>, CanoError>
 where
     S: SteppedTask<S2, K> + ?Sized,
@@ -259,8 +264,6 @@ where
         match s.step(res, cursor).await? {
             Step::More(new_cursor) => {
                 cursor = Some(new_cursor);
-                // TODO(task 17): persist cursor to CheckpointStore here before
-                // continuing to the next step, enabling crash-resume.
             }
             Step::Done(result) => return Ok(result),
         }
@@ -290,6 +293,95 @@ pub type DynSteppedTask<TState, TResourceKey = Cow<'static, str>> =
 /// Type alias for an `Arc`-wrapped dynamic [`SteppedTask`] trait object.
 pub type SteppedTaskObject<TState, TResourceKey = Cow<'static, str>> =
     std::sync::Arc<DynSteppedTask<TState, TResourceKey>>;
+
+// ---------------------------------------------------------------------------
+// Type-erased stepped-task infrastructure (for StateEntry::Stepped)
+// ---------------------------------------------------------------------------
+
+/// The outcome of one erased step call: serialized cursor bytes (`More`) or the
+/// final [`TaskResult`] (`Done`).
+pub enum ErasedStep<TState> {
+    /// More work remains; the opaque cursor bytes are passed to the next call.
+    More(Vec<u8>),
+    /// Processing is complete; carry the [`TaskResult`] forward to the FSM.
+    Done(TaskResult<TState>),
+}
+
+/// Future type returned by [`ErasedSteppedTask::step`].
+pub type StepFuture<'a, TState> =
+    Pin<Box<dyn Future<Output = Result<ErasedStep<TState>, CanoError>> + Send + 'a>>;
+
+/// Object-safe, type-erased view of a [`SteppedTask`].
+///
+/// All cursor serialization/deserialization is handled inside the blanket
+/// [`SteppedAdapter`] impl; callers work purely with `Vec<u8>` cursors.
+pub trait ErasedSteppedTask<TState, TResourceKey>: Send + Sync
+where
+    TState: Clone + Send + Sync + 'static,
+    TResourceKey: Hash + Eq + Send + Sync + 'static,
+{
+    /// Human-readable identifier, forwarded from the underlying [`SteppedTask::name`].
+    fn name(&self) -> Cow<'static, str>;
+    /// Task configuration, forwarded from the underlying [`SteppedTask::config`].
+    fn config(&self) -> TaskConfig;
+    /// Execute one step with a type-erased, optionally `None` cursor.
+    ///
+    /// `cursor_bytes` is `None` on the first call; `Some(bytes)` on subsequent calls,
+    /// where `bytes` were returned by the previous `step` via [`ErasedStep::More`].
+    fn step<'a>(
+        &'a self,
+        res: &'a Resources<TResourceKey>,
+        cursor_bytes: Option<Vec<u8>>,
+    ) -> StepFuture<'a, TState>;
+}
+
+/// Bridges a concrete [`SteppedTask`] to the object-safe [`ErasedSteppedTask`].
+///
+/// Handles `serde_json` cursor (de)serialization so the engine only sees `Vec<u8>`.
+pub(crate) struct SteppedAdapter<T>(pub Arc<T>);
+
+impl<TState, TResourceKey, T> ErasedSteppedTask<TState, TResourceKey> for SteppedAdapter<T>
+where
+    TState: Clone + fmt::Debug + Send + Sync + 'static,
+    TResourceKey: Hash + Eq + Send + Sync + 'static,
+    T: SteppedTask<TState, TResourceKey> + 'static,
+{
+    fn name(&self) -> Cow<'static, str> {
+        self.0.name()
+    }
+    fn config(&self) -> TaskConfig {
+        self.0.config()
+    }
+    fn step<'a>(
+        &'a self,
+        res: &'a Resources<TResourceKey>,
+        cursor_bytes: Option<Vec<u8>>,
+    ) -> StepFuture<'a, TState> {
+        Box::pin(async move {
+            let cursor: Option<T::Cursor> = match cursor_bytes {
+                None => None,
+                Some(ref b) => Some(serde_json::from_slice(b).map_err(|e| {
+                    CanoError::task_execution(format!(
+                        "deserialize cursor for `{}`: {e}",
+                        self.0.name()
+                    ))
+                })?),
+            };
+            match self.0.step(res, cursor).await? {
+                Step::More(c) => {
+                    let blob = serde_json::to_vec(&c).map_err(|e| {
+                        CanoError::task_execution(format!(
+                            "serialize cursor for `{}`: {e}",
+                            self.0.name()
+                        ))
+                    })?;
+                    Ok(ErasedStep::More(blob))
+                }
+                Step::Done(result) => Ok(ErasedStep::Done(result)),
+            }
+        })
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Tests

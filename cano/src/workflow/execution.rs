@@ -7,6 +7,7 @@
 //! [`compensation`](super::compensation) module.
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::hash::Hash;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -16,6 +17,7 @@ use futures_util::FutureExt;
 use crate::error::CanoError;
 use crate::recovery::CheckpointRow;
 use crate::saga::{CompensationEntry, ErasedCompensatable};
+use crate::task::stepped::{ErasedStep, ErasedSteppedTask};
 use crate::task::{Task, TaskResult, run_with_retries};
 
 use super::join::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult};
@@ -72,6 +74,20 @@ where
         /// Forward-run config, captured at registration time (see `Single::config`).
         config: Arc<crate::task::TaskConfig>,
     },
+    /// A [`SteppedTask`](crate::task::stepped::SteppedTask) registered via
+    /// [`Workflow::register_stepped`](crate::workflow::Workflow::register_stepped).
+    ///
+    /// The engine drives the step loop, persisting each cursor as a
+    /// [`RowKind::StepCursor`] row after each `Step::More`. On
+    /// [`resume_from`](crate::workflow::Workflow::resume_from), the latest persisted
+    /// cursor for this state is rehydrated and passed to the first `step` call instead
+    /// of `None`, so processing continues from where it left off.
+    Stepped {
+        /// Type-erased stepped task — exposes `name`, `config`, and `step`.
+        task: Arc<dyn ErasedSteppedTask<TState, TResourceKey>>,
+        /// Task config captured at registration time (same rationale as `Single::config`).
+        config: Arc<crate::task::TaskConfig>,
+    },
 }
 
 impl<TState, TResourceKey> Clone for StateEntry<TState, TResourceKey>
@@ -99,6 +115,10 @@ where
                 join_config: join_config.clone(),
             },
             StateEntry::CompensatableSingle { task, config } => StateEntry::CompensatableSingle {
+                task: Arc::clone(task),
+                config: Arc::clone(config),
+            },
+            StateEntry::Stepped { task, config } => StateEntry::Stepped {
                 task: Arc::clone(task),
                 config: Arc::clone(config),
             },
@@ -137,8 +157,14 @@ where
         &self,
         initial_state: TState,
     ) -> Result<TState, CanoError> {
-        self.execute_workflow_from(initial_state, 0, self.workflow_id.clone(), Vec::new())
-            .await
+        self.execute_workflow_from(
+            initial_state,
+            0,
+            self.workflow_id.clone(),
+            Vec::new(),
+            HashMap::new(),
+        )
+        .await
     }
 
     /// The FSM loop, parameterized by the starting checkpoint sequence, the workflow id
@@ -164,6 +190,11 @@ where
         start_sequence: u64,
         workflow_id: Option<String>,
         mut compensation_stack: Vec<CompensationEntry>,
+        // Map of `state_label → latest serialized cursor bytes` for `Stepped` states
+        // being resumed. Populated by `resume_from`; empty on a fresh run.
+        // Entries are consumed via `remove` so visiting the same state twice (on the
+        // resumed run continuing past it) starts fresh from `None`.
+        mut resume_cursors: HashMap<String, Vec<u8>>,
     ) -> Result<TState, CanoError> {
         let mut current_state = initial_state;
         let mut sequence = start_sequence;
@@ -193,6 +224,9 @@ where
             // number so that sequence numbers remain dense for `resume_from`.
             // `on_state_enter` was already fired above — the FSM did enter the
             // state; only the recovery footprint is suppressed.
+            //
+            // All other variants (Single, Split, CompensatableSingle, Stepped) are
+            // checkpointed.
             let is_router = matches!(
                 self.states.get(&current_state).map(|e| e.as_ref()),
                 Some(StateEntry::Router { .. }),
@@ -218,6 +252,7 @@ where
                 let task_id = match self.states.get(&current_state).map(|e| e.as_ref()) {
                     Some(StateEntry::Single { task, .. }) => task.name().into_owned(),
                     Some(StateEntry::CompensatableSingle { task, .. }) => task.name().into_owned(),
+                    Some(StateEntry::Stepped { task, .. }) => task.name().into_owned(),
                     // Router is unreachable here (is_router guard above), Split has no single task_id.
                     _ => String::new(),
                 };
@@ -324,6 +359,23 @@ where
                         Err(e) => Err(e),
                     }
                 }
+                StateEntry::Stepped { task, config } => {
+                    // Pop the resume cursor for this state (if any). Using `remove` instead
+                    // of `get` so that if the FSM visits the same state again later (e.g. a
+                    // loop), that second visit starts fresh from `None`.
+                    let resume_cursor = state_label
+                        .as_deref()
+                        .and_then(|label| resume_cursors.remove(label));
+                    self.execute_stepped_task(
+                        task.clone(),
+                        Arc::clone(config),
+                        &workflow_id,
+                        state_label.as_deref().unwrap_or_default(),
+                        &mut sequence,
+                        resume_cursor,
+                    )
+                    .await
+                }
             };
 
             current_state = match step {
@@ -405,6 +457,90 @@ where
                 "Single task returned split result - use register_split() for split tasks",
             )),
             Err(e) => Err(e),
+        };
+
+        if let Some(ref slice) = observers {
+            match &outcome {
+                Ok(_) => notify_observers(slice, |o| o.on_task_success(task_name.as_ref())),
+                Err(e) => notify_observers(slice, |o| o.on_task_failure(task_name.as_ref(), e)),
+            }
+        }
+        outcome
+    }
+
+    /// Drive the step loop for a `Stepped` state, persisting each cursor as a
+    /// [`RowKind::StepCursor`] row after every `Step::More`.
+    ///
+    /// - `resume_cursor`: `Some(bytes)` when resuming from a prior cursor row; `None`
+    ///   on a fresh run or when no cursor was persisted for this state.
+    /// - `sequence`: mutated in-place — each persisted cursor row consumes one number.
+    ///   The caller already consumed one for the state-entry row before calling here.
+    ///
+    /// Returns the next `TState` on `Step::Done(TaskResult::Single)`. Returns an error
+    /// if `Step::Done(TaskResult::Split)` is returned (split is unsupported here), or on
+    /// any task / checkpoint failure.
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_stepped_task(
+        &self,
+        task: Arc<dyn ErasedSteppedTask<TState, TResourceKey>>,
+        config: Arc<crate::task::TaskConfig>,
+        workflow_id: &Option<String>,
+        state_label: &str,
+        sequence: &mut u64,
+        resume_cursor: Option<Vec<u8>>,
+    ) -> Result<TState, CanoError> {
+        let observers = self.observer_slice();
+        let task_name = task.name();
+        if let Some(ref slice) = observers {
+            notify_observers(slice, |o| o.on_task_start(task_name.as_ref()));
+        }
+        let config = Self::config_with_observers(&config, &observers, &task_name);
+
+        // Current cursor: starts from the resume cursor (if any), advances each iteration.
+        let mut current_cursor: Option<Vec<u8>> = resume_cursor;
+
+        let outcome: Result<TState, CanoError> = loop {
+            // Capture the cursor for this attempt so that the retry closure can clone it.
+            let attempt_cursor = current_cursor.clone();
+            let step_result = run_with_retries(&config, || {
+                let c = attempt_cursor.clone();
+                let t = Arc::clone(&task);
+                let r = Arc::clone(&self.resources);
+                async move { t.step(&*r, c).await }
+            })
+            .await;
+
+            match step_result {
+                Err(e) => break Err(e),
+                Ok(ErasedStep::Done(TaskResult::Single(next_state))) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::debug!(next_state = ?next_state, "Stepped task completed");
+                    break Ok(next_state);
+                }
+                Ok(ErasedStep::Done(TaskResult::Split(_))) => {
+                    break Err(CanoError::workflow(
+                        "Stepped task returned split result — split is not supported for Stepped states",
+                    ));
+                }
+                Ok(ErasedStep::More(new_cursor_bytes)) => {
+                    // Persist the cursor before advancing so a crash between steps
+                    // can resume from this exact position.
+                    if let (Some(store), Some(wf_id)) =
+                        (&self.checkpoint_store, workflow_id.as_deref())
+                    {
+                        let row = CheckpointRow::new(*sequence, state_label, task_name.as_ref())
+                            .with_cursor(new_cursor_bytes.clone());
+                        if let Err(e) = store.append(wf_id, row).await {
+                            break Err(CanoError::checkpoint_store(format!(
+                                "append step cursor checkpoint: {e}"
+                            )));
+                        }
+                        notify_observers(&self.observers, |o| o.on_checkpoint(wf_id, *sequence));
+                        *sequence += 1;
+                    }
+                    current_cursor = Some(new_cursor_bytes);
+                }
+            }
         };
 
         if let Some(ref slice) = observers {
@@ -1695,5 +1831,82 @@ mod tests {
             "shared breaker must trip after 4 concurrent failures, got {:?}",
             breaker.state()
         );
+    }
+
+    // ------------------------------------------------------------------
+    // register_stepped tests — no-store path (in-memory loop via engine)
+    // ------------------------------------------------------------------
+
+    use crate::TaskConfig;
+    use crate::task::stepped::{Step, SteppedTask};
+    use cano_macros::stepped_task;
+
+    #[tokio::test]
+    async fn test_register_stepped_no_store_runs_to_completion() {
+        // register_stepped with no checkpoint store behaves like register (in-memory loop).
+        struct Counter {
+            target: u32,
+        }
+
+        #[stepped_task]
+        impl SteppedTask<TestState> for Counter {
+            type Cursor = u32;
+            fn config(&self) -> crate::task::TaskConfig {
+                crate::task::TaskConfig::minimal()
+            }
+            async fn step(
+                &self,
+                _res: &Resources,
+                cursor: Option<u32>,
+            ) -> Result<Step<u32, TestState>, CanoError> {
+                let n = cursor.unwrap_or(0) + 1;
+                if n >= self.target {
+                    Ok(Step::Done(TaskResult::Single(TestState::Complete)))
+                } else {
+                    Ok(Step::More(n))
+                }
+            }
+        }
+
+        let result = Workflow::bare()
+            .register_stepped(TestState::Start, Counter { target: 5 })
+            .add_exit_state(TestState::Complete)
+            .orchestrate(TestState::Start)
+            .await
+            .unwrap();
+        assert_eq!(result, TestState::Complete);
+    }
+
+    #[tokio::test]
+    async fn test_register_stepped_split_result_is_rejected() {
+        // Step::Done(TaskResult::Split) must return a workflow error.
+        struct SplitStepper;
+
+        #[stepped_task]
+        impl SteppedTask<TestState> for SplitStepper {
+            type Cursor = u32;
+            fn config(&self) -> crate::task::TaskConfig {
+                crate::task::TaskConfig::minimal()
+            }
+            async fn step(
+                &self,
+                _res: &Resources,
+                _cursor: Option<u32>,
+            ) -> Result<Step<u32, TestState>, CanoError> {
+                Ok(Step::Done(TaskResult::Split(vec![TestState::Complete])))
+            }
+        }
+
+        let err = Workflow::bare()
+            .register_stepped(TestState::Start, SplitStepper)
+            .add_exit_state(TestState::Complete)
+            .orchestrate(TestState::Start)
+            .await
+            .expect_err("split result from stepped must error");
+        assert!(
+            matches!(err, CanoError::Workflow(_)),
+            "expected Workflow error, got {err:?}"
+        );
+        assert!(err.to_string().contains("split"), "got: {err}");
     }
 }

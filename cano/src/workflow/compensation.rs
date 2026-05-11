@@ -6,6 +6,7 @@
 //! is the entry point in the other direction: replay a checkpointed run from its
 //! last recorded state, rehydrating the compensation stack from the log.
 
+use std::collections::HashMap;
 use std::hash::Hash;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -287,9 +288,6 @@ where
         // resume point — it re-runs below and re-pushes its own compensation entry, so
         // keeping the persisted one too would compensate that step twice on a later
         // failure. Earlier compensatable states' rows are kept (their tasks don't re-run).
-        //
-        // TODO(task 17): collect StepCursor rows here and pass them to the resumed
-        // SteppedTask so it can continue from its persisted cursor rather than restarting.
         let resume_sequence = last.sequence;
         let compensation_stack: Vec<CompensationEntry> = rows
             .iter()
@@ -303,8 +301,30 @@ where
             })
             .collect();
 
+        // Collect the latest StepCursor row per state. `rows` is ascending by sequence,
+        // so a simple fold keeps the last (highest-sequence) cursor for each state label.
+        // The resume-sequence filter is intentionally NOT applied here: the StepCursor rows
+        // all belong to Stepped states, not to the resume point's own state entry, so no
+        // double-application risk. The cursor for the resumed state itself is included —
+        // the Stepped state re-runs, and passing its last persisted cursor lets it pick up
+        // exactly where the loop left off rather than restarting from None.
+        let resume_cursors: HashMap<String, Vec<u8>> = rows
+            .iter()
+            .filter(|r| r.kind == RowKind::StepCursor)
+            .filter_map(|r| {
+                r.output_blob
+                    .as_ref()
+                    .map(|blob| (r.state.clone(), blob.clone()))
+            })
+            .fold(HashMap::new(), |mut acc, (state, blob)| {
+                // Fold keeps the latest (highest-sequence) cursor per state because
+                // `rows` is in ascending sequence order.
+                acc.insert(state, blob);
+                acc
+            });
+
         #[cfg(feature = "tracing")]
-        info!(workflow_id = %workflow_id, resume_state = ?resume_state, last_sequence = last.sequence, compensation_entries = compensation_stack.len(), "Resuming workflow from checkpoint");
+        info!(workflow_id = %workflow_id, resume_state = ?resume_state, last_sequence = last.sequence, compensation_entries = compensation_stack.len(), cursor_states = resume_cursors.len(), "Resuming workflow from checkpoint");
         notify_observers(&self.observers, |o| {
             o.on_resume(&workflow_id, last.sequence)
         });
@@ -315,6 +335,7 @@ where
             start_sequence,
             Some(workflow_id),
             compensation_stack,
+            resume_cursors,
         );
         let result = if let Some(timeout_duration) = self.workflow_timeout {
             match tokio::time::timeout(timeout_duration, exec).await {
@@ -1749,5 +1770,284 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- SteppedTask with checkpoint store ----
+
+    use crate::recovery::RowKind;
+    use crate::task::stepped::{Step, SteppedTask};
+    use cano_macros::stepped_task;
+    use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
+
+    /// A counting stepper: each step increments the cursor by 1 until it hits `target`.
+    struct CountStepper {
+        target: u32,
+        /// Counts how many `step` calls were made (for retry/resume assertions).
+        calls: Arc<AtomicU32>,
+    }
+
+    impl CountStepper {
+        fn new(target: u32) -> (Self, Arc<AtomicU32>) {
+            let calls = Arc::new(AtomicU32::new(0));
+            (
+                Self {
+                    target,
+                    calls: Arc::clone(&calls),
+                },
+                calls,
+            )
+        }
+    }
+
+    #[stepped_task]
+    impl SteppedTask<TestState> for CountStepper {
+        type Cursor = u32;
+        fn config(&self) -> TaskConfig {
+            TaskConfig::minimal()
+        }
+        async fn step(
+            &self,
+            _res: &Resources,
+            cursor: Option<u32>,
+        ) -> Result<Step<u32, TestState>, CanoError> {
+            self.calls.fetch_add(1, AtomicOrdering::Relaxed);
+            let n = cursor.unwrap_or(0) + 1;
+            if n >= self.target {
+                Ok(Step::Done(TaskResult::Single(TestState::Complete)))
+            } else {
+                Ok(Step::More(n))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn stepped_forward_run_writes_cursor_rows_and_clears_on_success() {
+        let store = Arc::new(MemCheckpoints::default());
+        let (stepper, calls) = CountStepper::new(4); // steps: None→1, 1→2, 2→3, 3→Done
+
+        let workflow = Workflow::bare()
+            .register_stepped(TestState::Start, stepper)
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone())
+            .with_workflow_id("step-fwd");
+
+        assert_eq!(
+            workflow.orchestrate(TestState::Start).await.unwrap(),
+            TestState::Complete
+        );
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 4);
+
+        // Audit: Start (seq 0), cursor 1 (seq 1), cursor 2 (seq 2), cursor 3 (seq 3),
+        // Complete (seq 4). Live rows must be empty on success.
+        let audit = store.audit_rows("step-fwd");
+        assert_eq!(audit.len(), 5, "start + 3 cursors + exit = 5 rows");
+        assert_eq!(audit[0].kind, RowKind::StateEntry);
+        assert_eq!(audit[0].state, "Start");
+        assert_eq!(audit[1].kind, RowKind::StepCursor);
+        assert_eq!(audit[2].kind, RowKind::StepCursor);
+        assert_eq!(audit[3].kind, RowKind::StepCursor);
+        assert_eq!(audit[4].kind, RowKind::StateEntry);
+        assert_eq!(audit[4].state, "Complete");
+        // cursor values are serde_json-encoded u32 bytes
+        assert_eq!(
+            serde_json::from_slice::<u32>(audit[1].output_blob.as_ref().unwrap()).unwrap(),
+            1
+        );
+        assert_eq!(
+            serde_json::from_slice::<u32>(audit[3].output_blob.as_ref().unwrap()).unwrap(),
+            3
+        );
+        assert!(
+            store.rows("step-fwd").is_empty(),
+            "live log cleared on success"
+        );
+    }
+
+    #[tokio::test]
+    async fn stepped_resume_continues_from_last_cursor() {
+        let store = Arc::new(MemCheckpoints::default());
+
+        // Seed: the run had entered Start (seq 0), written cursor=1 (seq 1), cursor=2 (seq 2),
+        // then crashed. Resume should start from cursor=2, not from None.
+        store
+            .append(
+                "step-resume",
+                CheckpointRow::new(0, "Start", "CountStepper"),
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "step-resume",
+                CheckpointRow::new(1, "Start", "CountStepper")
+                    .with_cursor(serde_json::to_vec(&1u32).unwrap()),
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "step-resume",
+                CheckpointRow::new(2, "Start", "CountStepper")
+                    .with_cursor(serde_json::to_vec(&2u32).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        // target=4 → steps: cursor=2→3, 3→Done (only 2 more calls, not 4).
+        let (stepper, calls) = CountStepper::new(4);
+
+        let workflow = Workflow::bare()
+            .register_stepped(TestState::Start, stepper)
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone());
+
+        assert_eq!(
+            workflow.resume_from("step-resume").await.unwrap(),
+            TestState::Complete
+        );
+        // Only 2 step calls: cursor=2→More(3), cursor=3→Done.
+        assert_eq!(
+            calls.load(AtomicOrdering::Relaxed),
+            2,
+            "resumed run must not restart from None"
+        );
+    }
+
+    #[tokio::test]
+    async fn stepped_sequences_are_dense_after_cursors() {
+        // Verify that cursor rows consume sequence numbers and subsequent state rows
+        // (e.g. the exit state) continue at the right sequence.
+        let store = Arc::new(MemCheckpoints::default());
+        let (stepper, _) = CountStepper::new(3); // 2 cursor rows (1 and 2), then Done
+
+        let workflow = Workflow::bare()
+            .register_stepped(TestState::Start, stepper)
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone())
+            .with_workflow_id("dense");
+
+        workflow.orchestrate(TestState::Start).await.unwrap();
+
+        let audit = store.audit_rows("dense");
+        // seq 0: Start (StateEntry), seq 1: cursor=1, seq 2: cursor=2, seq 3: Complete (exit)
+        assert_eq!(audit[0].sequence, 0);
+        assert_eq!(audit[1].sequence, 1);
+        assert_eq!(audit[2].sequence, 2);
+        assert_eq!(audit[3].sequence, 3);
+        for (i, row) in audit.iter().enumerate() {
+            assert_eq!(
+                row.sequence, i as u64,
+                "sequences must be contiguous, gap at {i}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn stepped_resume_without_cursor_rows_restarts_from_none() {
+        // If the run crashed before any cursor was persisted (only the StateEntry row exists),
+        // resume should start from None (same as a fresh run).
+        let store = Arc::new(MemCheckpoints::default());
+        store
+            .append(
+                "step-fresh-resume",
+                CheckpointRow::new(0, "Start", "CountStepper"),
+            )
+            .await
+            .unwrap();
+
+        let (stepper, calls) = CountStepper::new(3); // needs 2 successful steps
+
+        let workflow = Workflow::bare()
+            .register_stepped(TestState::Start, stepper)
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone());
+
+        assert_eq!(
+            workflow.resume_from("step-fresh-resume").await.unwrap(),
+            TestState::Complete
+        );
+        // Full 2 steps: None→1, 1→2, 2→Done = 3 calls
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn stepped_no_store_path_unchanged() {
+        // Without a checkpoint store, register_stepped behaves like register (no rows written).
+        let (stepper, calls) = CountStepper::new(3);
+
+        let result = Workflow::bare()
+            .register_stepped(TestState::Start, stepper)
+            .add_exit_state(TestState::Complete)
+            .orchestrate(TestState::Start)
+            .await
+            .unwrap();
+        assert_eq!(result, TestState::Complete);
+        assert_eq!(calls.load(AtomicOrdering::Relaxed), 3);
+    }
+
+    #[tokio::test]
+    async fn stepped_cursor_rows_do_not_become_compensation_entries() {
+        // Verifies the existing regression test still passes with the full engine path
+        // (StepCursor rows from register_stepped must not pollute the compensation stack).
+        let store = Arc::new(MemCheckpoints::default());
+        let log: CompLog = Arc::new(Mutex::new(Vec::new()));
+
+        // Seed: A (compensatable, seq 0+1), cursor for a stepped state (seq 2), then crash.
+        store
+            .append("mixed-stepped", CheckpointRow::new(0, "Start", "A"))
+            .await
+            .unwrap();
+        store
+            .append(
+                "mixed-stepped",
+                CheckpointRow::new(1, "Start", "A")
+                    .with_output(serde_json::to_vec(&42u32).unwrap()),
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "mixed-stepped",
+                CheckpointRow::new(2, "Process", "CountStepper")
+                    .with_cursor(serde_json::to_vec(&1u32).unwrap()),
+            )
+            .await
+            .unwrap();
+
+        // Process is a Stepped state; it's the resume point. Make the stepper fail so
+        // the compensation stack (rehydrated A) drains and we can inspect it.
+        struct FailingStepper;
+        #[stepped_task]
+        impl SteppedTask<TestState> for FailingStepper {
+            type Cursor = u32;
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+            async fn step(
+                &self,
+                _res: &Resources,
+                _cursor: Option<u32>,
+            ) -> Result<Step<u32, TestState>, CanoError> {
+                Err(CanoError::task_execution("stepper failed"))
+            }
+        }
+
+        let workflow = Workflow::bare()
+            .register_with_compensation(
+                TestState::Start,
+                CompTask::ok("A", 42, TestState::Process, &log),
+            )
+            .register_stepped(TestState::Process, FailingStepper)
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone());
+
+        let err = workflow.resume_from("mixed-stepped").await.unwrap_err();
+        assert_eq!(err.message(), "stepper failed");
+        // A must have been compensated with value 42 from the rehydrated stack.
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![("A".to_string(), 42u32)],
+            "StepCursor row must not become a compensation entry"
+        );
     }
 }
