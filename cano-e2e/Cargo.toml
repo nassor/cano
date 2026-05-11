@@ -16,8 +16,8 @@ serde_json = "1"
 anyhow = "1"
 
 [dev-dependencies]
-testcontainers = "0.24"
-testcontainers-modules = { version = "0.12", features = ["postgres"] }
+testcontainers = "0.27.3"
+testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
 
 # The "custom software" the e2e tests drive: a small Cano app over a Postgres-backed
 # CheckpointStore. Built into the Docker image (see `Dockerfile`) and also runnable
