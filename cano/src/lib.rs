@@ -116,11 +116,15 @@
 //! - [`RouterTask`] trait: side-effect-free branching; reads resources, returns the next
 //!   state without writing anything. Registered with [`Workflow::register_router`] — the
 //!   engine dispatches it like a normal state but writes **no** `CheckpointRow`.
+//! - [`PollTask`] trait: "wait-until" loop; `poll()` returns [`Poll::Ready`] or
+//!   [`Poll::Pending { delay_ms }`](Poll::Pending) on each call. Defaults to
+//!   [`TaskConfig::minimal()`](task::TaskConfig::minimal) (no retries). Registered with
+//!   [`Workflow::register`] — the engine applies `attempt_timeout` if set via `config()`.
 //!
 //! Every [`Node`] automatically implements [`Task`] via a blanket impl, so both can be
-//! registered with the same [`Workflow::register`] method. Every [`RouterTask`] also
-//! automatically implements [`Task`] via a companion impl emitted by the `#[router_task]`
-//! macro.
+//! registered with the same [`Workflow::register`] method. Every [`RouterTask`] and
+//! [`PollTask`] automatically implement [`Task`] via companion impls emitted by the
+//! `#[router_task]` and `#[poll_task]` macros respectively.
 //!
 //! ### Parallel Execution (Split/Join)
 //!
@@ -177,11 +181,17 @@
 //! **RouterTask**: Single `route()` method — side-effect-free; reads resources, returns
 //! the next state. Dispatched like a normal state but leaves no checkpoint row.
 //!
+//! **PollTask**: Single `poll()` method — returns [`Poll::Ready(TaskResult)`](Poll::Ready)
+//! or [`Poll::Pending { delay_ms }`](Poll::Pending); the engine loops until `Ready`. Defaults
+//! to `TaskConfig::minimal()` (no retries). Use `config().with_attempt_timeout(dur)` to cap
+//! total wall-clock time; registered with [`Workflow::register`] like any other task.
+//!
 //! ## Module Overview
 //!
 //! - [`mod@task`]: The [`Task`] trait — single `run()` method
 //! - [`task::node`](crate::task::node): The [`Node`] trait — three-phase lifecycle with retry via [`TaskConfig`]
 //! - [`task::router`](crate::task::router): The [`RouterTask`] trait — side-effect-free branching via `route()`; registered with [`Workflow::register_router`]
+//! - [`task::poll`](crate::task::poll): The [`PollTask`] trait — wait-until loop via `poll()`; registered with [`Workflow::register`]
 //! - [`workflow`]: [`Workflow`] — FSM orchestration with Split/Join support
 //! - `scheduler` (requires `scheduler` feature): `Scheduler` (builder) and `RunningScheduler` (live handle) — cron and interval scheduling
 //! - [`mod@resource`]: [`Resource`] trait, [`Resources`] dictionary, and [`HealthStatus`] — lifecycle-aware resource management and health probes
