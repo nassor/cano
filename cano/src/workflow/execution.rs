@@ -37,6 +37,17 @@ where
         /// virtual call through dyn Task to retrieve it.
         config: Arc<crate::task::TaskConfig>,
     },
+    /// Side-effect-free routing task (registered via
+    /// [`Workflow::register_router`](crate::workflow::Workflow::register_router)).
+    ///
+    /// A router only reads resources and returns the next state — it never
+    /// writes. The engine currently dispatches it exactly like `Single`; Task 3
+    /// will add the checkpoint-skipping behaviour that distinguishes the two.
+    Router {
+        task: Arc<dyn Task<TState, TResourceKey> + Send + Sync>,
+        /// TaskConfig captured at registration time (same rationale as `Single`).
+        config: Arc<crate::task::TaskConfig>,
+    },
     /// Split into parallel tasks with join configuration
     Split {
         tasks: Vec<Arc<dyn Task<TState, TResourceKey> + Send + Sync>>,
@@ -64,6 +75,10 @@ where
     fn clone(&self) -> Self {
         match self {
             StateEntry::Single { task, config } => StateEntry::Single {
+                task: task.clone(),
+                config: Arc::clone(config),
+            },
+            StateEntry::Router { task, config } => StateEntry::Router {
                 task: task.clone(),
                 config: Arc::clone(config),
             },
@@ -184,6 +199,7 @@ where
                 let label = state_label.as_deref().unwrap_or_default();
                 let task_id = match self.states.get(&current_state).map(|e| e.as_ref()) {
                     Some(StateEntry::Single { task, .. }) => task.name().into_owned(),
+                    Some(StateEntry::Router { task, .. }) => task.name().into_owned(),
                     Some(StateEntry::CompensatableSingle { task, .. }) => task.name().into_owned(),
                     _ => String::new(),
                 };
@@ -228,6 +244,11 @@ where
             // Dispatch by entry type. Any `Err` triggers a compensation drain.
             let step: Result<TState, CanoError> = match state_entry.as_ref() {
                 StateEntry::Single { task, config } => {
+                    self.execute_single_task(task.clone(), Arc::clone(config))
+                        .await
+                }
+                StateEntry::Router { task, config } => {
+                    // TODO(task 3): skip the per-state checkpoint write for Router states
                     self.execute_single_task(task.clone(), Arc::clone(config))
                         .await
                 }

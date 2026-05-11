@@ -82,7 +82,7 @@ use crate::observer::WorkflowObserver;
 use crate::recovery::CheckpointStore;
 use crate::resource::Resources;
 use crate::saga::{CompensatableTask, ErasedCompensatable};
-use crate::task::Task;
+use crate::task::{RouterTask, Task};
 
 #[cfg(feature = "tracing")]
 use tracing::{Span, info_span};
@@ -210,6 +210,35 @@ where
         self.states.insert(
             state,
             Arc::new(StateEntry::Single {
+                task: Arc::new(task),
+                config,
+            }),
+        );
+        self
+    }
+
+    /// Register a side-effect-free routing task for a state.
+    ///
+    /// A router only reads resources and returns the next state — it never writes.
+    /// Use this when you need conditional branching without side effects. The engine
+    /// currently dispatches a [`StateEntry::Router`] exactly like [`StateEntry::Single`];
+    /// Task 3 will add checkpoint-skipping so routers leave no recovery footprint.
+    ///
+    /// `T` must implement both [`RouterTask`] (signals read-only intent) and [`Task`]
+    /// (provides the `run` method the engine calls). Use the `#[router_task]` macro to
+    /// derive the companion [`Task`] impl from your [`RouterTask`] implementation.
+    ///
+    /// Associates `task` with `state`. If a handler was already registered for `state`,
+    /// it is replaced. This method is infallible.
+    pub fn register_router<T>(mut self, state: TState, task: T) -> Self
+    where
+        T: RouterTask<TState, TResourceKey> + Task<TState, TResourceKey> + 'static,
+    {
+        self.forget_compensator_for(&state);
+        let config = Arc::new(Task::config(&task));
+        self.states.insert(
+            state,
+            Arc::new(StateEntry::Router {
                 task: Arc::new(task),
                 config,
             }),
@@ -947,5 +976,65 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, TestState::Complete);
+    }
+
+    // ------------------------------------------------------------------
+    // register_router tests
+    // ------------------------------------------------------------------
+
+    // Note: inside the `cano` crate the inherent `#[router_task(state = S)]` form emits
+    // `::cano::RouterTask<...>` paths that don't resolve. Use the trait-impl form instead.
+
+    #[tokio::test]
+    async fn test_register_router_orchestration_round_trip() {
+        use crate::task::{RouterTask, TaskConfig};
+        use cano_macros::router_task;
+
+        // A router that unconditionally routes Start → Process → Complete.
+        struct RouteToProcess;
+
+        #[router_task]
+        impl RouterTask<TestState> for RouteToProcess {
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+            async fn route(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
+                Ok(TaskResult::Single(TestState::Process))
+            }
+        }
+
+        let result = Workflow::bare()
+            .register_router(TestState::Start, RouteToProcess)
+            .register(TestState::Process, SimpleTask::new(TestState::Complete))
+            .add_exit_state(TestState::Complete)
+            .orchestrate(TestState::Start)
+            .await
+            .unwrap();
+
+        assert_eq!(result, TestState::Complete);
+    }
+
+    #[test]
+    fn test_validate_passes_with_router_state() {
+        use crate::task::{RouterTask, TaskConfig};
+        use cano_macros::router_task;
+
+        struct RouteToComplete;
+
+        #[router_task]
+        impl RouterTask<TestState> for RouteToComplete {
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+            async fn route(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
+                Ok(TaskResult::Single(TestState::Complete))
+            }
+        }
+
+        let workflow = Workflow::bare()
+            .register_router(TestState::Start, RouteToComplete)
+            .add_exit_state(TestState::Complete);
+
+        assert!(workflow.validate().is_ok());
     }
 }
