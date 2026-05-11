@@ -167,6 +167,10 @@ required-features = ["recovery"]
 name = "saga_payment"
 path = "examples/saga_payment.rs"
 
+[[example]]
+name = "router_task"
+path = "examples/router_task.rs"
+
 [[bench]]
 name = "workflow_performance"
 harness = false

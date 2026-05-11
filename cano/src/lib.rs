@@ -113,9 +113,14 @@
 //! Two interfaces for processing logic:
 //! - [`Task`] trait: single `run()` method — straightforward operations and prototyping
 //! - [`Node`] trait: three-phase lifecycle (`prep` → `exec` → `post`) with built-in retry
+//! - [`RouterTask`] trait: side-effect-free branching; reads resources, returns the next
+//!   state without writing anything. Registered with [`Workflow::register_router`] — the
+//!   engine dispatches it like a normal state but writes **no** `CheckpointRow`.
 //!
 //! Every [`Node`] automatically implements [`Task`] via a blanket impl, so both can be
-//! registered with the same [`Workflow::register`] method.
+//! registered with the same [`Workflow::register`] method. Every [`RouterTask`] also
+//! automatically implements [`Task`] via a companion impl emitted by the `#[router_task]`
+//! macro.
 //!
 //! ### Parallel Execution (Split/Join)
 //!
@@ -169,10 +174,14 @@
 //! 2. `exec` — core logic (infallible — signature returns result directly)
 //! 3. `post` — write results, determine next state
 //!
+//! **RouterTask**: Single `route()` method — side-effect-free; reads resources, returns
+//! the next state. Dispatched like a normal state but leaves no checkpoint row.
+//!
 //! ## Module Overview
 //!
 //! - [`mod@task`]: The [`Task`] trait — single `run()` method
 //! - [`task::node`](crate::task::node): The [`Node`] trait — three-phase lifecycle with retry via [`TaskConfig`]
+//! - [`task::router`](crate::task::router): The [`RouterTask`] trait — side-effect-free branching via `route()`; registered with [`Workflow::register_router`]
 //! - [`workflow`]: [`Workflow`] — FSM orchestration with Split/Join support
 //! - `scheduler` (requires `scheduler` feature): `Scheduler` (builder) and `RunningScheduler` (live handle) — cron and interval scheduling
 //! - [`mod@resource`]: [`Resource`] trait, [`Resources`] dictionary, and [`HealthStatus`] — lifecycle-aware resource management and health probes
