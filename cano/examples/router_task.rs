@@ -102,19 +102,17 @@ impl SlowProcessor {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn build_workflow(use_fast_path: bool) -> (Workflow<Step>, impl std::fmt::Debug) {
+fn build_workflow(use_fast_path: bool) -> Workflow<Step> {
     let config = Config { use_fast_path };
     let resources = Resources::new().insert("config", config);
 
-    let workflow = Workflow::new(resources)
+    Workflow::new(resources)
         // `register_router` stores the task as a Router state entry:
         // dispatched like a normal state but writes no CheckpointRow.
         .register_router(Step::Classify, Classifier)
         .register(Step::FastPath, FastProcessor)
         .register(Step::SlowPath, SlowProcessor)
-        .add_exit_state(Step::Done);
-
-    (workflow, ())
+        .add_exit_state(Step::Done)
 }
 
 // ---------------------------------------------------------------------------
@@ -124,13 +122,13 @@ fn build_workflow(use_fast_path: bool) -> (Workflow<Step>, impl std::fmt::Debug)
 #[tokio::main]
 async fn main() -> CanoResult<()> {
     println!("=== fast-path run ===");
-    let (workflow, _) = build_workflow(true);
+    let workflow = build_workflow(true);
     let result = workflow.orchestrate(Step::Classify).await?;
     assert_eq!(result, Step::Done);
     println!("completed at {result:?}\n");
 
     println!("=== slow-path run ===");
-    let (workflow, _) = build_workflow(false);
+    let workflow = build_workflow(false);
     let result = workflow.orchestrate(Step::Classify).await?;
     assert_eq!(result, Step::Done);
     println!("completed at {result:?}");
