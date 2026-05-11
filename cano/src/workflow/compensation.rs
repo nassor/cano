@@ -1580,6 +1580,190 @@ mod tests {
         );
     }
 
+    // ---- Cross-model interoperability ----
+
+    /// Chain all four processing models (router → poll → batch → stepped → done)
+    /// in one workflow and assert:
+    ///
+    /// 1. The workflow completes at `Done`.
+    /// 2. The `Route` router state never writes a `CheckpointRow` (router rows are skipped).
+    /// 3. Sequence numbers are dense — no gap where `Route` would have been.
+    /// 4. `Wait`, `Crunch`, `Grind` (entry + cursor rows), and `Done` each appear in the
+    ///    audit log under `RowKind::StateEntry` / `RowKind::StepCursor`.
+    #[tokio::test]
+    async fn cross_model_chain_router_poll_batch_stepped_interop() {
+        use crate::recovery::RowKind;
+        use crate::task::{BatchTask, PollTask, RouterTask, SteppedTask, TaskConfig};
+        use crate::{Poll, PollErrorPolicy};
+        use cano_macros::{batch_task, poll_task, router_task, stepped_task};
+        use serde::{Deserialize, Serialize};
+        use std::sync::atomic::AtomicU32;
+
+        // --- local state enum ---
+        #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+        enum TourStage {
+            Route,
+            Wait,
+            Crunch,
+            Grind,
+            Done,
+        }
+
+        // --- Route (RouterTask) ---
+        // Reads nothing meaningful, unconditionally routes to Wait.
+        struct TourRouter;
+
+        #[router_task]
+        impl RouterTask<TourStage> for TourRouter {
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+            async fn route(&self, _res: &Resources) -> Result<TaskResult<TourStage>, CanoError> {
+                Ok(TaskResult::Single(TourStage::Wait))
+            }
+        }
+
+        // --- Wait (PollTask) ---
+        // Shares an AtomicU32. Returns Ready after 2 polls (counter becomes ≥ 2).
+        struct TourPoller {
+            counter: Arc<AtomicU32>,
+        }
+
+        #[poll_task]
+        impl PollTask<TourStage> for TourPoller {
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+            async fn poll(&self, _res: &Resources) -> Result<Poll<TourStage>, CanoError> {
+                let n = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
+                if n >= 2 {
+                    Ok(Poll::Ready(TaskResult::Single(TourStage::Crunch)))
+                } else {
+                    Ok(Poll::Pending { delay_ms: 0 })
+                }
+            }
+        }
+
+        // --- Crunch (BatchTask) ---
+        // Fan-out over [1,2,3]: each item → item * item. finish sums them.
+        struct TourBatch;
+
+        #[batch_task]
+        impl BatchTask<TourStage> for TourBatch {
+            type Item = u32;
+            type ItemOutput = u32;
+
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+            fn concurrency(&self) -> usize {
+                4
+            }
+            async fn load(&self, _res: &Resources) -> Result<Vec<u32>, CanoError> {
+                Ok(vec![1, 2, 3])
+            }
+            async fn process_item(&self, item: &u32) -> Result<u32, CanoError> {
+                Ok(item * item)
+            }
+            async fn finish(
+                &self,
+                _res: &Resources,
+                outputs: Vec<Result<u32, CanoError>>,
+            ) -> Result<TaskResult<TourStage>, CanoError> {
+                let sum: u32 = outputs.into_iter().filter_map(|r| r.ok()).sum();
+                assert_eq!(sum, 1 + 4 + 9, "1²+2²+3² = 14");
+                Ok(TaskResult::Single(TourStage::Grind))
+            }
+        }
+
+        // --- Grind (SteppedTask) ---
+        // Counts 0 → 3 (3 steps total: More(1), More(2), More(3), Done).
+        struct TourStepper;
+
+        #[derive(Serialize, Deserialize)]
+        struct GrindCursor(u32);
+
+        #[stepped_task]
+        impl SteppedTask<TourStage> for TourStepper {
+            type Cursor = GrindCursor;
+
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+            async fn step(
+                &self,
+                _res: &Resources,
+                cursor: Option<GrindCursor>,
+            ) -> Result<Step<GrindCursor, TourStage>, CanoError> {
+                let n = cursor.map(|c| c.0).unwrap_or(0);
+                if n >= 3 {
+                    Ok(Step::Done(TaskResult::Single(TourStage::Done)))
+                } else {
+                    Ok(Step::More(GrindCursor(n + 1)))
+                }
+            }
+        }
+
+        // --- build workflow ---
+        let store = Arc::new(MemCheckpoints::default());
+        let poll_counter = Arc::new(AtomicU32::new(0));
+
+        let workflow = Workflow::bare()
+            .register_router(TourStage::Route, TourRouter)
+            .register(
+                TourStage::Wait,
+                TourPoller {
+                    counter: Arc::clone(&poll_counter),
+                },
+            )
+            .register(TourStage::Crunch, TourBatch)
+            .register_stepped(TourStage::Grind, TourStepper)
+            .add_exit_state(TourStage::Done)
+            .with_checkpoint_store(store.clone())
+            .with_workflow_id("tour-interop");
+
+        let result = workflow.orchestrate(TourStage::Route).await.unwrap();
+        assert_eq!(result, TourStage::Done);
+
+        // --- assertions on the audit log ---
+        let audit = store.audit_rows("tour-interop");
+
+        // (1) No row whose state label is "Route" (the router skips the checkpoint).
+        assert!(
+            audit.iter().all(|r| r.state != "Route"),
+            "router state must leave no checkpoint row; got: {audit:?}"
+        );
+
+        // (2) Sequence numbers are dense from 0 (no gap where Route would have been).
+        for (idx, row) in audit.iter().enumerate() {
+            assert_eq!(
+                row.sequence, idx as u64,
+                "sequence gap at index {idx}: got {} expected {idx}",
+                row.sequence
+            );
+        }
+
+        // (3) The StateEntry rows, in order, must be: Wait, Crunch, Grind, Done.
+        let state_entry_states: Vec<&str> = audit
+            .iter()
+            .filter(|r| r.kind == RowKind::StateEntry)
+            .map(|r| r.state.as_str())
+            .collect();
+        assert_eq!(
+            state_entry_states,
+            vec!["Wait", "Crunch", "Grind", "Done"],
+            "StateEntry rows must cover all non-router states in order"
+        );
+
+        // (4) At least one StepCursor row exists for Grind.
+        assert!(
+            audit
+                .iter()
+                .any(|r| r.kind == RowKind::StepCursor && r.state == "Grind"),
+            "Grind stepped task must produce at least one StepCursor row"
+        );
+    }
+
     #[tokio::test]
     async fn resume_then_advance_then_fail_rolls_back_mixed_outputs_and_clears() {
         let store = Arc::new(MemCheckpoints::default());

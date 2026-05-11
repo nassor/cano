@@ -191,6 +191,11 @@ name = "stepped_task"
 path = "examples/stepped_task.rs"
 required-features = ["recovery"]
 
+[[example]]
+name = "processing_models_tour"
+path = "examples/processing_models_tour.rs"
+required-features = ["recovery"]
+
 [[bench]]
 name = "workflow_performance"
 harness = false
