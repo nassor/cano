@@ -175,6 +175,10 @@ path = "examples/router_task.rs"
 name = "poll_task"
 path = "examples/poll_task.rs"
 
+[[example]]
+name = "batch_task"
+path = "examples/batch_task.rs"
+
 [[bench]]
 name = "workflow_performance"
 harness = false
