@@ -122,6 +122,7 @@ fn expand_inherent_impl(
     let mut errors: Vec<syn::Error> = Vec::new();
     let mut has_config = false;
     let mut has_name = false;
+    let mut has_on_poll_error = false;
 
     for it in &item_impl.items {
         match it {
@@ -129,12 +130,13 @@ fn expand_inherent_impl(
                 "poll" => poll_fn = Some(f),
                 "config" => has_config = true,
                 "name" => has_name = true,
+                "on_poll_error" => has_on_poll_error = true,
                 other => {
                     errors.push(syn::Error::new_spanned(
                         &f.sig.ident,
                         format!(
                             "#[cano::poll_task]: unexpected method `{other}` in inherent impl; \
-                             only `poll`, `config`, and `name` are allowed"
+                             only `poll`, `config`, `name`, and `on_poll_error` are allowed"
                         ),
                     ));
                 }
@@ -203,11 +205,22 @@ fn expand_inherent_impl(
         None
     };
 
+    let on_poll_error_default = if !has_on_poll_error {
+        Some(quote! {
+            fn on_poll_error(&self) -> ::cano::PollErrorPolicy {
+                ::cano::PollErrorPolicy::FailFast
+            }
+        })
+    } else {
+        None
+    };
+
     let synth = quote! {
         #(#attrs)*
         #unsafety impl #generics #poll_trait_ref for #self_ty #where_clause {
             #config_default
             #name_default
+            #on_poll_error_default
             #(#user_items)*
         }
     };
@@ -393,6 +406,7 @@ fn synthesise_task_impl(
     let task_result_ty = module_prefix.qualify("TaskResult");
     let cano_error_ty = module_prefix.qualify("CanoError");
     let poll_ty = module_prefix.qualify("Poll");
+    let poll_error_policy_ty = module_prefix.qualify("PollErrorPolicy");
 
     let key_ty_tok: TokenStream = match key_ty {
         Some(k) => quote! { #k },
@@ -409,15 +423,29 @@ fn synthesise_task_impl(
             ::cano::task::poll::run_poll_loop(self, res).await
         },
         _ => quote! {
-            loop {
-                match <Self as #poll_trait_path>::poll(self, res).await? {
-                    #poll_ty::Ready(result) => return Ok(result),
-                    #poll_ty::Pending { delay_ms } => {
-                        if delay_ms > 0 {
-                            ::tokio::time::sleep(
-                                ::std::time::Duration::from_millis(delay_ms)
-                            ).await;
+            {
+                let __policy = <Self as #poll_trait_path>::on_poll_error(self);
+                let mut __consecutive_errors: u32 = 0;
+                loop {
+                    match <Self as #poll_trait_path>::poll(self, res).await {
+                        Ok(#poll_ty::Ready(result)) => return Ok(result),
+                        Ok(#poll_ty::Pending { delay_ms }) => {
+                            __consecutive_errors = 0;
+                            if delay_ms > 0 {
+                                ::tokio::time::sleep(
+                                    ::std::time::Duration::from_millis(delay_ms)
+                                ).await;
+                            }
                         }
+                        Err(__e) => match &__policy {
+                            #poll_error_policy_ty::FailFast => return Err(__e),
+                            #poll_error_policy_ty::RetryOnError { max_errors: __max } => {
+                                __consecutive_errors += 1;
+                                if __consecutive_errors > *__max {
+                                    return Err(__e);
+                                }
+                            }
+                        },
                     }
                 }
             }

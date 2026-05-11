@@ -1,9 +1,8 @@
 //! # PollTask — Wait-Until Processing Model
 //!
 //! A [`PollTask`] repeatedly calls `poll()` until it returns [`Poll::Ready`] or until an
-//! optional bound (maximum number of polls or a wall-clock timeout) is exceeded. This
-//! "wait-until" pattern is the canonical way to poll an external system for completion
-//! without blocking a thread.
+//! optional wall-clock timeout is exceeded. This "wait-until" pattern is the canonical way
+//! to poll an external system for completion without blocking a thread.
 //!
 //! ## When to use `PollTask`
 //!
@@ -54,13 +53,14 @@
 //! # }
 //! ```
 //!
-//! ## Limiting polls
+//! ## Bounding the poll loop by wall-clock time
 //!
-//! Override [`PollTask::config`] to pass a [`PollConfig`] via [`TaskConfig`], or use
-//! [`PollErrorPolicy`] fields on the config to limit how long the loop runs:
+//! There is no built-in poll-count limit. To cap total wall-clock time, return a
+//! [`TaskConfig`] with an `attempt_timeout` from [`PollTask::config`]:
 //!
 //! ```rust
 //! use cano::prelude::*;
+//! use std::time::Duration;
 //!
 //! #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 //! enum Step { Wait, Done }
@@ -69,13 +69,20 @@
 //!
 //! #[poll_task(state = Step)]
 //! impl BoundedPoller {
-//!     fn config(&self) -> TaskConfig { TaskConfig::minimal() }
+//!     fn config(&self) -> TaskConfig {
+//!         TaskConfig::minimal().with_attempt_timeout(Duration::from_secs(30))
+//!     }
 //!
 //!     async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
-//!         Ok(Poll::Pending { delay_ms: 10 })
+//!         Ok(Poll::Pending { delay_ms: 100 })
 //!     }
 //! }
 //! ```
+//!
+//! The timeout is enforced by the workflow engine when the task is dispatched via
+//! [`Workflow::orchestrate`](crate::workflow::Workflow::orchestrate). If the entire
+//! poll loop does not complete within the timeout, the workflow receives
+//! [`CanoError::Timeout`](crate::error::CanoError::Timeout).
 //!
 //! ## The trait-impl form
 //!
@@ -144,8 +151,8 @@ pub enum Poll<TState> {
 
 /// Controls how the poll loop responds when [`PollTask::poll`] returns an [`Err`].
 ///
-/// Attach to [`TaskConfig`] by returning a custom [`TaskConfig`] from
-/// [`PollTask::config`], or by using [`PollConfig`] to wrap the behaviour.
+/// Return a non-default policy from [`PollTask::on_poll_error`] to override the default
+/// fail-fast behaviour.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum PollErrorPolicy {
     /// Propagate the error immediately — the loop stops and the error is returned.
@@ -220,6 +227,33 @@ where
         Cow::Borrowed(std::any::type_name::<Self>())
     }
 
+    /// Policy for handling errors returned by [`poll`](PollTask::poll).
+    ///
+    /// Defaults to [`PollErrorPolicy::FailFast`] — the first error stops the loop.
+    /// Override to tolerate transient errors:
+    ///
+    /// ```rust
+    /// use cano::prelude::*;
+    ///
+    /// #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    /// enum Step { Wait, Done }
+    ///
+    /// struct ResilientPoller;
+    ///
+    /// #[poll_task]
+    /// impl PollTask<Step> for ResilientPoller {
+    ///     fn on_poll_error(&self) -> PollErrorPolicy {
+    ///         PollErrorPolicy::RetryOnError { max_errors: 3 }
+    ///     }
+    ///     async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
+    ///         Ok(Poll::Ready(TaskResult::Single(Step::Done)))
+    ///     }
+    /// }
+    /// ```
+    fn on_poll_error(&self) -> PollErrorPolicy {
+        PollErrorPolicy::FailFast
+    }
+
     /// Call once per poll iteration.
     ///
     /// Return [`Poll::Ready`] with the next [`TaskResult`] when the condition is met,
@@ -227,8 +261,8 @@ where
     ///
     /// # Errors
     ///
-    /// Returns [`CanoError`] on a non-recoverable error. By default the loop stops
-    /// immediately (`PollErrorPolicy::FailFast`).
+    /// Returns [`CanoError`] on a non-recoverable error. The loop's response to the
+    /// error is governed by [`on_poll_error`](PollTask::on_poll_error).
     async fn poll(&self, res: &Resources<TResourceKey>) -> Result<Poll<TState>, CanoError>;
 }
 
@@ -245,25 +279,43 @@ where
 /// The loop calls `p.poll(res)` repeatedly:
 ///
 /// - [`Poll::Ready(result)`] → return `Ok(result)`.
-/// - [`Poll::Pending { delay_ms }`] → sleep `delay_ms` ms, then poll again.
-/// - `Err(e)` → return `Err(e)` immediately.
+/// - [`Poll::Pending { delay_ms }`] → reset the consecutive-error counter, sleep
+///   `delay_ms` ms, then poll again.
+/// - `Err(e)` → consult [`PollTask::on_poll_error`]:
+///   - [`PollErrorPolicy::FailFast`] → return `Err(e)` immediately.
+///   - [`PollErrorPolicy::RetryOnError { max_errors }`] → increment the consecutive-error
+///     counter; if it exceeds `max_errors`, return `Err(e)`; otherwise continue.
 ///
-/// There is no built-in iteration limit. Use [`TaskConfig::attempt_timeout`] (via
-/// `PollTask::config`) to cap total wall-clock time.
+/// There is no built-in iteration limit. To cap total wall-clock time, return
+/// `TaskConfig::minimal().with_attempt_timeout(dur)` from [`PollTask::config`] and
+/// dispatch the task via [`Workflow::orchestrate`](crate::workflow::Workflow::orchestrate).
 pub async fn run_poll_loop<P, S, K>(p: &P, res: &Resources<K>) -> Result<TaskResult<S>, CanoError>
 where
     P: PollTask<S, K> + ?Sized,
     S: Clone + fmt::Debug + Send + Sync + 'static,
     K: Hash + Eq + Send + Sync + 'static,
 {
+    let policy = p.on_poll_error();
+    let mut consecutive_errors: u32 = 0;
+
     loop {
-        match p.poll(res).await? {
-            Poll::Ready(result) => return Ok(result),
-            Poll::Pending { delay_ms } => {
+        match p.poll(res).await {
+            Ok(Poll::Ready(result)) => return Ok(result),
+            Ok(Poll::Pending { delay_ms }) => {
+                consecutive_errors = 0;
                 if delay_ms > 0 {
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 }
             }
+            Err(e) => match &policy {
+                PollErrorPolicy::FailFast => return Err(e),
+                PollErrorPolicy::RetryOnError { max_errors } => {
+                    consecutive_errors += 1;
+                    if consecutive_errors > *max_errors {
+                        return Err(e);
+                    }
+                }
+            },
         }
     }
 }
@@ -544,5 +596,167 @@ mod tests {
         let res = Resources::new();
         let result = run_poll_loop(poller, &res).await.unwrap();
         assert_eq!(result, TaskResult::Single(Step::Done));
+    }
+
+    // ---------------------------------------------------------------------------
+    // (j) PollErrorPolicy — RetryOnError succeeds when errors < max_errors
+    // ---------------------------------------------------------------------------
+
+    // Emits `count` errors then Poll::Ready.
+    struct ErrorThenReadyPoller {
+        errors_before_ready: u32,
+        count: AtomicU32,
+    }
+
+    impl ErrorThenReadyPoller {
+        fn new(errors_before_ready: u32) -> Self {
+            Self {
+                errors_before_ready,
+                count: AtomicU32::new(0),
+            }
+        }
+    }
+
+    #[poll_task]
+    impl PollTask<Step> for ErrorThenReadyPoller {
+        fn on_poll_error(&self) -> PollErrorPolicy {
+            PollErrorPolicy::RetryOnError { max_errors: 2 }
+        }
+
+        async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
+            let n = self.count.fetch_add(1, Ordering::Relaxed);
+            if n < self.errors_before_ready {
+                Err(CanoError::task_execution("transient"))
+            } else {
+                Ok(Poll::Ready(TaskResult::Single(Step::Done)))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_on_error_within_budget_succeeds() {
+        // 2 errors then Ready — max_errors = 2 so both errors are tolerated.
+        let poller = ErrorThenReadyPoller::new(2);
+        let res = Resources::new();
+        let result = Task::run(&poller, &res).await.unwrap();
+        assert_eq!(result, TaskResult::Single(Step::Done));
+        assert_eq!(poller.count.load(Ordering::Relaxed), 3); // 2 errors + 1 Ready
+    }
+
+    // ---------------------------------------------------------------------------
+    // (k) PollErrorPolicy — RetryOnError fails when consecutive errors exceed max
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_retry_on_error_exceeds_budget_fails() {
+        // 3 consecutive errors with max_errors = 2 → should fail on the 3rd error.
+        let poller = ErrorThenReadyPoller::new(3);
+        let res = Resources::new();
+        let err = Task::run(&poller, &res).await.unwrap_err();
+        assert!(matches!(err, CanoError::TaskExecution(_)));
+        // poll called exactly 3 times: errors 1, 2, 3 (third exceeds max_errors=2)
+        assert_eq!(poller.count.load(Ordering::Relaxed), 3);
+    }
+
+    // ---------------------------------------------------------------------------
+    // (l) PollErrorPolicy — Pending resets the consecutive-error counter
+    // ---------------------------------------------------------------------------
+
+    // Sequence: error → Pending → error → Ready (Pending resets counter)
+    struct ErrorPendingErrorReadyPoller {
+        count: AtomicU32,
+    }
+
+    impl ErrorPendingErrorReadyPoller {
+        fn new() -> Self {
+            Self {
+                count: AtomicU32::new(0),
+            }
+        }
+    }
+
+    #[poll_task]
+    impl PollTask<Step> for ErrorPendingErrorReadyPoller {
+        fn on_poll_error(&self) -> PollErrorPolicy {
+            PollErrorPolicy::RetryOnError { max_errors: 1 }
+        }
+
+        async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
+            match self.count.fetch_add(1, Ordering::Relaxed) {
+                0 => Err(CanoError::task_execution("first error")),
+                1 => Ok(Poll::Pending { delay_ms: 0 }),
+                2 => Err(CanoError::task_execution("second error after reset")),
+                _ => Ok(Poll::Ready(TaskResult::Single(Step::Done))),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_retry_on_error_pending_resets_counter() {
+        // error(1) → Pending resets → error(1) → Ready: should succeed, 4 polls
+        let poller = ErrorPendingErrorReadyPoller::new();
+        let res = Resources::new();
+        let result = Task::run(&poller, &res).await.unwrap();
+        assert_eq!(result, TaskResult::Single(Step::Done));
+        assert_eq!(poller.count.load(Ordering::Relaxed), 4);
+    }
+
+    // ---------------------------------------------------------------------------
+    // (m) Default on_poll_error is FailFast
+    // ---------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_default_on_poll_error_is_fail_fast() {
+        // ErrorPoller has no on_poll_error override — default is FailFast.
+        // First error should propagate immediately (1 poll call).
+        let poller = ErrorPoller;
+        let res = Resources::new();
+        let err = Task::run(&poller, &res).await.unwrap_err();
+        assert!(matches!(err, CanoError::TaskExecution(_)));
+        // Verify the default method itself
+        assert_eq!(
+            PollTask::<Step>::on_poll_error(&poller),
+            PollErrorPolicy::FailFast
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // (n) attempt_timeout bounds the poll loop when dispatched via Workflow::orchestrate
+    // ---------------------------------------------------------------------------
+
+    struct InfinitePendingPoller;
+
+    #[poll_task]
+    impl PollTask<Step> for InfinitePendingPoller {
+        fn config(&self) -> TaskConfig {
+            TaskConfig::minimal().with_attempt_timeout(std::time::Duration::from_millis(20))
+        }
+
+        async fn poll(&self, _res: &Resources) -> Result<Poll<Step>, CanoError> {
+            Ok(Poll::Pending { delay_ms: 1 })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_attempt_timeout_bounds_infinite_pending_loop() {
+        use crate::workflow::Workflow;
+
+        let workflow = Workflow::bare()
+            .register(Step::Wait, InfinitePendingPoller)
+            .add_exit_state(Step::Done);
+
+        let start = std::time::Instant::now();
+        let err = workflow.orchestrate(Step::Wait).await.unwrap_err();
+        let elapsed = start.elapsed();
+
+        assert!(
+            matches!(err, CanoError::Timeout(_)),
+            "expected CanoError::Timeout, got: {err:?}"
+        );
+        // Should complete well within 500ms even with scheduling jitter
+        assert!(
+            elapsed < std::time::Duration::from_millis(500),
+            "timeout took too long: {elapsed:?}"
+        );
     }
 }
