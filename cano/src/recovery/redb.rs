@@ -125,6 +125,7 @@ impl CheckpointStore for RedbCheckpointStore {
                 state: payload.state,
                 task_id: payload.task_id,
                 output_blob: payload.output_blob,
+                kind: super::RowKind::StateEntry,
             });
         }
         Ok(rows)

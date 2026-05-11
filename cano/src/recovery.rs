@@ -3,8 +3,9 @@
 //! This module defines the [`CheckpointStore`] trait: a pluggable, append-only
 //! log of FSM transitions that lets a workflow be resumed after a crash. Each
 //! transition is recorded as one [`CheckpointRow`] — a monotonically increasing
-//! sequence number, the state that was entered, the task that produced it, and
-//! an optional output blob for compensatable tasks.
+//! sequence number, the state that was entered, the task that produced it, an
+//! optional output blob for compensatable tasks, and a [`RowKind`] discriminant
+//! that identifies why the row was written.
 //!
 //! ## Design
 //!
@@ -77,11 +78,27 @@ mod redb;
 #[cfg(feature = "recovery")]
 pub use redb::RedbCheckpointStore;
 
+/// Why a [`CheckpointRow`] was written — distinguishes ordinary state-entry rows
+/// from saga compensation-completion rows and `SteppedTask` cursor rows so
+/// `resume_from` can route each correctly.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum RowKind {
+    /// An ordinary "the FSM entered this state" row (the common case).
+    #[default]
+    StateEntry,
+    /// A saga compensatable task's completion row, carrying its serialized output in `output_blob`.
+    CompensationCompletion,
+    /// A `SteppedTask` iteration row, carrying the serialized cursor in `output_blob`.
+    StepCursor,
+}
+
 /// One recorded FSM transition.
 ///
 /// Rows are append-only and ordered within a run by [`sequence`](Self::sequence).
-/// `output_blob` is `Some` only for tasks whose output must be retained for
-/// compensation/rollback; it is opaque bytes to the store.
+/// `output_blob` carries opaque bytes whose purpose is discriminated by [`kind`](Self::kind):
+/// `None` for plain state-entry rows, `Some` for saga completion rows
+/// ([`RowKind::CompensationCompletion`]) and `SteppedTask` cursor rows ([`RowKind::StepCursor`]).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CheckpointRow {
     /// Monotonically increasing position of this transition within its run.
@@ -90,25 +107,44 @@ pub struct CheckpointRow {
     pub state: String,
     /// Identifier of the task that produced this transition (see `Task::name`).
     pub task_id: String,
-    /// Optional opaque output blob, retained for compensatable tasks.
+    /// Optional opaque bytes payload; see [`kind`](Self::kind) for semantics.
     pub output_blob: Option<Vec<u8>>,
+    /// Why this row was written; drives how [`resume_from`](crate::workflow::Workflow::resume_from)
+    /// routes the row during replay.
+    pub kind: RowKind,
 }
 
 impl CheckpointRow {
-    /// Build a row with no output blob.
+    /// Build a plain state-entry row: `kind = `[`RowKind::StateEntry`]`, `output_blob = None`.
     pub fn new(sequence: u64, state: impl Into<String>, task_id: impl Into<String>) -> Self {
         Self {
             sequence,
             state: state.into(),
             task_id: task_id.into(),
             output_blob: None,
+            kind: RowKind::StateEntry,
         }
     }
 
-    /// Attach an output blob (for compensatable tasks whose output must be
-    /// retained for rollback). Builder-style: `CheckpointRow::new(..).with_output(bytes)`.
+    /// Attach a saga compensation output blob and mark the row as
+    /// [`RowKind::CompensationCompletion`].
+    ///
+    /// Used for compensatable tasks whose output must be retained for rollback so that
+    /// [`resume_from`](crate::workflow::Workflow::resume_from) can rehydrate the
+    /// compensation stack. Builder-style: `CheckpointRow::new(..).with_output(bytes)`.
     pub fn with_output(mut self, output_blob: Vec<u8>) -> Self {
         self.output_blob = Some(output_blob);
+        self.kind = RowKind::CompensationCompletion;
+        self
+    }
+
+    /// Attach a `SteppedTask` cursor blob and mark the row as [`RowKind::StepCursor`].
+    ///
+    /// Mark this row as a `SteppedTask` cursor checkpoint carrying the serialized cursor
+    /// bytes. Builder-style: `CheckpointRow::new(..).with_cursor(bytes)`.
+    pub fn with_cursor(mut self, cursor_blob: Vec<u8>) -> Self {
+        self.output_blob = Some(cursor_blob);
+        self.kind = RowKind::StepCursor;
         self
     }
 }
@@ -206,10 +242,17 @@ mod tests {
         assert_eq!(bare.state, "Process");
         assert_eq!(bare.task_id, "worker");
         assert_eq!(bare.output_blob, None);
+        assert_eq!(bare.kind, RowKind::StateEntry);
 
         let carried = CheckpointRow::new(4, "Done", "worker").with_output(vec![1, 2, 3]);
         assert_eq!(carried.sequence, 4);
         assert_eq!(carried.output_blob.as_deref(), Some(&[1u8, 2, 3][..]));
+        assert_eq!(carried.kind, RowKind::CompensationCompletion);
+
+        let cursor = CheckpointRow::new(5, "Step", "stepper").with_cursor(vec![9, 8, 7]);
+        assert_eq!(cursor.sequence, 5);
+        assert_eq!(cursor.output_blob.as_deref(), Some(&[9u8, 8, 7][..]));
+        assert_eq!(cursor.kind, RowKind::StepCursor);
     }
 
     #[tokio::test]

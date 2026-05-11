@@ -224,7 +224,7 @@ pub mod scheduler;
 pub use circuit::{CircuitBreaker, CircuitPolicy, CircuitState, Permit as CircuitPermit};
 pub use error::{CanoError, CanoResult};
 pub use observer::WorkflowObserver;
-pub use recovery::{CheckpointRow, CheckpointStore};
+pub use recovery::{CheckpointRow, CheckpointStore, RowKind};
 pub use resource::{HealthStatus, Resource, Resources};
 pub use saga::{CompensatableTask, ErasedCompensatable};
 pub use task::batch::{
@@ -353,8 +353,8 @@ pub mod prelude {
         BatchTask, CanoError, CanoResult, CheckpointRow, CheckpointStore, CircuitBreaker,
         CircuitPermit, CircuitPolicy, CircuitState, CompensatableTask, DefaultNodeResult,
         HealthStatus, JoinConfig, JoinStrategy, MemoryStore, Node, Poll, PollErrorPolicy, PollTask,
-        Resource, Resources, RetryMode, RouterTask, SplitResult, SplitTaskResult, StateEntry, Task,
-        TaskConfig, TaskObject, TaskResult, Workflow, WorkflowObserver,
+        Resource, Resources, RetryMode, RouterTask, RowKind, SplitResult, SplitTaskResult,
+        StateEntry, Task, TaskConfig, TaskObject, TaskResult, Workflow, WorkflowObserver,
     };
 
     #[cfg(feature = "scheduler")]

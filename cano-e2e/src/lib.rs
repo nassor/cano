@@ -146,6 +146,7 @@ impl CheckpointStore for PostgresCheckpointStore {
                     state: r.get(1),
                     task_id: r.get(2),
                     output_blob: r.get(3),
+                    kind: cano::recovery::RowKind::StateEntry,
                 }
             })
             .collect())
