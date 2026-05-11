@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["cano", "cano-macros"]
+members = ["cano", "cano-macros", "cano-e2e"]
+# `cano-e2e` pulls in heavy Docker/Postgres test deps — keep it out of the default
+# `cargo build` / `cargo test` selection; run it explicitly with `-p cano-e2e`.
+default-members = ["cano", "cano-macros"]
 
 [workspace.package]
 version = "0.11.1"

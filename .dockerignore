@@ -1,0 +1,7 @@
+# Keep the Docker build context small (the workspace root is the build context).
+target
+.git
+.github
+docs
+*.redb
+**/*.redb
