@@ -81,12 +81,14 @@ where
                             None => compensate_fut.await,
                         }
                     };
-                    match AssertUnwindSafe(bounded).catch_unwind().await {
-                        Ok(Ok(())) => {}
+                    #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
+                    let compensate_ok = match AssertUnwindSafe(bounded).catch_unwind().await {
+                        Ok(Ok(())) => true,
                         Ok(Err(e)) => {
                             #[cfg(feature = "tracing")]
                             tracing::error!(task_id = %entry.task_id, error = %e, "compensation failed");
                             errors.push(e);
+                            false
                         }
                         Err(payload) => {
                             let msg = panic_payload_message(&*payload);
@@ -96,19 +98,26 @@ where
                                 "compensate for {:?} panicked: {msg}",
                                 entry.task_id
                             )));
+                            false
                         }
-                    }
+                    };
+                    #[cfg(feature = "metrics")]
+                    crate::metrics::compensation_run(compensate_ok);
                 }
             }
         }
         if errors.len() == 1 {
             // Clean rollback — clear the log (best-effort), surface the original error.
+            #[cfg(feature = "metrics")]
+            crate::metrics::compensation_drain(true);
             self.clear_checkpoint_log(workflow_id).await;
             Err(errors
                 .into_iter()
                 .next()
                 .expect("errors has exactly one element"))
         } else {
+            #[cfg(feature = "metrics")]
+            crate::metrics::compensation_drain(false);
             Err(CanoError::compensation_failed(errors))
         }
     }
@@ -121,12 +130,15 @@ where
         let Some((store, wf_id)) = self.checkpoint_store.as_ref().zip(workflow_id) else {
             return;
         };
+        let clear_result = store.clear(wf_id).await;
+        #[cfg(feature = "metrics")]
+        crate::metrics::checkpoint_clear(clear_result.is_ok());
         #[cfg(feature = "tracing")]
-        if let Err(e) = store.clear(wf_id).await {
+        if let Err(e) = clear_result {
             tracing::warn!(workflow_id = %wf_id, error = %e, "failed to clear checkpoint log");
         }
         #[cfg(not(feature = "tracing"))]
-        let _ = store.clear(wf_id).await;
+        let _ = clear_result;
     }
 
     pub(super) async fn execute_compensatable_task(
@@ -2249,6 +2261,169 @@ mod tests {
             *log.lock().unwrap(),
             vec![("A".to_string(), 42u32)],
             "StepCursor row must not become a compensation entry"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "metrics"))]
+mod metrics_tests {
+    use crate::metrics::test_support::*;
+    use crate::prelude::*;
+    use crate::recovery::{CheckpointRow, CheckpointStore};
+    use crate::saga;
+    use crate::saga::CompensatableTask;
+    use crate::task::TaskConfig;
+    use crate::workflow::test_support::{SimpleTask, TestState};
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    // ---- In-memory CheckpointStore for recovery tests ----
+
+    #[derive(Default)]
+    struct MemCheckpoints {
+        live: Mutex<HashMap<String, Vec<CheckpointRow>>>,
+        audit: Mutex<Vec<(String, CheckpointRow)>>,
+    }
+
+    #[cano_macros::checkpoint_store]
+    impl CheckpointStore for MemCheckpoints {
+        async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
+            let mut live = self.live.lock().unwrap();
+            let rows = live.entry(workflow_id.to_string()).or_default();
+            if rows.iter().any(|r| r.sequence == row.sequence) {
+                return Err(CanoError::checkpoint_store(format!(
+                    "checkpoint conflict: {workflow_id:?} already has sequence {}",
+                    row.sequence
+                )));
+            }
+            self.audit
+                .lock()
+                .unwrap()
+                .push((workflow_id.to_string(), row.clone()));
+            rows.push(row);
+            Ok(())
+        }
+        async fn load_run(&self, workflow_id: &str) -> Result<Vec<CheckpointRow>, CanoError> {
+            let mut rows = self
+                .live
+                .lock()
+                .unwrap()
+                .get(workflow_id)
+                .cloned()
+                .unwrap_or_default();
+            rows.sort_by_key(|r| r.sequence);
+            Ok(rows)
+        }
+        async fn clear(&self, workflow_id: &str) -> Result<(), CanoError> {
+            self.live.lock().unwrap().remove(workflow_id);
+            Ok(())
+        }
+    }
+
+    // ---- Recovery: checkpoint append + clear counters ----
+
+    #[test]
+    fn checkpoint_append_and_clear_counters_on_successful_run() {
+        let (res, rows) = run_with_recorder(|| async {
+            let store = Arc::new(MemCheckpoints::default());
+            let workflow = Workflow::bare()
+                .with_checkpoint_store(store.clone())
+                .with_workflow_id("metrics-wf")
+                .register(TestState::Start, SimpleTask::new(TestState::Process))
+                .register(TestState::Process, SimpleTask::new(TestState::Complete))
+                .add_exit_state(TestState::Complete);
+            workflow.orchestrate(TestState::Start).await
+        });
+        assert_eq!(res.unwrap(), TestState::Complete);
+        // At minimum one append per state entered (Start, Process, Complete = 3 rows)
+        assert!(
+            counter(&rows, "cano_checkpoint_appends_total", &[("result", "ok")]) >= 1,
+            "expected at least one successful checkpoint append"
+        );
+        // A successful run clears its log exactly once
+        assert_eq!(
+            counter(&rows, "cano_checkpoint_clears_total", &[("result", "ok")]),
+            1,
+            "expected exactly one checkpoint clear on successful run"
+        );
+    }
+
+    // ---- Saga: compensation run + drain counters ----
+
+    type CompLog = Arc<Mutex<Vec<(String, u32)>>>;
+
+    #[derive(Clone)]
+    struct CompTask {
+        value: u32,
+        next_state: TestState,
+        log: CompLog,
+    }
+
+    #[saga::task]
+    impl CompensatableTask<TestState> for CompTask {
+        type Output = u32;
+        fn config(&self) -> TaskConfig {
+            TaskConfig::minimal()
+        }
+        async fn run(&self, _res: &Resources) -> Result<(TaskResult<TestState>, u32), CanoError> {
+            Ok((TaskResult::Single(self.next_state.clone()), self.value))
+        }
+        async fn compensate(&self, _res: &Resources, output: u32) -> Result<(), CanoError> {
+            self.log.lock().unwrap().push(("comp".to_string(), output));
+            Ok(())
+        }
+    }
+
+    struct AlwaysFailTask;
+
+    #[crate::task]
+    impl Task<TestState> for AlwaysFailTask {
+        fn config(&self) -> TaskConfig {
+            TaskConfig::minimal()
+        }
+        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            Err(CanoError::task_execution(
+                "intentional failure for saga test",
+            ))
+        }
+    }
+
+    #[test]
+    fn compensation_run_and_drain_counters_on_clean_rollback() {
+        let (res, rows) = run_with_recorder(|| async {
+            let log: CompLog = Arc::new(Mutex::new(Vec::new()));
+            // CompensatableTask succeeds (Start→Process), then AlwaysFailTask fails.
+            // This triggers a LIFO drain with one compensate() call which succeeds.
+            let workflow = Workflow::bare()
+                .register_with_compensation(
+                    TestState::Start,
+                    CompTask {
+                        value: 42,
+                        next_state: TestState::Process,
+                        log: log.clone(),
+                    },
+                )
+                .register(TestState::Process, AlwaysFailTask)
+                .add_exit_state(TestState::Complete);
+            workflow.orchestrate(TestState::Start).await
+        });
+        // Clean rollback: the original error is returned (not CompensationFailed)
+        assert!(res.is_err(), "expected workflow to fail");
+        // compensate() was called once and succeeded
+        assert_eq!(
+            counter(&rows, "cano_compensations_run_total", &[("result", "ok")]),
+            1,
+            "expected one successful compensate() call"
+        );
+        // The drain was clean (all compensations ok)
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_compensation_drains_total",
+                &[("outcome", "clean")]
+            ),
+            1,
+            "expected a clean compensation drain"
         );
     }
 }

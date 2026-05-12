@@ -257,10 +257,12 @@ where
                     // Router is unreachable here (is_router guard above), Split has no single task_id.
                     _ => String::new(),
                 };
-                if let Err(e) = store
+                let append_result = store
                     .append(wf_id, CheckpointRow::new(sequence, label, task_id))
-                    .await
-                {
+                    .await;
+                #[cfg(feature = "metrics")]
+                crate::metrics::checkpoint_append(append_result.is_ok());
+                if let Err(e) = append_result {
                     let err = CanoError::checkpoint_store(format!("append checkpoint: {e}"));
                     return self
                         .run_compensations(workflow_id.as_deref(), compensation_stack, err)
@@ -335,7 +337,10 @@ where
                                 let label = state_label.as_deref().unwrap_or_default();
                                 let row = CheckpointRow::new(sequence, label, task_name.clone())
                                     .with_output(output_blob.clone());
-                                if let Err(e) = store.append(wf_id, row).await {
+                                let comp_append_result = store.append(wf_id, row).await;
+                                #[cfg(feature = "metrics")]
+                                crate::metrics::checkpoint_append(comp_append_result.is_ok());
+                                if let Err(e) = comp_append_result {
                                     let err = CanoError::checkpoint_store(format!(
                                         "append compensation checkpoint: {e}"
                                     ));
@@ -572,7 +577,10 @@ where
                     {
                         let row = CheckpointRow::new(*sequence, state_label, task_name.as_ref())
                             .with_cursor(new_cursor_bytes.clone());
-                        if let Err(e) = store.append(wf_id, row).await {
+                        let cursor_append_result = store.append(wf_id, row).await;
+                        #[cfg(feature = "metrics")]
+                        crate::metrics::checkpoint_append(cursor_append_result.is_ok());
+                        if let Err(e) = cursor_append_result {
                             break Err(CanoError::checkpoint_store(format!(
                                 "append step cursor checkpoint: {e}"
                             )));
