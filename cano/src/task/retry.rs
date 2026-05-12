@@ -318,6 +318,8 @@ where
                     #[cfg(feature = "tracing")]
                     warn!(error = %e, "Circuit breaker open; short-circuiting task");
                     notify_observers(config, |o, name| o.on_circuit_open(name));
+                    #[cfg(feature = "metrics")]
+                    crate::metrics::circuit_rejection();
                     return Err(e);
                 }
             },
@@ -338,6 +340,9 @@ where
                 Err(_) => b.record_failure(p),
             }
         }
+
+        #[cfg(feature = "metrics")]
+        crate::metrics::task_attempt(attempt_outcome.is_ok());
 
         match attempt_outcome {
             Ok(result) => {
@@ -1066,6 +1071,79 @@ mod tests {
             invocations.load(Ordering::SeqCst),
             before,
             "task body must not run when the breaker is open"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "metrics"))]
+mod metrics_tests {
+    use super::*;
+    use crate::circuit::{CircuitBreaker, CircuitPolicy};
+    use crate::error::CanoError;
+    use crate::metrics::test_support::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    #[test]
+    fn retry_loop_counts_attempts() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls2 = Arc::clone(&calls);
+        let config = TaskConfig::new().with_fixed_retry(3, Duration::from_millis(1));
+        let (res, rows) = run_with_recorder(move || async move {
+            run_with_retries::<u8, _, _>(&config, move || {
+                let n = calls2.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if n < 2 {
+                        Err(CanoError::task_execution("transient"))
+                    } else {
+                        Ok(7u8)
+                    }
+                }
+            })
+            .await
+        });
+        assert_eq!(res.unwrap(), 7);
+        assert_eq!(
+            counter(&rows, "cano_task_attempts_total", &[("outcome", "failed")]),
+            2
+        );
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_task_attempts_total",
+                &[("outcome", "completed")]
+            ),
+            1
+        );
+        assert_eq!(
+            counter_opt(&rows, "cano_circuit_rejections_total", &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn open_breaker_records_a_circuit_rejection() {
+        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+            failure_threshold: 1,
+            reset_timeout: Duration::from_secs(60),
+            half_open_max_calls: 1,
+        }));
+        let p = breaker.try_acquire().unwrap();
+        breaker.record_failure(p);
+        let config = TaskConfig::minimal().with_circuit_breaker(Arc::clone(&breaker));
+        let (res, rows) = run_with_recorder(move || async move {
+            run_with_retries::<u8, _, _>(&config, || async { Ok(1u8) }).await
+        });
+        assert!(matches!(res, Err(CanoError::CircuitOpen(_))));
+        assert_eq!(counter(&rows, "cano_circuit_rejections_total", &[]), 1);
+        assert_eq!(
+            counter_opt(
+                &rows,
+                "cano_task_attempts_total",
+                &[("outcome", "completed")]
+            ),
+            None
         );
     }
 }
