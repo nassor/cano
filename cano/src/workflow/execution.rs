@@ -295,6 +295,11 @@ where
             #[cfg(feature = "tracing")]
             debug!(current_state = ?current_state, "Executing state");
 
+            #[cfg(feature = "metrics")]
+            let _state_label = crate::metrics::state_label(&current_state);
+            #[cfg(feature = "metrics")]
+            let _dispatch_started = std::time::Instant::now();
+
             // Dispatch by entry type. Any `Err` triggers a compensation drain.
             let step: Result<TState, CanoError> = match state_entry.as_ref() {
                 StateEntry::Single { task, config } => {
@@ -378,6 +383,19 @@ where
                     .await
                 }
             };
+
+            #[cfg(feature = "metrics")]
+            crate::metrics::task_dispatch_duration(
+                &_state_label,
+                match state_entry.as_ref() {
+                    StateEntry::Single { .. } => "single",
+                    StateEntry::Router { .. } => "router",
+                    StateEntry::Split { .. } => "split",
+                    StateEntry::CompensatableSingle { .. } => "compensatable",
+                    StateEntry::Stepped { .. } => "stepped",
+                },
+                _dispatch_started.elapsed(),
+            );
 
             current_state = match step {
                 Ok(s) => s,
@@ -701,6 +719,13 @@ where
         let split_result = self
             .collect_results(join_set, &join_config, total_tasks)
             .await?;
+
+        #[cfg(feature = "metrics")]
+        crate::metrics::split_branch_results(
+            split_result.successes.len(),
+            split_result.errors.len(),
+            split_result.cancelled.len(),
+        );
 
         // Fire per-task observer events for everything that ran to completion.
         // Cancelled tasks are intentionally silent (no dedicated hook), and an

@@ -873,6 +873,98 @@ mod metrics_tests {
         );
         assert_eq!(gauge(&rows, "cano_workflow_active", &[]), 0.0);
     }
+
+    #[test]
+    fn per_state_task_durations_are_recorded_single_and_split() {
+        let (res, rows) = run_with_recorder(|| async { ok_workflow().orchestrate(S::Start).await });
+        assert_eq!(res.unwrap(), S::Done);
+        assert_eq!(
+            histogram_count(
+                &rows,
+                "cano_task_duration_seconds",
+                &[("state", "Start"), ("kind", "single")]
+            ),
+            1
+        );
+        assert_eq!(
+            histogram_count(
+                &rows,
+                "cano_task_duration_seconds",
+                &[("state", "Mid"), ("kind", "single")]
+            ),
+            1
+        );
+    }
+
+    #[derive(Clone)]
+    struct Branch {
+        fail: bool,
+    }
+    #[crate::task]
+    impl Task<S> for Branch {
+        fn config(&self) -> TaskConfig {
+            TaskConfig::minimal()
+        }
+        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+            if self.fail {
+                Err(CanoError::task_execution("nope"))
+            } else {
+                Ok(TaskResult::Single(S::Done))
+            }
+        }
+    }
+
+    #[test]
+    fn split_records_branch_results_and_a_split_kind_duration() {
+        let (res, rows) = run_with_recorder(|| async {
+            Workflow::bare()
+                .register_split(
+                    S::Start,
+                    vec![
+                        Branch { fail: false },
+                        Branch { fail: true },
+                        Branch { fail: false },
+                    ],
+                    JoinConfig::new(JoinStrategy::PartialResults(2), S::Done),
+                )
+                .add_exit_state(S::Done)
+                .orchestrate(S::Start)
+                .await
+        });
+        assert_eq!(res.unwrap(), S::Done);
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_split_branch_results_total",
+                &[("result", "success")]
+            ),
+            2
+        );
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_split_branch_results_total",
+                &[("result", "failure")]
+            ),
+            1
+        );
+        assert_eq!(
+            counter_opt(
+                &rows,
+                "cano_split_branch_results_total",
+                &[("result", "cancelled")]
+            ),
+            None
+        );
+        assert_eq!(
+            histogram_count(
+                &rows,
+                "cano_task_duration_seconds",
+                &[("state", "Start"), ("kind", "split")]
+            ),
+            1
+        );
+    }
 }
 
 #[cfg(test)]
