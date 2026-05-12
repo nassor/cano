@@ -54,6 +54,17 @@ pub(super) async fn spawn_every_loop<TState, TResourceKey>(
     }
 
     loop {
+        // Check `running` at the top of the iteration, mirroring
+        // `spawn_cron_loop`. The driver's `notify_waiters()` only wakes loops
+        // parked on `notified()` at the instant of the call — a loop that was
+        // inside `execute_flow` (or between `wait_until_eligible` and the
+        // `select!`) misses it and would otherwise sleep a full `interval`
+        // before the post-sleep check fires, stalling shutdown by up to one
+        // schedule period. The sticky `running` flag closes that gap here.
+        if !*running.read().await {
+            break;
+        }
+
         // Sleep at least `interval`, but if a backoff window pushes us further
         // out, sleep until that instant. `notify` still wins in the select!
         // below.
