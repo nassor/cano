@@ -250,6 +250,9 @@ pub use workflow::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult, State
 #[cfg(feature = "tracing")]
 pub use observer::TracingObserver;
 
+#[cfg(feature = "metrics")]
+pub use observer::MetricsObserver;
+
 #[cfg(feature = "scheduler")]
 pub use scheduler::{BackoffPolicy, FlowInfo, RunningScheduler, Schedule, Scheduler, Status};
 
@@ -320,6 +323,9 @@ pub mod prelude {
 
     #[cfg(feature = "tracing")]
     pub use crate::TracingObserver;
+
+    #[cfg(feature = "metrics")]
+    pub use crate::MetricsObserver;
 
     #[cfg(feature = "recovery")]
     pub use crate::RedbCheckpointStore;

@@ -183,6 +183,53 @@ impl WorkflowObserver for TracingObserver {
     }
 }
 
+/// A [`WorkflowObserver`] that re-emits each hook as a metric (counter), under the
+/// `cano_*` namespace. Attach with `Workflow::with_observer(Arc::new(MetricsObserver::new()))`
+/// — the metrics it emits then require this observer to be attached, exactly as `tracing`
+/// events from [`TracingObserver`] require attaching that observer.
+///
+/// Requires the `metrics` feature. Complements (does not replace) the always-on
+/// `#[cfg(feature = "metrics")]` direct instrumentation elsewhere in the engine (workflow run
+/// duration, circuit internals, scheduler flows, …) — see [`crate::metrics`].
+#[cfg(feature = "metrics")]
+#[derive(Debug, Clone, Default)]
+pub struct MetricsObserver;
+
+#[cfg(feature = "metrics")]
+impl MetricsObserver {
+    /// Construct a `MetricsObserver`.
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(feature = "metrics")]
+impl WorkflowObserver for MetricsObserver {
+    fn on_state_enter(&self, state: &str) {
+        crate::metrics::observed_state_enter(state);
+    }
+    fn on_task_success(&self, task_id: &str) {
+        crate::metrics::observed_task_run(task_id, true);
+    }
+    fn on_task_failure(&self, task_id: &str, _err: &CanoError) {
+        crate::metrics::observed_task_run(task_id, false);
+    }
+    fn on_retry(&self, task_id: &str, _attempt: u32) {
+        crate::metrics::observed_task_retry(task_id);
+    }
+    fn on_circuit_open(&self, task_id: &str) {
+        crate::metrics::observed_circuit_open(task_id);
+    }
+    fn on_checkpoint(&self, _workflow_id: &str, _sequence: u64) {
+        crate::metrics::observed_checkpoint();
+    }
+    fn on_resume(&self, _workflow_id: &str, _sequence: u64) {
+        crate::metrics::observed_resume();
+    }
+    // on_task_start: intentionally not emitted — on_task_success/on_task_failure already
+    // count each dispatch by outcome; a separate "start" counter would just be their sum.
+}
+
 #[cfg(test)]
 mod tests {
     use crate::prelude::*;
@@ -403,5 +450,110 @@ mod tests {
             }
         }
         assert!(Anon.name().contains("Anon"), "{}", Anon.name());
+    }
+}
+
+#[cfg(all(test, feature = "metrics"))]
+mod metrics_observer_tests {
+    use super::*;
+    use crate::metrics::test_support::*;
+    use crate::prelude::*;
+    use std::sync::Arc;
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    enum S {
+        Start,
+        Mid,
+        Done,
+    }
+
+    struct GoTo(S);
+    #[crate::task]
+    impl Task<S> for GoTo {
+        fn name(&self) -> std::borrow::Cow<'static, str> {
+            std::borrow::Cow::Borrowed("GoTo")
+        }
+        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+            Ok(TaskResult::Single(self.0.clone()))
+        }
+    }
+
+    #[test]
+    fn metrics_observer_emits_state_enters_and_task_runs() {
+        let (res, rows) = run_with_recorder(|| async {
+            Workflow::bare()
+                .with_observer(Arc::new(MetricsObserver::new()))
+                .register(S::Start, GoTo(S::Mid))
+                .register(S::Mid, GoTo(S::Done))
+                .add_exit_state(S::Done)
+                .orchestrate(S::Start)
+                .await
+        });
+        assert_eq!(res.unwrap(), S::Done);
+        assert_eq!(
+            counter(&rows, "cano_state_enters_total", &[("state", "Start")]),
+            1
+        );
+        assert_eq!(
+            counter(&rows, "cano_state_enters_total", &[("state", "Mid")]),
+            1
+        );
+        assert_eq!(
+            counter(&rows, "cano_state_enters_total", &[("state", "Done")]),
+            1
+        );
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_observed_task_runs_total",
+                &[("task", "GoTo"), ("outcome", "completed")]
+            ),
+            2
+        );
+    }
+
+    #[test]
+    fn metrics_observer_emits_retries() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let n = Arc::new(AtomicUsize::new(0));
+        let n2 = Arc::clone(&n);
+        struct Flaky(Arc<AtomicUsize>);
+        #[crate::task]
+        impl Task<S> for Flaky {
+            fn name(&self) -> std::borrow::Cow<'static, str> {
+                std::borrow::Cow::Borrowed("Flaky")
+            }
+            fn config(&self) -> TaskConfig {
+                TaskConfig::new().with_fixed_retry(3, std::time::Duration::from_millis(1))
+            }
+            async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+                if self.0.fetch_add(1, Ordering::SeqCst) < 2 {
+                    Err(CanoError::task_execution("transient"))
+                } else {
+                    Ok(TaskResult::Single(S::Done))
+                }
+            }
+        }
+        let (res, rows) = run_with_recorder(move || async move {
+            Workflow::bare()
+                .with_observer(Arc::new(MetricsObserver::new()))
+                .register(S::Start, Flaky(n2))
+                .add_exit_state(S::Done)
+                .orchestrate(S::Start)
+                .await
+        });
+        assert_eq!(res.unwrap(), S::Done);
+        assert_eq!(
+            counter(&rows, "cano_task_retries_total", &[("task", "Flaky")]),
+            2
+        );
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_observed_task_runs_total",
+                &[("task", "Flaky"), ("outcome", "completed")]
+            ),
+            1
+        );
     }
 }
