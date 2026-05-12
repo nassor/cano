@@ -160,3 +160,63 @@ mod test_support;
 
 pub use builder::Scheduler;
 pub use running::RunningScheduler;
+
+#[cfg(all(test, feature = "metrics"))]
+mod metrics_tests {
+    use crate::metrics::test_support::*;
+    use crate::prelude::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    enum St {
+        Start,
+        Done,
+    }
+    struct Ok1;
+    #[crate::task]
+    impl Task<St> for Ok1 {
+        async fn run_bare(&self) -> Result<TaskResult<St>, CanoError> {
+            Ok(TaskResult::Single(St::Done))
+        }
+    }
+
+    #[test]
+    fn manual_trigger_records_a_completed_flow_run() {
+        let ((), rows) = run_with_recorder(|| async {
+            let wf = Workflow::bare()
+                .register(St::Start, Ok1)
+                .add_exit_state(St::Done);
+            let mut scheduler = Scheduler::<St>::new();
+            scheduler.manual("flow_a", wf, St::Start).unwrap();
+            let running = scheduler.start().await.unwrap();
+            running.trigger("flow_a").await.unwrap();
+            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            running.stop().await.unwrap();
+        });
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_scheduler_flow_runs_total",
+                &[("flow", "flow_a"), ("outcome", "completed")]
+            ),
+            1
+        );
+        assert_eq!(
+            histogram_count(
+                &rows,
+                "cano_scheduler_flow_duration_seconds",
+                &[("flow", "flow_a")]
+            ),
+            1
+        );
+        assert_eq!(gauge(&rows, "cano_scheduler_active_flows", &[]), 0.0);
+        assert_eq!(
+            counter_opt(
+                &rows,
+                "cano_scheduler_flow_backoff_total",
+                &[("flow", "flow_a")]
+            ),
+            None
+        );
+    }
+}
