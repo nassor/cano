@@ -42,8 +42,6 @@
 //! is small and bounded, but if you have a latency-critical build that does not collect
 //! metrics, leave the feature off.
 
-#![allow(dead_code)] // helpers are wired up across the following tasks; the final task removes this
-
 use metrics::{
     Unit, counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram,
 };
