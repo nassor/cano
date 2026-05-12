@@ -80,7 +80,7 @@ It excels at managing complex lifecycles where state transitions matter:
 <div class="feature-card animate-in">
 <div class="feature-icon accent" aria-hidden="true">&#9673;</div>
 <h3>Observability</h3>
-<p>Built-in <code>tracing</code> spans, plus <code>WorkflowObserver</code> hooks and resource health probes.</p>
+<p>Built-in <code>tracing</code> spans and <code>metrics</code> counters, plus <code>WorkflowObserver</code> hooks and resource health probes.</p>
 </div>
 </div>
 
@@ -132,12 +132,13 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 <p>
 Cano ships with <strong>no features enabled by default</strong>. <code>features = ["all"]</code> turns
-on all three optional features at once:
+on all four optional features at once:
 </p>
 <ul>
 <li><code>scheduler</code> — the <a href="scheduler/"><code>Scheduler</code></a> (cron + interval + manual triggers)</li>
 <li><code>tracing</code> — <a href="tracing/"><code>tracing</code>-crate spans</a> and the <code>TracingObserver</code></li>
 <li><code>recovery</code> — <a href="recovery/"><code>RedbCheckpointStore</code></a>, the embedded ACID checkpoint store (the <code>CheckpointStore</code> trait itself is always available)</li>
+<li><code>metrics</code> — <a href="metrics/"><code>metrics</code>-crate counters / histograms / gauges</a> and the <code>MetricsObserver</code></li>
 </ul>
 <p>
 Pick only what you need — e.g. <code>features = ["recovery"]</code>, or omit <code>features</code>
@@ -219,7 +220,7 @@ async fn main() -> Result<(), CanoError> {
 <li><a href="task/">Task</a> — the default processing unit, then the rest of the <a href="task/#task-family">Task family</a> (<a href="router-task/">RouterTask</a>, <a href="poll-task/">PollTask</a>, <a href="batch-task/">BatchTask</a>, <a href="stepped-task/">SteppedTask</a>) as you hit a shape that fits.</li>
 <li><a href="split-join/">Split &amp; Join</a> and <a href="scheduler/">Scheduler</a> — parallelism within a workflow, and time-driven execution of workflows.</li>
 <li>Resilience &amp; recovery: <a href="resilience/">Resilience</a>, <a href="recovery/">Recovery</a>, <a href="saga/">Saga</a>.</li>
-<li>Observability: <a href="tracing/">Tracing</a>, <a href="observers/">Observers</a>.</li>
+<li>Observability: <a href="tracing/">Tracing</a>, <a href="metrics/">Metrics</a>, <a href="observers/">Observers</a>.</li>
 </ol>
 <p>Every concept has a runnable example under <a href="https://github.com/nassor/cano/tree/main/cano/examples"><code>cano/examples/</code></a> — each page links the relevant ones.</p>
 

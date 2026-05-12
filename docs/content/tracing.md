@@ -13,7 +13,9 @@ template = "page.html"
 <span class="callout-label">See also</span>
 <p>This page covers Cano's built-in <code>tracing</code> <em>spans</em>. For the synchronous callback API
 (<code>WorkflowObserver</code>) and the ready-made <code>TracingObserver</code> that re-emits those callbacks
-as <code>tracing</code> events, see <a href="../observers/">Observers</a>.</p>
+as <code>tracing</code> events, see <a href="../observers/">Observers</a>. For the sibling
+<code>metrics</code> feature — which re-emits the same observer hooks as <code>metrics</code>-crate
+counters and histograms — see <a href="../metrics/">Metrics</a>.</p>
 </div>
 
 <nav class="page-toc" aria-label="Table of contents">

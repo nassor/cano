@@ -10,7 +10,7 @@ template = "page.html"
 
 <p>
 Cano gives you two opt-in observability surfaces that sit alongside the
-<a href="../tracing/">tracing</a> integration:
+<a href="../tracing/">tracing</a> integration and the <a href="../metrics/">metrics</a> feature:
 </p>
 <ul>
 <li><strong><code>WorkflowObserver</code></strong> — synchronous callbacks fired at every
