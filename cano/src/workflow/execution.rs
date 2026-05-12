@@ -551,14 +551,20 @@ where
                 Ok(ErasedStep::Done(TaskResult::Single(next_state))) => {
                     #[cfg(feature = "tracing")]
                     tracing::debug!(next_state = ?next_state, "Stepped task completed");
+                    #[cfg(feature = "metrics")]
+                    crate::metrics::step_iteration(true);
                     break Ok(next_state);
                 }
                 Ok(ErasedStep::Done(TaskResult::Split(_))) => {
+                    #[cfg(feature = "metrics")]
+                    crate::metrics::step_iteration(true);
                     break Err(CanoError::workflow(
                         "Stepped task returned split result — split is not supported for Stepped states",
                     ));
                 }
                 Ok(ErasedStep::More(new_cursor_bytes)) => {
+                    #[cfg(feature = "metrics")]
+                    crate::metrics::step_iteration(false);
                     // Persist the cursor before advancing so a crash between steps
                     // can resume from this exact position.
                     if let (Some(store), Some(wf_id)) =
