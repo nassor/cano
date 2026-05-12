@@ -323,10 +323,16 @@ where
                         .await
                 }
                 StateEntry::CompensatableSingle { task, config } => {
-                    match self
+                    let comp_result = self
                         .execute_compensatable_task(task.clone(), Arc::clone(config))
-                        .await
-                    {
+                        .await;
+                    #[cfg(feature = "metrics")]
+                    crate::metrics::task_dispatch_duration(
+                        &_state_label,
+                        "compensatable",
+                        _dispatch_started.elapsed(),
+                    );
+                    match comp_result {
                         Ok((next_state, output_blob)) => {
                             let task_name = task.name().into_owned();
                             // Persist a completion row carrying the output so a resumed
@@ -389,18 +395,22 @@ where
                 }
             };
 
+            // CompensatableSingle records its own duration earlier (before the
+            // completion-row append) so it is excluded here to avoid double-counting.
             #[cfg(feature = "metrics")]
-            crate::metrics::task_dispatch_duration(
-                &_state_label,
-                match state_entry.as_ref() {
-                    StateEntry::Single { .. } => "single",
-                    StateEntry::Router { .. } => "router",
-                    StateEntry::Split { .. } => "split",
-                    StateEntry::CompensatableSingle { .. } => "compensatable",
-                    StateEntry::Stepped { .. } => "stepped",
-                },
-                _dispatch_started.elapsed(),
-            );
+            if let Some(kind) = match state_entry.as_ref() {
+                StateEntry::Single { .. } => Some("single"),
+                StateEntry::Router { .. } => Some("router"),
+                StateEntry::Split { .. } => Some("split"),
+                StateEntry::CompensatableSingle { .. } => None,
+                StateEntry::Stepped { .. } => Some("stepped"),
+            } {
+                crate::metrics::task_dispatch_duration(
+                    &_state_label,
+                    kind,
+                    _dispatch_started.elapsed(),
+                );
+            }
 
             current_state = match step {
                 Ok(s) => s,

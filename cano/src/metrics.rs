@@ -177,7 +177,7 @@ pub fn describe() {
     describe_counter!(
         POLL_ITERATIONS_TOTAL,
         Unit::Count,
-        "PollTask poll() calls, by outcome (ready|pending)"
+        "PollTask poll iterations, by outcome (ready|pending)"
     );
     describe_counter!(
         BATCH_RUNS_TOTAL,
@@ -192,7 +192,7 @@ pub fn describe() {
     describe_counter!(
         STEP_ITERATIONS_TOTAL,
         Unit::Count,
-        "SteppedTask step() calls, by outcome (more|done)"
+        "SteppedTask step iterations, by outcome (more|done)"
     );
     describe_counter!(
         CHECKPOINT_APPENDS_TOTAL,
