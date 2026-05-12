@@ -328,6 +328,11 @@ where
         });
 
         self.resources.setup_all().await?;
+        #[cfg(feature = "metrics")]
+        let _active = crate::metrics::WorkflowActiveGuard::new();
+        #[cfg(feature = "metrics")]
+        let _started = std::time::Instant::now();
+
         let exec = self.execute_workflow_from(
             resume_state,
             start_sequence,
@@ -337,12 +342,28 @@ where
         );
         let result = if let Some(timeout_duration) = self.workflow_timeout {
             match tokio::time::timeout(timeout_duration, exec).await {
-                Ok(result) => result,
-                Err(_) => Err(CanoError::workflow("Workflow timeout exceeded")),
+                Ok(inner) => inner,
+                Err(_) => {
+                    #[cfg(feature = "metrics")]
+                    crate::metrics::workflow_run("timeout", _started.elapsed());
+                    self.resources
+                        .teardown_range(0..self.resources.lifecycle_len())
+                        .await;
+                    return Err(CanoError::workflow("Workflow timeout exceeded"));
+                }
             }
         } else {
             exec.await
         };
+        #[cfg(feature = "metrics")]
+        crate::metrics::workflow_run(
+            if result.is_ok() {
+                "completed"
+            } else {
+                "failed"
+            },
+            _started.elapsed(),
+        );
         self.resources
             .teardown_range(0..self.resources.lifecycle_len())
             .await;
