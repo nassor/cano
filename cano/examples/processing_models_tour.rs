@@ -36,13 +36,11 @@ use cano::RedbCheckpointStore;
 use cano::prelude::*;
 
 // ---------------------------------------------------------------------------
-// State enum — named `Stage` (not `Step`) to avoid shadowing `cano::Step`
+// State enum
 // ---------------------------------------------------------------------------
 
-/// Workflow states for this tour.
-///
-/// Named `Stage` — `Step` would also work since `cano::StepOutcome` no longer
-/// collides with a plain identifier `Step`, but `Stage` is semantically fitting here.
+/// Workflow states for this tour. (`Stage` is just a name — `Step` would work
+/// equally well; `cano` exports `StepOutcome`, not `Step`.)
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Stage {
     /// Router state: reads config, routes to `Wait`.
@@ -181,7 +179,7 @@ impl Cruncher {
 
 /// Counts from 0 to 6, advancing one step at a time.
 ///
-/// Each `Step::More` persists the cursor as a `RowKind::StepCursor` row when a
+/// Each `StepOutcome::More` persists the cursor as a `RowKind::StepCursor` row when a
 /// checkpoint store is attached.
 struct Grinder;
 

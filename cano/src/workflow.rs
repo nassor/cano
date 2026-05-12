@@ -337,7 +337,7 @@ where
     /// macro-synthesised `Task::run`, this method hands the step loop to the engine so
     /// it can persist each cursor as a
     /// [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row after every
-    /// `Step::More`. A subsequent [`resume_from`](Self::resume_from) rehydrates the
+    /// `StepOutcome::More`. A subsequent [`resume_from`](Self::resume_from) rehydrates the
     /// latest cursor for this state and passes it to the first `step` call, so
     /// processing resumes from exactly where it left off rather than from `None`.
     ///

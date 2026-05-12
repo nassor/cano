@@ -131,6 +131,11 @@ async fn main() -> Result<(), CanoError> {
 }
 
 ```
+
+<div class="callout callout-tip">
+<p>Runnable examples: <code>cargo run --example workflow_simple</code> (a linear three-state workflow,
+like the one above) and <code>cargo run --example mixed_workflow</code> (Tasks and Nodes together).</p>
+</div>
 <hr class="section-divider">
 
 <h2 id="builder-pattern"><a href="#builder-pattern" class="anchor-link" aria-hidden="true">#</a>Builder Pattern and #[must_use]</h2>
@@ -178,6 +183,14 @@ will warn you if you discard the return value. If you forget to capture it, the 
 </tr>
 </tbody>
 </table>
+
+<p>
+The same builder also carries the cross-cutting concerns: <code>with_checkpoint_store</code> /
+<code>with_workflow_id</code> / <code>resume_from</code> for <a href="../recovery/">crash recovery</a>,
+<code>register_with_compensation</code> for <a href="../saga/">sagas</a>, <code>with_observer</code> for
+<a href="../observers/">observers</a>, and per-task <code>TaskConfig</code> for retries, timeouts, and
+<a href="../resilience/">circuit breakers</a>.
+</p>
 
 <div class="callout callout-warning">
 <div class="callout-label">Warning: Do not discard the return value</div>
@@ -286,6 +299,12 @@ async fn main() -> Result<(), CanoError> {
     Ok(())
 }
 ```
+
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example workflow_validation</code> — a well-formed workflow that
+passes, plus the failure cases (a missing transition target, an unregistered initial state) and the
+exact errors <code>validate()</code> / <code>validate_initial_state()</code> return.</p>
+</div>
 <hr class="section-divider">
 
 <h2 id="error-handling"><a href="#error-handling" class="anchor-link" aria-hidden="true">#</a>Error Handling</h2>

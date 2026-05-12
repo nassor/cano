@@ -38,6 +38,9 @@
         <details class="nav-section" id="nav-concepts" open>
             <summary class="nav-section-label">Concepts</summary>
             <ul class="nav-links">
+                <li><a href="{{ get_url(path='@/workflows.md') }}">Workflows</a></li>
+                <li><a href="{{ get_url(path='@/resources.md') }}">Resources</a></li>
+                <li><a href="{{ get_url(path='@/store.md') }}">MemoryStore</a></li>
                 <li>
                     <details class="nav-subsection" id="nav-processing-models" open>
                         <summary class="nav-subsection-label">Processing Models</summary>
@@ -51,16 +54,8 @@
                         </ul>
                     </details>
                 </li>
-                <li><a href="{{ get_url(path='@/workflows.md') }}">Workflows</a></li>
                 <li><a href="{{ get_url(path='@/split-join.md') }}">Split &amp; Join</a></li>
                 <li><a href="{{ get_url(path='@/scheduler.md') }}">Scheduler</a></li>
-            </ul>
-        </details>
-        <details class="nav-section" id="nav-state-data">
-            <summary class="nav-section-label">State &amp; Data</summary>
-            <ul class="nav-links">
-                <li><a href="{{ get_url(path='@/resources.md') }}">Resources</a></li>
-                <li><a href="{{ get_url(path='@/store.md') }}">MemoryStore</a></li>
             </ul>
         </details>
         <details class="nav-section" id="nav-resilience">

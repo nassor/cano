@@ -1,19 +1,33 @@
 +++
-title = "Tasks"
+title = "Task"
 description = "Learn how to use Tasks in Cano - simple, flexible processing units for async workflows in Rust."
 template = "page.html"
 +++
 
 <div class="content-wrapper">
-<h1>Tasks</h1>
+<h1>Task</h1>
 <p class="subtitle">Simple, flexible processing units for your workflows.</p>
 
 <p>
 A <code>Task</code> is the fundamental building block of a Cano workflow: a single <code>run</code>
-method that decides the next state. Tasks receive a <code>&amp;Resources</code> reference at
-dispatch time — see <a href="../resources/">Resources</a> for how to register and retrieve typed
-dependencies. For a structured prep / exec / post lifecycle, see <a href="../nodes/">Nodes</a>.
+method that decides the next state. <strong>Start here</strong> — <code>Task</code> is the default
+choice for every processing unit. The other five processing models
+(<a href="../nodes/">Node</a>, <a href="../router-task/">RouterTask</a>,
+<a href="../poll-task/">PollTask</a>, <a href="../batch-task/">BatchTask</a>,
+<a href="../stepped-task/">SteppedTask</a>) are specialisations you reach for only when a task
+has a shape that one of them fits better — see <a href="#task-family">The Task Family</a> below for
+the decision matrix. Tasks receive a <code>&amp;Resources</code> reference at dispatch time — see
+<a href="../resources/">Resources</a> for how to register and retrieve typed dependencies.
 </p>
+
+<div class="callout callout-tip">
+<div class="callout-label">New to Cano?</div>
+<p>
+Read <a href="../workflows/">Workflows</a> and <a href="../resources/">Resources</a> first — every
+example on this page wires a task into a <code>Workflow</code> and pulls dependencies from a
+<code>Resources</code> map. Then come back here.
+</p>
+</div>
 
 <!-- Table of Contents -->
 <nav class="page-toc" aria-label="Table of contents">
@@ -24,7 +38,8 @@ dependencies. For a structured prep / exec / post lifecycle, see <a href="../nod
 <li><a href="#config-retries">Configuration &amp; Retries</a></li>
 <li><a href="#patterns">Real-World Task Patterns</a></li>
 <li><a href="#task-family">The Task Family: Four More Processing Models</a></li>
-<li><a href="#task-vs-node">Task vs Node</a></li>
+<li><a href="#choosing">Choosing a Processing Model</a></li>
+<li><a href="#task-vs-node">Task vs Node, in Detail</a></li>
 <li><a href="#when-to-use">When to Use Tasks vs Nodes</a></li>
 </ol>
 </nav>
@@ -73,6 +88,12 @@ impl GeneratorTask {
 }
 
 ```
+</div>
+
+<div class="callout callout-tip">
+<p>Runnable examples: <code>cargo run --example task_simple</code> (a two-task generate/count workflow,
+like the snippet above) and <code>cargo run --example task_interface_demo</code> (the same struct used
+through both the <code>Task</code> and <code>Node</code> interfaces).</p>
 </div>
 
 <!-- Section: Resource-Free Tasks -->
@@ -126,6 +147,8 @@ The <code>TaskConfig</code> struct allows you to specify the retry behavior.
 </p>
 
 <h3>Retry Strategy Examples</h3>
+<div class="diagram-frame">
+<p class="diagram-label">Retry with backoff between attempts</p>
 <div class="mermaid">
 sequenceDiagram
 participant W as Workflow
@@ -138,6 +161,7 @@ T-->>W: Fail
 Note over W: Wait (longer)
 W->>T: Retry 2
 T-->>W: Success ✓
+</div>
 </div>
 
 <div class="card-stack retry-cards">
@@ -496,23 +520,62 @@ step, so a crash resumes mid-loop. Registered with <code>register_stepped</code>
 </div>
 </div>
 
-<div class="callout callout-info">
-<div class="callout-label">When to reach for which</div>
-<p>
-Need a <em>structured</em> task with retries spanning load / compute / store? <a href="../nodes/">Node</a>.
-Just <em>deciding</em> the next state with no side effects? <a href="../router-task/">RouterTask</a>.
-<em>Waiting</em> on something to become ready? <a href="../poll-task/">PollTask</a>.
-Doing the <em>same thing to many items</em>? <a href="../batch-task/">BatchTask</a>.
-A <em>long iterative job</em> you want to crash-resume mid-flight? <a href="../stepped-task/">SteppedTask</a>.
-Anything else — a plain <code>Task</code>.
-</p>
-</div>
-
-<!-- Section: Task vs Node -->
+<!-- Section: Choosing a Processing Model -->
 <hr class="section-divider">
-<h2 id="task-vs-node"><a href="#task-vs-node" class="anchor-link" aria-hidden="true">#</a>Task vs Node</h2>
+<h2 id="choosing"><a href="#choosing" class="anchor-link" aria-hidden="true">#</a>Choosing a Processing Model</h2>
 <p>
-Cano supports both <code>Task</code> and <code>Node</code> interfaces. Every Node automatically implements Task, so they can be mixed in the same workflow.
+All six models dispatch as a <code>Task</code>, so you can mix them in one workflow. Start from
+<code>Task</code> and move to a specialised model only when your work has its shape:
+</p>
+
+<table class="styled-table">
+<thead>
+<tr>
+<th>Model</th>
+<th>Reach for it when…</th>
+<th>Register with</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong><code>Task</code></strong></td>
+<td>The default — a single <code>run</code> that does the work and picks the next state. Everything else is a specialisation of this.</td>
+<td><code>register</code></td>
+</tr>
+<tr>
+<td><a href="../nodes/"><strong><code>Node</code></strong></a></td>
+<td>You want a structured <code>prep → exec → post</code> split, with full-pipeline retry, to keep IO and compute apart.</td>
+<td><code>register</code></td>
+</tr>
+<tr>
+<td><a href="../router-task/"><strong><code>RouterTask</code></strong></a></td>
+<td>You're only <em>deciding</em> the next state — branching on a flag or data shape — with no side effects and no recovery footprint.</td>
+<td><code>register_router</code></td>
+</tr>
+<tr>
+<td><a href="../poll-task/"><strong><code>PollTask</code></strong></a></td>
+<td>You need to <em>wait until</em> something is ready — an external job, a queue, a flag flip — without blocking a thread.</td>
+<td><code>register</code></td>
+</tr>
+<tr>
+<td><a href="../batch-task/"><strong><code>BatchTask</code></strong></a></td>
+<td>You're doing the <em>same sub-operation over a collection</em>, with bounded concurrency and per-item retry, re-joined in one state.</td>
+<td><code>register</code></td>
+</tr>
+<tr>
+<td><a href="../stepped-task/"><strong><code>SteppedTask</code></strong></a></td>
+<td>You have a <em>long iterative job</em> (page-by-page scan, chunked migration) you want to crash-resume mid-loop, finer than per-state.</td>
+<td><code>register_stepped</code></td>
+</tr>
+</tbody>
+</table>
+
+<!-- Section: Task vs Node, in detail -->
+<hr class="section-divider">
+<h2 id="task-vs-node"><a href="#task-vs-node" class="anchor-link" aria-hidden="true">#</a>Task vs Node, in Detail</h2>
+<p>
+<code>Task</code> and <code>Node</code> are the two you'll use most. Every <code>Node</code> automatically
+implements <code>Task</code>, so they mix freely in the same workflow.
 </p>
 
 <div class="comparison-grid">
@@ -547,6 +610,12 @@ let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
     .register(State::Finish, FinishTask);         // Another Task
 
 ```
+</div>
+
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example mixed_workflow</code> — Tasks and Nodes in one workflow.
+For a tour that chains <em>all six</em> processing models in a single checkpointed workflow, see
+<code>cargo run --example processing_models_tour --features recovery</code>.</p>
 </div>
 
 <!-- Section: When to Use -->

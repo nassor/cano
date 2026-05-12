@@ -1199,44 +1199,42 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_no_policy_preserves_failed_status() {
-        // A flow registered without `set_backoff` keeps the legacy semantics:
-        // failures land as Status::Failed and re-fire on the base interval.
+    async fn test_default_policy_parks_failed_flow_in_backoff() {
+        // A flow registered without `set_backoff` still gets BackoffPolicy::default(),
+        // so a failure parks it in Backoff (never the removed Failed status) and
+        // tracks the streak.
         let timeout = Duration::from_secs(3);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
             let workflow = flaky_workflow(FlakyNode::always_failing());
             scheduler
                 .every(
-                    "legacy",
+                    "defaulted",
                     workflow,
                     TestState::Start,
                     Duration::from_millis(40),
                 )
                 .unwrap();
-            // Intentionally no set_backoff call.
+            // Intentionally no set_backoff call — the default policy applies.
 
             let running = scheduler.start().await.unwrap();
 
-            // Poll until we observe a non-Running status with run_count ≥ 3.
-            // The loop alternates Running ↔ Failed quickly, so a single sleep
-            // can land on either side. Polling makes the test robust without
-            // hiding bugs (a stuck status never escapes the inner timeout).
+            // Poll until we observe a non-Running status with at least one run.
             let snap = loop {
                 sleep(Duration::from_millis(50)).await;
-                let s = running.status("legacy").await.unwrap();
-                if !matches!(s.status, Status::Running) && s.run_count >= 3 {
+                let s = running.status("defaulted").await.unwrap();
+                if !matches!(s.status, Status::Running) && s.run_count >= 1 {
                     break s;
                 }
             };
 
             assert!(
-                matches!(snap.status, Status::Failed(_)),
-                "no-policy flow must report Failed, got: {:?}",
+                matches!(snap.status, Status::Backoff { .. }),
+                "default-policy flow must park in Backoff, got: {:?}",
                 snap.status
             );
-            assert_eq!(snap.failure_streak, 0, "no streak tracking without policy");
-            assert!(snap.next_eligible.is_none());
+            assert!(snap.failure_streak >= 1, "streak must be tracked");
+            assert!(snap.next_eligible.is_some());
 
             running.stop().await.unwrap();
         })

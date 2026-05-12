@@ -44,6 +44,8 @@ the full <code>insert</code> / <code>get</code> API.
 <hr class="section-divider">
 <h2 id="thread-safety"><a href="#thread-safety" class="anchor-link" aria-hidden="true">#</a>Thread Safety Model</h2>
 
+<div class="diagram-frame">
+<p class="diagram-label">One shared map, many readers and writers</p>
 <div class="mermaid">
 graph LR
 S["Arc&lt;RwLock&lt;HashMap&gt;&gt;"]
@@ -51,6 +53,7 @@ S --> R1["Task A (read)"]
 S --> R2["Task B (read)"]
 S --> W1["Task C (write)"]
 style S fill:#1e293b,stroke:#38bdf8
+</div>
 </div>
 
 <p>
@@ -309,6 +312,11 @@ async fn main() -> Result<(), CanoError> {
 ```
 </div>
 
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example workflow_stack_store</code> — uses a <code>MemoryStore</code>
+as a shared stack passed between workflow stages.</p>
+</div>
+
 <!-- Section: Custom Store Backends -->
 <hr class="section-divider">
 <h2 id="custom-backends"><a href="#custom-backends" class="anchor-link" aria-hidden="true">#</a>Custom Store Resources</h2>
@@ -420,6 +428,13 @@ Because <code>Resources</code> retrieves dependencies by concrete type, your cus
 the exact methods it needs. If you need dynamic dispatch, wrap your backend in a concrete
 resource type that owns an object-safe client or repository trait.
 </p>
+</div>
+
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example store_custom_backend</code> — a small
+<code>NamespacedStore</code> wrapping a <code>MemoryStore</code> with key prefixing, registered as a
+resource and retrieved by type, plus a <code>get_shared::&lt;T&gt;()</code> demo (<code>Arc::ptr_eq</code>
+proves the zero-copy share of a large value between tasks).</p>
 </div>
 
 <!-- Section: Error Handling -->

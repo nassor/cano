@@ -28,7 +28,7 @@ pub(super) async fn spawn_every_loop<TState, TResourceKey>(
     workflow: Arc<Workflow<TState, TResourceKey>>,
     initial_state: TState,
     info: Arc<RwLock<FlowInfo>>,
-    policy: Option<Arc<BackoffPolicy>>,
+    policy: Arc<BackoffPolicy>,
     running: Arc<RwLock<bool>>,
     stop_notify: Arc<Notify>,
     interval: Duration,
@@ -48,7 +48,7 @@ pub(super) async fn spawn_every_loop<TState, TResourceKey>(
             Arc::clone(&workflow),
             initial_state.clone(),
             Arc::clone(&info),
-            policy.as_ref(),
+            &policy,
         )
         .await;
     }
@@ -79,7 +79,7 @@ pub(super) async fn spawn_every_loop<TState, TResourceKey>(
             Arc::clone(&workflow),
             initial_state.clone(),
             Arc::clone(&info),
-            policy.as_ref(),
+            &policy,
         )
         .await;
     }
@@ -91,7 +91,7 @@ pub(super) async fn spawn_cron_loop<TState, TResourceKey>(
     workflow: Arc<Workflow<TState, TResourceKey>>,
     initial_state: TState,
     info: Arc<RwLock<FlowInfo>>,
-    policy: Option<Arc<BackoffPolicy>>,
+    policy: Arc<BackoffPolicy>,
     running: Arc<RwLock<bool>>,
     stop_notify: Arc<Notify>,
     schedule: Box<CronSchedule>,
@@ -144,7 +144,7 @@ pub(super) async fn spawn_cron_loop<TState, TResourceKey>(
             Arc::clone(&workflow),
             initial_state.clone(),
             Arc::clone(&info),
-            policy.as_ref(),
+            &policy,
         )
         .await;
     }
@@ -192,15 +192,9 @@ pub(super) async fn driver_task<TState, TResourceKey>(
                             let workflow = Arc::clone(&flow.workflow);
                             let initial_state = flow.initial_state.clone();
                             let info = Arc::clone(&flow.info);
-                            let policy = flow.policy.clone();
+                            let policy = Arc::clone(&flow.policy);
                             let handle = tokio::spawn(async move {
-                                execute_reserved_flow(
-                                    workflow,
-                                    initial_state,
-                                    info,
-                                    policy.as_ref(),
-                                )
-                                .await;
+                                execute_reserved_flow(workflow, initial_state, info, &policy).await;
                             });
                             let mut tasks = scheduler_tasks.write().await;
                             tasks.retain(|h| !h.is_finished());
@@ -305,7 +299,7 @@ async fn execute_flow<TState, TResourceKey>(
     workflow: Arc<Workflow<TState, TResourceKey>>,
     initial_state: TState,
     info: Arc<RwLock<FlowInfo>>,
-    policy: Option<&Arc<BackoffPolicy>>,
+    policy: &BackoffPolicy,
 ) where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
     TResourceKey: Hash + Eq + Send + Sync + 'static,
@@ -352,7 +346,7 @@ async fn execute_reserved_flow<TState, TResourceKey>(
     workflow: Arc<Workflow<TState, TResourceKey>>,
     initial_state: TState,
     info: Arc<RwLock<FlowInfo>>,
-    policy: Option<&Arc<BackoffPolicy>>,
+    policy: &BackoffPolicy,
 ) where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
     TResourceKey: Hash + Eq + Send + Sync + 'static,
@@ -367,17 +361,17 @@ async fn execute_reserved_flow<TState, TResourceKey>(
     #[cfg(not(feature = "tracing"))]
     let result = workflow.execute_workflow(initial_state).await;
 
-    apply_outcome(&info, result.map(|_| ()), policy.map(|p| p.as_ref())).await;
+    apply_outcome(&info, result.map(|_| ()), policy).await;
 }
 
-/// Atomic post-execution status write. With a policy attached the loop never
-/// flickers through `Status::Failed` on the way to `Backoff`/`Tripped` — a
-/// single write under the existing lock decides the terminal status for this
-/// run. Streak and `next_eligible` are reset on success.
+/// Atomic post-execution status write: a single write under the existing lock
+/// decides the terminal status for this run (`Completed` on success, else
+/// `Backoff` / `Tripped` per the policy). Streak and `next_eligible` are reset
+/// on success.
 async fn apply_outcome(
     info: &Arc<RwLock<FlowInfo>>,
     result: Result<(), CanoError>,
-    policy: Option<&BackoffPolicy>,
+    policy: &BackoffPolicy,
 ) {
     let mut info_guard = info.write().await;
     match result {
@@ -388,36 +382,24 @@ async fn apply_outcome(
         }
         Err(e) => {
             let err_str = e.to_string();
-            match policy {
-                None => {
-                    debug_assert!(
-                        info_guard.failure_streak == 0,
-                        "Status::Failed path should never see a non-zero failure_streak (no policy is attached)"
-                    );
-                    info_guard.status = Status::Failed(err_str);
-                    // No policy: don't track streak / next_eligible.
-                }
-                Some(p) => {
-                    let new_streak = info_guard.failure_streak.saturating_add(1);
-                    info_guard.failure_streak = new_streak;
-                    if p.is_tripped(new_streak) {
-                        info_guard.next_eligible = None;
-                        info_guard.status = Status::Tripped {
-                            streak: new_streak,
-                            last_error: err_str,
-                        };
-                    } else {
-                        let delay = p.compute_delay(new_streak);
-                        let until = Utc::now()
-                            + chrono::Duration::from_std(delay).unwrap_or(chrono::Duration::zero());
-                        info_guard.next_eligible = Some(until);
-                        info_guard.status = Status::Backoff {
-                            until,
-                            streak: new_streak,
-                            last_error: err_str,
-                        };
-                    }
-                }
+            let new_streak = info_guard.failure_streak.saturating_add(1);
+            info_guard.failure_streak = new_streak;
+            if policy.is_tripped(new_streak) {
+                info_guard.next_eligible = None;
+                info_guard.status = Status::Tripped {
+                    streak: new_streak,
+                    last_error: err_str,
+                };
+            } else {
+                let delay = policy.compute_delay(new_streak);
+                let until = Utc::now()
+                    + chrono::Duration::from_std(delay).unwrap_or(chrono::Duration::zero());
+                info_guard.next_eligible = Some(until);
+                info_guard.status = Status::Backoff {
+                    until,
+                    streak: new_streak,
+                    last_error: err_str,
+                };
             }
         }
     }

@@ -122,9 +122,11 @@ just failed — the retry that follows is attempt <code>attempt + 1</code>.</p>
 </div>
 <div class="card">
 <h3 id="on-circuit-open"><a href="#on-circuit-open" class="anchor-link" aria-hidden="true">#</a><code>on_circuit_open(task_id: &amp;str)</code></h3>
-<p>Fired when a <code>CircuitBreaker</code> attached via
+<p>Fired when a <a href="../resilience/#circuit-breaker"><code>CircuitBreaker</code></a> attached via
 <code>TaskConfig::with_circuit_breaker</code> rejects a call because it is open. Followed by
-an <code>on_task_failure</code> carrying a <code>CanoError::CircuitOpen</code>.</p>
+an <code>on_task_failure</code> carrying a <code>CanoError::CircuitOpen</code>. <code>on_retry</code>
+and <code>on_circuit_open</code> are your bridge to the <a href="../resilience/">Resilience</a>
+machinery — see that guide for retries, timeouts, circuit breakers, and bulkheads.</p>
 </div>
 <div class="card">
 <h3 id="on-checkpoint"><a href="#on-checkpoint" class="anchor-link" aria-hidden="true">#</a><code>on_checkpoint(workflow_id: &amp;str, sequence: u64)</code></h3>

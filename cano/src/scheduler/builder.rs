@@ -182,7 +182,7 @@ where
                 initial_state,
                 schedule,
                 info,
-                policy: None,
+                policy: Arc::new(BackoffPolicy::default()),
             },
         );
         self.flow_order.push(id.to_string());
@@ -205,12 +205,11 @@ where
         self.workflows.contains_key(id)
     }
 
-    /// Attach a [`BackoffPolicy`] to an existing flow.
+    /// Override the [`BackoffPolicy`] for an existing flow.
     ///
-    /// After failure the scheduler will sleep `policy.compute_delay(streak)`
-    /// before the next dispatch and trip the flow when `streak_limit` is hit.
-    /// Without this call a flow keeps the legacy "fail and try again on the
-    /// base schedule" behavior.
+    /// Every flow starts with [`BackoffPolicy::default`]; call this to replace
+    /// it. After a failure the scheduler sleeps `policy.compute_delay(streak)`
+    /// before the next dispatch and trips the flow when `streak_limit` is hit.
     ///
     /// `set_backoff` is a builder method — it can only be called before
     /// [`Scheduler::start`] consumes `self`, which is enforced at the type
@@ -223,7 +222,7 @@ where
         let flow = self.workflows.get_mut(id).ok_or_else(|| {
             CanoError::Configuration(format!("Flow '{id}' not found — cannot set backoff"))
         })?;
-        flow.policy = Some(Arc::new(policy));
+        flow.policy = Arc::new(policy);
         Ok(())
     }
 

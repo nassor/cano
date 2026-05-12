@@ -470,7 +470,7 @@ where
     }
 
     /// Drive the step loop for a `Stepped` state, persisting each cursor as a
-    /// [`RowKind::StepCursor`] row after every `Step::More`.
+    /// [`RowKind::StepCursor`] row after every `StepOutcome::More`.
     ///
     /// - `resume_cursor`: `Some(bytes)` when resuming from a prior cursor row; `None`
     ///   on a fresh run or when no cursor was persisted for this state.

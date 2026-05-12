@@ -7,7 +7,7 @@
 //! `#[compensatable_task]`, `CheckpointStore` has no type parameters, so there are
 //! no attribute args.
 //!
-//! The legacy `#[checkpoint_store] impl CheckpointStore for T { ... }` form (and
+//! The explicit `#[checkpoint_store] impl CheckpointStore for T { ... }` form (and
 //! `#[checkpoint_store] trait CheckpointStore { ... }`) go through the plain async
 //! rewriter in `lib.rs`.
 

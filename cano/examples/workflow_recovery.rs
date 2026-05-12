@@ -35,13 +35,16 @@ struct CrashOnce {
 impl Resource for CrashOnce {}
 
 /// Prints each checkpoint as it's committed, and the resume point — watch the FSM persist.
+///
+/// Exercises [`WorkflowObserver::on_checkpoint`] and [`WorkflowObserver::on_resume`] so
+/// checkpoint and resume events are visible alongside the workflow output.
 struct Watcher;
 impl WorkflowObserver for Watcher {
-    fn on_checkpoint(&self, _workflow_id: &str, seq: u64) {
-        println!("  ✓ checkpoint #{seq}");
+    fn on_checkpoint(&self, workflow_id: &str, seq: u64) {
+        println!("  ✓ checkpoint  workflow_id={workflow_id}  sequence={seq}");
     }
-    fn on_resume(&self, _workflow_id: &str, seq: u64) {
-        println!("  ↺ resuming from checkpoint #{seq}");
+    fn on_resume(&self, workflow_id: &str, seq: u64) {
+        println!("  ↺ resuming    workflow_id={workflow_id}  from_sequence={seq}");
     }
 }
 

@@ -12,8 +12,8 @@
 //!    every `async fn` becomes a `Pin<Box<dyn Future + Send>>`-returning
 //!    method.
 //!
-//! The legacy `#[task] impl Task<S> for T { ... }` form is unchanged and goes
-//! through the plain async rewriter in `lib.rs`.
+//! The explicit `#[task] impl Task<S> for T { ... }` form goes through the
+//! plain async rewriter in `lib.rs`.
 
 use proc_macro2::TokenStream;
 use quote::quote;

@@ -15,8 +15,42 @@ order</strong>, and decides the next state from the aggregate — all within one
 one of the <a href="../task/">Task</a> family of processing models, alongside
 <a href="../nodes/">Node</a>, <a href="../router-task/">RouterTask</a>,
 <a href="../poll-task/">PollTask</a>, and <a href="../stepped-task/">SteppedTask</a>, and it reads
-typed dependencies from <a href="../resources/">Resources</a> like the rest.
+typed dependencies from <a href="../resources/">Resources</a> like the rest. New to Cano? Read
+<a href="../workflows/">Workflows</a> and <a href="../resources/">Resources</a> first.
 </p>
+
+<div class="code-block">
+<span class="code-block-label">At a glance — <code>#[task::batch]</code> infers <code>Item</code> / <code>ItemOutput</code> from the signatures</span>
+
+```rust
+use cano::prelude::*;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Stage { Crunch, Done }
+
+struct Crunch;
+
+#[task::batch(state = Stage)]
+impl Crunch {
+    async fn load(&self, _res: &Resources) -> Result<Vec<u32>, CanoError> {
+        Ok((1..=100).collect())
+    }
+    // Returning Err here doesn't fail the batch — it lands in that slot of `finish`'s `outputs`.
+    async fn process_item(&self, n: &u32) -> Result<u64, CanoError> {
+        Ok((*n as u64) * (*n as u64))
+    }
+    async fn finish(&self, _res: &Resources, outputs: Vec<Result<u64, CanoError>>)
+        -> Result<TaskResult<Stage>, CanoError>
+    {
+        let total: u64 = outputs.into_iter().flatten().sum();
+        println!("sum of squares = {total}");
+        Ok(TaskResult::Single(Stage::Done))
+    }
+    fn concurrency(&self) -> usize { 8 }                  // up to 8 process_item in flight
+    fn item_retry(&self) -> RetryMode { RetryMode::fixed(2, std::time::Duration::from_millis(50)) }
+}
+```
+</div>
 
 <div class="callout callout-info">
 <div class="callout-label">Not the same as <code>TaskResult::Split</code></div>
@@ -48,11 +82,14 @@ for "map this one operation over N <em>items</em>".
 <hr class="section-divider">
 <h2 id="shape"><a href="#shape" class="anchor-link" aria-hidden="true">#</a>The Three Methods</h2>
 
+<div class="diagram-frame">
+<p class="diagram-label">BatchTask: load &rarr; process_item (&times;N) &rarr; finish</p>
 <div class="mermaid">
 graph LR
 A[load] -->|"items: Vec of Item"| B[process_item ×N]
 B -->|"per-item Results — input order"| C[finish]
 C -->|TaskResult| D[Next State]
+</div>
 </div>
 
 <p>

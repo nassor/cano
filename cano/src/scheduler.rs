@@ -1,14 +1,14 @@
 //! # Scheduler API
 //!
 //! Time-driven dispatch for [`Workflow`](crate::workflow::Workflow) instances —
-//! intervals, cron expressions, and manual triggers, plus optional per-flow
-//! backoff and trip semantics.
+//! intervals, cron expressions, and manual triggers, plus per-flow backoff and
+//! trip semantics.
 //!
 //! Two-stage lifecycle:
 //!
 //! - [`Scheduler`] is the **builder**. Register workflows with [`every`](Scheduler::every) /
-//!   [`cron`](Scheduler::cron) / [`manual`](Scheduler::manual), attach optional
-//!   [`BackoffPolicy`] via [`set_backoff`](Scheduler::set_backoff), then call
+//!   [`cron`](Scheduler::cron) / [`manual`](Scheduler::manual), optionally override the
+//!   default [`BackoffPolicy`] via [`set_backoff`](Scheduler::set_backoff), then call
 //!   [`start`](Scheduler::start) to consume the builder. `Scheduler` is **not** `Clone`.
 //! - [`RunningScheduler`] is the **live handle** returned by `start`. It owns the
 //!   spawned driver and per-flow loop tasks. It is cheap to clone — call
@@ -76,16 +76,8 @@ pub enum Status {
     Idle,
     Running,
     Completed,
-    /// Terminal failure for a flow without a [`BackoffPolicy`]. Carries the
-    /// last error message for observability.
-    ///
-    /// Invariant: only reachable when the flow has no policy attached.
-    /// `apply_outcome` upholds this; a debug-build assertion guards it.
-    /// Flows with a policy use [`Status::Backoff`] or [`Status::Tripped`]
-    /// instead, which is what avoids the legacy `Failed` flicker.
-    Failed(String),
-    /// Flow failed and is waiting until `until` before its next dispatch
-    /// (set only when a [`BackoffPolicy`] is attached).
+    /// Flow failed and is waiting until `until` before its next dispatch,
+    /// per the flow's [`BackoffPolicy`].
     Backoff {
         until: DateTime<Utc>,
         streak: u32,
@@ -110,8 +102,7 @@ pub struct FlowInfo {
     pub status: Status,
     pub run_count: u64,
     pub last_run: Option<DateTime<Utc>>,
-    /// Number of consecutive failures since the last success. Always 0 when
-    /// the flow has no [`BackoffPolicy`] attached.
+    /// Number of consecutive failures since the last success.
     pub failure_streak: u32,
     /// When set, the next dispatch must wait until this time. Cleared on
     /// success and on `reset_flow`.
@@ -131,7 +122,8 @@ enum ParsedSchedule {
 
 /// Per-flow data stored in the scheduler. Carries the workflow, its initial
 /// state, the parsed schedule, the live `FlowInfo` shared with status readers,
-/// and an optional [`BackoffPolicy`].
+/// and the flow's [`BackoffPolicy`] ([`BackoffPolicy::default`] unless
+/// overridden via [`Scheduler::set_backoff`]).
 struct FlowData<TState, TResourceKey>
 where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
@@ -141,9 +133,7 @@ where
     initial_state: TState,
     schedule: ParsedSchedule,
     info: Arc<RwLock<FlowInfo>>,
-    /// `None` keeps the legacy "fail-and-retry-on-base-schedule" behavior.
-    /// `Some(policy)` activates the backoff/trip code path.
-    policy: Option<Arc<BackoffPolicy>>,
+    policy: Arc<BackoffPolicy>,
 }
 
 impl<TState, TResourceKey> Clone for FlowData<TState, TResourceKey>

@@ -22,7 +22,7 @@ template = "page.html"
 <li class="toc-sub"><a href="#manual-triggering">Manual Triggering</a></li>
 <li class="toc-sub"><a href="#mixed-scheduling">Mixed Scheduling</a></li>
 <li><a href="#backoff-and-trip">Backoff &amp; Trip State</a></li>
-<li class="toc-sub"><a href="#backoff-policy">Attaching a Policy</a></li>
+<li class="toc-sub"><a href="#backoff-policy">Overriding the Default Policy</a></li>
 <li class="toc-sub"><a href="#status-variants">Status Variants</a></li>
 <li class="toc-sub"><a href="#recovery">Recovery via reset_flow</a></li>
 <li><a href="#graceful-shutdown">Graceful Shutdown</a></li>
@@ -55,8 +55,8 @@ The scheduler is split into two halves to make a double-start impossible at the 
 </p>
 <ul>
 <li><strong><code>Scheduler</code></strong> is the <em>builder</em>. Register workflows with <code>every</code> /
-<code>cron</code> / <code>manual</code> and attach optional <code>BackoffPolicy</code> via
-<code>set_backoff</code>. <code>Scheduler</code> is <strong>not</strong> <code>Clone</code>.</li>
+<code>cron</code> / <code>manual</code> and, if you want something other than <code>BackoffPolicy::default()</code>,
+override it per flow via <code>set_backoff</code>. <code>Scheduler</code> is <strong>not</strong> <code>Clone</code>.</li>
 <li><strong><code>RunningScheduler</code></strong> is the <em>live handle</em> returned by
 <code>scheduler.start().await?</code>. It owns the spawned driver and per-flow loop tasks. It is cheap to
 clone — every clone shares the same command channel and flow registry, so you can call <code>trigger</code>,
@@ -183,6 +183,12 @@ async fn main() -> Result<(), CanoError> {
 }
 
 ```
+
+<div class="callout callout-tip">
+<p>Runnable examples: <code>cargo run --example scheduler_duration_scheduling --features scheduler</code>
+(interval-only) and <code>cargo run --example scheduler_scheduling --features scheduler</code> (intervals
+plus cron and manual flows).</p>
+</div>
 
 <h3 id="cron-scheduling"><a href="#cron-scheduling" class="anchor-link" aria-hidden="true">#</a>2. Cron Scheduling - Time-Based Expressions</h3>
 <p>Run workflows based on cron expressions. Perfect for scheduled reports, backups, or time-specific tasks.</p>
@@ -483,21 +489,30 @@ async fn main() -> Result<(), CanoError> {
 }
 
 ```
+
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example scheduler_mixed_workflows --features scheduler</code> —
+interval, cron, and manual flows side by side, plus a <code>trigger</code> on the manual one.</p>
+</div>
 <hr class="section-divider">
 
 <h2 id="backoff-and-trip"><a href="#backoff-and-trip" class="anchor-link" aria-hidden="true">#</a>Backoff &amp; Trip State</h2>
 <p>
-A flow that fails repeatedly can waste resources by re-firing on its base schedule.
-Attach a <code>BackoffPolicy</code> to stretch the gap between failed runs and, optionally, trip the flow
-after a streak limit so the scheduler stops dispatching it until you intervene.
+A flow that fails repeatedly shouldn't keep re-firing on its base schedule, so <strong>every flow has a
+<code>BackoffPolicy</code></strong>. After a failure the scheduler parks the flow in <code>Status::Backoff</code>
+for a growing delay; with a <code>streak_limit</code> set it eventually <code>Tripped</code>s and stops
+dispatching until you intervene. Each flow starts with <code>BackoffPolicy::default()</code> — call
+<code>set_backoff</code> to use a different one.
 </p>
 
 <div class="callout callout-info">
-<div class="callout-label">Opt-in</div>
+<div class="callout-label">Heads-up: failure delays are at least 1s by default</div>
 <p>
-Flows registered without a policy keep the existing <code>Status::Failed(err)</code> behavior — the next
-scheduled tick fires per the base schedule. Defaults are <strong>never</strong> applied silently; you must
-call <code>set_backoff</code> to activate the new code path.
+Because <code>BackoffPolicy::default()</code> has a <strong>1s</strong> initial delay and is applied to
+<em>every</em> flow, a flow that fails waits ~1s before its next attempt (the <code>Every</code> loop sleeps
+<code>max(interval, next_eligible - now)</code>) — even if its base interval is shorter. If you run a flow
+on a sub-second interval and want fast retries after a failure, lower
+<code>BackoffPolicy { initial: … }</code> via <code>set_backoff</code>.
 </p>
 </div>
 
@@ -511,10 +526,10 @@ an entire flow.
 </p>
 </div>
 
-<h3 id="backoff-policy"><a href="#backoff-policy" class="anchor-link" aria-hidden="true">#</a>Attaching a Policy</h3>
+<h3 id="backoff-policy"><a href="#backoff-policy" class="anchor-link" aria-hidden="true">#</a>Overriding the Default Policy</h3>
 <p>
 Register the workflow normally, then call <code>set_backoff</code> <strong>before</strong> <code>start()</code>.
-The policy controls four things: the initial delay after the first failure, the multiplier applied per
+The policy controls the initial delay after the first failure, the multiplier applied per
 additional consecutive failure, a hard cap on the computed delay, jitter, and an optional streak limit.
 </p>
 
@@ -586,15 +601,15 @@ a wildcard. The variants are:
 <li><code>Idle</code> — registered, never run or finished cleanly.</li>
 <li><code>Running</code> — currently executing.</li>
 <li><code>Completed</code> — last run reached an exit state.</li>
-<li><code>Failed(String)</code> — last run errored. Used only when no policy is attached.</li>
-<li><code>Backoff { until, streak, last_error }</code> — flow failed and is waiting until <code>until</code>
-before its next dispatch. Set only when a policy is attached.</li>
+<li><code>Backoff { until, streak, last_error }</code> — last run errored; the flow is waiting until
+<code>until</code> before its next dispatch, per its <code>BackoffPolicy</code>.</li>
 <li><code>Tripped { streak, last_error }</code> — streak reached <code>streak_limit</code>; the scheduler
 will not dispatch this flow again until <code>reset_flow</code> is called.</li>
 </ul>
 <p>
-Outcome writes are atomic: observers never see a transient <code>Failed</code> flicker for a flow that
-has a policy attached. <code>FlowInfo</code> exposes <code>failure_streak</code> and
+Outcome writes are atomic: a single write decides this run's terminal status (<code>Completed</code> on
+success, otherwise <code>Backoff</code> or <code>Tripped</code>), so observers never see a transient
+intermediate state. <code>FlowInfo</code> exposes <code>failure_streak</code> and
 <code>next_eligible</code> for observability.
 </p>
 
@@ -640,6 +655,11 @@ waits up to 30 seconds for any in-progress workflow executions to finish, and ru
 workflow's resource <code>teardown_all</code> in reverse registration order before returning.
 A second <code>stop()</code> call after success is idempotent — it returns the same cached result.
 </p>
+
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example scheduler_graceful_shutdown --features scheduler</code> —
+spawns a Ctrl-C handler, runs scheduled flows, and shuts down cleanly on signal.</p>
+</div>
 <hr class="section-divider">
 
 
@@ -688,8 +708,8 @@ let mut scheduler = Scheduler::new();
 scheduler.manual("batch-a", batch_workflow(batch_a, results.clone()), State::Start)?;
 scheduler.manual("batch-b", batch_workflow(batch_b, results.clone()), State::Start)?;
 let running = scheduler.start().await?;
-running.trigger("batch-a")?;
-running.trigger("batch-b")?;
+running.trigger("batch-a").await?;
+running.trigger("batch-b").await?;
 // ...wait for both flows to finish, then reduce across all batch summaries in `results`.
 
 ```

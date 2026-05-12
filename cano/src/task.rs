@@ -95,8 +95,9 @@
 //!
 //! ## Interoperability
 //!
-//! Every [`crate::task::node::Node`] automatically implements [`Task`], so you can use existing nodes
-//! wherever tasks are expected. This provides a smooth upgrade path and backward compatibility.
+//! Every [`crate::task::node::Node`] automatically implements [`Task`], so a `Node` can be used
+//! wherever a `Task` is expected — start with a plain `Task` and reach for `Node`'s three-phase
+//! lifecycle when a unit of work grows complex enough to want it.
 
 use crate::error::CanoError;
 use crate::resource::Resources;

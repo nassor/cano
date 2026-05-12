@@ -1,17 +1,51 @@
 +++
-title = "Nodes"
+title = "Node"
 description = "Learn how to use Nodes in Cano - structured, resilient processing units with a three-phase lifecycle."
 template = "page.html"
 +++
 
 <div class="content-wrapper">
-<h1>Nodes</h1>
+<h1>Node</h1>
 <p class="subtitle">Structured, resilient processing units with a three-phase lifecycle.</p>
 
 <p>
-A <code>Node</code> implements a structured three-phase lifecycle with built-in retry capabilities.
-Nodes are ideal for complex operations where separating data loading, execution, and result handling improves clarity and maintainability.
+A <code>Node</code> implements a structured three-phase lifecycle (<code>prep</code> &rarr;
+<code>exec</code> &rarr; <code>post</code>) with built-in retry. <strong>Reach for a <code>Node</code>
+only when</strong> separating data loading, processing, and result handling genuinely improves
+clarity — otherwise a plain <a href="../task/">Task</a> is simpler. A <code>Node</code>
+automatically implements <code>Task</code>, so it works anywhere a task does. New to Cano? Read
+<a href="../workflows/">Workflows</a> and <a href="../resources/">Resources</a> first.
 </p>
+
+<div class="code-block">
+<span class="code-block-label">At a glance — <code>#[task::node]</code> infers the three phases from your method signatures</span>
+
+```rust
+use cano::prelude::*;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Stage { Fetch, Done }
+
+struct FetchUser { id: u64 }
+
+#[task::node(state = Stage)]
+impl FetchUser {
+    // prep: load — return value flows into exec
+    async fn prep(&self, _res: &Resources) -> Result<u64, CanoError> {
+        Ok(self.id)
+    }
+    // exec: compute — pure, no resources
+    async fn exec(&self, id: u64) -> String {
+        format!("user-{id}")
+    }
+    // post: store + decide the next state
+    async fn post(&self, res: &Resources, name: String) -> Result<Stage, CanoError> {
+        res.get::<MemoryStore, _>("store")?.put("user", name)?;
+        Ok(Stage::Done)
+    }
+}
+```
+</div>
 
 <div class="callout callout-info">
 <div class="callout-label">Key concept</div>
@@ -40,11 +74,14 @@ so all three phases must be idempotent. <code>prep</code> and <code>post</code> 
 <hr class="section-divider">
 <h2 id="three-phases"><a href="#three-phases" class="anchor-link" aria-hidden="true">#</a>The Three Phases</h2>
 
+<div class="diagram-frame">
+<p class="diagram-label">Node lifecycle: prep &rarr; exec &rarr; post</p>
 <div class="mermaid">
 graph LR
 A[Prep] -->|Load Data| B[Exec]
 B -->|Process| C[Post]
 C -->|Save Result| D[Next State]
+</div>
 </div>
 
 <!-- Visual lifecycle cards with step numbers and arrows -->
@@ -301,11 +338,14 @@ See the <a href="../task/">Tasks</a> page for the simpler interface.
 </div>
 <p>The three-phase lifecycle naturally maps to ETL operations.</p>
 
+<div class="diagram-frame">
+<p class="diagram-label">ETL mapped onto the three phases</p>
 <div class="mermaid">
 graph LR
 A[Prep: Extract] -->|Load from source| B[Exec: Transform]
 B -->|Process data| C[Post: Load]
 C -->|Save to destination| D[Next State]
+</div>
 </div>
 
 <div class="code-block">
@@ -395,6 +435,8 @@ impl ETLNode {
 </div>
 <p>Nodes can maintain state across iterations for negotiation workflows.</p>
 
+<div class="diagram-frame">
+<p class="diagram-label">Iterative negotiation across node rounds</p>
 <div class="mermaid">
 sequenceDiagram
 participant W as Workflow
@@ -406,6 +448,7 @@ B-->>S: Counter: Too high
 W->>S: Round 2
 S-->>B: Offer $8,000
 B-->>S: Accept ✓
+</div>
 </div>
 
 <div class="code-block">
@@ -465,6 +508,10 @@ impl SellerNode {
     }
 }
 ```
+</div>
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example workflow_negotiation</code> — a seller/buyer node loop
+that iterates until the offer is accepted.</p>
 </div>
 </section>
 
@@ -545,6 +592,10 @@ impl BookAnalyzerNode {
 }
 
 ```
+</div>
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example workflow_book_prepositions</code> — downloads a book from
+Project Gutenberg and counts prepositions across a download &rarr; analyze node pipeline.</p>
 </div>
 </section>
 

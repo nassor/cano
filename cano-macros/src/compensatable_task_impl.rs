@@ -12,8 +12,8 @@
 //! 3. Hands the synthesised impl to `async_rewrite::rewrite_impl_block` so every
 //!    `async fn` becomes a `Pin<Box<dyn Future + Send>>`-returning method.
 //!
-//! The legacy `#[saga::task] impl CompensatableTask<S> for T { ... }`
-//! form is unchanged and goes through the plain async rewriter in `lib.rs`.
+//! The explicit `#[saga::task] impl CompensatableTask<S> for T { ... }`
+//! form goes through the plain async rewriter in `lib.rs`.
 
 use proc_macro2::TokenStream;
 use quote::quote;

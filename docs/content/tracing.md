@@ -48,16 +48,17 @@ observer events as <code>tracing</code> events under the <code>cano::observer</c
 
 <h2 id="setup"><a href="#setup" class="anchor-link" aria-hidden="true">#</a>Setup</h2>
 <p>Enable the <code>tracing</code> feature flag in your <code>Cargo.toml</code>. You can also use
-<code>features = ["all"]</code> to enable both <code>tracing</code> and <code>scheduler</code> at once.</p>
+<code>features = ["all"]</code> to enable everything (<code>scheduler</code> + <code>tracing</code> +
+<code>recovery</code>) at once.</p>
 
 ```toml
 [dependencies]
-cano = { version = "0.11", features = ["tracing"] }
+cano = { version = "0.12", features = ["tracing"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Or enable everything (tracing + scheduler):
-# cano = { version = "0.11", features = ["all"] }
+# Or enable everything (scheduler + tracing + recovery):
+# cano = { version = "0.12", features = ["all"] }
 
 ```
 
@@ -194,9 +195,9 @@ execution in log output.</p>
 </div>
 
 ```toml
-# Enable both scheduler and tracing
+# Enable everything: scheduler + tracing + recovery
 [dependencies]
-cano = { version = "0.11", features = ["all"] }
+cano = { version = "0.12", features = ["all"] }
 
 ```
 <hr class="section-divider">
@@ -402,5 +403,12 @@ async fn main() -> Result<(), CanoError> {
 }
 
 ```
+</div>
+
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example tracing_demo --features "tracing scheduler"</code> — sets
+up a <code>tracing-subscriber</code>, runs a workflow and a scheduled flow, and prints the structured
+span output. Pair it with <code>TracingObserver</code> (see <a href="../observers/#tracing-observer">Observers</a>)
+for flat lifecycle events alongside the spans.</p>
 </div>
 

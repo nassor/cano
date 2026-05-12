@@ -78,7 +78,7 @@ pub fn derive_from_resources(input: TokenStream) -> TokenStream {
 ///
 /// Two surface forms are supported:
 ///
-/// 1. **Trait-impl form (legacy):** `#[task] impl Task<S> for X { ... }` — user
+/// 1. **Trait-impl form:** `#[task] impl Task<S> for X { ... }` — user
 ///    writes the trait header.
 /// 2. **Inherent-impl form:** `#[task(state = S [, key = K])] impl X { ... }` —
 ///    user writes only the inherent block; the macro builds the trait header
@@ -124,7 +124,7 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// Two surface forms are supported on impl blocks:
 ///
-/// 1. **Trait-impl form (legacy):** `#[task::node] impl Node<S> for X { ... }`. The
+/// 1. **Trait-impl form:** `#[task::node] impl Node<S> for X { ... }`. The
 ///    macro infers `type PrepResult` / `type ExecResult` from the return types
 ///    of `prep` and `exec`, and supplies a default `fn config(&self) -> TaskConfig`
 ///    when missing.

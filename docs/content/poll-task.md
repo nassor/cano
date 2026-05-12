@@ -15,8 +15,33 @@ is ready. Each call returns either "ready, here's the next state" or "not yet, t
 <a href="../task/">Task</a> family of processing models, alongside <a href="../nodes/">Node</a>,
 <a href="../router-task/">RouterTask</a>, <a href="../batch-task/">BatchTask</a>, and
 <a href="../stepped-task/">SteppedTask</a>. A <code>PollTask</code> reads typed dependencies from
-<a href="../resources/">Resources</a> the same way every other model does.
+<a href="../resources/">Resources</a> the same way every other model does. New to Cano? Read
+<a href="../workflows/">Workflows</a> and <a href="../resources/">Resources</a> first.
 </p>
+
+<div class="code-block">
+<span class="code-block-label">At a glance — <code>poll</code> returns <code>Ready</code> or <code>Pending { delay_ms }</code></span>
+
+```rust
+use cano::prelude::*;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Stage { AwaitJob, Done }
+
+struct AwaitJob;
+
+#[task::poll(state = Stage)]
+impl AwaitJob {
+    async fn poll(&self, res: &Resources) -> Result<PollOutcome<Stage>, CanoError> {
+        let store = res.get::<MemoryStore, _>("store")?;
+        match store.get::<bool>("job_done") {
+            Ok(true) => Ok(PollOutcome::Ready(TaskResult::Single(Stage::Done))),
+            _        => Ok(PollOutcome::Pending { delay_ms: 250 }), // async sleep, then poll again
+        }
+    }
+}
+```
+</div>
 
 <div class="callout callout-info">
 <div class="callout-label">Key concept</div>
@@ -47,11 +72,14 @@ retry rarely makes sense, since the loop already keeps trying. For tolerating tr
 <hr class="section-divider">
 <h2 id="how-it-works"><a href="#how-it-works" class="anchor-link" aria-hidden="true">#</a>How the Poll Loop Works</h2>
 
+<div class="diagram-frame">
+<p class="diagram-label">The poll loop: poll &rarr; sleep &rarr; poll &hellip; until Ready</p>
 <div class="mermaid">
 graph LR
 A[poll] -->|"Pending { delay_ms }"| B[sleep delay_ms]
 B --> A
 A -->|"Ready(result)"| C[Next State]
+</div>
 </div>
 
 <p>
@@ -194,6 +222,12 @@ impl AwaitJob {
     }
 }
 ```
+</div>
+
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example poll_retry_on_error</code> — a <code>poll</code> that
+intermittently <code>Err</code>s under <code>RetryOnError { max_errors: 3 }</code>: it absorbs short
+error streaks (and a <code>Pending</code> resets the counter), and fails once a streak exceeds the cap.</p>
 </div>
 
 <!-- Section: caps -->

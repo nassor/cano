@@ -7,6 +7,7 @@ template = "page.html"
 <div class="content-wrapper">
 <h1>Crash Recovery</h1>
 <p class="subtitle">Persist every state transition; resume a crashed run from the last checkpoint.</p>
+<p class="feature-tag">The <code>CheckpointStore</code> trait is always available; the built-in <code>RedbCheckpointStore</code> used in the examples below is behind the <code>recovery</code> feature gate (<code>features = ["recovery"]</code>).</p>
 
 <p>
 Attach a <strong><code>CheckpointStore</code></strong> to a <a href="../workflows/">Workflow</a>
@@ -15,16 +16,6 @@ written <em>before</em> that state's task runs. After a crash, <code>Workflow::r
 reloads the run, re-enters the FSM at the last checkpointed state, and continues forward.
 </p>
 
-<div class="callout callout-warning">
-<span class="callout-label">Breaking change in 0.12.0</span>
-<p>
-<code>CheckpointRow</code> gained a <code>kind: RowKind</code> field. <strong>Any custom
-<code>CheckpointStore</code> implementation must add <code>kind</code> to its row mapping</strong>
-(persist it, return it on load). The built-in <code>RedbCheckpointStore</code> handles this, with a
-legacy fallback so pre-0.12 redb files still load (old rows decode as <code>RowKind::StateEntry</code>).
-See <a href="#what-is-recorded">What Gets Recorded</a> and <a href="#trait">The <code>CheckpointStore</code> Trait</a> below.
-</p>
-</div>
 <p>
 The <code>CheckpointStore</code> trait is <strong>backend-agnostic and always available</strong> —
 implement it over Postgres, an HTTP service, a file, anything. With the <code>recovery</code>
@@ -244,14 +235,21 @@ with an <code>Err</code> rather than overwriting (a collision means two runs sha
 the id, <strong>sorted ascending by <code>sequence</code></strong>, or an empty <code>Vec</code> for
 an unknown id; <code>clear</code> removes a run's rows and must not touch any other id (clearing an
 unknown id is a no-op). The example above stores the whole <code>CheckpointRow</code>, so it carries
-<code>kind</code> for free — a store that maps rows to columns must add a <code>kind</code> column
-(this is the <strong>0.12.0 breaking change</strong> for custom impls). The engine calls
-<code>clear</code> automatically when a run reaches an exit state — and after a fully successful
+<code>kind</code> for free — a store that maps rows to columns needs a <code>kind</code> column. The
+engine calls <code>clear</code> automatically when a run reaches an exit state — and after a fully successful
 <a href="../saga/">compensation rollback</a> — so a finished run leaves no recovery log behind
 (it's best-effort: a <code>clear</code> failure is logged, not fatal). Implementations must be
 <code>Send + Sync + 'static</code> so one store can be shared (typically as
 <code>Arc&lt;dyn CheckpointStore&gt;</code>) across concurrent workflows.
 </p>
+
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example custom_checkpoint_store</code> — a complete in-memory
+<code>CheckpointStore</code> built with <code>#[cano::checkpoint_store]</code> (including the
+duplicate-<code>(workflow_id, sequence)</code> rejection), wired into a workflow, with a
+<code>resume_from</code> walk-through. No feature flag needed. The <code>cano-e2e</code> crate has a
+Postgres-backed implementation for the database-mapped case.</p>
+</div>
 <hr class="section-divider">
 
 <h2 id="redb"><a href="#redb" class="anchor-link" aria-hidden="true">#</a>Built-in: <code>RedbCheckpointStore</code></h2>
@@ -275,12 +273,11 @@ let store: Arc<RedbCheckpointStore> = Arc::new(RedbCheckpointStore::new("workflo
 
 <p>
 Internally a single table maps <code>(workflow_id, sequence)</code> to the
-<a href="https://docs.rs/postcard"><code>postcard</code></a>-encoded payload. redb orders composite
-keys element by element, so a workflow's rows are stored — and range-scanned — in ascending
-<code>sequence</code> order; the <code>sequence</code> lives in the key, not the value. The on-disk
-row now carries the <code>kind</code> discriminant; <code>RedbCheckpointStore</code> keeps a legacy
-fallback so a pre-0.12 redb file still loads — rows written without a <code>kind</code> field decode
-as <code>RowKind::StateEntry</code>.
+<a href="https://docs.rs/postcard"><code>postcard</code></a>-encoded payload (the
+<code>CheckpointRow</code> fields other than <code>sequence</code>, including the <code>kind</code>
+discriminant). redb orders composite keys element by element, so a workflow's rows are stored — and
+range-scanned — in ascending <code>sequence</code> order; the <code>sequence</code> lives in the key,
+not the value.
 </p>
 <hr class="section-divider">
 

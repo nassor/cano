@@ -196,6 +196,47 @@ name = "processing_models_tour"
 path = "examples/processing_models_tour.rs"
 required-features = ["recovery"]
 
+[[example]]
+name = "join_strategies"
+path = "examples/join_strategies.rs"
+
+[[example]]
+name = "custom_checkpoint_store"
+path = "examples/custom_checkpoint_store.rs"
+
+[[example]]
+name = "saga_recovery"
+path = "examples/saga_recovery.rs"
+required-features = ["recovery"]
+
+[[example]]
+name = "circuit_breaker_manual"
+path = "examples/circuit_breaker_manual.rs"
+
+[[example]]
+name = "workflow_validation"
+path = "examples/workflow_validation.rs"
+
+[[example]]
+name = "split_bulkhead"
+path = "examples/split_bulkhead.rs"
+
+[[example]]
+name = "poll_retry_on_error"
+path = "examples/poll_retry_on_error.rs"
+
+[[example]]
+name = "panic_safety"
+path = "examples/panic_safety.rs"
+
+[[example]]
+name = "store_custom_backend"
+path = "examples/store_custom_backend.rs"
+
+[[example]]
+name = "resources_advanced"
+path = "examples/resources_advanced.rs"
+
 [[bench]]
 name = "workflow_performance"
 harness = false

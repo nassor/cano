@@ -3,7 +3,7 @@
 //!
 //! Two entry shapes:
 //!
-//! 1. **Trait-impl form (legacy):** `#[node] impl Node<S> for T { ... }` — user
+//! 1. **Trait-impl form:** `#[node] impl Node<S> for T { ... }` — user
 //!    writes the trait header. The macro fills in `type PrepResult`,
 //!    `type ExecResult`, and `fn config` (when missing) and async-rewrites.
 //!
@@ -33,7 +33,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     let args = AttrArgs::parse(attr)?;
 
     if item_impl.trait_.is_some() {
-        // Legacy trait-impl form: ignore attr args (none expected) and fill missing
+        // Trait-impl form: ignore attr args (none expected) and fill missing
         // associated types / config.
         if args.state.is_some() || args.key.is_some() {
             return Err(syn::Error::new(
@@ -58,7 +58,7 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
 }
 
 // ---------------------------------------------------------------------------
-// Legacy trait-impl path (unchanged behaviour)
+// Trait-impl path
 // ---------------------------------------------------------------------------
 
 fn expand_trait_impl(mut item_impl: ItemImpl) -> syn::Result<TokenStream> {
@@ -174,8 +174,8 @@ fn expand_inherent_impl(
                 }
             },
             // Allow explicit `type PrepResult = ...;` / `type ExecResult = ...;`
-            // overrides — same semantics as the legacy trait-impl form: the
-            // user's declaration wins; otherwise the type is inferred from the
+            // overrides — same semantics as the trait-impl form: the user's
+            // declaration wins; otherwise the type is inferred from the
             // method's return type.
             ImplItem::Type(t) => match t.ident.to_string().as_str() {
                 "PrepResult" => has_prep_result = true,

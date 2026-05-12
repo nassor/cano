@@ -35,7 +35,7 @@ It excels at managing complex lifecycles where state transitions matter:
 </p>
 <ul class="animate-in">
 <li><strong>Data Pipelines</strong>: ETL jobs with parallel processing (Split/Join) and aggregation.</li>
-<li><strong>AI Agents</strong>: Multi-step inference chains with shared context and memory.</li>
+<li><strong>AI Agents</strong>: Multi-step inference chains with shared context and memory — see <code>cargo run --example ai_workflow_yes_and</code> (needs a local Ollama).</li>
 <li><strong>Background Systems</strong>: Scheduled maintenance, periodic reporting, and distributed cron jobs.</li>
 </ul>
 </section>
@@ -45,7 +45,7 @@ It excels at managing complex lifecycles where state transitions matter:
 <div class="feature-card animate-in">
 <div class="feature-icon" aria-hidden="true">&#9881;</div>
 <h3>Processing Models</h3>
-<p>A whole <code>Task</code> family: plain <code>Task</code>, structured <code>Node</code>, side-effect-free <code>RouterTask</code>, wait-until <code>PollTask</code>, fan-out <code>BatchTask</code>, resumable <code>SteppedTask</code> — mixed freely in one workflow.</p>
+<p>A whole <a href="task/#task-family"><code>Task</code> family</a>: plain <code>Task</code>, structured <code>Node</code>, side-effect-free <code>RouterTask</code>, wait-until <code>PollTask</code>, fan-out <code>BatchTask</code>, resumable <code>SteppedTask</code> — mixed freely in one workflow.</p>
 </div>
 <div class="feature-card animate-in">
 <div class="feature-icon secondary" aria-hidden="true">&#9670;</div>
@@ -117,7 +117,7 @@ the FSM dispatch hot path stays allocation-light whether or not you wire any of 
 <p>Full coverage: the <a href="resilience/">Resilience</a>, <a href="recovery/">Recovery</a>, <a href="saga/">Saga</a> and <a href="observers/">Observers</a> guides.</p>
 
 <h2>Getting Started</h2>
-<p>Add Cano to your <code>Cargo.toml</code>:</p>
+<p>Cano requires <strong>Rust 1.95.0+</strong> (edition 2024). Add it to your <code>Cargo.toml</code>:</p>
 
 <div class="getting-started-code">
 
@@ -130,7 +130,23 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 </div>
 
-<p>Cano runs on the Tokio runtime, so <code>tokio</code> is a required direct dependency — you launch the runtime via <code>#[tokio::main]</code> or <code>tokio::runtime::Builder</code>. The two features above are the minimum to do that; add <code>"time"</code>, <code>"sync"</code>, etc. only if your own code calls into them. Use <code>"full"</code> if you prefer convenience over compile time.</p>
+<p>
+Cano ships with <strong>no features enabled by default</strong>. <code>features = ["all"]</code> turns
+on all three optional features at once:
+</p>
+<ul>
+<li><code>scheduler</code> — the <a href="scheduler/"><code>Scheduler</code></a> (cron + interval + manual triggers)</li>
+<li><code>tracing</code> — <a href="tracing/"><code>tracing</code>-crate spans</a> and the <code>TracingObserver</code></li>
+<li><code>recovery</code> — <a href="recovery/"><code>RedbCheckpointStore</code></a>, the embedded ACID checkpoint store (the <code>CheckpointStore</code> trait itself is always available)</li>
+</ul>
+<p>
+Pick only what you need — e.g. <code>features = ["recovery"]</code>, or omit <code>features</code>
+entirely for the lean core. Cano runs on the Tokio runtime, so <code>tokio</code> is a required
+direct dependency — you launch the runtime via <code>#[tokio::main]</code> or
+<code>tokio::runtime::Builder</code>. The two <code>tokio</code> features above are the minimum to
+do that; add <code>"time"</code>, <code>"sync"</code>, etc. only if your own code calls into them, or
+use <code>"full"</code> if you prefer convenience over compile time.
+</p>
 
 <h3>Basic Example</h3>
 <div class="getting-started-code">
@@ -191,4 +207,19 @@ async fn main() -> Result<(), CanoError> {
 ```
 
 </div>
+
+<p>Run a working version with <code>cargo run --example workflow_simple</code> (or
+<code>task_simple</code> for the bare-task variant).</p>
+
+<h2>Where to go next</h2>
+<p>New to Cano? Read the docs roughly in this order:</p>
+<ol>
+<li><a href="workflows/">Workflows</a> — defining states, the builder, validation, and how a run executes.</li>
+<li><a href="resources/">Resources</a> — typed, lifecycle-managed dependency injection (every task receives a <code>&amp;Resources</code>).</li>
+<li><a href="task/">Task</a> — the default processing unit, then the rest of the <a href="task/#task-family">Task family</a> (<a href="nodes/">Node</a>, <a href="router-task/">RouterTask</a>, <a href="poll-task/">PollTask</a>, <a href="batch-task/">BatchTask</a>, <a href="stepped-task/">SteppedTask</a>) as you hit a shape that fits.</li>
+<li><a href="split-join/">Split &amp; Join</a> and <a href="scheduler/">Scheduler</a> — parallelism within a workflow, and time-driven execution of workflows.</li>
+<li>Resilience &amp; recovery: <a href="resilience/">Resilience</a>, <a href="recovery/">Recovery</a>, <a href="saga/">Saga</a>.</li>
+<li>Observability: <a href="tracing/">Tracing</a>, <a href="observers/">Observers</a>.</li>
+</ol>
+<p>Every concept has a runnable example under <a href="https://github.com/nassor/cano/tree/main/cano/examples"><code>cano/examples/</code></a> — each page links the relevant ones.</p>
 

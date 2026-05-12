@@ -260,14 +260,22 @@ async fn main() -> CanoResult<()> {
         println!("✅ Basic workflow completed with state: {result:?}\n");
     }
 
-    // Example 2: Task-based workflow with Tracing
+    // Example 2: Task-based workflow with Tracing and a custom workflow span
     {
-        info!("📋 Example 2: Task-based Workflow with Tracing and Retry");
+        info!("📋 Example 2: Task-based Workflow with Tracing, Retry, and with_tracing_span");
 
         let store = MemoryStore::new();
         // Set some operands for the math task
         store.put("operand_a", 7)?;
         store.put("operand_b", 6)?;
+
+        // Build a span with a business field so every log event inside this
+        // workflow run is decorated with `workflow_id` in structured output.
+        let workflow_span = info_span!(
+            "math_workflow",
+            workflow_id = "demo-run-42",
+            operation = "multiply"
+        );
 
         let resources = Resources::new().insert("store", store.clone());
         let task_workflow = Workflow::new(resources)
@@ -275,9 +283,12 @@ async fn main() -> CanoResult<()> {
                 WorkflowState::Start,
                 SimpleMathTask::new("math_task_1", "multiply"),
             )
-            .add_exit_state(WorkflowState::Complete);
+            .add_exit_state(WorkflowState::Complete)
+            // Attach the span: every tracing event emitted inside orchestrate()
+            // will carry the `workflow_id` and `operation` fields automatically.
+            .with_tracing_span(workflow_span);
 
-        info!("Starting task-based workflow execution...");
+        info!("Starting task-based workflow execution (with custom span)...");
         let result = task_workflow.orchestrate(WorkflowState::Start).await?;
 
         let math_result: i32 = store.get("math_result").unwrap_or(0);
@@ -408,6 +419,7 @@ async fn main() -> CanoResult<()> {
     println!("• Workflows are automatically instrumented with tracing");
     println!("• Node execution phases (prep, exec, post) are traced");
     println!("• Tasks can add custom tracing spans");
+    println!("• with_tracing_span(span) decorates every log event with business fields");
     println!("• Schedulers trace workflow executions with context");
     println!("• Error paths are traced with appropriate log levels");
     println!("• TracingObserver re-emits observer events under the `cano::observer` target");

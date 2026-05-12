@@ -290,7 +290,11 @@ interact. See <a href="../scheduler/#backoff-and-trip">Scheduler → Backoff &am
 </p>
 </div>
 
-<p>Runnable demo: <code>cargo run --example circuit_breaker</code>.</p>
+<p>Runnable demos: <code>cargo run --example circuit_breaker</code> (the
+<code>TaskConfig::with_circuit_breaker</code> integration path) and
+<code>cargo run --example circuit_breaker_manual</code> (the manual <code>try_acquire</code> /
+<code>record_*</code> path shown above — breaker opens after a failure streak, rejects calls while
+open, then closes via <code>HalfOpen</code>).</p>
 <hr class="section-divider">
 
 <h2 id="bulkhead"><a href="#bulkhead" class="anchor-link" aria-hidden="true">#</a>Bulkheads (split concurrency)</h2>
@@ -309,6 +313,11 @@ let workflow = Workflow::bare()
     .register_split(S::Fan, (0..200).map(|_| W).collect(), join)
     .add_exit_state(S::Done);
 ```
+
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example split_bulkhead</code> — 8 split tasks behind a
+<code>with_bulkhead(2)</code>; the start/end timestamps make the rate-limiting visible.</p>
+</div>
 <hr class="section-divider">
 
 <h2 id="panic-safety"><a href="#panic-safety" class="anchor-link" aria-hidden="true">#</a>Panic Safety</h2>
@@ -320,6 +329,12 @@ then flows through the normal retry / error / (with a saga) compensation path. S
 same per spawned task, so a panic preserves its task index. There's nothing to configure — it's
 always on.
 </p>
+
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example panic_safety</code> — a task that <code>panic!</code>s
+mid-workflow; the engine returns <code>CanoError::TaskExecution("panic: …")</code> and the preceding
+compensatable step's rollback still runs.</p>
+</div>
 <hr class="section-divider">
 
 <h2 id="scheduler-backoff"><a href="#scheduler-backoff" class="anchor-link" aria-hidden="true">#</a>Scheduler Backoff &amp; Trip</h2>

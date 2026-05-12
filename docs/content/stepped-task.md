@@ -16,9 +16,42 @@ step — so a crash mid-loop resumes from where it left off, not from step zero.
 <a href="../task/">Task</a> family of processing models, alongside <a href="../nodes/">Node</a>,
 <a href="../router-task/">RouterTask</a>, <a href="../poll-task/">PollTask</a>, and
 <a href="../batch-task/">BatchTask</a>, and it reads typed dependencies from
-<a href="../resources/">Resources</a> like the rest.
+<a href="../resources/">Resources</a> like the rest. New to Cano? Read
+<a href="../workflows/">Workflows</a> and <a href="../resources/">Resources</a> first; for the
+cursor-persistence half, <a href="../recovery/">Recovery</a>.
 
 </p>
+
+<div class="code-block">
+<span class="code-block-label">At a glance — each <code>step</code> returns <code>More(cursor)</code> or <code>Done(state)</code></span>
+
+```rust
+use cano::prelude::*;
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Stage { Scan, Done }
+
+#[derive(Serialize, Deserialize, Clone)]
+struct Cursor { page: u32 }
+
+struct ScanPages;
+
+#[task::stepped(state = Stage)]
+impl ScanPages {
+    async fn step(&self, _res: &Resources, cursor: Option<Cursor>)
+        -> Result<StepOutcome<Cursor, Stage>, CanoError>
+    {
+        let c = cursor.unwrap_or(Cursor { page: 0 });
+        if c.page >= 50 {
+            return Ok(StepOutcome::Done(TaskResult::Single(Stage::Done)));
+        }
+        // ...process page c.page...
+        Ok(StepOutcome::More(Cursor { page: c.page + 1 }))   // cursor persisted here when a store is attached
+    }
+}
+```
+</div>
 
 <div class="callout callout-info">
 <div class="callout-label">Key concept</div>
@@ -49,6 +82,8 @@ the step at and after the resume point may re-run.
 <hr class="section-divider">
 <h2 id="how-it-works"><a href="#how-it-works" class="anchor-link" aria-hidden="true">#</a>How the Step Loop Works</h2>
 
+<div class="diagram-frame">
+<p class="diagram-label">The step loop, with a crash &amp; resume from the last cursor</p>
 <div class="mermaid">
 graph LR
 A["step(None)"] -->|"More(c1)"| P1[persist cursor c1]
@@ -58,6 +93,7 @@ P2 --> C[…]
 C -->|"Done(result)"| D[Next State]
 P2 -. crash .-> R["resume_from"]
 R -->|"step(Some c2)"| C
+</div>
 </div>
 
 <p>
@@ -101,14 +137,6 @@ types, injects default <code>config</code> / <code>name</code> if absent, synthe
 <code>cano::task::stepped::run_stepped</code>) — useful if you register it with plain
 <code>register</code> and don't want persistence.
 </p>
-
-<div class="callout callout-tip">
-<div class="callout-label">Tip — don't name your state enum <code>Step</code></div>
-<p>
-The prelude exports <code>StepOutcome</code>; a state enum named <code>Step</code> reads awkwardly
-next to it. <code>Stage</code> or <code>Phase</code> are clearer choices for the FSM-state type.
-</p>
-</div>
 
 <div class="code-block">
 <span class="code-block-label"><span class="label-icon">&#128260;</span> Inference form — <code>#[task::stepped(state = ...)]</code> on an inherent impl</span>

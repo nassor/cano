@@ -208,6 +208,12 @@ work purely from <code>(res, output)</code>, and the workflow definition (state 
 <code>register_with_compensation</code> calls) must match across processes — the same constraint that
 already applies to resume itself.</li>
 </ul>
+
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example saga_recovery --features recovery</code> — a saga with
+compensatable steps wired to a <code>RedbCheckpointStore</code>: a later step fails, the compensations
+drain LIFO, and (on a clean rollback) the checkpoint log is cleared.</p>
+</div>
 <hr class="section-divider">
 
 <h2 id="observers"><a href="#observers" class="anchor-link" aria-hidden="true">#</a>Observer Events</h2>

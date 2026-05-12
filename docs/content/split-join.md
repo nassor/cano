@@ -184,6 +184,11 @@ Leave the bulkhead unset (<code>None</code>) for unbounded concurrency. Bulkhead
 <code>PartialTimeout</code> and any other join strategy.
 </p>
 </div>
+
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example split_bulkhead</code> — 8 split tasks behind a
+<code>with_bulkhead(2)</code>, with start/end timestamps printed so you can see the 4 waves of 2.</p>
+</div>
 <hr class="section-divider">
 
 <h2 id="complete-example"><a href="#complete-example" class="anchor-link" aria-hidden="true">#</a>Complete Example</h2>
@@ -274,6 +279,12 @@ async fn main() -> Result<(), CanoError> {
 <h2 id="join-strategy-examples"><a href="#join-strategy-examples" class="anchor-link" aria-hidden="true">#</a>Join Strategy Examples</h2>
 <p>Each strategy handles parallel task completion differently. The examples below isolate the
 <code>JoinConfig</code> wiring for each one.</p>
+
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example join_strategies</code> — runs the same parallel split four
+times with <code>Any</code>, <code>Quorum</code>, <code>Percentage</code>, and <code>PartialResults</code>,
+with staggered task delays so you can see exactly when each one returns.</p>
+</div>
 
 <h3 id="strategy-all"><a href="#strategy-all" class="anchor-link" aria-hidden="true">#</a>All — Wait for Every Task</h3>
 <p>Waits for all tasks to complete successfully. Fails if any task fails. Use it when every result is required.</p>
@@ -1108,7 +1119,11 @@ async fn main() -> Result<(), CanoError> {
         .add_exit_state(ProcessState::Complete);
 
     scheduler.every_seconds("batch_processor", batch_workflow, ProcessState::Start, 10)?;
-    scheduler.start().await?;
+    // Keep the handle alive — dropping the `RunningScheduler` aborts the spawned loops.
+    let running = scheduler.start().await?;
+
+    // ...run until shut down (e.g. a Ctrl-C handler), then stop gracefully.
+    running.wait().await?;
     Ok(())
 }
 ```
