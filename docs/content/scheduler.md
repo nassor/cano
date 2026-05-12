@@ -216,17 +216,14 @@ use chrono::Utc;
 enum State { Start, Complete }
 
 #[derive(Clone)]
-struct DailyReportNode {
+struct DailyReport {
     report_type: String,
 }
 
-#[task::node(state = State)]
-impl DailyReportNode {
-    type PrepResult = Vec<String>;
-    type ExecResult = String;
-
-    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        println!("📊 Preparing {} report...", self.report_type);
+#[task(state = State)]
+impl DailyReport {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<State>, CanoError> {
+        println!("Preparing {} report...", self.report_type);
 
         let store = res.get::<MemoryStore, _>("store")?;
 
@@ -234,22 +231,13 @@ impl DailyReportNode {
         let data = vec!["metric1".to_string(), "metric2".to_string(), "metric3".to_string()];
         store.put("report_start", Utc::now().to_rfc3339())?;
 
-        Ok(data)
-    }
+        println!("Generating report with {} records", data.len());
+        let result = format!("{} report: {} records processed", self.report_type, data.len());
 
-    async fn exec(&self, data: Self::PrepResult) -> Self::ExecResult {
-        println!("📊 Generating report with {} records", data.len());
-
-        // Generate report
-        format!("{} report: {} records processed", self.report_type, data.len())
-    }
-
-    async fn post(&self, res: &Resources, result: Self::ExecResult) -> Result<State, CanoError> {
-        println!("📊 Report completed: {}", result);
-        let store = res.get::<MemoryStore, _>("store")?;
+        println!("Report completed: {}", result);
         store.put("last_report", result)?;
 
-        Ok(State::Complete)
+        Ok(TaskResult::Single(State::Complete))
     }
 }
 
@@ -260,14 +248,14 @@ async fn main() -> Result<(), CanoError> {
 
     // Morning report workflow
     let morning_report = Workflow::new(Resources::new().insert("store", store.clone()))
-        .register(State::Start, DailyReportNode {
+        .register(State::Start, DailyReport {
             report_type: "Morning".to_string()
         })
         .add_exit_state(State::Complete);
 
     // Evening report workflow
     let evening_report = Workflow::new(Resources::new().insert("store", store.clone()))
-        .register(State::Start, DailyReportNode { 
+        .register(State::Start, DailyReport { 
             report_type: "Evening".to_string() 
         })
         .add_exit_state(State::Complete);

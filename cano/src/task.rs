@@ -1,26 +1,9 @@
-//! # Task API - Simplified Workflow Interface
+//! # Task API - Workflow Processing Interface
 //!
-//! This module provides the [`Task`] trait, which offers a simplified interface for workflow processing.
-//! A [`Task`] only requires implementing a single `run` method, giving you direct control over the execution flow.
+//! This module provides the [`Task`] trait, the single interface for workflow processing units.
+//! A [`Task`] requires implementing one of `run` / `run_bare`, giving you direct control over the execution flow.
 //!
-//! ## Key Differences
-//!
-//! - **[`Task`]**: Simple interface with a single `run` method. It's great for straightforward operations and quick prototyping.
-//! - **[`crate::task::node::Node`]**: A more structured interface with a three-phase lifecycle (`prep`, `exec`, `post`). It's ideal for complex operations where separating concerns is beneficial.
-//!
-//! Both `Task` and `Node` support retry strategies.
-//!
-//! ## Relationship & Compatibility
-//!
-//! **Every [`crate::task::node::Node`] automatically implements [`Task`]** through a blanket implementation. This means:
-//! - You can use any existing `Node` wherever a `Task` is expected.
-//! - Workflows can register both `Task`s and `Node`s using the same `register()` method.
-//! - This provides a seamless migration path from a simple `Task` to a more structured `Node` if complexity increases.
-//!
-//! ## When to Use Which
-//!
-//! - Use **[`Task`]** for simplicity and direct control.
-//! - Use **[`crate::task::node::Node`]** for complex logic that benefits from a structured, multi-phase approach.
+//! Tasks support retry strategies via [`TaskConfig`].
 //!
 //! ## Example
 //!
@@ -92,12 +75,6 @@
 //! # Ok(())
 //! # }
 //! ```
-//!
-//! ## Interoperability
-//!
-//! Every [`crate::task::node::Node`] automatically implements [`Task`], so a `Node` can be used
-//! wherever a `Task` is expected — start with a plain `Task` and reach for `Node`'s three-phase
-//! lifecycle when a unit of work grows complex enough to want it.
 
 use crate::error::CanoError;
 use crate::resource::Resources;
@@ -106,11 +83,7 @@ use std::borrow::Cow;
 use std::fmt;
 use std::hash::Hash;
 
-#[cfg(feature = "tracing")]
-use tracing::{debug, info, instrument};
-
 pub mod batch;
-pub mod node;
 pub mod poll;
 mod retry;
 pub mod router;
@@ -119,7 +92,6 @@ pub mod stepped;
 pub use batch::{
     BatchTask, BatchTaskObject, DefaultBatchItem, DefaultBatchItemOutput, DynBatchTask, run_batch,
 };
-pub use node::{DefaultNodeResult, DynNode, Node, NodeObject};
 pub use poll::{
     DynPollTask, PollErrorPolicy, PollOutcome, PollTask, PollTaskObject, run_poll_loop,
 };
@@ -130,12 +102,11 @@ pub use stepped::{
 };
 
 // Attribute macros namespaced under `cano::task::` so that
-// `#[task::router]`, `#[task::poll]`, `#[task::batch]`, `#[task::stepped]`,
-// and `#[task::node]` all resolve as path-qualified attribute macros.
+// `#[task::router]`, `#[task::poll]`, `#[task::batch]`, and `#[task::stepped]`
+// all resolve as path-qualified attribute macros.
 // (Modules and macros occupy different namespaces, so these coexist with the
-// `router`, `poll`, `batch`, `stepped`, and `node` submodules above.)
+// `router`, `poll`, `batch`, and `stepped` submodules above.)
 pub use cano_macros::batch_task as batch;
-pub use cano_macros::node;
 pub use cano_macros::poll_task as poll;
 pub use cano_macros::router_task as router;
 pub use cano_macros::stepped_task as stepped;
@@ -149,18 +120,10 @@ pub enum TaskResult<TState> {
     Split(Vec<TState>),
 }
 
-/// Task trait for simplified workflow processing
+/// Task trait for workflow processing
 ///
-/// This trait provides a simplified interface for workflow processing compared to [`crate::task::node::Node`].
-/// Instead of implementing three separate phases (`prep`, `exec`, `post`), you only need
-/// to implement a single `run` method.
-///
-/// # Relationship with Node
-///
-/// **Every [`crate::task::node::Node`] automatically implements [`Task`]** through a blanket implementation.
-/// This means [`crate::task::node::Node`] is a superset of [`Task`] with additional structure and retry capabilities:
-/// - [`Task`]: Simple `run()` method - great for prototypes and simple operations
-/// - [`crate::task::node::Node`]: Three-phase lifecycle + retry strategies - ideal for production workloads
+/// This is the single interface for workflow processing units. You implement one
+/// of `run` / `run_bare`, giving you direct control over the execution flow.
 ///
 /// # Generic Types
 ///
@@ -171,10 +134,9 @@ pub enum TaskResult<TState> {
 ///
 /// # Benefits
 ///
-/// - **Simplicity**: Single method to implement instead of three
+/// - **Simplicity**: One method to implement
 /// - **Flexibility**: Full control over execution flow
-/// - **Compatibility**: Works seamlessly with existing [`crate::task::node::Node`] implementations
-/// - **Type Safety**: Same type safety guarantees as [`crate::task::node::Node`]
+/// - **Type Safety**: Compile-time-checked state transitions
 /// - **Performance**: Zero-cost abstraction with direct execution
 ///
 /// # Example
@@ -293,62 +255,6 @@ where
     }
 }
 
-/// Blanket implementation: Every Node is automatically a Task
-///
-/// This implementation makes all existing [`crate::task::node::Node`] implementations automatically
-/// work as [`Task`] implementations. This means [`crate::task::node::Node`] is a superset of [`Task`]:
-///
-/// - **[`Task`]**: Simple `run()` method
-/// - **[`crate::task::node::Node`]**: Three-phase lifecycle (`prep`, `exec`, `post`) + retry strategies
-///
-/// This enables:
-/// - Using any Node wherever Tasks are expected
-/// - Mixing Tasks and Nodes in the same workflow
-/// - Gradual migration from simple Tasks to full-featured Nodes
-///
-/// # Retry contract
-///
-/// This blanket `Task::run` executes exactly **one** `prep` → `exec` → `post` pass with no
-/// retries. Retries are driven by the workflow dispatcher's outer `run_with_retries` call,
-/// which uses this single-pass method as the unit of work.
-///
-/// **Do not call [`crate::task::node::Node::run`] inside a `Task::run` override for a Node** —
-/// `Node::run` applies its own retry loop, so doing so would retry twice: once inside
-/// `Node::run` and again in the workflow dispatcher.
-#[task]
-impl<TState, TResourceKey, N> Task<TState, TResourceKey> for N
-where
-    N: crate::task::node::Node<TState, TResourceKey>,
-    TState: Clone + fmt::Debug + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
-{
-    fn config(&self) -> TaskConfig {
-        crate::task::node::Node::config(self)
-    }
-
-    #[cfg_attr(
-        feature = "tracing",
-        instrument(skip(self, res), fields(task_type = "node_adapter"))
-    )]
-    async fn run(&self, res: &Resources<TResourceKey>) -> Result<TaskResult<TState>, CanoError> {
-        #[cfg(feature = "tracing")]
-        debug!("Executing task through Node adapter");
-
-        // Run a single attempt of prep → exec → post without the Node's own retry loop.
-        // Retries are driven by the outer `run_with_retries` in both `execute_single_task` and
-        // `execute_split_join`, which use this method as the unit of work. Calling `Node::run`
-        // here would double-retry nodes (inner Node::run_with_retries + outer run_with_retries).
-        let prep_result = crate::task::node::Node::prep(self, res).await?;
-        let exec_result = crate::task::node::Node::exec(self, prep_result).await;
-        let next_state = crate::task::node::Node::post(self, res, exec_result).await?;
-
-        #[cfg(feature = "tracing")]
-        info!(next_state = ?next_state, "Task execution completed successfully");
-
-        Ok(TaskResult::Single(next_state))
-    }
-}
-
 /// Type alias for a dynamic task trait object.
 ///
 /// Use this when you need to store different task types in the same collection.
@@ -387,7 +293,6 @@ pub type TaskObject<TState, TResourceKey = Cow<'static, str>> =
 mod tests {
     use super::*;
     use crate::resource::Resources;
-    use crate::task as task_mod;
     use cano_macros::task;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -559,49 +464,6 @@ mod tests {
             assert_eq!(result, TaskResult::Single(TestAction::Complete));
             assert_eq!(task.execution_count(), i);
         }
-    }
-
-    // Test that demonstrates Node -> Task compatibility
-    use crate::task::node::Node;
-
-    struct TestNode;
-
-    #[task_mod::node]
-    impl Node<TestAction> for TestNode {
-        type PrepResult = String;
-        type ExecResult = bool;
-
-        async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
-            Ok("node_prepared".to_string())
-        }
-
-        async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
-            prep_res == "node_prepared"
-        }
-
-        async fn post(
-            &self,
-            _res: &Resources,
-            exec_res: Self::ExecResult,
-        ) -> Result<TestAction, CanoError> {
-            if exec_res {
-                Ok(TestAction::Complete)
-            } else {
-                Ok(TestAction::Error)
-            }
-        }
-    }
-
-    #[tokio::test]
-    async fn test_node_as_task_compatibility() {
-        let node = TestNode;
-        let res = Resources::new();
-
-        // Use the node as a task - this should work due to the blanket implementation
-        let result = Task::run(&node, &res).await;
-
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), TaskResult::Single(TestAction::Complete));
     }
 
     // ------------------------------------------------------------------

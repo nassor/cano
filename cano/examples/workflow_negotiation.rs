@@ -1,11 +1,11 @@
 //! # Negotiation Workflow Example
 //!
 //! This example demonstrates a negotiation workflow between a seller and buyer using the Workflow structure:
-//! 1. **SellerNode**: Starts with an initial price and decrements it on each round
-//! 2. **BuyerNode**: Evaluates the offer against their budget and decides to accept or continue
+//! 1. **SellerTask**: Starts with an initial price and decrements it on each round
+//! 2. **BuyerTask**: Evaluates the offer against their budget and decides to accept or continue
 //!
 //! The workflow showcases:
-//! - Inter-node communication through shared store
+//! - Inter-task communication through shared store
 //! - Iterative negotiation logic with random price decrements
 //! - Workflow control based on negotiation outcomes
 //!
@@ -53,11 +53,11 @@ impl NegotiationState {
     }
 }
 
-/// Seller node: Manages pricing and decrements offers
+/// Seller task: manages pricing and decrements offers
 #[derive(Clone)]
-struct SellerNode;
+struct SellerTask;
 
-impl SellerNode {
+impl SellerTask {
     fn new() -> Self {
         Self
     }
@@ -69,93 +69,72 @@ impl SellerNode {
     }
 }
 
-#[task::node(state = NegotiationAction)]
-impl SellerNode {
-    type PrepResult = NegotiationState;
-    type ExecResult = NegotiationState;
-
+#[task(state = NegotiationAction)]
+impl SellerTask {
     fn config(&self) -> TaskConfig {
         TaskConfig::minimal()
     }
 
-    /// Preparation phase: Load current negotiation state or initialize if first round
-    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<NegotiationAction>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
-        match store.get::<NegotiationState>("negotiation_state") {
-            Ok(state) => {
+
+        // Load or initialize negotiation state
+        let mut state = match store.get::<NegotiationState>("negotiation_state") {
+            Ok(s) => {
                 println!(
-                    "🏷️  Seller: Round {} - Current offer on table: ${}",
-                    state.round, state.current_offer
+                    "Seller: Round {} - Current offer on table: ${}",
+                    s.round, s.current_offer
                 );
-                Ok(state)
+                s
             }
             Err(_) => {
                 // First round - initialize negotiation
                 let initial_price = 10000;
                 let buyer_budget = 1000;
-                let state = NegotiationState::new(initial_price, buyer_budget);
+                let s = NegotiationState::new(initial_price, buyer_budget);
 
-                println!("🏪 Seller: Starting negotiation!");
-                println!("🏷️  Seller: Initial asking price: ${initial_price}");
-                println!("💰 Buyer budget: ${buyer_budget}");
+                println!("Seller: Starting negotiation!");
+                println!("Seller: Initial asking price: ${initial_price}");
+                println!("Buyer budget: ${buyer_budget}");
                 println!("{}", "=".repeat(50));
-
-                Ok(state)
+                s
             }
-        }
-    }
+        };
 
-    /// Execution phase: Calculate new offer (unless it's the first round)
-    async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
-        let mut state = prep_res;
-
-        // If this is not the first round, make a new offer
+        // Calculate new offer (unless it's the first round)
         if state.round > 1 {
             let reduction = Self::calculate_price_reduction();
             let new_offer = state.current_offer.saturating_sub(reduction);
-
-            // Don't go below a minimum reasonable price
             let minimum_price = 100;
             state.current_offer = std::cmp::max(new_offer, minimum_price);
 
             println!(
-                "🏷️  Seller: Round {} - Reducing price by ${}",
+                "Seller: Round {} - Reducing price by ${}",
                 state.round, reduction
             );
-            println!("🏷️  Seller: New offer: ${}", state.current_offer);
+            println!("Seller: New offer: ${}", state.current_offer);
 
             if state.current_offer == minimum_price {
-                println!("🏷️  Seller: This is my final offer! Can't go any lower.");
+                println!("Seller: This is my final offer! Can't go any lower.");
             }
         } else {
-            println!("🏷️  Seller: My asking price is ${}", state.current_offer);
+            println!("Seller: My asking price is ${}", state.current_offer);
         }
 
-        state
-    }
-
-    /// Post-processing phase: Store the updated offer for buyer evaluation
-    async fn post(
-        &self,
-        res: &Resources,
-        exec_res: Self::ExecResult,
-    ) -> Result<NegotiationAction, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
         // Store the current negotiation state
-        store.put("negotiation_state", exec_res.clone())?;
-
-        println!("🏷️  Seller: Waiting for buyer's response...");
+        store.put("negotiation_state", state)?;
+        println!("Seller: Waiting for buyer's response...");
         println!("{}", "-".repeat(30));
 
-        Ok(NegotiationAction::BuyerEvaluate)
+        Ok(TaskResult::Single(NegotiationAction::BuyerEvaluate))
     }
 }
 
-/// Buyer node: Evaluates offers and makes decisions
+/// Buyer task: evaluates offers and makes decisions
 #[derive(Clone)]
-struct BuyerNode;
+struct BuyerTask;
 
-impl BuyerNode {
+impl BuyerTask {
     fn new() -> Self {
         Self
     }
@@ -178,80 +157,58 @@ impl BuyerNode {
     }
 }
 
-#[task::node(state = NegotiationAction)]
-impl BuyerNode {
-    type PrepResult = NegotiationState;
-    type ExecResult = (NegotiationState, bool);
-
+#[task(state = NegotiationAction)]
+impl BuyerTask {
     fn config(&self) -> TaskConfig {
         TaskConfig::minimal()
     }
 
-    /// Preparation phase: Load the current negotiation state
-    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<NegotiationAction>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
-        let state: NegotiationState = store.get("negotiation_state").map_err(|e| {
-            CanoError::preparation(format!("Failed to load negotiation state: {e}"))
+
+        let mut state: NegotiationState = store.get("negotiation_state").map_err(|e| {
+            CanoError::task_execution(format!("Failed to load negotiation state: {e}"))
         })?;
 
         println!(
-            "💰 Buyer: Evaluating seller's offer of ${}",
+            "Buyer: Evaluating seller's offer of ${}",
             state.current_offer
         );
-        Ok(state)
-    }
 
-    /// Execution phase: Decide whether to accept the offer
-    async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
-        let state = prep_res;
         let acceptable = Self::evaluate_offer(&state);
 
         if acceptable {
             if state.current_offer <= state.buyer_budget {
                 println!(
-                    "💰 Buyer: Great! This offer (${}) fits my budget (${})",
+                    "Buyer: Great! This offer (${}) fits my budget (${})",
                     state.current_offer, state.buyer_budget
                 );
-                println!("🤝 Buyer: I accept this deal!");
+                println!("Buyer: I accept this deal!");
             }
         } else {
             let offer_ratio = state.current_offer as f64 / state.buyer_budget as f64;
 
             if state.round >= 10 && offer_ratio > 3.0 {
                 println!(
-                    "💰 Buyer: This is taking too long and the offer (${}) is still {}x my budget.",
+                    "Buyer: This is taking too long and the offer (${}) is still {}x my budget.",
                     state.current_offer,
                     offer_ratio.round() as u32
                 );
-                println!("😞 Buyer: I'm walking away from this negotiation.");
+                println!("Buyer: I'm walking away from this negotiation.");
             } else {
                 println!(
-                    "💰 Buyer: ${} is still above my budget of ${}.",
+                    "Buyer: ${} is still above my budget of ${}.",
                     state.current_offer, state.buyer_budget
                 );
-                println!("💰 Buyer: Can you do better?");
+                println!("Buyer: Can you do better?");
             }
         }
 
-        (state, acceptable)
-    }
-
-    /// Post-processing phase: Update state and determine next action
-    async fn post(
-        &self,
-        res: &Resources,
-        exec_res: Self::ExecResult,
-    ) -> Result<NegotiationAction, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
-        let (mut state, acceptable) = exec_res;
-
         if acceptable && state.current_offer <= state.buyer_budget {
-            // Store final deal details
             store.put("final_deal", state.clone())?;
             store.remove("negotiation_state")?;
-
-            println!("✅ Deal reached in round {}!", state.round);
-            return Ok(NegotiationAction::Deal);
+            println!("Deal reached in round {}!", state.round);
+            return Ok(TaskResult::Single(NegotiationAction::Deal));
         }
 
         // Check if we should give up
@@ -259,22 +216,21 @@ impl BuyerNode {
         if state.round >= 10 && offer_ratio > 3.0 {
             store.put("failed_negotiation", state)?;
             store.remove("negotiation_state")?;
-            return Ok(NegotiationAction::NoDeal);
+            return Ok(TaskResult::Single(NegotiationAction::NoDeal));
         }
 
         // Continue negotiation - increment round and go back to seller
         state.round += 1;
         store.put("negotiation_state", state)?;
-
         println!("{}", "-".repeat(30));
 
-        Ok(NegotiationAction::StartSelling)
+        Ok(TaskResult::Single(NegotiationAction::StartSelling))
     }
 }
 
 /// Negotiation orchestrator using Workflow
 async fn run_negotiation_workflow() -> Result<(), CanoError> {
-    println!("🤝 Starting Negotiation Workflow");
+    println!("Starting Negotiation Workflow");
     println!("================================");
     println!("Seller starts at $10,000");
     println!("Buyer has a budget of $1,000");
@@ -285,8 +241,8 @@ async fn run_negotiation_workflow() -> Result<(), CanoError> {
 
     // Create a Workflow that handles the negotiation process
     let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
-        .register(NegotiationAction::StartSelling, SellerNode::new())
-        .register(NegotiationAction::BuyerEvaluate, BuyerNode::new())
+        .register(NegotiationAction::StartSelling, SellerTask::new())
+        .register(NegotiationAction::BuyerEvaluate, BuyerTask::new())
         .add_exit_states(vec![
             NegotiationAction::Deal,
             NegotiationAction::NoDeal,
@@ -300,15 +256,15 @@ async fn run_negotiation_workflow() -> Result<(), CanoError> {
 
             match final_state {
                 NegotiationAction::Deal => {
-                    println!("🎉 NEGOTIATION SUCCESSFUL!");
+                    println!("NEGOTIATION SUCCESSFUL!");
 
                     if let Ok(deal) = store.get::<NegotiationState>("final_deal") {
-                        println!("📋 Final Deal Summary:");
-                        println!("  • Final price: ${}", deal.current_offer);
-                        println!("  • Buyer budget: ${}", deal.buyer_budget);
-                        println!("  • Rounds of negotiation: {}", deal.round);
+                        println!("Final Deal Summary:");
+                        println!("  Final price: ${}", deal.current_offer);
+                        println!("  Buyer budget: ${}", deal.buyer_budget);
+                        println!("  Rounds of negotiation: {}", deal.round);
                         println!(
-                            "  • Savings from initial price: ${}",
+                            "  Savings from initial price: ${}",
                             deal.seller_initial_price - deal.current_offer
                         );
 
@@ -316,36 +272,36 @@ async fn run_negotiation_workflow() -> Result<(), CanoError> {
                             as f64
                             / deal.seller_initial_price as f64)
                             * 100.0;
-                        println!("  • Discount achieved: {savings_percent:.1}%");
+                        println!("  Discount achieved: {savings_percent:.1}%");
                     }
                 }
                 NegotiationAction::NoDeal => {
-                    println!("💔 NEGOTIATION FAILED!");
+                    println!("NEGOTIATION FAILED!");
 
                     if let Ok(failed) = store.get::<NegotiationState>("failed_negotiation") {
-                        println!("📋 Negotiation Summary:");
-                        println!("  • Final offer: ${}", failed.current_offer);
-                        println!("  • Buyer budget: ${}", failed.buyer_budget);
-                        println!("  • Rounds attempted: {}", failed.round);
+                        println!("Negotiation Summary:");
+                        println!("  Final offer: ${}", failed.current_offer);
+                        println!("  Buyer budget: ${}", failed.buyer_budget);
+                        println!("  Rounds attempted: {}", failed.round);
                         println!(
-                            "  • Gap remaining: ${}",
+                            "  Gap remaining: ${}",
                             failed.current_offer - failed.buyer_budget
                         );
 
                         let gap_ratio = failed.current_offer as f64 / failed.buyer_budget as f64;
-                        println!("  • Offer was {gap_ratio:.1}x the buyer's budget");
+                        println!("  Offer was {gap_ratio:.1}x the buyer's budget");
                     }
 
                     println!("The buyer walked away - no deal was reached.");
                 }
                 NegotiationAction::Error => {
-                    eprintln!("❌ Negotiation terminated due to an error");
+                    eprintln!("Negotiation terminated due to an error");
                     return Err(CanoError::workflow(
                         "Negotiation terminated with error state",
                     ));
                 }
                 other => {
-                    eprintln!("⚠️  Negotiation ended in unexpected state: {other:?}");
+                    eprintln!("Negotiation ended in unexpected state: {other:?}");
                     return Err(CanoError::workflow(format!(
                         "Negotiation ended in unexpected state: {other:?}"
                     )));
@@ -353,7 +309,7 @@ async fn run_negotiation_workflow() -> Result<(), CanoError> {
             }
         }
         Err(e) => {
-            eprintln!("❌ Negotiation workflow failed: {e}");
+            eprintln!("Negotiation workflow failed: {e}");
             return Err(e);
         }
     }
@@ -363,24 +319,24 @@ async fn run_negotiation_workflow() -> Result<(), CanoError> {
 
 #[tokio::main]
 async fn main() {
-    println!("🤝 Negotiation Workflow Example");
+    println!("Negotiation Workflow Example");
     println!("===============================");
 
     match run_negotiation_workflow().await {
         Ok(()) => {
-            println!("\n✅ Negotiation workflow completed!");
+            println!("\nNegotiation workflow completed!");
         }
         Err(e) => {
-            eprintln!("\n❌ Negotiation workflow failed: {e}");
+            eprintln!("\nNegotiation workflow failed: {e}");
             std::process::exit(1);
         }
     }
 
-    println!("\n🎭 This example demonstrates:");
-    println!("  • Inter-node communication via shared store");
-    println!("  • Iterative workflow with conditional routing");
-    println!("  • Random business logic (price reductions)");
-    println!("  • Multiple exit conditions (deal/no deal)");
+    println!("\nThis example demonstrates:");
+    println!("  Inter-task communication via shared store");
+    println!("  Iterative workflow with conditional routing");
+    println!("  Random business logic (price reductions)");
+    println!("  Multiple exit conditions (deal/no deal)");
 }
 
 #[cfg(test)]
@@ -388,14 +344,14 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_seller_node_initialization() {
-        let seller = SellerNode::new();
+    async fn test_seller_task_initialization() {
+        let seller = SellerTask::new();
         let store = MemoryStore::new();
         let res = Resources::new().insert("store", store.clone());
 
         // First run should initialize the negotiation
         let result = seller.run(&res).await.unwrap();
-        assert_eq!(result, NegotiationAction::BuyerEvaluate);
+        assert_eq!(result, TaskResult::Single(NegotiationAction::BuyerEvaluate));
 
         // Verify state was stored
         let state: NegotiationState = store.get("negotiation_state").unwrap();
@@ -405,7 +361,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_buyer_node_evaluation() {
+    async fn test_buyer_task_evaluation() {
         let store = MemoryStore::new();
 
         // Setup: affordable offer
@@ -416,16 +372,16 @@ mod tests {
             .put("negotiation_state", affordable_state_modified.clone())
             .unwrap();
 
-        let buyer = BuyerNode::new();
+        let buyer = BuyerTask::new();
         let res = Resources::new().insert("store", store.clone());
         let result = buyer.run(&res).await.unwrap();
 
         // Should accept the deal
-        assert_eq!(result, NegotiationAction::Deal);
+        assert_eq!(result, TaskResult::Single(NegotiationAction::Deal));
     }
 
     #[tokio::test]
-    async fn test_buyer_node_rejection() {
+    async fn test_buyer_task_rejection() {
         let store = MemoryStore::new();
 
         // Setup: expensive offer, early round
@@ -437,16 +393,16 @@ mod tests {
             .put("negotiation_state", expensive_state_modified)
             .unwrap();
 
-        let buyer = BuyerNode::new();
+        let buyer = BuyerTask::new();
         let res = Resources::new().insert("store", store.clone());
         let result = buyer.run(&res).await.unwrap();
 
         // Should continue negotiating
-        assert_eq!(result, NegotiationAction::StartSelling);
+        assert_eq!(result, TaskResult::Single(NegotiationAction::StartSelling));
     }
 
     #[tokio::test]
-    async fn test_buyer_node_gives_up() {
+    async fn test_buyer_task_gives_up() {
         let store = MemoryStore::new();
 
         // Setup: expensive offer, many rounds
@@ -458,12 +414,12 @@ mod tests {
             .put("negotiation_state", expensive_state_modified)
             .unwrap();
 
-        let buyer = BuyerNode::new();
+        let buyer = BuyerTask::new();
         let res = Resources::new().insert("store", store.clone());
         let result = buyer.run(&res).await.unwrap();
 
         // Should give up
-        assert_eq!(result, NegotiationAction::NoDeal);
+        assert_eq!(result, TaskResult::Single(NegotiationAction::NoDeal));
     }
 
     #[tokio::test]
@@ -479,11 +435,11 @@ mod tests {
             .put("negotiation_state", ongoing_state.clone())
             .unwrap();
 
-        let seller = SellerNode::new();
+        let seller = SellerTask::new();
         let res = Resources::new().insert("store", store.clone());
         let result = seller.run(&res).await.unwrap();
 
-        assert_eq!(result, NegotiationAction::BuyerEvaluate);
+        assert_eq!(result, TaskResult::Single(NegotiationAction::BuyerEvaluate));
 
         // Verify price was reduced
         let updated_state: NegotiationState = store.get("negotiation_state").unwrap();
@@ -505,7 +461,7 @@ mod tests {
     async fn test_price_reduction_range() {
         // Test the price reduction range multiple times
         for _ in 0..10 {
-            let reduction = SellerNode::calculate_price_reduction();
+            let reduction = SellerTask::calculate_price_reduction();
             assert!(reduction >= 500);
             assert!(reduction <= 2000);
         }

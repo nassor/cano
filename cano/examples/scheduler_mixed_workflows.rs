@@ -45,32 +45,20 @@ impl SimpleTask {
     }
 }
 
-#[cano::task::node]
-impl Node<TaskState> for SimpleTask {
-    type PrepResult = String;
-    type ExecResult = String;
-
-    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        Ok(format!("Task {} prepared", self.task_id))
-    }
-
-    async fn exec(&self, prep_result: Self::PrepResult) -> Self::ExecResult {
+#[cano::task]
+impl Task<TaskState> for SimpleTask {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<TaskState>, CanoError> {
+        let prep_result = format!("Task {} prepared", self.task_id);
         let count = self.execution_count.fetch_add(1, Ordering::SeqCst) + 1;
 
         // Simulate some work
         tokio::time::sleep(Duration::from_millis(10)).await;
 
-        format!("{} - Execution #{}", prep_result, count)
-    }
+        let exec_result = format!("{} - Execution #{}", prep_result, count);
 
-    async fn post(
-        &self,
-        res: &Resources,
-        exec_result: Self::ExecResult,
-    ) -> Result<TaskState, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
         store.put("last_execution", exec_result)?;
-        Ok(TaskState::Complete)
+        Ok(TaskResult::Single(TaskState::Complete))
     }
 }
 

@@ -23,7 +23,7 @@ template = "page.html"
 </nav>
 
 <p>
-Workflows in Cano are state machines. You define a set of states (usually an enum) and register a <code>Task</code> or <code>Node</code> for each state. 
+Workflows in Cano are state machines. You define a set of states (usually an enum) and register a <code>Task</code> for each state.
 The workflow engine manages the transitions between these states until an exit state is reached.
 </p>
 <hr class="section-divider">
@@ -133,8 +133,8 @@ async fn main() -> Result<(), CanoError> {
 ```
 
 <div class="callout callout-tip">
-<p>Runnable examples: <code>cargo run --example workflow_simple</code> (a linear three-state workflow,
-like the one above) and <code>cargo run --example mixed_workflow</code> (Tasks and Nodes together).</p>
+<p>Runnable example: <code>cargo run --example workflow_simple</code> — a linear three-state workflow
+like the one above.</p>
 </div>
 <hr class="section-divider">
 
@@ -159,7 +159,7 @@ will warn you if you discard the return value. If you forget to capture it, the 
 <tr>
 <td><code>register(state, task)</code></td>
 <td><code>Single</code></td>
-<td>One <a href="../task/">Task</a> (or <a href="../nodes/">Node</a>, <a href="../poll-task/">PollTask</a>, <a href="../batch-task/">BatchTask</a> — all dispatch as <code>Task</code>).</td>
+<td>One <a href="../task/">Task</a> (or <a href="../poll-task/">PollTask</a>, <a href="../batch-task/">BatchTask</a> — all dispatch as <code>Task</code>).</td>
 </tr>
 <tr>
 <td><code>register_split(state, tasks, join_config)</code></td>
@@ -349,7 +349,7 @@ during execution. Understanding these errors helps you build robust error recove
 </tr>
 <tr>
 <td><code>CanoError::RetryExhausted</code></td>
-<td>All retry attempts exhausted by a Node</td>
+<td>All retry attempts exhausted by a Task</td>
 <td>Increase retry count or fix the underlying transient failure</td>
 </tr>
 <tr>
@@ -365,7 +365,7 @@ during execution. Understanding these errors helps you build robust error recove
 <tr>
 <td><code>CanoError::*</code></td>
 <td>Any error propagated from task execution</td>
-<td>Check the specific task logic — <code>NodeExecution</code>, <code>Preparation</code>, <code>Store</code>, etc.</td>
+<td>Check the specific task logic — <code>TaskExecution</code>, <code>Store</code>, etc.</td>
 </tr>
 </tbody>
 </table>

@@ -1530,58 +1530,46 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("register_split"));
     }
 
-    /// Regression test: a Node used in a workflow should only be retried once per the
-    /// configured retry count, not double-retried by both Node::run_with_retries and
-    /// the outer execute_single_task run_with_retries.
+    /// Regression test: a task registered in a workflow is retried exactly once per the
+    /// configured retry count by the outer `execute_single_task` `run_with_retries`.
     #[tokio::test]
-    async fn test_node_in_workflow_no_double_retry() {
-        use crate::task::node::Node;
+    async fn test_task_in_workflow_no_double_retry() {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::Duration;
 
-        struct CountingNode {
+        struct CountingTask {
             call_count: Arc<std::sync::atomic::AtomicUsize>,
         }
 
-        #[task_mod::node]
-        impl Node<TestState> for CountingNode {
-            type PrepResult = ();
-            type ExecResult = ();
-
+        #[task]
+        impl Task<TestState> for CountingTask {
             fn config(&self) -> crate::task::TaskConfig {
                 crate::task::TaskConfig::new().with_fixed_retry(2, Duration::from_millis(1))
             }
 
-            async fn prep(&self, _res: &Resources) -> Result<(), CanoError> {
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
                 self.call_count.fetch_add(1, Ordering::SeqCst);
-                Err(CanoError::preparation("always fails"))
-            }
-
-            async fn exec(&self, _: ()) -> () {}
-
-            async fn post(&self, _res: &Resources, _: ()) -> Result<TestState, CanoError> {
-                Ok(TestState::Complete)
+                Err(CanoError::task_execution("always fails"))
             }
         }
 
         let call_count = Arc::new(AtomicUsize::new(0));
-        let node = CountingNode {
+        let task = CountingTask {
             call_count: Arc::clone(&call_count),
         };
 
         let workflow = Workflow::bare()
-            .register(TestState::Start, node)
+            .register(TestState::Start, task)
             .add_exit_state(TestState::Complete);
 
         let result = workflow.orchestrate(TestState::Start).await;
         assert!(result.is_err());
 
         // With max_retries=2, there should be exactly 3 attempts (1 initial + 2 retries).
-        // Before the fix, double-retry would cause 3*3 = 9 attempts.
         assert_eq!(
             call_count.load(Ordering::SeqCst),
             3,
-            "Node should be called exactly 3 times (1 + 2 retries), not double-retried"
+            "task should be called exactly 3 times (1 + 2 retries)"
         );
     }
 

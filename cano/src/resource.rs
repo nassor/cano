@@ -90,7 +90,7 @@
 //!     store: Arc<MemoryStore>,
 //! }
 //!
-//! // ... inside a Node::prep:
+//! // ... inside a Task::run:
 //! let PrepDeps { settings, store } = PrepDeps::from_resources(res)?;
 //! ```
 //!

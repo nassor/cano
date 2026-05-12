@@ -1,5 +1,6 @@
-//! Shared attribute-arg parser for `#[node(...)]` / `#[task(...)]` /
-//! `#[compensatable_task(...)]`.
+//! Shared attribute-arg parser for `#[task(...)]` / `#[compensatable_task(...)]`
+//! / `#[router_task(...)]` / `#[poll_task(...)]` / `#[batch_task(...)]` /
+//! `#[stepped_task(...)]`.
 //!
 //! Recognised keys:
 //! - `state = T` — required when the macro is applied to an inherent `impl X { ... }`

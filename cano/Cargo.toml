@@ -242,10 +242,6 @@ name = "workflow_performance"
 harness = false
 
 [[bench]]
-name = "node_performance"
-harness = false
-
-[[bench]]
 name = "store_performance"
 harness = false
 

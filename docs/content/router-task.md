@@ -14,7 +14,7 @@ A <code>RouterTask</code> is a processing model for <em>pure routing</em>: it re
 and nothing else. No store mutations, no external I/O, no side effects. Because re-running a router
 is free, the workflow engine records <strong>no checkpoint row</strong> for it — see
 <a href="../recovery/">Crash Recovery</a> for what that means. It is one of the
-<a href="../task/">Task</a> family of processing models, alongside <a href="../nodes/">Node</a>,
+<a href="../task/">Task</a> family of processing models, alongside
 <a href="../poll-task/">PollTask</a>, <a href="../batch-task/">BatchTask</a>, and
 <a href="../stepped-task/">SteppedTask</a>.
 </p>

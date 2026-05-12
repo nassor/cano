@@ -288,11 +288,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::resource::Resources;
     use crate::scheduler::test_support::*;
     use crate::scheduler::{BackoffPolicy, Scheduler};
     use crate::task;
-    use crate::task::node::Node;
+    use crate::task::{Task, TaskResult};
     use crate::workflow::Workflow;
     use std::sync::atomic::{AtomicU32, Ordering};
     use tokio::time::{Duration, sleep};
@@ -304,7 +303,7 @@ mod tests {
         // first scheduled execution.
         let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
         let bad_workflow: Workflow<TestState> =
-            Workflow::bare().register(TestState::Start, TestNode::new());
+            Workflow::bare().register(TestState::Start, TestTask::new());
 
         scheduler
             .every_seconds("bad", bad_workflow, TestState::Start, 60)
@@ -320,7 +319,7 @@ mod tests {
         // must catch this at start, before any resource setup runs.
         let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
         let workflow: Workflow<TestState> = Workflow::bare()
-            .register(TestState::Start, TestNode::new())
+            .register(TestState::Start, TestTask::new())
             .add_exit_state(TestState::Complete);
 
         scheduler
@@ -534,27 +533,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_manual_trigger_rejects_overlap() {
         #[derive(Clone)]
-        struct SlowNode;
+        struct SlowTask;
 
-        #[task::node]
-        impl Node<TestState> for SlowNode {
-            type PrepResult = ();
-            type ExecResult = ();
-
-            async fn prep(&self, _res: &Resources) -> CanoResult<()> {
-                Ok(())
-            }
-
-            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
+        #[task]
+        impl Task<TestState> for SlowTask {
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
                 sleep(Duration::from_millis(300)).await;
-            }
-
-            async fn post(
-                &self,
-                _res: &Resources,
-                _exec_res: Self::ExecResult,
-            ) -> CanoResult<TestState> {
-                Ok(TestState::Complete)
+                Ok(TaskResult::Single(TestState::Complete))
             }
         }
 
@@ -562,7 +547,7 @@ mod tests {
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
             let workflow = Workflow::bare()
-                .register(TestState::Start, SlowNode)
+                .register(TestState::Start, SlowTask)
                 .add_exit_state(TestState::Complete)
                 .add_exit_state(TestState::Error);
             scheduler
@@ -670,28 +655,14 @@ mod tests {
         // to finish, a concurrent trigger() must surface "not running" instead
         // of enqueueing into the closed command channel.
         #[derive(Clone)]
-        struct SlowNode;
+        struct SlowTask;
 
-        #[task::node]
-        impl Node<TestState> for SlowNode {
-            type PrepResult = ();
-            type ExecResult = ();
-
-            async fn prep(&self, _res: &Resources) -> CanoResult<()> {
-                Ok(())
-            }
-
-            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
+        #[task]
+        impl Task<TestState> for SlowTask {
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
                 // Hold Status::Running long enough to span the shutdown window.
                 sleep(Duration::from_millis(400)).await;
-            }
-
-            async fn post(
-                &self,
-                _res: &Resources,
-                _exec_res: Self::ExecResult,
-            ) -> CanoResult<TestState> {
-                Ok(TestState::Complete)
+                Ok(TaskResult::Single(TestState::Complete))
             }
         }
 
@@ -699,7 +670,7 @@ mod tests {
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
             let slow_workflow = Workflow::bare()
-                .register(TestState::Start, SlowNode)
+                .register(TestState::Start, SlowTask)
                 .add_exit_state(TestState::Complete)
                 .add_exit_state(TestState::Error);
             scheduler
@@ -766,15 +737,15 @@ mod tests {
 
     // ----- Backoff / trip / reset tests -----
 
-    /// Node that fails until its internal counter reaches `succeed_after`.
+    /// Task that fails until its internal counter reaches `succeed_after`.
     /// Used to drive deterministic streak behavior in the tests below.
     #[derive(Clone)]
-    struct FlakyNode {
+    struct FlakyTask {
         attempts: Arc<AtomicU32>,
         succeed_after: u32,
     }
 
-    impl FlakyNode {
+    impl FlakyTask {
         fn always_failing() -> Self {
             Self {
                 attempts: Arc::new(AtomicU32::new(0)),
@@ -790,38 +761,27 @@ mod tests {
         }
     }
 
-    #[task::node]
-    impl Node<TestState> for FlakyNode {
-        type PrepResult = ();
-        type ExecResult = bool;
-
+    #[task]
+    impl Task<TestState> for FlakyTask {
         // Disable retries so each scheduler dispatch is a single attempt.
         // The scheduler's BackoffPolicy is the only retry layer under test.
         fn config(&self) -> crate::task::TaskConfig {
             crate::task::TaskConfig::minimal()
         }
 
-        async fn prep(&self, _res: &Resources) -> CanoResult<()> {
-            Ok(())
-        }
-
-        async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
+        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
             let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
-            attempt >= self.succeed_after
-        }
-
-        async fn post(&self, _res: &Resources, ok: Self::ExecResult) -> CanoResult<TestState> {
-            if ok {
-                Ok(TestState::Complete)
+            if attempt >= self.succeed_after {
+                Ok(TaskResult::Single(TestState::Complete))
             } else {
-                Err(CanoError::NodeExecution("flaky".to_string()))
+                Err(CanoError::TaskExecution("flaky".to_string()))
             }
         }
     }
 
-    fn flaky_workflow(node: FlakyNode) -> Workflow<TestState> {
+    fn flaky_workflow(task: FlakyTask) -> Workflow<TestState> {
         Workflow::bare()
-            .register(TestState::Start, node)
+            .register(TestState::Start, task)
             .add_exit_state(TestState::Complete)
             .add_exit_state(TestState::Error)
     }
@@ -833,7 +793,7 @@ mod tests {
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            let workflow = flaky_workflow(FlakyNode::always_failing());
+            let workflow = flaky_workflow(FlakyTask::always_failing());
             scheduler
                 .every(
                     "flaky",
@@ -881,7 +841,7 @@ mod tests {
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            let workflow = flaky_workflow(FlakyNode::always_failing());
+            let workflow = flaky_workflow(FlakyTask::always_failing());
             scheduler
                 .every(
                     "trippy",
@@ -941,7 +901,7 @@ mod tests {
             // (the "first attempt after reset") is again a failure, but with
             // streak_limit=10 (we'll bump the policy via re-registration trick
             // — instead we just verify the reset clears the trip and advances).
-            let workflow = flaky_workflow(FlakyNode::succeed_on_attempt(5));
+            let workflow = flaky_workflow(FlakyTask::succeed_on_attempt(5));
             scheduler
                 .every(
                     "reset_me",
@@ -1007,7 +967,7 @@ mod tests {
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            let workflow = flaky_workflow(FlakyNode::succeed_on_attempt(3));
+            let workflow = flaky_workflow(FlakyTask::succeed_on_attempt(3));
             scheduler
                 .every(
                     "recover",
@@ -1051,7 +1011,7 @@ mod tests {
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            let workflow = flaky_workflow(FlakyNode::always_failing());
+            let workflow = flaky_workflow(FlakyTask::always_failing());
             scheduler
                 .manual("manual_flaky", workflow, TestState::Start)
                 .unwrap();
@@ -1150,7 +1110,7 @@ mod tests {
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            let workflow = flaky_workflow(FlakyNode::always_failing());
+            let workflow = flaky_workflow(FlakyTask::always_failing());
             scheduler
                 .every(
                     "long_backoff",
@@ -1206,7 +1166,7 @@ mod tests {
         let timeout = Duration::from_secs(3);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            let workflow = flaky_workflow(FlakyNode::always_failing());
+            let workflow = flaky_workflow(FlakyTask::always_failing());
             scheduler
                 .every(
                     "defaulted",
@@ -1252,9 +1212,9 @@ mod tests {
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            // Flaky node that fails first then succeeds, so the manual
+            // Flaky task that fails first then succeeds, so the manual
             // override can be observed advancing run_count past the failure.
-            let workflow = flaky_workflow(FlakyNode::succeed_on_attempt(2));
+            let workflow = flaky_workflow(FlakyTask::succeed_on_attempt(2));
             scheduler
                 .manual("flow", workflow, TestState::Start)
                 .unwrap();
@@ -1319,7 +1279,7 @@ mod tests {
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            let workflow = flaky_workflow(FlakyNode::always_failing());
+            let workflow = flaky_workflow(FlakyTask::always_failing());
             scheduler
                 .every(
                     "flow",
@@ -1390,7 +1350,7 @@ mod tests {
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            let workflow = flaky_workflow(FlakyNode::always_failing());
+            let workflow = flaky_workflow(FlakyTask::always_failing());
             scheduler
                 .cron("flow", workflow, TestState::Start, "* * * * * *")
                 .unwrap();
@@ -1445,7 +1405,7 @@ mod tests {
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            let workflow = flaky_workflow(FlakyNode::always_failing());
+            let workflow = flaky_workflow(FlakyTask::always_failing());
             scheduler
                 .manual("flow", workflow, TestState::Start)
                 .unwrap();
@@ -1505,14 +1465,14 @@ mod tests {
     async fn test_drop_aborts_loops_when_no_stop() {
         // Drop on the last RunningScheduler clone should abort the spawned
         // driver and per-flow loop tasks instead of leaking them. We assert
-        // via the node's own execution_count — once we drop the handle, the
+        // via the task's own execution_count — once we drop the handle, the
         // count must freeze.
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
-            let node = TestNode::new();
-            let count = Arc::clone(&node.execution_count);
+            let task = TestTask::new();
+            let count = Arc::clone(&task.execution_count);
             let workflow = Workflow::bare()
-                .register(TestState::Start, node)
+                .register(TestState::Start, task)
                 .add_exit_state(TestState::Complete)
                 .add_exit_state(TestState::Error);
 

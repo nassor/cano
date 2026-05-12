@@ -649,7 +649,7 @@ where
     /// - [`CanoError::Workflow`] -- no handler is registered for the current state, a single
     ///   task returned a `TaskResult::Split` (use [`Workflow::register_split`] instead), the
     ///   global workflow timeout was exceeded, or a split strategy was misconfigured
-    /// - Any [`CanoError`] variant propagated from a task or node during execution
+    /// - Any [`CanoError`] variant propagated from a task during execution
     pub async fn orchestrate(&self, initial_state: TState) -> Result<TState, CanoError> {
         #[cfg(feature = "tracing")]
         let workflow_span = self.tracing_span.clone().unwrap_or_else(|| {

@@ -4,7 +4,7 @@
 //! ## Why a sibling `impl Task` is emitted
 //!
 //! A blanket `impl<P: PollTask<..>> Task<..> for P` would conflict (E0119) with the
-//! existing `impl<N: Node<..>> Task<..> for N`. Instead, each use of `#[poll_task]` on
+//! analogous blanket impls for the other specialized task traits (a type can implement more than one). Instead, each use of `#[poll_task]` on
 //! an **impl** block synthesises a concrete `impl Task<S [, K]> for T` alongside the
 //! `PollTask` impl, with `Task::run` delegating to
 //! `::cano::task::poll::run_poll_loop(self, res).await`. This gives the same

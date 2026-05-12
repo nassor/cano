@@ -17,8 +17,6 @@
 //! cargo run --example scheduler_duration_scheduling
 //! ```
 
-// Example: Duration-based Scheduling
-
 use cano::prelude::*;
 use tokio::time::Duration;
 
@@ -28,94 +26,51 @@ enum TaskState {
     Complete,
 }
 
-// Demo nodes for different schedules
 #[derive(Clone)]
 struct DailyTask;
 
-#[task::node(state = TaskState)]
+#[task(state = TaskState)]
 impl DailyTask {
-    type PrepResult = ();
-    type ExecResult = ();
-
-    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        Ok(())
-    }
-
-    async fn exec(&self, _data: Self::PrepResult) -> Self::ExecResult {
+    async fn run_bare(&self) -> Result<TaskResult<TaskState>, CanoError> {
         println!(
-            "📅 Daily task executed at {}",
+            "Daily task executed at {}",
             chrono::Utc::now().format("%H:%M:%S")
         );
-    }
-
-    async fn post(
-        &self,
-        _res: &Resources,
-        _result: Self::ExecResult,
-    ) -> Result<TaskState, CanoError> {
-        Ok(TaskState::Complete)
+        Ok(TaskResult::Single(TaskState::Complete))
     }
 }
 
 #[derive(Clone)]
 struct HourlyTask;
 
-#[task::node(state = TaskState)]
+#[task(state = TaskState)]
 impl HourlyTask {
-    type PrepResult = ();
-    type ExecResult = ();
-
-    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        Ok(())
-    }
-
-    async fn exec(&self, _data: Self::PrepResult) -> Self::ExecResult {
+    async fn run_bare(&self) -> Result<TaskResult<TaskState>, CanoError> {
         println!(
-            "⏰ Hourly task executed at {}",
+            "Hourly task executed at {}",
             chrono::Utc::now().format("%H:%M:%S")
         );
-    }
-
-    async fn post(
-        &self,
-        _res: &Resources,
-        _result: Self::ExecResult,
-    ) -> Result<TaskState, CanoError> {
-        Ok(TaskState::Complete)
+        Ok(TaskResult::Single(TaskState::Complete))
     }
 }
 
 #[derive(Clone)]
 struct FrequentTask;
 
-#[task::node(state = TaskState)]
+#[task(state = TaskState)]
 impl FrequentTask {
-    type PrepResult = ();
-    type ExecResult = ();
-
-    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        Ok(())
-    }
-
-    async fn exec(&self, _data: Self::PrepResult) -> Self::ExecResult {
+    async fn run_bare(&self) -> Result<TaskResult<TaskState>, CanoError> {
         println!(
-            "🔄 Frequent task executed at {}",
+            "Frequent task executed at {}",
             chrono::Utc::now().format("%H:%M:%S")
         );
-    }
-
-    async fn post(
-        &self,
-        _res: &Resources,
-        _result: Self::ExecResult,
-    ) -> Result<TaskState, CanoError> {
-        Ok(TaskState::Complete)
+        Ok(TaskResult::Single(TaskState::Complete))
     }
 }
 
 #[tokio::main]
 async fn main() -> CanoResult<()> {
-    println!("⏰ Duration-Based Scheduling Example");
+    println!("Duration-Based Scheduling Example");
     println!("====================================");
 
     let mut scheduler = Scheduler::new();
@@ -154,20 +109,20 @@ async fn main() -> CanoResult<()> {
         Duration::from_secs(1),
     )?; // Frequent (every 1s)
 
-    println!("📅 Scheduled workflows:");
-    println!("  • Daily task: Every 4 seconds (simulated)");
-    println!("  • Hourly task: Every 2 seconds (simulated)");
-    println!("  • Frequent task: Every 1 second");
+    println!("Scheduled workflows:");
+    println!("  Daily task: Every 4 seconds (simulated)");
+    println!("  Hourly task: Every 2 seconds (simulated)");
+    println!("  Frequent task: Every 1 second");
     println!();
 
     // Start consumes the builder and returns a live handle.
     let running = scheduler.start().await?;
 
-    println!("🚀 Scheduler started! Running for 10 seconds...");
+    println!("Scheduler started! Running for 10 seconds...");
     tokio::time::sleep(Duration::from_secs(10)).await;
 
     running.stop().await?;
-    println!("✅ Scheduler stopped gracefully");
+    println!("Scheduler stopped gracefully");
 
     Ok(())
 }

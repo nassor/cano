@@ -97,7 +97,7 @@ tracing_subscriber::registry()
 <p>Orchestration start/completion, state transitions, final states.</p>
 </div>
 <div class="card">
-<h3>Task/Node Level</h3>
+<h3>Task Level</h3>
 <p>Execution attempts, retry logic, delays, success/failure outcomes.</p>
 </div>
 <div class="card">
@@ -214,10 +214,10 @@ use cano::prelude::*;
 enum MyState { Start, Complete }
 
 #[derive(Clone)]
-struct MyProcessorNode;
+struct MyProcessor;
 
 #[task(state = MyState)]
-impl MyProcessorNode {
+impl MyProcessor {
     async fn run_bare(&self) -> Result<TaskResult<MyState>, CanoError> {
         Ok(TaskResult::Single(MyState::Complete))
     }
@@ -234,14 +234,14 @@ fn build_workflow() -> Workflow<MyState> {
     let store = MemoryStore::new();
     Workflow::new(Resources::new().insert("store", store))
         .with_tracing_span(workflow_span)
-        .register(MyState::Start, MyProcessorNode)
+        .register(MyState::Start, MyProcessor)
         .add_exit_state(MyState::Complete)
 }
 ```
 <hr class="section-divider">
 
 <h2 id="custom-instrumentation"><a href="#custom-instrumentation" class="anchor-link" aria-hidden="true">#</a>Custom Instrumentation</h2>
-<p>You can add your own tracing to Task and Node implementations using the
+<p>You can add your own tracing to Task implementations using the
 <code>tracing</code> crate's macros directly. This is useful for adding domain-specific
 context that Cano's built-in instrumentation does not cover.</p>
 
@@ -284,52 +284,6 @@ impl PaymentTask {
 
 ```
 
-<h3 id="instrument-node"><a href="#instrument-node" class="anchor-link" aria-hidden="true">#</a>Instrumenting a Node</h3>
-
-```rust
-use cano::prelude::*;
-use tracing::{info, debug, instrument};
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum PipelineState { Enrich, Validate, Complete }
-
-#[derive(Clone)]
-struct DataEnrichmentNode {
-    source: String,
-}
-
-#[task::node(state = PipelineState)]
-impl DataEnrichmentNode {
-    type PrepResult = Vec<String>;
-    type ExecResult = Vec<String>;
-
-    #[instrument(skip(self, res), fields(source = %self.source))]
-    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
-        let keys: Vec<String> = store.get("pending_keys")?;
-        debug!(count = keys.len(), "Loaded keys for enrichment");
-        Ok(keys)
-    }
-
-    async fn exec(&self, keys: Self::PrepResult) -> Self::ExecResult {
-        info!(count = keys.len(), source = %self.source, "Enriching records");
-        // ... enrichment logic
-        keys
-    }
-
-    async fn post(
-        &self,
-        res: &Resources,
-        results: Self::ExecResult,
-    ) -> Result<PipelineState, CanoError> {
-        info!(enriched = results.len(), "Enrichment complete");
-        let store = res.get::<MemoryStore, _>("store")?;
-        store.put("enriched_data", results)?;
-        Ok(PipelineState::Validate)
-    }
-}
-
-```
 <hr class="section-divider">
 
 <h2 id="example-output"><a href="#example-output" class="anchor-link" aria-hidden="true">#</a>Example Output</h2>
@@ -339,7 +293,7 @@ impl DataEnrichmentNode {
 ```bash
 INFO user_data_processing{user_id="12345"}: Starting workflow orchestration
   INFO user_data_processing{user_id="12345"}:task_execution: Starting task execution
-    INFO user_data_processing{user_id="12345"}:task_attempt{attempt=1}: Node execution completed success=true
+    INFO user_data_processing{user_id="12345"}:task_attempt{attempt=1}: Task execution completed success=true
     INFO user_data_processing{user_id="12345"}:task_attempt{attempt=1}: processor_id=basic_processor input_records=3: Data processing completed
   INFO user_data_processing{user_id="12345"}: Workflow completed successfully
 
@@ -361,10 +315,10 @@ enum State {
 }
 
 #[derive(Clone)]
-struct ProcessOrderNode;
+struct ProcessOrder;
 
 #[task(state = State)]
-impl ProcessOrderNode {
+impl ProcessOrder {
     async fn run(&self, _res: &Resources) -> Result<TaskResult<State>, CanoError> {
         info!("Processing order...");
         Ok(TaskResult::Single(State::Complete))
@@ -391,7 +345,7 @@ async fn main() -> Result<(), CanoError> {
     );
 
     let workflow = Workflow::new(Resources::new().insert("store", store))
-        .register(State::Start, ProcessOrderNode)
+        .register(State::Start, ProcessOrder)
         .add_exit_state(State::Complete)
         .with_tracing_span(workflow_span); // Attach span
 

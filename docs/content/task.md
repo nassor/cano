@@ -11,8 +11,8 @@ template = "page.html"
 <p>
 A <code>Task</code> is the fundamental building block of a Cano workflow: a single <code>run</code>
 method that decides the next state. <strong>Start here</strong> — <code>Task</code> is the default
-choice for every processing unit. The other five processing models
-(<a href="../nodes/">Node</a>, <a href="../router-task/">RouterTask</a>,
+choice for every processing unit. The other four processing models
+(<a href="../router-task/">RouterTask</a>,
 <a href="../poll-task/">PollTask</a>, <a href="../batch-task/">BatchTask</a>,
 <a href="../stepped-task/">SteppedTask</a>) are specialisations you reach for only when a task
 has a shape that one of them fits better — see <a href="#task-family">The Task Family</a> below for
@@ -39,8 +39,6 @@ example on this page wires a task into a <code>Workflow</code> and pulls depende
 <li><a href="#patterns">Real-World Task Patterns</a></li>
 <li><a href="#task-family">The Task Family: Four More Processing Models</a></li>
 <li><a href="#choosing">Choosing a Processing Model</a></li>
-<li><a href="#task-vs-node">Task vs Node, in Detail</a></li>
-<li><a href="#when-to-use">When to Use Tasks vs Nodes</a></li>
 </ol>
 </nav>
 
@@ -91,9 +89,8 @@ impl GeneratorTask {
 </div>
 
 <div class="callout callout-tip">
-<p>Runnable examples: <code>cargo run --example task_simple</code> (a two-task generate/count workflow,
-like the snippet above) and <code>cargo run --example task_interface_demo</code> (the same struct used
-through both the <code>Task</code> and <code>Node</code> interfaces).</p>
+<p>Runnable example: <code>cargo run --example task_simple</code> — a two-task generate/count workflow
+like the snippet above.</p>
 </div>
 
 <!-- Section: Resource-Free Tasks -->
@@ -487,7 +484,7 @@ impl AggregatorTask {
 <hr class="section-divider">
 <h2 id="task-family"><a href="#task-family" class="anchor-link" aria-hidden="true">#</a>The Task Family: Four More Processing Models</h2>
 <p>
-Beyond the plain <code>Task</code> and the structured <a href="../nodes/">Node</a>, Cano ships
+Beyond the plain <code>Task</code>, Cano ships
 <strong>four more <code>Task</code>-derived processing models</strong>. Each is a specialised shape —
 they all ultimately dispatch as a <code>Task</code>, so you mix them freely in one workflow — and
 each has its own page with the full reference.
@@ -524,7 +521,7 @@ step, so a crash resumes mid-loop. Registered with <code>register_stepped</code>
 <hr class="section-divider">
 <h2 id="choosing"><a href="#choosing" class="anchor-link" aria-hidden="true">#</a>Choosing a Processing Model</h2>
 <p>
-All six models dispatch as a <code>Task</code>, so you can mix them in one workflow. Start from
+All five models dispatch as a <code>Task</code>, so you can mix them in one workflow. Start from
 <code>Task</code> and move to a specialised model only when your work has its shape:
 </p>
 
@@ -540,11 +537,6 @@ All six models dispatch as a <code>Task</code>, so you can mix them in one workf
 <tr>
 <td><strong><code>Task</code></strong></td>
 <td>The default — a single <code>run</code> that does the work and picks the next state. Everything else is a specialisation of this.</td>
-<td><code>register</code></td>
-</tr>
-<tr>
-<td><a href="../nodes/"><strong><code>Node</code></strong></a></td>
-<td>You want a structured <code>prep → exec → post</code> split, with full-pipeline retry, to keep IO and compute apart.</td>
 <td><code>register</code></td>
 </tr>
 <tr>
@@ -570,99 +562,5 @@ All six models dispatch as a <code>Task</code>, so you can mix them in one workf
 </tbody>
 </table>
 
-<!-- Section: Task vs Node, in detail -->
-<hr class="section-divider">
-<h2 id="task-vs-node"><a href="#task-vs-node" class="anchor-link" aria-hidden="true">#</a>Task vs Node, in Detail</h2>
-<p>
-<code>Task</code> and <code>Node</code> are the two you'll use most. Every <code>Node</code> automatically
-implements <code>Task</code>, so they mix freely in the same workflow.
-</p>
-
-<div class="comparison-grid">
-<div class="comparison-col">
-<h3>Task</h3>
-<p><strong>Best for:</strong> Simple logic, quick prototyping, functional style.</p>
-<ul>
-<li>Single <code>run()</code> method</li>
-<li>Direct control over flow</li>
-<li>Supports <code>run_bare()</code> for resource-free tasks</li>
-</ul>
-</div>
-<div class="comparison-col">
-<h3>Node</h3>
-<p><strong>Best for:</strong> Complex operations, robust error handling, structured data flow.</p>
-<ul>
-<li>3 Phases: <code>prep</code>, <code>exec</code>, <code>post</code></li>
-<li>Full-pipeline retry: <code>prep</code> &rarr; <code>exec</code> &rarr; <code>post</code> restarts on failure</li>
-<li>Separation of concerns (IO vs Compute)</li>
-</ul>
-</div>
-</div>
-
-<div class="code-block">
-<span class="code-block-label"><span class="label-icon">&#128260;</span> Mixing Tasks and Nodes</span>
-
-```rust
-// Mixing Tasks and Nodes in one workflow
-let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
-    .register(State::Init, SimpleTask)            // Task
-    .register(State::Process, ComplexNode::new()) // Node
-    .register(State::Finish, FinishTask);         // Another Task
-
-```
-</div>
-
-<div class="callout callout-tip">
-<p>Runnable example: <code>cargo run --example mixed_workflow</code> — Tasks and Nodes in one workflow.
-For a tour that chains <em>all six</em> processing models in a single checkpointed workflow, see
-<code>cargo run --example processing_models_tour --features recovery</code>.</p>
-</div>
-
-<!-- Section: When to Use -->
-<hr class="section-divider">
-<h2 id="when-to-use"><a href="#when-to-use" class="anchor-link" aria-hidden="true">#</a>When to Use Tasks vs Nodes?</h2>
-<p>Choose the right abstraction for your use case:</p>
-
-<table class="styled-table">
-<thead>
-<tr>
-<th>Scenario</th>
-<th>Use Task</th>
-<th>Use Node</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Data transformation</td>
-<td>Simple transform</td>
-<td>Complex with validation</td>
-</tr>
-<tr>
-<td>API calls</td>
-<td>Simple requests</td>
-<td>With auth &amp; retry logic</td>
-</tr>
-<tr>
-<td>Validation</td>
-<td>Quick checks</td>
-<td>Usually overkill</td>
-</tr>
-<tr>
-<td>File operations</td>
-<td>For simple cases</td>
-<td>Load, process, save pattern</td>
-</tr>
-<tr>
-<td>Prototyping</td>
-<td>Fastest iteration</td>
-<td>More structure</td>
-</tr>
-<tr>
-<td>Production systems</td>
-<td>When simple is sufficient</td>
-<td>For robust operations</td>
-</tr>
-</tbody>
-</table>
 </div>
 

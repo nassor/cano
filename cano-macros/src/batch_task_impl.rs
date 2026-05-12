@@ -4,7 +4,7 @@
 //! ## Why a sibling `impl Task` is emitted
 //!
 //! A blanket `impl<B: BatchTask<..>> Task<..> for B` would conflict (E0119) with the
-//! existing `impl<N: Node<..>> Task<..> for N`. Instead, each use of `#[batch_task]` on
+//! analogous blanket impls for the other specialized task traits (a type can implement more than one). Instead, each use of `#[batch_task]` on
 //! an **impl** block synthesises a concrete `impl Task<S [, K]> for T` alongside the
 //! `BatchTask` impl, with `Task::run` delegating to
 //! `::cano::task::batch::run_batch(self, res).await`. This gives the same

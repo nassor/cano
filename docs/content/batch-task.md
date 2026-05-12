@@ -13,7 +13,7 @@ A <code>BatchTask</code> loads a <code>Vec</code> of work items, processes them 
 concurrency (each item independently retryable), collects the per-item results <strong>in input
 order</strong>, and decides the next state from the aggregate — all within one workflow state. It is
 one of the <a href="../task/">Task</a> family of processing models, alongside
-<a href="../nodes/">Node</a>, <a href="../router-task/">RouterTask</a>,
+<a href="../router-task/">RouterTask</a>,
 <a href="../poll-task/">PollTask</a>, and <a href="../stepped-task/">SteppedTask</a>, and it reads
 typed dependencies from <a href="../resources/">Resources</a> like the rest. New to Cano? Read
 <a href="../workflows/">Workflows</a> and <a href="../resources/">Resources</a> first.
@@ -95,8 +95,7 @@ C -->|TaskResult| D[Next State]
 <p>
 A <code>BatchTask</code> has two associated types — <code>type Item: Send + Sync + 'static</code> and
 <code>type ItemOutput: Send + 'static</code> (inferred by <code>#[task::batch(state = ...)]</code> from
-the method signatures, à la <code>#[task::node]</code>'s <code>PrepResult</code> / <code>ExecResult</code>,
-or written explicitly) — and three methods:
+the method signatures, or written explicitly) — and three methods:
 </p>
 <table class="styled-table">
 <thead>
@@ -347,7 +346,7 @@ impl BatchTask<Step> for FetchUrls {
 <hr class="section-divider">
 <h2 id="object-safe"><a href="#object-safe" class="anchor-link" aria-hidden="true">#</a>Type-Erased Aliases</h2>
 <p>
-As with <code>DynNode</code>, the object-safe aliases pin the associated types: <code>Item</code> to
+The object-safe aliases pin the associated types: <code>Item</code> to
 <code>Box&lt;dyn Any + Send + Sync&gt;</code> and <code>ItemOutput</code> to
 <code>Box&lt;dyn Any + Send&gt;</code>.
 </p>

@@ -20,38 +20,23 @@ enum TestState {
 }
 
 #[derive(Clone)]
-struct TestNode {
+struct TestTask {
     id: String,
 }
 
-impl TestNode {
+impl TestTask {
     fn new(id: &str) -> Self {
         Self { id: id.to_string() }
     }
 }
 
-#[cano::task::node]
-impl Node<TestState> for TestNode {
-    type PrepResult = String;
-    type ExecResult = String;
-
-    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        Ok(format!("prep_{}", self.id))
-    }
-
-    async fn exec(&self, prep_result: Self::PrepResult) -> Self::ExecResult {
-        format!("exec_{}", prep_result)
-    }
-
-    async fn post(
-        &self,
-        _res: &Resources,
-        exec_result: Self::ExecResult,
-    ) -> Result<TestState, CanoError> {
-        if exec_result.contains("processing") {
-            Ok(TestState::Complete)
+#[cano::task]
+impl Task<TestState> for TestTask {
+    async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+        if self.id.contains("processing") {
+            Ok(TaskResult::Single(TestState::Complete))
         } else {
-            Ok(TestState::Processing)
+            Ok(TaskResult::Single(TestState::Processing))
         }
     }
 }
@@ -62,8 +47,8 @@ async fn test_workflow_with_tracing_span() {
 
     let workflow = Workflow::new(Resources::new())
         .with_tracing_span(span)
-        .register(TestState::Start, TestNode::new("start"))
-        .register(TestState::Processing, TestNode::new("processing"))
+        .register(TestState::Start, TestTask::new("start"))
+        .register(TestState::Processing, TestTask::new("processing"))
         .add_exit_state(TestState::Complete);
 
     let result = workflow.orchestrate(TestState::Start).await.unwrap();
@@ -80,10 +65,10 @@ async fn test_concurrent_workflow_with_tracing_span() {
         .with_tracing_span(span)
         .register_split(
             TestState::Start,
-            vec![TestNode::new("start1"), TestNode::new("start2")],
+            vec![TestTask::new("start1"), TestTask::new("start2")],
             JoinConfig::new(JoinStrategy::All, TestState::Processing),
         )
-        .register(TestState::Processing, TestNode::new("processing"))
+        .register(TestState::Processing, TestTask::new("processing"))
         .add_exit_state(TestState::Complete);
 
     let result = workflow.orchestrate(TestState::Start).await.unwrap();
@@ -100,8 +85,8 @@ async fn test_scheduler_with_tracing() {
 
         let workflow = Workflow::new(Resources::new())
             .with_tracing_span(span)
-            .register(TestState::Start, TestNode::new("start"))
-            .register(TestState::Processing, TestNode::new("processing"))
+            .register(TestState::Start, TestTask::new("start"))
+            .register(TestState::Processing, TestTask::new("processing"))
             .add_exit_state(TestState::Complete);
 
         let mut scheduler = Scheduler::new();
@@ -128,8 +113,8 @@ async fn test_scheduler_with_tracing() {
 async fn test_workflow_tracing_without_custom_span() {
     // Test that workflows work fine without custom spans when tracing is enabled
     let workflow = Workflow::new(Resources::new())
-        .register(TestState::Start, TestNode::new("start"))
-        .register(TestState::Processing, TestNode::new("processing"))
+        .register(TestState::Start, TestTask::new("start"))
+        .register(TestState::Processing, TestTask::new("processing"))
         .add_exit_state(TestState::Complete);
 
     let result = workflow.orchestrate(TestState::Start).await.unwrap();

@@ -1,13 +1,13 @@
 //! Shared fixtures for the scheduler module's unit tests: a trivial counting
-//! node and helpers that build ok / failing single-state workflows from it.
+//! task and helpers that build ok / failing single-state workflows from it.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::error::{CanoError, CanoResult};
-use crate::resource::Resources;
-use crate::task;
-use crate::task::node::Node;
+use cano_macros::task;
+
+use crate::error::CanoError;
+use crate::task::{Task, TaskResult};
 use crate::workflow::Workflow;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -18,12 +18,12 @@ pub(crate) enum TestState {
 }
 
 #[derive(Clone)]
-pub(crate) struct TestNode {
+pub(crate) struct TestTask {
     pub(crate) execution_count: Arc<AtomicU32>,
     should_fail: bool,
 }
 
-impl TestNode {
+impl TestTask {
     pub(crate) fn new() -> Self {
         Self {
             execution_count: Arc::new(AtomicU32::new(0)),
@@ -39,38 +39,28 @@ impl TestNode {
     }
 }
 
-#[task::node]
-impl Node<TestState> for TestNode {
-    type PrepResult = ();
-    type ExecResult = ();
-
-    async fn prep(&self, _res: &Resources) -> CanoResult<()> {
-        Ok(())
-    }
-
-    async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
+#[task]
+impl Task<TestState> for TestTask {
+    async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
         self.execution_count.fetch_add(1, Ordering::Relaxed);
-    }
-
-    async fn post(&self, _res: &Resources, _exec_res: Self::ExecResult) -> CanoResult<TestState> {
         if self.should_fail {
-            Err(CanoError::NodeExecution("Test failure".to_string()))
+            Err(CanoError::TaskExecution("Test failure".to_string()))
         } else {
-            Ok(TestState::Complete)
+            Ok(TaskResult::Single(TestState::Complete))
         }
     }
 }
 
 pub(crate) fn create_test_workflow() -> Workflow<TestState> {
     Workflow::bare()
-        .register(TestState::Start, TestNode::new())
+        .register(TestState::Start, TestTask::new())
         .add_exit_state(TestState::Complete)
         .add_exit_state(TestState::Error)
 }
 
 pub(crate) fn create_failing_workflow() -> Workflow<TestState> {
     Workflow::bare()
-        .register(TestState::Start, TestNode::new_failing())
+        .register(TestState::Start, TestTask::new_failing())
         .add_exit_state(TestState::Complete)
         .add_exit_state(TestState::Error)
 }

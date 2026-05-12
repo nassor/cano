@@ -31,7 +31,7 @@ pub enum StoreError {
     ///
     /// This error occurs when the stored value can't be downcast to the
     /// requested type. Common causes: storing one type and requesting another,
-    /// or inconsistent type usage across nodes.
+    /// or inconsistent type usage across tasks.
     TypeMismatch(String),
 
     /// Failed to acquire lock on store

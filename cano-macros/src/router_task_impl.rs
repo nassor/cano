@@ -4,7 +4,7 @@
 //! ## Why a sibling `impl Task` is emitted
 //!
 //! A blanket `impl<R: RouterTask<..>> Task<..> for R` would conflict (E0119) with the
-//! existing `impl<N: Node<..>> Task<..> for N`. Instead, each use of `#[router_task]` on
+//! analogous blanket impls for the other specialized task traits (a type can implement more than one). Instead, each use of `#[router_task]` on
 //! an **impl** block synthesises a concrete `impl Task<S [, K]> for T` alongside the
 //! `RouterTask` impl, delegating `Task::run` → `RouterTask::route`. This gives the same
 //! ergonomics ("register a `RouterTask` directly with `Workflow::register`") without

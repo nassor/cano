@@ -45,7 +45,7 @@ It excels at managing complex lifecycles where state transitions matter:
 <div class="feature-card animate-in">
 <div class="feature-icon" aria-hidden="true">&#9881;</div>
 <h3>Processing Models</h3>
-<p>A whole <a href="task/#task-family"><code>Task</code> family</a>: plain <code>Task</code>, structured <code>Node</code>, side-effect-free <code>RouterTask</code>, wait-until <code>PollTask</code>, fan-out <code>BatchTask</code>, resumable <code>SteppedTask</code> — mixed freely in one workflow.</p>
+<p>A whole <a href="task/#task-family"><code>Task</code> family</a>: plain <code>Task</code>, side-effect-free <code>RouterTask</code>, wait-until <code>PollTask</code>, fan-out <code>BatchTask</code>, resumable <code>SteppedTask</code> — mixed freely in one workflow.</p>
 </div>
 <div class="feature-card animate-in">
 <div class="feature-icon secondary" aria-hidden="true">&#9670;</div>
@@ -216,7 +216,7 @@ async fn main() -> Result<(), CanoError> {
 <ol>
 <li><a href="workflows/">Workflows</a> — defining states, the builder, validation, and how a run executes.</li>
 <li><a href="resources/">Resources</a> — typed, lifecycle-managed dependency injection (every task receives a <code>&amp;Resources</code>).</li>
-<li><a href="task/">Task</a> — the default processing unit, then the rest of the <a href="task/#task-family">Task family</a> (<a href="nodes/">Node</a>, <a href="router-task/">RouterTask</a>, <a href="poll-task/">PollTask</a>, <a href="batch-task/">BatchTask</a>, <a href="stepped-task/">SteppedTask</a>) as you hit a shape that fits.</li>
+<li><a href="task/">Task</a> — the default processing unit, then the rest of the <a href="task/#task-family">Task family</a> (<a href="router-task/">RouterTask</a>, <a href="poll-task/">PollTask</a>, <a href="batch-task/">BatchTask</a>, <a href="stepped-task/">SteppedTask</a>) as you hit a shape that fits.</li>
 <li><a href="split-join/">Split &amp; Join</a> and <a href="scheduler/">Scheduler</a> — parallelism within a workflow, and time-driven execution of workflows.</li>
 <li>Resilience &amp; recovery: <a href="resilience/">Resilience</a>, <a href="recovery/">Recovery</a>, <a href="saga/">Saga</a>.</li>
 <li>Observability: <a href="tracing/">Tracing</a>, <a href="observers/">Observers</a>.</li>

@@ -9,7 +9,7 @@ template = "page.html"
 <p class="subtitle">The default in-memory shared state for passing data between workflow stages.</p>
 
 <p>
-The store is the shared data layer that connects workflow stages. Tasks and nodes write
+The store is the shared data layer that connects workflow stages. Tasks write
 values during their execution and read values produced by upstream stages. The default
 implementation, <code>MemoryStore</code>, is an <code>Arc&lt;RwLock&lt;HashMap&gt;&gt;</code>
 that is safe to clone and share across async tasks. Custom backends can be registered
@@ -18,7 +18,7 @@ as typed <code>Resource</code> values and retrieved by concrete type.
 
 <p>
 <code>MemoryStore</code> is registered inside a <a href="../resources/"><code>Resources</code></a>
-dictionary and retrieved in tasks and nodes with
+dictionary and retrieved in tasks with
 <code>res.get::&lt;MemoryStore, _&gt;("store")?</code>. This makes the store one
 of many named dependencies a workflow can carry, alongside database pools, HTTP clients,
 configuration, or any other type that implements the <code>Resource</code> trait. See
@@ -324,7 +324,7 @@ as a shared stack passed between workflow stages.</p>
 <p>
 For custom storage, define a concrete type with the API your workflow needs and
 implement <code>Resource</code> for it. Register that type in <code>Resources</code>, then retrieve it by
-concrete type inside tasks or nodes. This keeps storage dependencies explicit and avoids
+concrete type inside tasks. This keeps storage dependencies explicit and avoids
 an unnecessary storage trait layer now that <code>Resources</code> provides typed dependency lookup.
 </p>
 
@@ -445,7 +445,7 @@ proves the zero-copy share of a large value between tasks).</p>
 Store operations return <code>StoreResult&lt;T&gt;</code>, which is
 <code>Result&lt;T, StoreError&gt;</code>. <code>StoreError</code> converts automatically
 to <code>CanoError::Store</code> via the <code>From</code> impl, so the <code>?</code>
-operator works transparently in task and node methods.
+operator works transparently in task methods.
 </p>
 
 <div class="card-grid error-cards">

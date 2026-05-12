@@ -106,13 +106,12 @@
 //! ### Finite State Machines (FSM)
 //!
 //! Workflows in Cano are state machines. You define your states as an `enum`, register
-//! handlers ([`Task`] or [`Node`]) for each state, and the engine manages transitions.
+//! a [`Task`] handler for each state, and the engine manages transitions.
 //!
-//! ### Tasks and Nodes
+//! ### Tasks
 //!
-//! Two interfaces for processing logic:
-//! - [`Task`] trait: single `run()` method — straightforward operations and prototyping
-//! - [`Node`] trait: three-phase lifecycle (`prep` → `exec` → `post`) with built-in retry
+//! [`Task`] is the single interface for processing logic — implement one of `run` /
+//! `run_bare`. Several specialized task models build on it:
 //! - [`RouterTask`] trait: side-effect-free branching; reads resources, returns the next
 //!   state without writing anything. Registered with [`Workflow::register_router`] — the
 //!   engine dispatches it like a normal state but writes **no** `CheckpointRow`.
@@ -120,11 +119,12 @@
 //!   [`PollOutcome::Pending { delay_ms }`](PollOutcome::Pending) on each call. Defaults to
 //!   [`TaskConfig::minimal()`](task::TaskConfig::minimal) (no retries). Registered with
 //!   [`Workflow::register`] — the engine applies `attempt_timeout` if set via `config()`.
+//! - [`BatchTask`] trait: fan-out over data items via `load`/`process_item`/`finish`.
+//! - [`SteppedTask`] trait: resumable iterative work via `step()` with a serializable cursor.
 //!
-//! Every [`Node`] automatically implements [`Task`] via a blanket impl, so both can be
-//! registered with the same [`Workflow::register`] method. Every [`RouterTask`] and
-//! [`PollTask`] automatically implement [`Task`] via companion impls emitted by the
-//! `#[task::router]` and `#[task::poll]` macros respectively.
+//! Every [`RouterTask`], [`PollTask`], [`BatchTask`], and [`SteppedTask`] automatically
+//! implements [`Task`] via companion impls emitted by the `#[task::router]`,
+//! `#[task::poll]`, `#[task::batch]`, and `#[task::stepped]` macros respectively.
 //!
 //! ### Parallel Execution (Split/Join)
 //!
@@ -171,12 +171,7 @@
 //!
 //! ## Processing Lifecycle
 //!
-//! **Task**: Single `run()` method — full control over execution flow.
-//!
-//! **Node**: Three-phase lifecycle (retried as a unit on `prep` or `post` failure):
-//! 1. `prep` — load data, validate inputs, allocate resources
-//! 2. `exec` — core logic (infallible — signature returns result directly)
-//! 3. `post` — write results, determine next state
+//! **Task**: Single `run()` / `run_bare()` method — full control over execution flow.
 //!
 //! **RouterTask**: Single `route()` method — side-effect-free; reads resources, returns
 //! the next state. Dispatched like a normal state but leaves no checkpoint row.
@@ -188,8 +183,7 @@
 //!
 //! ## Module Overview
 //!
-//! - [`mod@task`]: The [`Task`] trait — single `run()` method
-//! - [`task::node`]: The [`Node`] trait — three-phase lifecycle with retry via [`TaskConfig`]
+//! - [`mod@task`]: The [`Task`] trait — single `run()` / `run_bare()` method
 //! - [`task::router`]: The [`RouterTask`] trait — side-effect-free branching via `route()`; registered with [`Workflow::register_router`]
 //! - [`task::poll`]: The [`PollTask`] trait — wait-until loop via `poll()`; registered with [`Workflow::register`]
 //! - [`task::batch`]: The [`BatchTask`] trait — fan-out over data items via `load`/`process_item`/`finish`; registered with [`Workflow::register`]
@@ -207,7 +201,7 @@
 //!
 //! 1. Run an example: `cargo run --example workflow_simple`
 //! 2. Read the module docs — each module has detailed documentation and examples
-//! 3. Run benchmarks: `cargo bench --bench node_performance`
+//! 3. Run benchmarks: `cargo bench --bench workflow_performance`
 
 pub mod circuit;
 pub mod error;
@@ -232,7 +226,6 @@ pub use saga::{CompensatableTask, ErasedCompensatable};
 pub use task::batch::{
     BatchTask, BatchTaskObject, DefaultBatchItem, DefaultBatchItemOutput, DynBatchTask, run_batch,
 };
-pub use task::node::{DefaultNodeResult, DynNode, Node, NodeObject};
 pub use task::poll::{
     DynPollTask, PollErrorPolicy, PollOutcome, PollTask, PollTaskObject, run_poll_loop,
 };
@@ -261,7 +254,6 @@ pub use scheduler::{BackoffPolicy, FlowInfo, RunningScheduler, Schedule, Schedul
 /// The implementation lives in the [`cano-macros`] sibling crate.
 ///
 /// Processing-model macros are namespaced under `cano::task::` and `cano::saga::`:
-/// - `#[cano::task::node]` — for `impl Node` blocks
 /// - `#[cano::task::router]` — for `impl RouterTask` blocks
 /// - `#[cano::task::poll]` — for `impl PollTask` blocks
 /// - `#[cano::task::batch]` — for `impl BatchTask` blocks
@@ -309,11 +301,11 @@ pub mod prelude {
 
     pub use crate::{
         BatchTask, CanoError, CanoResult, CheckpointRow, CheckpointStore, CircuitBreaker,
-        CircuitPermit, CircuitPolicy, CircuitState, CompensatableTask, DefaultNodeResult, DynNode,
-        HealthStatus, JoinConfig, JoinStrategy, MemoryStore, Node, NodeObject, PollErrorPolicy,
-        PollOutcome, PollTask, Resource, Resources, RetryMode, RouterTask, RowKind, SplitResult,
-        SplitTaskResult, StateEntry, StepOutcome, SteppedTask, Task, TaskConfig, TaskObject,
-        TaskResult, Workflow, WorkflowObserver, run_stepped,
+        CircuitPermit, CircuitPolicy, CircuitState, CompensatableTask, HealthStatus, JoinConfig,
+        JoinStrategy, MemoryStore, PollErrorPolicy, PollOutcome, PollTask, Resource, Resources,
+        RetryMode, RouterTask, RowKind, SplitResult, SplitTaskResult, StateEntry, StepOutcome,
+        SteppedTask, Task, TaskConfig, TaskObject, TaskResult, Workflow, WorkflowObserver,
+        run_stepped,
     };
 
     #[cfg(feature = "scheduler")]
@@ -330,7 +322,7 @@ pub mod prelude {
 
     // Re-export the `task` and `saga` *modules* so that path-qualified macros resolve:
     // `#[task::router]`, `#[task::poll]`, `#[task::batch]`, `#[task::stepped]`,
-    // `#[task::node]`, `#[saga::task]` — all available via `use cano::prelude::*`.
+    // `#[saga::task]` — all available via `use cano::prelude::*`.
     // (Modules and macros occupy different namespaces; `task` the module coexists with
     // `task` the macro imported above via `pub use crate::{..., task}`.)
     pub use crate::saga;

@@ -22,12 +22,10 @@
 //!
 //! | Error Type | When It Occurs | How to Fix |
 //! |------------|----------------|------------|
-//! | `NodeExecution` | Node `post` phase fails | Check your `post` method logic |
 //! | `TaskExecution` | `Task::run` fails | Check your `run` method logic |
-//! | `Preparation` | Node `prep` phase fails | Verify input data and store |
 //! | `Store` | Store operations fail | Check store state and keys |
-//! | `Workflow` | Workflow orchestration fails | Verify node registration and routing |
-//! | `Configuration` | Invalid node/workflow config | Check parameters and settings |
+//! | `Workflow` | Workflow orchestration fails | Verify task registration and routing |
+//! | `Configuration` | Invalid task/workflow config | Check parameters and settings |
 //! | `RetryExhausted` | All retries exhausted | Increase retries or fix root cause |
 //! | `Timeout` | Per-attempt timeout reached | Increase `attempt_timeout` or speed up the task |
 //! | `CircuitOpen` | Circuit breaker rejected the call | Wait for the breaker's `reset_timeout` or fix the upstream dependency |
@@ -35,12 +33,11 @@
 //! | `CompensationFailed` | A `compensate` run failed during rollback | Inspect the aggregated errors; the original failure is `errors[0]` |
 //! | `Generic` | General errors | Check the specific error message |
 //!
-//! ## Using Errors in Your Nodes
+//! ## Using Errors in Your Tasks
 //!
-//! In your custom nodes, return specific error types for different failures.
-//! Use `CanoError::Preparation` for prep phase issues, `CanoError::NodeExecution`
-//! for post phase failures (exec is infallible), and `CanoError::TaskExecution`
-//! for errors from a `Task::run` implementation.
+//! In your custom tasks, return specific error types for different failures.
+//! Use `CanoError::TaskExecution` for errors from a `Task::run` implementation,
+//! and `CanoError::Store` for store-access failures.
 //!
 //! ## Store Error Integration
 //!
@@ -66,26 +63,15 @@
 ///
 /// ## 🎯 Error Categories
 ///
-/// ### NodeExecution
-/// Something went wrong during node execution — specifically, the `post` phase failed.
-/// (The `exec` phase is infallible by design; it cannot produce this error.)
+/// ### TaskExecution
+/// Something went wrong during a [`Task::run`](crate::task::Task::run) implementation.
 ///
 /// **Common causes:**
-/// - Failed store write in `post`
-/// - Business-logic validation in `post` rejected the `exec` result
-/// - External API call in `post` failed
+/// - Failed store write
+/// - Business-logic validation rejected an input
+/// - External API call failed
 ///
-/// **How to fix:** Check your node's `post` method logic and store writes.
-///
-/// ### Preparation  
-/// Something went wrong while preparing data in the `prep` phase.
-///
-/// **Common causes:**
-/// - Missing data in store
-/// - Invalid data format
-/// - Resource initialization failures
-///
-/// **How to fix:** Verify that previous nodes stored the expected data.
+/// **How to fix:** Check your task's `run` method logic and store writes.
 ///
 /// ### Store
 /// Store operations failed (get, put, remove, etc.).
@@ -101,21 +87,21 @@
 /// Workflow orchestration problems.
 ///
 /// **Common causes:**
-/// - Unregistered node references
+/// - Unregistered task references
 /// - Invalid action routing
 /// - Circular dependencies
 ///
-/// **How to fix:** Verify node registration and action string routing.
+/// **How to fix:** Verify task registration and action string routing.
 ///
 /// ### Configuration
-/// Invalid node or workflow configuration.
+/// Invalid task or workflow configuration.
 ///
 /// **Common causes:**
 /// - Invalid concurrency settings
 /// - Negative retry counts
 /// - Conflicting settings
 ///
-/// **How to fix:** Review node builder parameters and workflow setup.
+/// **How to fix:** Review task builder parameters and workflow setup.
 ///
 /// ### RetryExhausted
 /// All retry attempts have been exhausted.
@@ -130,7 +116,7 @@
 /// ## 💡 Usage Examples
 ///
 /// Create specific error types with helpful messages. Use the appropriate
-/// error variant (NodeExecution, Configuration, Store, etc.) and provide
+/// error variant (TaskExecution, Configuration, Store, etc.) and provide
 /// clear, actionable error messages that help users understand what went wrong.
 ///
 /// ## 🔄 Converting from Other Errors
@@ -140,23 +126,11 @@
 /// method or the `Into` trait for convenient conversion.
 #[derive(Debug, Clone)]
 pub enum CanoError {
-    /// Error during node execution — used for `post` phase failures.
-    ///
-    /// `exec` is infallible by design (returns `Self::ExecResult` directly).
-    /// This variant is emitted by the blanket `Task` impl when `post` fails.
-    NodeExecution(String),
-
     /// Error during task execution
     ///
     /// Use this when your task's `run` method encounters an error during
-    /// execution. This is the task-specific equivalent of NodeExecution.
+    /// execution.
     TaskExecution(String),
-
-    /// Error during node preparation phase (data loading/setup)
-    ///
-    /// Use this when your node's `prep` method fails to load or prepare data.
-    /// Often indicates missing or invalid data in store.
-    Preparation(String),
 
     /// Error in store operations (get/put/remove)
     ///
@@ -166,11 +140,11 @@ pub enum CanoError {
 
     /// Error in workflow orchestration (routing/registration)
     ///
-    /// Use this for workflow-level problems like unregistered nodes,
+    /// Use this for workflow-level problems like unregistered tasks,
     /// invalid action routing, or workflow configuration issues.
     Workflow(String),
 
-    /// Error in node or workflow configuration (invalid settings)
+    /// Error in task or workflow configuration (invalid settings)
     ///
     /// Use this for configuration problems like invalid parameters,
     /// conflicting settings, or constraint violations.
@@ -178,7 +152,7 @@ pub enum CanoError {
 
     /// All retry attempts have been exhausted
     ///
-    /// This error is automatically generated when a node fails and
+    /// This error is automatically generated when a task fails and
     /// all configured retry attempts have been used up.
     RetryExhausted(String),
 
@@ -237,19 +211,9 @@ pub enum CanoError {
 }
 
 impl CanoError {
-    /// Create a new node execution error
-    pub fn node_execution<S: Into<String>>(msg: S) -> Self {
-        CanoError::NodeExecution(msg.into())
-    }
-
     /// Create a new task execution error
     pub fn task_execution<S: Into<String>>(msg: S) -> Self {
         CanoError::TaskExecution(msg.into())
-    }
-
-    /// Create a new preparation error
-    pub fn preparation<S: Into<String>>(msg: S) -> Self {
-        CanoError::Preparation(msg.into())
     }
 
     /// Create a new store error
@@ -316,9 +280,7 @@ impl CanoError {
     /// Get the error message as a string slice
     pub fn message(&self) -> &str {
         match self {
-            CanoError::NodeExecution(msg) => msg,
             CanoError::TaskExecution(msg) => msg,
-            CanoError::Preparation(msg) => msg,
             CanoError::Store(msg) => msg,
             CanoError::Workflow(msg) => msg,
             CanoError::Configuration(msg) => msg,
@@ -339,9 +301,7 @@ impl CanoError {
     /// Get the error category as a string
     pub fn category(&self) -> &'static str {
         match self {
-            CanoError::NodeExecution(_) => "node_execution",
             CanoError::TaskExecution(_) => "task_execution",
-            CanoError::Preparation(_) => "preparation",
             CanoError::Store(_) => "store",
             CanoError::Workflow(_) => "workflow",
             CanoError::Configuration(_) => "configuration",
@@ -361,9 +321,7 @@ impl CanoError {
 impl std::fmt::Display for CanoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CanoError::NodeExecution(msg) => write!(f, "Node execution error: {msg}"),
             CanoError::TaskExecution(msg) => write!(f, "Task execution error: {msg}"),
-            CanoError::Preparation(msg) => write!(f, "Preparation error: {msg}"),
             CanoError::Store(msg) => write!(f, "Store error: {msg}"),
             CanoError::Workflow(msg) => write!(f, "Workflow error: {msg}"),
             CanoError::Configuration(msg) => write!(f, "Configuration error: {msg}"),
@@ -395,9 +353,7 @@ impl std::error::Error for CanoError {}
 impl PartialEq for CanoError {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (CanoError::NodeExecution(a), CanoError::NodeExecution(b)) => a == b,
             (CanoError::TaskExecution(a), CanoError::TaskExecution(b)) => a == b,
-            (CanoError::Preparation(a), CanoError::Preparation(b)) => a == b,
             (CanoError::Store(a), CanoError::Store(b)) => a == b,
             (CanoError::Workflow(a), CanoError::Workflow(b)) => a == b,
             (CanoError::Configuration(a), CanoError::Configuration(b)) => a == b,
@@ -489,15 +445,15 @@ mod tests {
 
     #[test]
     fn test_error_creation() {
-        let error = CanoError::node_execution("Test error");
+        let error = CanoError::task_execution("Test error");
         assert_eq!(error.message(), "Test error");
-        assert_eq!(error.category(), "node_execution");
+        assert_eq!(error.category(), "task_execution");
     }
 
     #[test]
     fn test_error_display() {
-        let error = CanoError::NodeExecution("Test error".to_string());
-        assert_eq!(format!("{error}"), "Node execution error: Test error");
+        let error = CanoError::TaskExecution("Test error".to_string());
+        assert_eq!(format!("{error}"), "Task execution error: Test error");
     }
 
     #[test]
@@ -516,8 +472,8 @@ mod tests {
     #[test]
     fn test_error_categories() {
         assert_eq!(
-            CanoError::NodeExecution("".to_string()).category(),
-            "node_execution"
+            CanoError::TaskExecution("".to_string()).category(),
+            "task_execution"
         );
         assert_eq!(CanoError::store("".to_string()).category(), "store");
         assert_eq!(CanoError::Workflow("".to_string()).category(), "workflow");
@@ -563,22 +519,22 @@ mod tests {
 
     #[test]
     fn test_partial_eq_same_variant_same_message() {
-        let a = CanoError::NodeExecution("oops".to_string());
-        let b = CanoError::NodeExecution("oops".to_string());
+        let a = CanoError::TaskExecution("oops".to_string());
+        let b = CanoError::TaskExecution("oops".to_string());
         assert_eq!(a, b);
     }
 
     #[test]
     fn test_partial_eq_same_variant_different_message() {
-        let a = CanoError::NodeExecution("a".to_string());
-        let b = CanoError::NodeExecution("b".to_string());
+        let a = CanoError::TaskExecution("a".to_string());
+        let b = CanoError::TaskExecution("b".to_string());
         assert_ne!(a, b);
     }
 
     #[test]
     fn test_partial_eq_different_variants() {
-        let a = CanoError::NodeExecution("msg".to_string());
-        let b = CanoError::TaskExecution("msg".to_string());
+        let a = CanoError::TaskExecution("msg".to_string());
+        let b = CanoError::Workflow("msg".to_string());
         assert_ne!(a, b);
     }
 

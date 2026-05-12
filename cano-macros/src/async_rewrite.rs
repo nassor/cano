@@ -1,7 +1,8 @@
 //! Async-fn-in-trait rewriter.
 //!
-//! Shared by the `task`, `node`, and `resource` attribute macros: rewrites every
-//! `async fn` method on a trait definition or impl block so it returns
+//! Shared by every cano attribute macro (`task`, `resource`, `checkpoint_store`,
+//! and the specialized task macros): rewrites every `async fn` method on a trait
+//! definition or impl block so it returns
 //! `Pin<Box<dyn Future<Output = ...> + Send + 'async_trait>>`. This is the same
 //! shape produced by the `async-trait` crate; the macros are drop-in replacements.
 
@@ -36,9 +37,8 @@ pub(crate) fn rewrite(item: TokenStream) -> TokenStream {
 }
 
 /// Rewrite a parsed `ItemImpl` directly. Used by callers that have already
-/// massaged the impl block (e.g. the boilerplate-filler in `node_impl.rs`)
-/// before handing it back for the async rewrite.
-#[allow(dead_code)] // wired by node_impl in step 4 of the macro plan
+/// massaged the impl block (e.g. the boilerplate-fillers in `task_impl.rs`,
+/// `router_task_impl.rs`, etc.) before handing it back for the async rewrite.
 pub(crate) fn rewrite_impl_block(item: ItemImpl) -> TokenStream2 {
     rewrite_impl(item)
 }

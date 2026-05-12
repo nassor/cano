@@ -74,8 +74,7 @@ impl FetchTask {
 ```
 
 <p>See <a href="../task/#config-retries">Tasks → Configuration &amp; Retries</a> for the full
-<code>RetryMode</code> / <code>TaskConfig</code> reference. (A <a href="../nodes/">Node</a>'s
-<code>prep</code>/<code>post</code> are retried as a unit; <code>exec</code> is infallible.)</p>
+<code>RetryMode</code> / <code>TaskConfig</code> reference.</p>
 <hr class="section-divider">
 
 <h2 id="timeouts"><a href="#timeouts" class="anchor-link" aria-hidden="true">#</a>Per-Attempt Timeouts</h2>

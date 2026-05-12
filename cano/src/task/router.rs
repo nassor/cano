@@ -14,9 +14,10 @@
 //!
 //! Every [`RouterTask`] automatically implements [`Task`](crate::task::Task) via a
 //! per-impl-site companion `impl Task<S> for T` emitted by the `#[task::router]` macro
-//! (a blanket impl would conflict with the existing `Node → Task` blanket). This means
-//! you can register a `RouterTask` with [`Workflow::register`](crate::workflow::Workflow::register)
-//! using the same call as for `Task` and `Node` implementations.
+//! (a blanket impl would conflict with the analogous blanket impls for the other
+//! specialized task traits). This means you can register a `RouterTask` with
+//! [`Workflow::register`](crate::workflow::Workflow::register) using the same call as for
+//! any other `Task`.
 //!
 //! ## Quick Start
 //!
