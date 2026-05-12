@@ -88,8 +88,7 @@ document.addEventListener('DOMContentLoaded', () => {
   const readSectionState = (section) => {
     try { return localStorage.getItem(sectionStateKey(section)); } catch (e) { return null; }
   };
-  // Covers both top-level sections and nested sub-dropdowns.
-  document.querySelectorAll('details.nav-section, details.nav-subsection').forEach((section) => {
+  document.querySelectorAll('details.nav-section').forEach((section) => {
     const stored = readSectionState(section);
     if (stored === 'open') section.open = true;
     else if (stored === 'closed') section.open = false;
