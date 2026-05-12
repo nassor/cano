@@ -1,0 +1,27 @@
+[package]
+name = "cano-e2e"
+description = "End-to-end hardening tests for Cano crash recovery & sagas, using Docker + testcontainers."
+publish = false
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+cano = { path = "../cano" }
+tokio = { version = "1.52.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio-postgres = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+[dev-dependencies]
+testcontainers = "0.27.3"
+testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
+
+# The "custom software" the e2e tests drive: a small Cano app over a Postgres-backed
+# CheckpointStore. Built into the Docker image (see `Dockerfile`) and also runnable
+# directly against a local Postgres for a smoke test.
+[[bin]]
+name = "cano_workflow_app"
+path = "src/bin/cano_workflow_app.rs"

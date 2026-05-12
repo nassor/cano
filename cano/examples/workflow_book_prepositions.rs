@@ -1,12 +1,12 @@
 //! # Book Preposition Analysis Example: Project Gutenberg Book Analysis
 //!
 //! This example demonstrates a sophisticated book analysis workflow that:
-//! 1. **BookDownloaderNode**: Downloads 12 popular books from Project Gutenberg in parallel
-//! 2. **PrepositionNode**: Analyzes each book to count unique prepositions
-//! 3. **BookRankingByPrepositionNode**: Ranks books by their preposition diversity
+//! 1. **BookDownloaderTask**: Downloads 12 popular books from Project Gutenberg in parallel
+//! 2. **PrepositionTask**: Analyzes each book to count unique prepositions
+//! 3. **BookRankingByPrepositionTask**: Ranks books by their preposition diversity
 //!
 //! The workflow showcases parallel processing, text analysis, and book analysis patterns
-//! using the Cano framework with Workflow orchestration supporting different node types.
+//! using the Cano framework with Workflow orchestration.
 //!
 //! ## Execution Modes
 //!
@@ -21,7 +21,7 @@ use futures_util::future::join_all;
 use std::collections::HashSet;
 use tokio::time::{Duration, timeout};
 
-/// Result type for workflow workflow control
+/// Result type for workflow control
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum BookPrepositionAction {
     Complete,
@@ -130,10 +130,10 @@ const PREPOSITIONS: &[&str] = &[
     "without",
 ];
 
-/// Node 1: Downloads books from Project Gutenberg in parallel
-struct BookDownloaderNode;
+/// Task 1: Downloads books from Project Gutenberg in parallel
+struct BookDownloaderTask;
 
-impl BookDownloaderNode {
+impl BookDownloaderTask {
     fn new() -> Self {
         Self
     }
@@ -206,7 +206,7 @@ impl BookDownloaderNode {
 
     /// Download a single book with error handling and timeout
     async fn download_book(id: u32, title: String, url: String) -> Result<Book, String> {
-        println!("📚 Downloading: {title}");
+        println!("Downloading: {title}");
 
         let client = reqwest::Client::new();
 
@@ -233,7 +233,7 @@ impl BookDownloaderNode {
                 ));
             }
 
-            println!("✅ Downloaded: {title} ({} chars)", content.len());
+            println!("Downloaded: {title} ({} chars)", content.len());
 
             Ok(Book {
                 id,
@@ -250,31 +250,20 @@ impl BookDownloaderNode {
     }
 }
 
-#[node(state = BookPrepositionAction)]
-impl BookDownloaderNode {
-    type PrepResult = Vec<(u32, String, String)>;
-    type ExecResult = Vec<Book>;
-
+#[task(state = BookPrepositionAction)]
+impl BookDownloaderTask {
     fn config(&self) -> TaskConfig {
         TaskConfig::new().with_fixed_retry(2, Duration::from_secs(1))
     }
 
-    /// Preparation: Get the list of books to download
-    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<BookPrepositionAction>, CanoError> {
         let book_list = Self::get_book_list();
-        println!("📋 Prepared {} books for download", book_list.len());
-        Ok(book_list)
-    }
+        println!("Prepared {} books for download", book_list.len());
 
-    /// Execution: Download all books in parallel
-    async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
-        println!(
-            "🚀 Starting parallel download of {} books...",
-            prep_res.len()
-        );
+        println!("Starting parallel download of {} books...", book_list.len());
 
         // Create download futures for all books
-        let download_futures: Vec<_> = prep_res
+        let download_futures: Vec<_> = book_list
             .into_iter()
             .map(|(id, title, url)| Self::download_book(id, title, url))
             .collect();
@@ -290,44 +279,35 @@ impl BookDownloaderNode {
             match result {
                 Ok(book) => books.push(book),
                 Err(error) => {
-                    eprintln!("❌ Download failed: {error}");
+                    eprintln!("Download failed: {error}");
                     failed_count += 1;
                 }
             }
         }
 
         println!(
-            "📊 Download summary: {} successful, {} failed",
+            "Download summary: {} successful, {} failed",
             books.len(),
             failed_count
         );
-        books
-    }
 
-    /// Post-processing: Store downloaded books in memory
-    async fn post(
-        &self,
-        res: &Resources,
-        exec_res: Self::ExecResult,
-    ) -> Result<BookPrepositionAction, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
-        if exec_res.is_empty() {
-            return Err(CanoError::node_execution(
+        if books.is_empty() {
+            return Err(CanoError::task_execution(
                 "No books were successfully downloaded",
             ));
         }
 
-        store.put("downloaded_books", exec_res.clone())?;
-
-        println!("✅ Stored {} books in memory for analysis", exec_res.len());
-        Ok(BookPrepositionAction::Analyze) // Move to analysis phase
+        store.put("downloaded_books", books.clone())?;
+        println!("Stored {} books in memory for analysis", books.len());
+        Ok(TaskResult::Single(BookPrepositionAction::Analyze))
     }
 }
 
-/// Node 2: Analyzes prepositions in each book
-struct PrepositionNode;
+/// Task 2: Analyzes prepositions in each book
+struct PrepositionTask;
 
-impl PrepositionNode {
+impl PrepositionTask {
     fn new() -> Self {
         Self
     }
@@ -366,7 +346,7 @@ impl PrepositionNode {
         };
 
         println!(
-            "📖 Analyzed '{}': {} unique prepositions, {:.2}% density",
+            "Analyzed '{}': {} unique prepositions, {:.2}% density",
             book.title,
             found_prepositions.len(),
             preposition_density
@@ -383,32 +363,23 @@ impl PrepositionNode {
     }
 }
 
-#[node(state = BookPrepositionAction)]
-impl PrepositionNode {
-    type PrepResult = Vec<Book>;
-    type ExecResult = Vec<BookAnalysis>;
-
+#[task(state = BookPrepositionAction)]
+impl PrepositionTask {
     fn config(&self) -> TaskConfig {
         TaskConfig::minimal()
     }
 
-    /// Preparation: Load downloaded books from memory
-    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<BookPrepositionAction>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
         let books: Vec<Book> = store
             .get("downloaded_books")
-            .map_err(|e| CanoError::preparation(format!("Failed to load books: {e}")))?;
+            .map_err(|e| CanoError::task_execution(format!("Failed to load books: {e}")))?;
 
-        println!("📚 Loaded {} books for preposition analysis", books.len());
-        Ok(books)
-    }
-
-    /// Execution: Analyze prepositions in all books
-    async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
-        println!("🔍 Analyzing prepositions in {} books...", prep_res.len());
+        println!("Loaded {} books for preposition analysis", books.len());
+        println!("Analyzing prepositions in {} books...", books.len());
 
         // Process books in parallel using async tasks
-        let analysis_futures: Vec<_> = prep_res
+        let analysis_futures: Vec<_> = books
             .iter()
             .map(|book| {
                 let book_clone = book.clone();
@@ -422,75 +393,57 @@ impl PrepositionNode {
         for result in results {
             match result {
                 Ok(analysis) => analyses.push(analysis),
-                Err(e) => eprintln!("❌ Analysis task failed: {e}"),
+                Err(e) => eprintln!("Analysis task failed: {e}"),
             }
         }
 
-        println!("📊 Completed analysis of {} books", analyses.len());
-        analyses
-    }
+        println!("Completed analysis of {} books", analyses.len());
 
-    /// Post-processing: Store analysis results
-    async fn post(
-        &self,
-        res: &Resources,
-        exec_res: Self::ExecResult,
-    ) -> Result<BookPrepositionAction, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
-        if exec_res.is_empty() {
-            return Err(CanoError::node_execution("No book analyses were completed"));
+        if analyses.is_empty() {
+            return Err(CanoError::task_execution("No book analyses were completed"));
         }
 
-        store.put("book_analyses", exec_res.clone())?;
+        store.put("book_analyses", analyses.clone())?;
 
         // Clean up the raw book content to save memory
         store.remove("downloaded_books")?;
 
         println!(
-            "✅ Stored {} book analyses and cleaned up raw content",
-            exec_res.len()
+            "Stored {} book analyses and cleaned up raw content",
+            analyses.len()
         );
-        Ok(BookPrepositionAction::Rank) // Move to ranking phase
+        Ok(TaskResult::Single(BookPrepositionAction::Rank))
     }
 }
 
-/// Node 3: Ranks books by their preposition diversity
-struct BookRankingByPrepositionNode;
+/// Task 3: Ranks books by their preposition diversity
+struct BookRankingByPrepositionTask;
 
-impl BookRankingByPrepositionNode {
+impl BookRankingByPrepositionTask {
     fn new() -> Self {
         Self
     }
 }
 
-#[node(state = BookPrepositionAction)]
-impl BookRankingByPrepositionNode {
-    type PrepResult = Vec<BookAnalysis>;
-    type ExecResult = Vec<BookRanking>;
-
+#[task(state = BookPrepositionAction)]
+impl BookRankingByPrepositionTask {
     fn config(&self) -> TaskConfig {
         TaskConfig::minimal()
     }
 
-    /// Preparation: Load book analyses from memory
-    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<BookPrepositionAction>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
         let analyses: Vec<BookAnalysis> = store
             .get("book_analyses")
-            .map_err(|e| CanoError::preparation(format!("Failed to load analyses: {e}")))?;
+            .map_err(|e| CanoError::task_execution(format!("Failed to load analyses: {e}")))?;
 
-        println!("📊 Loaded {} book analyses for ranking", analyses.len());
-        Ok(analyses)
-    }
+        println!("Loaded {} book analyses for ranking", analyses.len());
+        println!("Ranking books by preposition diversity...");
 
-    /// Execution: Rank books by preposition count and density
-    async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
-        println!("🏆 Ranking books by preposition diversity...");
-
-        let mut analyses = prep_res;
+        let mut sorted = analyses;
 
         // Sort by preposition count (descending), then by density as tiebreaker
-        analyses.sort_by(|a, b| match b.preposition_count.cmp(&a.preposition_count) {
+        sorted.sort_by(|a, b| match b.preposition_count.cmp(&a.preposition_count) {
             std::cmp::Ordering::Equal => b
                 .preposition_density
                 .partial_cmp(&a.preposition_density)
@@ -499,7 +452,7 @@ impl BookRankingByPrepositionNode {
         });
 
         // Create rankings
-        let rankings: Vec<BookRanking> = analyses
+        let rankings: Vec<BookRanking> = sorted
             .into_iter()
             .enumerate()
             .map(|(index, analysis)| BookRanking {
@@ -508,33 +461,21 @@ impl BookRankingByPrepositionNode {
             })
             .collect();
 
-        println!(
-            "📈 Ranked {} books by preposition diversity",
-            rankings.len()
-        );
-        rankings
-    }
+        println!("Ranked {} books by preposition diversity", rankings.len());
 
-    /// Post-processing: Store final rankings and display results
-    async fn post(
-        &self,
-        res: &Resources,
-        exec_res: Self::ExecResult,
-    ) -> Result<BookPrepositionAction, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
-        store.put("book_rankings", exec_res.clone())?;
+        store.put("book_rankings", rankings.clone())?;
 
         // Display results
-        println!("\n🏆 FINAL BOOK RANKINGS BY PREPOSITION DIVERSITY");
+        println!("\nFINAL BOOK RANKINGS BY PREPOSITION DIVERSITY");
         println!("================================================");
 
-        for ranking in &exec_res {
+        for ranking in &rankings {
             println!(
                 "#{}: {} (ID: {})",
                 ranking.rank, ranking.analysis.title, ranking.analysis.book_id
             );
             println!(
-                "    📊 {} unique prepositions | {:.2}% density | {} total words",
+                "    {} unique prepositions | {:.2}% density | {} total words",
                 ranking.analysis.preposition_count,
                 ranking.analysis.preposition_density,
                 ranking.analysis.total_words
@@ -547,24 +488,24 @@ impl BookRankingByPrepositionNode {
                 .iter()
                 .take(10)
                 .collect();
-            println!("    🔤 Sample prepositions: {sample_prepositions:?}");
+            println!("    Sample prepositions: {sample_prepositions:?}");
             println!();
         }
 
         // Summary statistics
-        let total_books = exec_res.len();
-        let avg_prepositions: f64 = exec_res
+        let total_books = rankings.len();
+        let avg_prepositions: f64 = rankings
             .iter()
             .map(|r| r.analysis.preposition_count as f64)
             .sum::<f64>()
             / total_books as f64;
-        let avg_density: f64 = exec_res
+        let avg_density: f64 = rankings
             .iter()
             .map(|r| r.analysis.preposition_density)
             .sum::<f64>()
             / total_books as f64;
 
-        println!("📈 SUMMARY STATISTICS");
+        println!("SUMMARY STATISTICS");
         println!("=====================");
         println!("Total books analyzed: {}", total_books);
         println!(
@@ -573,80 +514,77 @@ impl BookRankingByPrepositionNode {
         );
         println!("Average preposition density: {:.2}%", avg_density);
 
-        if let (Some(highest), Some(lowest)) = (exec_res.first(), exec_res.last()) {
+        if let (Some(highest), Some(lowest)) = (rankings.first(), rankings.last()) {
             println!(
-                "\n🥇 Highest diversity: {} ({} prepositions)",
+                "\nHighest diversity: {} ({} prepositions)",
                 highest.analysis.title, highest.analysis.preposition_count
             );
             println!(
-                "🥉 Lowest diversity: {} ({} prepositions)",
+                "Lowest diversity: {} ({} prepositions)",
                 lowest.analysis.title, lowest.analysis.preposition_count
             );
         }
 
-        println!("✅ Book preposition analysis complete!");
-        Ok(BookPrepositionAction::Complete)
+        println!("Book preposition analysis complete!");
+        Ok(TaskResult::Single(BookPrepositionAction::Complete))
     }
 }
 
-/// Book preposition analysis workflow using Workflow orchestration with different node types
+/// Book preposition analysis workflow using Workflow orchestration
 async fn run_workflow() -> Result<(), CanoError> {
-    println!("🚀 Starting Book Preposition Analysis Workflow with Workflow");
+    println!("Starting Book Preposition Analysis Workflow");
     println!("========================================================");
 
     let store = MemoryStore::new();
 
-    // Create a Workflow that handles all three different node types
     let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
-        .register(BookPrepositionAction::Download, BookDownloaderNode::new())
-        .register(BookPrepositionAction::Analyze, PrepositionNode::new())
+        .register(BookPrepositionAction::Download, BookDownloaderTask::new())
+        .register(BookPrepositionAction::Analyze, PrepositionTask::new())
         .register(
             BookPrepositionAction::Rank,
-            BookRankingByPrepositionNode::new(),
+            BookRankingByPrepositionTask::new(),
         )
         .add_exit_states(vec![
             BookPrepositionAction::Complete,
             BookPrepositionAction::Error,
         ]);
 
-    println!("📋 Workflow configured with 3 different node types:");
-    println!("  • BookDownloaderNode (Download phase)");
-    println!("  • PrepositionNode (Analysis phase)");
-    println!("  • BookRankingByPrepositionNode (Ranking phase)");
+    println!("Workflow configured with 3 tasks:");
+    println!("  BookDownloaderTask (Download phase)");
+    println!("  PrepositionTask (Analysis phase)");
+    println!("  BookRankingByPrepositionTask (Ranking phase)");
 
     // Execute the entire workflow using Workflow orchestration
     match workflow.orchestrate(BookPrepositionAction::Download).await {
         Ok(final_state) => {
             match final_state {
                 BookPrepositionAction::Complete => {
-                    println!(
-                        "\n✅ Workflow-based book preposition analysis workflow completed successfully!"
-                    );
+                    println!("\nBook preposition analysis workflow completed successfully!");
 
                     // Display summary from the final rankings
                     if let Ok(rankings) = store.get::<Vec<BookRanking>>("book_rankings") {
-                        println!("\n🏆 WORKFLOW SUMMARY");
+                        println!("\nWORKFLOW SUMMARY");
                         println!("==================");
                         println!("Total books analyzed: {}", rankings.len());
 
                         if let (Some(top), Some(bottom)) = (rankings.first(), rankings.last()) {
                             println!(
-                                "🥇 Most diverse: {} ({} prepositions)",
+                                "Most diverse: {} ({} prepositions)",
                                 top.analysis.title, top.analysis.preposition_count
                             );
                             println!(
-                                "🥉 Least diverse: {} ({} prepositions)",
+                                "Least diverse: {} ({} prepositions)",
                                 bottom.analysis.title, bottom.analysis.preposition_count
                             );
                         }
                     }
                 }
                 BookPrepositionAction::Error => {
-                    eprintln!("❌ Workflow terminated with error state");
+                    eprintln!("Workflow terminated with error state");
                     return Err(CanoError::workflow("Workflow terminated with error state"));
                 }
                 other => {
-                    eprintln!("⚠️  Workflow ended in unexpected state: {other:?}");
+                    eprintln!("Workflow ended in unexpected state: {other:?}");
                     return Err(CanoError::workflow(format!(
                         "Workflow ended in unexpected state: {other:?}"
                     )));
@@ -654,7 +592,7 @@ async fn run_workflow() -> Result<(), CanoError> {
             }
         }
         Err(e) => {
-            eprintln!("❌ Workflow-based workflow failed: {e}");
+            eprintln!("Workflow-based workflow failed: {e}");
             return Err(e);
         }
     }
@@ -664,17 +602,15 @@ async fn run_workflow() -> Result<(), CanoError> {
 
 #[tokio::main]
 async fn main() {
-    println!("📚 Project Gutenberg Book Preposition Analysis");
+    println!("Project Gutenberg Book Preposition Analysis");
     println!("=========================================");
-
-    println!("🌐 Running with Workflow orchestration");
 
     match run_workflow().await {
         Ok(()) => {
-            println!("\n🎉 Workflow completed successfully!");
+            println!("\nWorkflow completed successfully!");
         }
         Err(e) => {
-            eprintln!("\n❌ Workflow failed: {e}");
+            eprintln!("\nWorkflow failed: {e}");
             std::process::exit(1);
         }
     }
@@ -683,15 +619,10 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cano::store::{MemoryStore, Store};
 
     #[tokio::test]
-    async fn test_book_downloader_prep() {
-        let downloader = BookDownloaderNode::new();
-        let store = MemoryStore::new();
-        let res = Resources::new().insert("store", store.clone());
-
-        let book_list = downloader.prep(&res).await.unwrap();
+    async fn test_book_downloader_book_list() {
+        let book_list = BookDownloaderTask::get_book_list();
 
         assert_eq!(book_list.len(), 12);
         assert!(book_list.iter().all(|(id, title, url)| {
@@ -710,7 +641,7 @@ mod tests {
                     .to_string(),
         };
 
-        let analysis = PrepositionNode::analyze_book_prepositions(&book);
+        let analysis = PrepositionTask::analyze_book_prepositions(&book);
 
         assert_eq!(analysis.book_id, 1);
         assert_eq!(analysis.title, "Test Book");
@@ -726,7 +657,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_preposition_node_with_mock_data() {
+    async fn test_preposition_task_with_mock_data() {
         let store = MemoryStore::new();
 
         // Setup mock books
@@ -747,11 +678,11 @@ mod tests {
 
         store.put("downloaded_books", mock_books).unwrap();
 
-        let analyzer = PrepositionNode::new();
+        let analyzer = PrepositionTask::new();
         let res = Resources::new().insert("store", store.clone());
         let result = analyzer.run(&res).await.unwrap();
 
-        assert_eq!(result, BookPrepositionAction::Rank);
+        assert_eq!(result, TaskResult::Single(BookPrepositionAction::Rank));
 
         // Verify analyses were stored
         let analyses: Vec<BookAnalysis> = store.get("book_analyses").unwrap();
@@ -765,7 +696,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_ranking_node() {
+    async fn test_ranking_task() {
         let store = MemoryStore::new();
 
         // Setup mock analyses
@@ -798,11 +729,11 @@ mod tests {
 
         store.put("book_analyses", mock_analyses).unwrap();
 
-        let ranker = BookRankingByPrepositionNode::new();
+        let ranker = BookRankingByPrepositionTask::new();
         let res = Resources::new().insert("store", store.clone());
         let result = ranker.run(&res).await.unwrap();
 
-        assert_eq!(result, BookPrepositionAction::Complete);
+        assert_eq!(result, TaskResult::Single(BookPrepositionAction::Complete));
 
         // Verify rankings were stored and properly sorted
         let rankings: Vec<BookRanking> = store.get("book_rankings").unwrap();
@@ -836,7 +767,7 @@ mod tests {
 
     #[test]
     fn test_book_list() {
-        let book_list = BookDownloaderNode::get_book_list();
+        let book_list = BookDownloaderTask::get_book_list();
 
         assert_eq!(book_list.len(), 12);
 

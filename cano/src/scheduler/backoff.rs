@@ -12,19 +12,18 @@ use std::time::Duration;
 /// Policy controlling how the scheduler delays subsequent runs of a flow that
 /// just failed and when to stop dispatching it altogether.
 ///
-/// A flow registered without a policy keeps the legacy behavior: failures set
-/// `Status::Failed(err)` and the next scheduled tick fires per the base
-/// schedule. Attaching a policy with [`Scheduler::set_backoff`](super::Scheduler::set_backoff)
-/// activates the new code path.
+/// Every flow has one: [`BackoffPolicy::default`] unless overridden for that
+/// flow via [`Scheduler::set_backoff`](super::Scheduler::set_backoff). After a
+/// failure the scheduler parks the flow in [`Status::Backoff`](super::Status::Backoff)
+/// for `compute_delay(streak)` (or [`Status::Tripped`](super::Status::Tripped)
+/// once `streak_limit` is hit).
 ///
 /// # Defaults
 ///
 /// `Default` gives 1s initial, 2.0x multiplier, 5min cap, 0.1 jitter, and
 /// **no trip limit** (`streak_limit: None`) — the flow keeps retrying with
 /// backoff forever. Use [`BackoffPolicy::with_trip`] to ask for a trip after
-/// N consecutive failures. The defaults exist for callers who want a
-/// reasonable policy without tuning every knob — they are **never** applied
-/// silently to existing flows.
+/// N consecutive failures.
 #[derive(Debug, Clone)]
 pub struct BackoffPolicy {
     /// Delay applied after the first failure in a streak.

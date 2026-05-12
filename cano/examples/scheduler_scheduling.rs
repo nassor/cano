@@ -30,13 +30,13 @@ enum WorkflowAction {
     Error,
 }
 
-/// Report generation node
+/// Report generation task
 #[derive(Clone)]
-struct ReportNode {
+struct ReportTask {
     report_type: String,
 }
 
-impl ReportNode {
+impl ReportTask {
     fn new(report_type: &str) -> Self {
         Self {
             report_type: report_type.to_string(),
@@ -44,48 +44,35 @@ impl ReportNode {
     }
 }
 
-#[node(state = WorkflowAction)]
-impl ReportNode {
-    type PrepResult = String;
-    type ExecResult = String;
-
+#[task(state = WorkflowAction)]
+impl ReportTask {
     fn config(&self) -> TaskConfig {
         TaskConfig::minimal()
     }
 
-    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowAction>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
-        println!("📊 Preparing {} report...", self.report_type);
+        println!("Preparing {} report...", self.report_type);
         store.put("report_start_time", Utc::now().to_rfc3339())?;
-        Ok(format!("Preparing {} report", self.report_type))
-    }
 
-    async fn exec(&self, _prep_result: Self::PrepResult) -> Self::ExecResult {
-        println!("📊 Generating {} report...", self.report_type);
+        println!("Generating {} report...", self.report_type);
         // Simulate longer report generation to see concurrent executions
         sleep(Duration::from_millis(3000)).await;
-        format!("{} report generated successfully", self.report_type)
-    }
+        let result = format!("{} report generated successfully", self.report_type);
 
-    async fn post(
-        &self,
-        res: &Resources,
-        exec_result: Self::ExecResult,
-    ) -> Result<WorkflowAction, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
-        println!("📊 Report completed: {}", exec_result);
-        store.put("report_result", exec_result)?;
-        Ok(WorkflowAction::Complete)
+        println!("Report completed: {}", result);
+        store.put("report_result", result)?;
+        Ok(TaskResult::Single(WorkflowAction::Complete))
     }
 }
 
-/// Data cleanup node
+/// Data cleanup task
 #[derive(Clone)]
-struct CleanupNode {
+struct CleanupTask {
     cleanup_type: String,
 }
 
-impl CleanupNode {
+impl CleanupTask {
     fn new(cleanup_type: &str) -> Self {
         Self {
             cleanup_type: cleanup_type.to_string(),
@@ -93,53 +80,40 @@ impl CleanupNode {
     }
 }
 
-#[node(state = WorkflowAction)]
-impl CleanupNode {
-    type PrepResult = Vec<String>;
-    type ExecResult = usize;
-
+#[task(state = WorkflowAction)]
+impl CleanupTask {
     fn config(&self) -> TaskConfig {
         TaskConfig::minimal()
     }
 
-    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowAction>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
-        println!("🧹 Scanning for {} cleanup...", self.cleanup_type);
+        println!("Scanning for {} cleanup...", self.cleanup_type);
         store.put("cleanup_start", Utc::now().to_rfc3339())?;
-        // Simulate finding items to clean
-        Ok(vec![
+
+        let items = [
             "temp_file_1".to_string(),
             "temp_file_2".to_string(),
             "old_log".to_string(),
-        ])
-    }
-
-    async fn exec(&self, prep_result: Self::PrepResult) -> Self::ExecResult {
-        println!("🧹 Cleaning up {} items...", prep_result.len());
+        ];
+        println!("Cleaning up {} items...", items.len());
         // Simulate longer cleanup work to see concurrent executions
         sleep(Duration::from_millis(2000)).await;
-        prep_result.len()
-    }
 
-    async fn post(
-        &self,
-        res: &Resources,
-        exec_result: Self::ExecResult,
-    ) -> Result<WorkflowAction, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
-        println!("🧹 Cleanup completed: {} items removed", exec_result);
-        store.put("cleanup_count", exec_result.to_string())?;
-        Ok(WorkflowAction::Complete)
+        let count = items.len();
+        println!("Cleanup completed: {} items removed", count);
+        store.put("cleanup_count", count.to_string())?;
+        Ok(TaskResult::Single(WorkflowAction::Complete))
     }
 }
 
-/// Manual task node
+/// Manual task
 #[derive(Clone)]
-struct ManualTaskNode {
+struct ManualTask {
     task_name: String,
 }
 
-impl ManualTaskNode {
+impl ManualTask {
     fn new(task_name: &str) -> Self {
         Self {
             task_name: task_name.to_string(),
@@ -147,48 +121,36 @@ impl ManualTaskNode {
     }
 }
 
-#[node(state = WorkflowAction)]
-impl ManualTaskNode {
-    type PrepResult = String;
-    type ExecResult = String;
-
+#[task(state = WorkflowAction)]
+impl ManualTask {
     fn config(&self) -> TaskConfig {
         TaskConfig::minimal()
     }
 
-    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowAction>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
-        println!("⚡ Starting manual task: {}", self.task_name);
+        println!("Starting manual task: {}", self.task_name);
         store.put("manual_task_start", Utc::now().to_rfc3339())?;
-        Ok(format!("Manual task: {}", self.task_name))
-    }
 
-    async fn exec(&self, prep_result: Self::PrepResult) -> Self::ExecResult {
-        println!("⚡ Executing: {}", prep_result);
+        let prep = format!("Manual task: {}", self.task_name);
+        println!("Executing: {}", prep);
         // Simulate task execution
         sleep(Duration::from_millis(200)).await;
-        format!("{} completed", prep_result)
-    }
 
-    async fn post(
-        &self,
-        res: &Resources,
-        exec_result: Self::ExecResult,
-    ) -> Result<WorkflowAction, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
-        println!("⚡ Manual task finished: {}", exec_result);
-        store.put("manual_task_result", exec_result)?;
-        Ok(WorkflowAction::Complete)
+        let result = format!("{} completed", prep);
+        println!("Manual task finished: {}", result);
+        store.put("manual_task_result", result)?;
+        Ok(TaskResult::Single(WorkflowAction::Complete))
     }
 }
 
-/// Setup task node
+/// Setup task
 #[derive(Clone)]
-struct SetupNode {
+struct SetupTask {
     setup_type: String,
 }
 
-impl SetupNode {
+impl SetupTask {
     fn new(setup_type: &str) -> Self {
         Self {
             setup_type: setup_type.to_string(),
@@ -196,67 +158,54 @@ impl SetupNode {
     }
 }
 
-#[node(state = WorkflowAction)]
-impl SetupNode {
-    type PrepResult = Vec<String>;
-    type ExecResult = bool;
-
+#[task(state = WorkflowAction)]
+impl SetupTask {
     fn config(&self) -> TaskConfig {
         TaskConfig::minimal()
     }
 
-    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowAction>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
-        println!("🔧 Preparing {} setup...", self.setup_type);
+        println!("Preparing {} setup...", self.setup_type);
         store.put("setup_start", Utc::now().to_rfc3339())?;
-        Ok(vec![
+
+        let steps = vec![
             "configure_database".to_string(),
             "setup_cache".to_string(),
             "initialize_logging".to_string(),
-        ])
-    }
-
-    async fn exec(&self, prep_result: Self::PrepResult) -> Self::ExecResult {
-        println!("🔧 Running setup tasks: {:?}", prep_result);
+        ];
+        println!("Running setup tasks: {:?}", steps);
         // Simulate setup work
         sleep(Duration::from_millis(300)).await;
-        true
-    }
 
-    async fn post(
-        &self,
-        res: &Resources,
-        exec_result: Self::ExecResult,
-    ) -> Result<WorkflowAction, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
-        println!("🔧 Setup completed successfully: {}", exec_result);
-        store.put("setup_complete", exec_result.to_string())?;
-        Ok(WorkflowAction::Complete)
+        println!("Setup completed successfully");
+        store.put("setup_complete", "true".to_string())?;
+        Ok(TaskResult::Single(WorkflowAction::Complete))
     }
 }
 
 #[tokio::main]
 async fn main() -> CanoResult<()> {
-    println!("🚀 Starting Scheduler Scheduling Example");
+    println!("Starting Scheduler Scheduling Example");
     println!("=====================================");
 
     let store = MemoryStore::new();
 
     // Create flows
     let hourly_report_flow = Workflow::new(Resources::new().insert("store", store.clone()))
-        .register(WorkflowAction::Start, ReportNode::new("Hourly"))
+        .register(WorkflowAction::Start, ReportTask::new("Hourly"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
     let cleanup_flow = Workflow::new(Resources::new().insert("store", store.clone()))
-        .register(WorkflowAction::Start, CleanupNode::new("Temporary"))
+        .register(WorkflowAction::Start, CleanupTask::new("Temporary"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
     let manual_flow = Workflow::new(Resources::new().insert("store", store.clone()))
-        .register(WorkflowAction::Start, ManualTaskNode::new("Data Migration"))
+        .register(WorkflowAction::Start, ManualTask::new("Data Migration"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
     let setup_flow = Workflow::new(Resources::new().insert("store", store.clone()))
-        .register(WorkflowAction::Start, SetupNode::new("System"))
+        .register(WorkflowAction::Start, SetupTask::new("System"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
     // Create scheduler with multiple flows
@@ -276,60 +225,60 @@ async fn main() -> CanoResult<()> {
     // System setup
     scheduler.manual("system_setup", setup_flow, WorkflowAction::Start)?;
 
-    println!("📅 Configured flows:");
-    println!("  • Hourly Report: Every 5 seconds");
-    println!("  • Data Cleanup: Every 3 seconds");
-    println!("  • Manual Migration: Manual trigger only");
-    println!("  • System Setup: Manual trigger only");
+    println!("Configured flows:");
+    println!("  Hourly Report: Every 5 seconds");
+    println!("  Data Cleanup: Every 3 seconds");
+    println!("  Manual Migration: Manual trigger only");
+    println!("  System Setup: Manual trigger only");
     println!();
 
     // Start the scheduler — consumes the builder and returns a live handle.
-    println!("▶️  Starting scheduler system...");
+    println!("Starting scheduler system...");
     let running = scheduler.start().await?;
 
     // Wait a bit and check workflow status
     sleep(Duration::from_secs(2)).await;
 
-    println!("📊 Current workflow status:");
+    println!("Current workflow status:");
     let flows_info = running.list().await;
     for info in &flows_info {
         println!(
-            "  • {}: {:?} (runs: {})",
+            "  {}: {:?} (runs: {})",
             info.id, info.status, info.run_count
         );
     }
     println!();
 
     // Wait for the system setup and then trigger it manually
-    println!("⏳ Waiting a bit then triggering system setup...");
+    println!("Waiting a bit then triggering system setup...");
     sleep(Duration::from_secs(4)).await;
 
     // Manually trigger the setup task
-    println!("🔧 Manually triggering system setup...");
+    println!("Manually triggering system setup...");
     running.trigger("system_setup").await?;
 
     // Manually trigger the migration task
-    println!("🔧 Manually triggering data migration...");
+    println!("Manually triggering data migration...");
     running.trigger("manual_migration").await?;
 
     // Let the scheduler run for a while to see scheduled executions
-    println!("⏳ Running scheduler for 20 seconds to see concurrent executions...");
+    println!("Running scheduler for 20 seconds to see concurrent executions...");
     sleep(Duration::from_secs(20)).await;
 
     // Show final status
-    println!("\n📊 Final workflow status:");
+    println!("\nFinal workflow status:");
     let final_flows_info = running.list().await;
     for info in &final_flows_info {
         println!(
-            "  • {}: {:?} (runs: {})",
+            "  {}: {:?} (runs: {})",
             info.id, info.status, info.run_count
         );
     }
 
     // Stop the scheduler — sends Stop and awaits graceful shutdown.
-    println!("\n⏹️  Stopping scheduler...");
+    println!("\nStopping scheduler...");
     running.stop().await?;
 
-    println!("✅ Scheduler scheduling example completed!");
+    println!("Scheduler scheduling example completed!");
     Ok(())
 }

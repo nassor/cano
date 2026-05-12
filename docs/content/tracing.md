@@ -6,15 +6,14 @@ template = "page.html"
 
 <div class="content-wrapper">
 <h1>Tracing</h1>
-<p class="subtitle">Comprehensive observability for your workflows.</p>
+<p class="subtitle"><code>tracing</code>-crate span instrumentation for your workflows.</p>
+<p class="feature-tag">Behind the <code>tracing</code> feature gate (<code>features = ["tracing"]</code>).</p>
 
-<div class="feature-banner">
-<div class="banner-icon" aria-hidden="true">⚙️</div>
-<div class="banner-content">
-<p><strong>Feature flag required</strong> -- Tracing is behind the <code>tracing</code> feature gate.
-Enable it with <code>features = ["tracing"]</code> or <code>features = ["all"]</code> in your
-<code>Cargo.toml</code>.</p>
-</div>
+<div class="callout callout-info">
+<span class="callout-label">See also</span>
+<p>This page covers Cano's built-in <code>tracing</code> <em>spans</em>. For the synchronous callback API
+(<code>WorkflowObserver</code>) and the ready-made <code>TracingObserver</code> that re-emits those callbacks
+as <code>tracing</code> events, see <a href="../observers/">Observers</a>.</p>
 </div>
 
 <nav class="page-toc" aria-label="Table of contents">
@@ -37,20 +36,29 @@ Cano provides comprehensive observability through the optional <code>tracing</co
 <a href="https://docs.rs/tracing/latest/tracing/" target="_blank">tracing</a> library.
 All tracing instrumentation is behind conditional compilation, so it adds zero overhead when disabled.
 </p>
+
+<p>
+For a callback-style API — get notified on workflow lifecycle and failure events without depending
+on the <code>tracing</code> ecosystem — see <a href="../observers/">Observers</a>. The
+<code>tracing</code> feature also ships a ready-made <code>TracingObserver</code> that bridges the
+two: attach it with <code>.with_observer(Arc::new(TracingObserver::new()))</code> to re-emit those
+observer events as <code>tracing</code> events under the <code>cano::observer</code> target.
+</p>
 <hr class="section-divider">
 
 <h2 id="setup"><a href="#setup" class="anchor-link" aria-hidden="true">#</a>Setup</h2>
 <p>Enable the <code>tracing</code> feature flag in your <code>Cargo.toml</code>. You can also use
-<code>features = ["all"]</code> to enable both <code>tracing</code> and <code>scheduler</code> at once.</p>
+<code>features = ["all"]</code> to enable everything (<code>scheduler</code> + <code>tracing</code> +
+<code>recovery</code>) at once.</p>
 
 ```toml
 [dependencies]
-cano = { version = "0.11", features = ["tracing"] }
+cano = { version = "0.12", features = ["tracing"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Or enable everything (tracing + scheduler):
-# cano = { version = "0.11", features = ["all"] }
+# Or enable everything (scheduler + tracing + recovery):
+# cano = { version = "0.12", features = ["all"] }
 
 ```
 
@@ -89,7 +97,7 @@ tracing_subscriber::registry()
 <p>Orchestration start/completion, state transitions, final states.</p>
 </div>
 <div class="card">
-<h3>Task/Node Level</h3>
+<h3>Task Level</h3>
 <p>Execution attempts, retry logic, delays, success/failure outcomes.</p>
 </div>
 <div class="card">
@@ -187,9 +195,9 @@ execution in log output.</p>
 </div>
 
 ```toml
-# Enable both scheduler and tracing
+# Enable everything: scheduler + tracing + recovery
 [dependencies]
-cano = { version = "0.11", features = ["all"] }
+cano = { version = "0.12", features = ["all"] }
 
 ```
 <hr class="section-divider">
@@ -206,10 +214,10 @@ use cano::prelude::*;
 enum MyState { Start, Complete }
 
 #[derive(Clone)]
-struct MyProcessorNode;
+struct MyProcessor;
 
 #[task(state = MyState)]
-impl MyProcessorNode {
+impl MyProcessor {
     async fn run_bare(&self) -> Result<TaskResult<MyState>, CanoError> {
         Ok(TaskResult::Single(MyState::Complete))
     }
@@ -226,14 +234,14 @@ fn build_workflow() -> Workflow<MyState> {
     let store = MemoryStore::new();
     Workflow::new(Resources::new().insert("store", store))
         .with_tracing_span(workflow_span)
-        .register(MyState::Start, MyProcessorNode)
+        .register(MyState::Start, MyProcessor)
         .add_exit_state(MyState::Complete)
 }
 ```
 <hr class="section-divider">
 
 <h2 id="custom-instrumentation"><a href="#custom-instrumentation" class="anchor-link" aria-hidden="true">#</a>Custom Instrumentation</h2>
-<p>You can add your own tracing to Task and Node implementations using the
+<p>You can add your own tracing to Task implementations using the
 <code>tracing</code> crate's macros directly. This is useful for adding domain-specific
 context that Cano's built-in instrumentation does not cover.</p>
 
@@ -276,52 +284,6 @@ impl PaymentTask {
 
 ```
 
-<h3 id="instrument-node"><a href="#instrument-node" class="anchor-link" aria-hidden="true">#</a>Instrumenting a Node</h3>
-
-```rust
-use cano::prelude::*;
-use tracing::{info, debug, instrument};
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum PipelineState { Enrich, Validate, Complete }
-
-#[derive(Clone)]
-struct DataEnrichmentNode {
-    source: String,
-}
-
-#[node(state = PipelineState)]
-impl DataEnrichmentNode {
-    type PrepResult = Vec<String>;
-    type ExecResult = Vec<String>;
-
-    #[instrument(skip(self, res), fields(source = %self.source))]
-    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
-        let keys: Vec<String> = store.get("pending_keys")?;
-        debug!(count = keys.len(), "Loaded keys for enrichment");
-        Ok(keys)
-    }
-
-    async fn exec(&self, keys: Self::PrepResult) -> Self::ExecResult {
-        info!(count = keys.len(), source = %self.source, "Enriching records");
-        // ... enrichment logic
-        keys
-    }
-
-    async fn post(
-        &self,
-        res: &Resources,
-        results: Self::ExecResult,
-    ) -> Result<PipelineState, CanoError> {
-        info!(enriched = results.len(), "Enrichment complete");
-        let store = res.get::<MemoryStore, _>("store")?;
-        store.put("enriched_data", results)?;
-        Ok(PipelineState::Validate)
-    }
-}
-
-```
 <hr class="section-divider">
 
 <h2 id="example-output"><a href="#example-output" class="anchor-link" aria-hidden="true">#</a>Example Output</h2>
@@ -331,7 +293,7 @@ impl DataEnrichmentNode {
 ```bash
 INFO user_data_processing{user_id="12345"}: Starting workflow orchestration
   INFO user_data_processing{user_id="12345"}:task_execution: Starting task execution
-    INFO user_data_processing{user_id="12345"}:task_attempt{attempt=1}: Node execution completed success=true
+    INFO user_data_processing{user_id="12345"}:task_attempt{attempt=1}: Task execution completed success=true
     INFO user_data_processing{user_id="12345"}:task_attempt{attempt=1}: processor_id=basic_processor input_records=3: Data processing completed
   INFO user_data_processing{user_id="12345"}: Workflow completed successfully
 
@@ -353,10 +315,10 @@ enum State {
 }
 
 #[derive(Clone)]
-struct ProcessOrderNode;
+struct ProcessOrder;
 
 #[task(state = State)]
-impl ProcessOrderNode {
+impl ProcessOrder {
     async fn run(&self, _res: &Resources) -> Result<TaskResult<State>, CanoError> {
         info!("Processing order...");
         Ok(TaskResult::Single(State::Complete))
@@ -383,7 +345,7 @@ async fn main() -> Result<(), CanoError> {
     );
 
     let workflow = Workflow::new(Resources::new().insert("store", store))
-        .register(State::Start, ProcessOrderNode)
+        .register(State::Start, ProcessOrder)
         .add_exit_state(State::Complete)
         .with_tracing_span(workflow_span); // Attach span
 
@@ -395,5 +357,12 @@ async fn main() -> Result<(), CanoError> {
 }
 
 ```
+</div>
+
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example tracing_demo --features "tracing scheduler"</code> — sets
+up a <code>tracing-subscriber</code>, runs a workflow and a scheduled flow, and prints the structured
+span output. Pair it with <code>TracingObserver</code> (see <a href="../observers/#tracing-observer">Observers</a>)
+for flat lifecycle events alongside the spans.</p>
 </div>
 

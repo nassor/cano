@@ -6,14 +6,14 @@ use cano::prelude::*;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::time::Duration;
 
-/// Simple node for benchmarking
+/// Simple task for benchmarking
 #[derive(Clone)]
-struct SimpleNode {
+struct SimpleTask {
     next_state: TestState,
     duration: Duration,
 }
 
-impl SimpleNode {
+impl SimpleTask {
     fn new(next_state: TestState, duration: Duration) -> Self {
         Self {
             next_state,
@@ -22,15 +22,15 @@ impl SimpleNode {
     }
 }
 
-/// IO-bound node that simulates network/disk operations
+/// IO-bound task that simulates network/disk operations
 #[derive(Clone)]
-struct IOBoundNode {
+struct IOBoundTask {
     next_state: TestState,
     io_duration: Duration,
     operation_type: String,
 }
 
-impl IOBoundNode {
+impl IOBoundTask {
     fn new(next_state: TestState, io_duration: Duration, operation_type: &str) -> Self {
         Self {
             next_state,
@@ -40,15 +40,15 @@ impl IOBoundNode {
     }
 }
 
-/// CPU-bound node that performs intensive calculations
+/// CPU-bound task that performs intensive calculations
 #[derive(Clone)]
-struct CPUBoundNode {
+struct CPUBoundTask {
     next_state: TestState,
     iterations: usize,
     operation_type: String,
 }
 
-impl CPUBoundNode {
+impl CPUBoundTask {
     fn new(next_state: TestState, iterations: usize, operation_type: &str) -> Self {
         Self {
             next_state,
@@ -65,38 +65,22 @@ enum TestState {
     Complete,
 }
 
-#[node]
-impl Node<TestState> for SimpleNode {
-    type PrepResult = String;
-    type ExecResult = String;
-
-    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
+#[task]
+impl Task<TestState> for SimpleTask {
+    async fn run(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
         tokio::time::sleep(self.duration / 4).await;
-        Ok("prepared".to_string())
-    }
-
-    async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
+        // simulate exec phase
         tokio::time::sleep(self.duration / 2).await;
-        format!("processed_{}", prep_res)
-    }
-
-    async fn post(
-        &self,
-        _res: &Resources,
-        _exec_res: Self::ExecResult,
-    ) -> Result<TestState, CanoError> {
+        // simulate post phase
         tokio::time::sleep(self.duration / 4).await;
-        Ok(self.next_state.clone())
+        Ok(TaskResult::Single(self.next_state.clone()))
     }
 }
 
-#[node]
-impl Node<TestState> for IOBoundNode {
-    type PrepResult = String;
-    type ExecResult = String;
-
-    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        // Simulate database connection or file opening
+#[task]
+impl Task<TestState> for IOBoundTask {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
+        // Simulate database connection or file opening (prep phase)
         tokio::time::sleep(self.io_duration / 8).await;
 
         let store = res.get::<MemoryStore, str>("store")?;
@@ -104,39 +88,26 @@ impl Node<TestState> for IOBoundNode {
         let metadata = format!("io_prep_{}", self.operation_type);
         let _ = store.put("io_metadata", metadata);
 
-        Ok(format!("io_prepared_{}", self.operation_type))
-    }
-
-    async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
-        // Simulate the main IO operation (network request, file read, database query)
+        // Simulate the main IO operation (exec phase)
         tokio::time::sleep(self.io_duration).await;
-        format!("io_result_{}_{}", self.operation_type, prep_res)
-    }
+        let exec_res = format!(
+            "io_result_{}_io_prepared_{}",
+            self.operation_type, self.operation_type
+        );
 
-    async fn post(
-        &self,
-        res: &Resources,
-        exec_res: Self::ExecResult,
-    ) -> Result<TestState, CanoError> {
-        // Simulate cleanup and result storage
+        // Simulate cleanup and result storage (post phase)
         tokio::time::sleep(self.io_duration / 16).await;
-
-        let store = res.get::<MemoryStore, str>("store")?;
-        // Store the result for potential downstream nodes
         let result_key = format!("io_result_{}", self.operation_type);
         let _ = store.put(&result_key, exec_res);
 
-        Ok(self.next_state.clone())
+        Ok(TaskResult::Single(self.next_state.clone()))
     }
 }
 
-#[node]
-impl Node<TestState> for CPUBoundNode {
-    type PrepResult = Vec<u64>;
-    type ExecResult = u64;
-
-    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        // Prepare data for CPU-intensive computation
+#[task]
+impl Task<TestState> for CPUBoundTask {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
+        // Prepare data for CPU-intensive computation (prep phase)
         let data: Vec<u64> = (0..self.iterations as u64).collect();
 
         let store = res.get::<MemoryStore, str>("store")?;
@@ -144,42 +115,31 @@ impl Node<TestState> for CPUBoundNode {
         let metadata = format!("cpu_prep_{}_{}", self.operation_type, self.iterations);
         let _ = store.put("cpu_metadata", metadata);
 
-        Ok(data)
-    }
-
-    async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
-        // Perform CPU-intensive calculation
-        match self.operation_type.as_str() {
+        // Perform CPU-intensive calculation (exec phase)
+        let result: u64 = match self.operation_type.as_str() {
             "fibonacci" => {
                 // Calculate Fibonacci numbers
-                prep_res.iter().map(|&n| fibonacci(n % 40)).sum()
+                data.iter().map(|&n| fibonacci(n % 40)).sum()
             }
             "prime_check" => {
                 // Check for prime numbers
-                prep_res.iter().filter(|&&n| is_prime(n)).count() as u64
+                data.iter().filter(|&&n| is_prime(n)).count() as u64
             }
             "matrix_multiply" => {
                 // Simulate matrix multiplication
-                prep_res.iter().map(|&n| n * n).sum()
+                data.iter().map(|&n| n * n).sum()
             }
             _ => {
                 // Default: simple sum
-                prep_res.iter().sum()
+                data.iter().sum()
             }
-        }
-    }
+        };
 
-    async fn post(
-        &self,
-        res: &Resources,
-        exec_res: Self::ExecResult,
-    ) -> Result<TestState, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
-        // Store computation result
+        // Store computation result (post phase)
         let result_key = format!("cpu_result_{}", self.operation_type);
-        let _ = store.put(&result_key, exec_res);
+        let _ = store.put(&result_key, result);
 
-        Ok(self.next_state.clone())
+        Ok(TaskResult::Single(self.next_state.clone()))
     }
 }
 
@@ -204,8 +164,8 @@ fn is_prime(n: u64) -> bool {
     true
 }
 
-fn bench_node_performance(c: &mut Criterion) {
-    let mut group = c.benchmark_group("node_performance");
+fn bench_task_performance(c: &mut Criterion) {
+    let mut group = c.benchmark_group("workflow_task_performance");
 
     let durations = vec![
         Duration::from_micros(1),
@@ -216,15 +176,15 @@ fn bench_node_performance(c: &mut Criterion) {
 
     for &duration in &durations {
         group.bench_with_input(
-            BenchmarkId::new("single_node_execution", duration.as_micros()),
+            BenchmarkId::new("single_task_execution", duration.as_micros()),
             &duration,
             |b, &duration| {
-                let node = SimpleNode::new(TestState::Complete, duration);
+                let task = SimpleTask::new(TestState::Complete, duration);
                 let resources = Resources::new().insert("store", MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let result = cano::Node::run(&node, &resources).await;
+                        let result = Task::<TestState>::run(&task, &resources).await;
                         assert!(result.is_ok());
                     });
             },
@@ -234,30 +194,30 @@ fn bench_node_performance(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_concurrent_node_execution(c: &mut Criterion) {
-    let mut group = c.benchmark_group("concurrent_node_execution");
+fn bench_concurrent_task_execution(c: &mut Criterion) {
+    let mut group = c.benchmark_group("concurrent_task_execution");
 
     let counts = vec![2, 5, 10, 20];
     let duration = Duration::from_micros(100);
 
     for &count in &counts {
         group.bench_with_input(
-            BenchmarkId::new("parallel_nodes", count),
+            BenchmarkId::new("parallel_tasks", count),
             &count,
             |b, &count| {
-                let nodes: Vec<SimpleNode> = (0..count)
-                    .map(|_| SimpleNode::new(TestState::Complete, duration))
+                let tasks: Vec<SimpleTask> = (0..count)
+                    .map(|_| SimpleTask::new(TestState::Complete, duration))
                     .collect();
                 let resources = Resources::new().insert("store", MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let tasks: Vec<_> = nodes
+                        let futs: Vec<_> = tasks
                             .iter()
-                            .map(|node| cano::Node::run(node, &resources))
+                            .map(|task| Task::<TestState>::run(task, &resources))
                             .collect();
 
-                        let results = futures_util::future::join_all(tasks).await;
+                        let results = futures_util::future::join_all(futs).await;
                         for result in results {
                             assert!(result.is_ok());
                         }
@@ -266,18 +226,18 @@ fn bench_concurrent_node_execution(c: &mut Criterion) {
         );
 
         group.bench_with_input(
-            BenchmarkId::new("sequential_nodes", count),
+            BenchmarkId::new("sequential_tasks", count),
             &count,
             |b, &count| {
-                let nodes: Vec<SimpleNode> = (0..count)
-                    .map(|_| SimpleNode::new(TestState::Complete, duration))
+                let tasks: Vec<SimpleTask> = (0..count)
+                    .map(|_| SimpleTask::new(TestState::Complete, duration))
                     .collect();
                 let resources = Resources::new().insert("store", MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        for node in &nodes {
-                            let result = cano::Node::run(node, &resources).await;
+                        for task in &tasks {
+                            let result = Task::<TestState>::run(task, &resources).await;
                             assert!(result.is_ok());
                         }
                     });
@@ -339,12 +299,12 @@ fn bench_memory_patterns(c: &mut Criterion) {
 
     for &size in &sizes {
         group.bench_with_input(
-            BenchmarkId::new("node_creation", size),
+            BenchmarkId::new("task_creation", size),
             &size,
             |b, &size| {
                 b.iter(|| {
-                    let _nodes: Vec<SimpleNode> = (0..size)
-                        .map(|_| SimpleNode::new(TestState::Complete, Duration::from_micros(1)))
+                    let _tasks: Vec<SimpleTask> = (0..size)
+                        .map(|_| SimpleTask::new(TestState::Complete, Duration::from_micros(1)))
                         .collect();
                 });
             },
@@ -374,21 +334,21 @@ fn bench_io_bound_workflows(c: &mut Criterion) {
         Duration::from_millis(25),
     ];
 
-    let node_counts = vec![2, 5, 10];
+    let task_counts = vec![2, 5, 10];
 
     for &duration in &io_durations {
-        for &count in &node_counts {
+        for &count in &task_counts {
             // Sequential IO-bound workflow
             group.bench_with_input(
                 BenchmarkId::new(
                     "sequential_io",
-                    format!("{}ms_{}nodes", duration.as_millis(), count),
+                    format!("{}ms_{}tasks", duration.as_millis(), count),
                 ),
                 &(duration, count),
                 |b, &(duration, count)| {
-                    let nodes: Vec<IOBoundNode> = (0..count)
+                    let tasks: Vec<IOBoundTask> = (0..count)
                         .map(|i| {
-                            IOBoundNode::new(
+                            IOBoundTask::new(
                                 TestState::Complete,
                                 duration,
                                 &format!("db_query_{i}"),
@@ -399,8 +359,8 @@ fn bench_io_bound_workflows(c: &mut Criterion) {
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
-                            for node in &nodes {
-                                let result = cano::Node::run(node, &resources).await;
+                            for task in &tasks {
+                                let result = Task::<TestState>::run(task, &resources).await;
                                 assert!(result.is_ok());
                             }
                         });
@@ -411,13 +371,13 @@ fn bench_io_bound_workflows(c: &mut Criterion) {
             group.bench_with_input(
                 BenchmarkId::new(
                     "concurrent_io",
-                    format!("{}ms_{}nodes", duration.as_millis(), count),
+                    format!("{}ms_{}tasks", duration.as_millis(), count),
                 ),
                 &(duration, count),
                 |b, &(duration, count)| {
-                    let nodes: Vec<IOBoundNode> = (0..count)
+                    let tasks: Vec<IOBoundTask> = (0..count)
                         .map(|i| {
-                            IOBoundNode::new(
+                            IOBoundTask::new(
                                 TestState::Complete,
                                 duration,
                                 &format!("api_call_{i}"),
@@ -428,12 +388,12 @@ fn bench_io_bound_workflows(c: &mut Criterion) {
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
-                            let tasks: Vec<_> = nodes
+                            let futs: Vec<_> = tasks
                                 .iter()
-                                .map(|node| cano::Node::run(node, &resources))
+                                .map(|task| Task::<TestState>::run(task, &resources))
                                 .collect();
 
-                            let results = futures_util::future::join_all(tasks).await;
+                            let results = futures_util::future::join_all(futs).await;
                             for result in results {
                                 assert!(result.is_ok());
                             }
@@ -456,21 +416,21 @@ fn bench_cpu_bound_workflows(c: &mut Criterion) {
         (5000, "matrix_multiply"),
     ];
 
-    let node_counts = vec![2, 4, 8];
+    let task_counts = vec![2, 4, 8];
 
     for &(iterations, operation) in &cpu_configs {
-        for &count in &node_counts {
+        for &count in &task_counts {
             // Sequential CPU-bound workflow
             group.bench_with_input(
                 BenchmarkId::new(
                     "sequential_cpu",
-                    format!("{operation}_{iterations}_{count}nodes"),
+                    format!("{operation}_{iterations}_{count}tasks"),
                 ),
                 &(iterations, operation, count),
                 |b, &(iterations, operation, count)| {
-                    let nodes: Vec<CPUBoundNode> = (0..count)
+                    let tasks: Vec<CPUBoundTask> = (0..count)
                         .map(|i| {
-                            CPUBoundNode::new(
+                            CPUBoundTask::new(
                                 TestState::Complete,
                                 iterations,
                                 &format!("{operation}_{i}"),
@@ -481,8 +441,8 @@ fn bench_cpu_bound_workflows(c: &mut Criterion) {
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
-                            for node in &nodes {
-                                let result = <_ as Node<TestState>>::run(node, &resources).await;
+                            for task in &tasks {
+                                let result = Task::<TestState>::run(task, &resources).await;
                                 assert!(result.is_ok());
                             }
                         });
@@ -493,13 +453,13 @@ fn bench_cpu_bound_workflows(c: &mut Criterion) {
             group.bench_with_input(
                 BenchmarkId::new(
                     "concurrent_cpu",
-                    format!("{operation}_{iterations}_{count}nodes"),
+                    format!("{operation}_{iterations}_{count}tasks"),
                 ),
                 &(iterations, operation, count),
                 |b, &(iterations, operation, count)| {
-                    let nodes: Vec<CPUBoundNode> = (0..count)
+                    let tasks: Vec<CPUBoundTask> = (0..count)
                         .map(|i| {
-                            CPUBoundNode::new(
+                            CPUBoundTask::new(
                                 TestState::Complete,
                                 iterations,
                                 &format!("{operation}_{i}"),
@@ -510,12 +470,12 @@ fn bench_cpu_bound_workflows(c: &mut Criterion) {
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
-                            let tasks: Vec<_> = nodes
+                            let futs: Vec<_> = tasks
                                 .iter()
-                                .map(|node| <_ as Node<TestState>>::run(node, &resources))
+                                .map(|task| Task::<TestState>::run(task, &resources))
                                 .collect();
 
-                            let results = futures_util::future::join_all(tasks).await;
+                            let results = futures_util::future::join_all(futs).await;
                             for result in results {
                                 assert!(result.is_ok());
                             }
@@ -543,16 +503,16 @@ fn bench_mixed_workload_workflows(c: &mut Criterion) {
             BenchmarkId::new("sequential_mixed", scenario_name),
             &(io_duration, cpu_iterations),
             |b, &(io_duration, cpu_iterations)| {
-                let io_node = IOBoundNode::new(TestState::Step1, io_duration, "database");
-                let cpu_node = CPUBoundNode::new(TestState::Complete, cpu_iterations, "processing");
+                let io_task = IOBoundTask::new(TestState::Step1, io_duration, "database");
+                let cpu_task = CPUBoundTask::new(TestState::Complete, cpu_iterations, "processing");
                 let resources = Resources::new().insert("store", MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let io_result = <_ as Node<TestState>>::run(&io_node, &resources).await;
+                        let io_result = Task::<TestState>::run(&io_task, &resources).await;
                         assert!(io_result.is_ok());
 
-                        let cpu_result = <_ as Node<TestState>>::run(&cpu_node, &resources).await;
+                        let cpu_result = Task::<TestState>::run(&cpu_task, &resources).await;
                         assert!(cpu_result.is_ok());
                     });
             },
@@ -563,17 +523,17 @@ fn bench_mixed_workload_workflows(c: &mut Criterion) {
             BenchmarkId::new("concurrent_mixed", scenario_name),
             &(io_duration, cpu_iterations),
             |b, &(io_duration, cpu_iterations)| {
-                let io_node = IOBoundNode::new(TestState::Complete, io_duration, "api_service");
-                let cpu_node = CPUBoundNode::new(TestState::Complete, cpu_iterations, "analytics");
+                let io_task = IOBoundTask::new(TestState::Complete, io_duration, "api_service");
+                let cpu_task = CPUBoundTask::new(TestState::Complete, cpu_iterations, "analytics");
                 let resources = Resources::new().insert("store", MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
-                        let io_task = <_ as Node<TestState>>::run(&io_node, &resources);
-                        let cpu_task = <_ as Node<TestState>>::run(&cpu_node, &resources);
+                        let io_fut = Task::<TestState>::run(&io_task, &resources);
+                        let cpu_fut = Task::<TestState>::run(&cpu_task, &resources);
 
                         let (io_result, cpu_result) =
-                            futures_util::future::join(io_task, cpu_task).await;
+                            futures_util::future::join(io_fut, cpu_fut).await;
                         assert!(io_result.is_ok());
                         assert!(cpu_result.is_ok());
                     });
@@ -707,8 +667,8 @@ fn bench_tracing_overhead(c: &mut Criterion) {
 
 criterion_group!(
     benches,
-    bench_node_performance,
-    bench_concurrent_node_execution,
+    bench_task_performance,
+    bench_concurrent_task_execution,
     bench_store_operations,
     bench_memory_patterns,
     bench_io_bound_workflows,

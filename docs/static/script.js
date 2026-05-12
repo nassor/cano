@@ -81,6 +81,24 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // --------------------------------------------------------------------------
+  // Collapsible nav sections — persist the user's open/closed choice
+  // --------------------------------------------------------------------------
+  const sectionStateKey = (section) =>
+    'nav-section:' + (section.id || (section.querySelector('summary') || {}).textContent || '').trim();
+  const readSectionState = (section) => {
+    try { return localStorage.getItem(sectionStateKey(section)); } catch (e) { return null; }
+  };
+  document.querySelectorAll('details.nav-section').forEach((section) => {
+    const stored = readSectionState(section);
+    if (stored === 'open') section.open = true;
+    else if (stored === 'closed') section.open = false;
+    section.addEventListener('toggle', () => {
+      try { localStorage.setItem(sectionStateKey(section), section.open ? 'open' : 'closed'); }
+      catch (e) { /* storage unavailable — just fall back to HTML defaults */ }
+    });
+  });
+
+  // --------------------------------------------------------------------------
   // Active nav link highlighting
   // --------------------------------------------------------------------------
   const normalize = (p) => p.replace(/\/+$/, '') || '/';
@@ -92,6 +110,13 @@ document.addEventListener('DOMContentLoaded', () => {
     if (linkPath === currentPath) {
       link.classList.add('active');
       link.setAttribute('aria-current', 'page');
+      // Reveal every <details> ancestor of the current page — section *and* any nested
+      // sub-dropdown — unless the user explicitly collapsed it.
+      let el = link.parentElement;
+      while (el) {
+        if (el.tagName === 'DETAILS' && readSectionState(el) !== 'closed') el.open = true;
+        el = el.parentElement;
+      }
     } else {
       link.classList.remove('active');
       link.removeAttribute('aria-current');

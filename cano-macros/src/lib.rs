@@ -9,23 +9,34 @@
 //! developer side: `#[cano::task]` on `impl Task` is immediately scannable for
 //! what the impl is.
 //!
-//! Available macros:
+//! These macros are intended to be used via their namespaced paths in `cano`:
 //!
-//! - [`task`] — for `impl Task` (and the `Task` trait definition itself)
-//! - [`node`] — for `impl Node` and the `Node` trait
-//! - [`resource`] — for `impl Resource` and the `Resource` trait
+//! - `#[cano::task]` — for `impl Task` (and the `Task` trait definition itself)
+//! - `#[cano::task::router]` — for `impl RouterTask` and the `RouterTask` trait
+//! - `#[cano::task::poll]` — for `impl PollTask` and the `PollTask` trait
+//! - `#[cano::task::batch]` — for `impl BatchTask` and the `BatchTask` trait
+//! - `#[cano::task::stepped]` — for `impl SteppedTask` and the `SteppedTask` trait
+//! - `#[cano::saga::task]` — for `impl CompensatableTask`
+//! - `#[cano::resource]` — for `impl Resource` and the `Resource` trait
+//! - `#[cano::checkpoint_store]` — for `impl CheckpointStore` and the `CheckpointStore` trait
 //!
-//! All three are functionally identical; they differ only in name. New traits
-//! that need async-fn-in-dyn rewriting can ship their own `cano-macros`
-//! attribute alongside.
+//! All are functionally identical in the async-rewrite they perform; they differ
+//! only in name. New traits that need async-fn-in-dyn rewriting can ship their
+//! own `cano-macros` attribute alongside.
 
 use proc_macro::TokenStream;
 
 mod async_rewrite;
 mod attr_args;
+mod batch_task_impl;
+mod checkpoint_store_impl;
+mod compensatable_task_impl;
 mod from_resources;
-mod node_impl;
+mod path_prefix;
+mod poll_task_impl;
 mod resource_derive;
+mod router_task_impl;
+mod stepped_task_impl;
 mod task_impl;
 
 /// Derive a `from_resources(&Resources<_>) -> CanoResult<Self>` constructor that
@@ -61,13 +72,18 @@ pub fn derive_from_resources(input: TokenStream) -> TokenStream {
 /// `async-trait` produces. This makes the methods callable through
 /// `dyn Task<...>`.
 ///
+/// Use as `#[cano::task]`.
+///
 /// Two surface forms are supported:
 ///
-/// 1. **Trait-impl form (legacy):** `#[task] impl Task<S> for X { ... }` — user
+/// 1. **Trait-impl form:** `#[task] impl Task<S> for X { ... }` — user
 ///    writes the trait header.
 /// 2. **Inherent-impl form:** `#[task(state = S [, key = K])] impl X { ... }` —
 ///    user writes only the inherent block; the macro builds the trait header
 ///    and enforces that exactly one of `run` / `run_bare` is present.
+///
+/// For compensatable (saga) tasks, use [`#[cano::saga::task]`](compensatable_task)
+/// instead.
 ///
 /// # Example
 ///
@@ -99,49 +115,70 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
     async_rewrite::rewrite(item)
 }
 
-/// Apply to `impl Node for ...` blocks, inherent `impl X { ... }` blocks, or
-/// the `Node` trait definition itself.
+/// Apply to `impl Resource for ...` blocks (or the `Resource` trait definition itself).
 ///
-/// Two surface forms are supported on impl blocks:
-///
-/// 1. **Trait-impl form (legacy):** `#[node] impl Node<S> for X { ... }`. The
-///    macro infers `type PrepResult` / `type ExecResult` from the return types
-///    of `prep` and `exec`, and supplies a default `fn config(&self) -> TaskConfig`
-///    when missing.
-/// 2. **Inherent-impl form:** `#[node(state = S [, key = K])] impl X { ... }`.
-///    The macro builds the `impl Node<S [, K]> for X` header from the attribute
-///    args, enforces that `prep` / `exec` / `post` are present, and injects
-///    the same boilerplate as form 1.
-///
-/// On a trait definition (`#[node] pub trait Node ...`) the macro just performs
-/// the async-fn-in-trait rewrite.
+/// Rewrites every `async fn` method into a method returning
+/// `Pin<Box<dyn Future<Output = ...> + Send + 'async_trait>>`. Behaviorally
+/// identical to [`task`]; the separate name makes the attribute
+/// self-documenting at impl sites.
 #[proc_macro_attribute]
-pub fn node(attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn resource(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    async_rewrite::rewrite(item)
+}
+
+/// Apply to the `CheckpointStore` trait definition, an
+/// `impl CheckpointStore for T` block, or — for less boilerplate — an inherent
+/// `impl T { ... }` block.
+///
+/// Two surface forms on impl blocks:
+///
+/// 1. **Trait-impl form:** `#[checkpoint_store] impl CheckpointStore for T { ... }` —
+///    user writes the trait header.
+/// 2. **Inherent-impl form:** `#[checkpoint_store] impl T { async fn append(..); async fn
+///    load_run(..); async fn clear(..); }` — the macro builds the `impl CheckpointStore for T`
+///    header and enforces that all three methods are present. (`CheckpointStore` takes no type
+///    parameters, so there are no attribute args.)
+///
+/// Either way, every `async fn` is rewritten to return
+/// `Pin<Box<dyn Future<Output = ...> + Send + 'async_trait>>`. On the trait definition the macro
+/// just performs that rewrite.
+#[proc_macro_attribute]
+pub fn checkpoint_store(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    if let Ok(item_impl) = syn::parse::<syn::ItemImpl>(item.clone())
+        && item_impl.trait_.is_none()
+    {
+        return checkpoint_store_impl::expand(item.into())
+            .unwrap_or_else(syn::Error::into_compile_error)
+            .into();
+    }
+    async_rewrite::rewrite(item)
+}
+
+/// Apply to the `CompensatableTask` trait definition, an
+/// `impl CompensatableTask<S [, K]> for T` block, or — for less boilerplate — an
+/// inherent `impl T { ... }` block.
+///
+/// Use as `#[cano::saga::task]`.
+///
+/// Two surface forms on impl blocks:
+///
+/// 1. **Trait-impl form:** `#[saga::task] impl CompensatableTask<S> for T { type Output =
+///    O; async fn run(..); async fn compensate(..); }` — user writes the trait header.
+/// 2. **Inherent-impl form:** `#[saga::task(state = S [, key = K])] impl T { type Output =
+///    O; async fn run(..); async fn compensate(..); }` — the macro builds the
+///    `impl CompensatableTask<S [, K]> for T` header from the attribute args and enforces that
+///    `type Output`, `run`, and `compensate` are present (`config` / `name` may be overridden).
+///
+/// Either way, every `async fn` is rewritten to return
+/// `Pin<Box<dyn Future<Output = ...> + Send + 'async_trait>>`. On the trait definition the macro
+/// just performs that rewrite.
+#[proc_macro_attribute]
+pub fn compensatable_task(attr: TokenStream, item: TokenStream) -> TokenStream {
     if let Ok(item_impl) = syn::parse::<syn::ItemImpl>(item.clone()) {
         let attr2: proc_macro2::TokenStream = attr.into();
-        let has_attr = !attr2.is_empty();
         let is_inherent = item_impl.trait_.is_none();
-
-        // Inherent form: always go through the boilerplate filler (it builds
-        // the trait header from attr args and enforces mandatory methods).
-        if is_inherent || has_attr {
-            return node_impl::expand(attr2, item.into())
-                .unwrap_or_else(syn::Error::into_compile_error)
-                .into();
-        }
-
-        // Trait-impl form: only run the boilerplate filler when inference is
-        // actually needed (at least one of PrepResult/ExecResult is absent).
-        let has_prep = item_impl
-            .items
-            .iter()
-            .any(|it| matches!(it, syn::ImplItem::Type(t) if t.ident == "PrepResult"));
-        let has_exec = item_impl
-            .items
-            .iter()
-            .any(|it| matches!(it, syn::ImplItem::Type(t) if t.ident == "ExecResult"));
-        if !has_prep || !has_exec {
-            return node_impl::expand(proc_macro2::TokenStream::new(), item.into())
+        if is_inherent || !attr2.is_empty() {
+            return compensatable_task_impl::expand(attr2, item.into())
                 .unwrap_or_else(syn::Error::into_compile_error)
                 .into();
         }
@@ -149,15 +186,132 @@ pub fn node(attr: TokenStream, item: TokenStream) -> TokenStream {
     async_rewrite::rewrite(item)
 }
 
-/// Apply to `impl Resource for ...` blocks (or the `Resource` trait definition itself).
+/// Apply to the `RouterTask` trait definition, an
+/// `impl RouterTask<S [, K]> for T` block, or — for less boilerplate — an
+/// inherent `impl T { ... }` block.
 ///
-/// Rewrites every `async fn` method into a method returning
-/// `Pin<Box<dyn Future<Output = ...> + Send + 'async_trait>>`. Behaviorally
-/// identical to [`task`] and [`node`]; the separate name makes the attribute
-/// self-documenting at impl sites.
+/// Use as `#[cano::task::router]`.
+///
+/// Two surface forms on impl blocks:
+///
+/// 1. **Trait-impl form:** `#[task::router] impl RouterTask<S> for T { async fn route(..) { ... } }` —
+///    user writes the trait header. The macro async-rewrites the `RouterTask` impl AND emits a
+///    companion `impl Task<S> for T` that delegates `Task::run` → `RouterTask::route`.
+/// 2. **Inherent-impl form:** `#[task::router(state = S [, key = K])] impl T { async fn route(..) { ... } }` —
+///    the macro builds the `impl RouterTask<S [, K]> for T` header from the attribute args, enforces
+///    that `route` is present (`config` / `name` may be overridden), and emits the same companion
+///    `impl Task<S [, K]> for T`.
+///
+/// On a trait definition (`#[task::router] pub trait RouterTask ...`) the macro just performs the
+/// async-fn-in-trait rewrite.
+///
+/// Because a blanket `impl<R: RouterTask<..>> Task<..> for R` would conflict (E0119) with the
+/// analogous blanket impls for the other specialized task traits — a type can implement more than
+/// one — the companion `Task` impl is generated per-use-site rather than as a blanket.
 #[proc_macro_attribute]
-pub fn resource(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    async_rewrite::rewrite(item)
+pub fn router_task(attr: TokenStream, item: TokenStream) -> TokenStream {
+    router_task_impl::expand(attr.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Apply to the `BatchTask` trait definition, an
+/// `impl BatchTask<S [, K]> for T` block, or — for less boilerplate — an
+/// inherent `impl T { ... }` block.
+///
+/// Use as `#[cano::task::batch]`.
+///
+/// Two surface forms are supported on impl blocks:
+///
+/// 1. **Trait-impl form:** `#[task::batch] impl BatchTask<S> for T { type Item = I; type ItemOutput = O; ... }` —
+///    user writes the trait header. The macro async-rewrites the `BatchTask` impl AND emits a
+///    companion `impl Task<S> for T` that delegates `Task::run` → `run_batch`.
+/// 2. **Inherent-impl form:** `#[task::batch(state = S [, key = K])] impl T { async fn load(..); async fn process_item(..); async fn finish(..); }` —
+///    the macro builds the `impl BatchTask<S [, K]> for T` header from the attribute args,
+///    infers `type Item` from the `&T` parameter of `process_item` and `type ItemOutput` from
+///    its return type, enforces that `load`, `process_item`, and `finish` are present
+///    (`concurrency`, `item_retry`, `config`, `name` may be overridden), and emits the same
+///    companion `impl Task<S [, K]> for T`.
+///
+/// On a trait definition (`#[task::batch] pub trait BatchTask ...`) the macro just performs the
+/// async-fn-in-trait rewrite.
+///
+/// Because a blanket `impl<B: BatchTask<..>> Task<..> for B` would conflict (E0119) with the
+/// analogous blanket impls for the other specialized task traits — a type can implement more than
+/// one — the companion `Task` impl is generated per-use-site rather than as a blanket.
+///
+/// `Task::run` always delegates to the `::cano::task::batch::run_batch` free function (it is
+/// never inlined into the generated code) because the fan-out loop requires `futures_util`,
+/// which is not a direct dependency of external callers.
+#[proc_macro_attribute]
+pub fn batch_task(attr: TokenStream, item: TokenStream) -> TokenStream {
+    batch_task_impl::expand(attr.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Apply to the `PollTask` trait definition, an
+/// `impl PollTask<S [, K]> for T` block, or — for less boilerplate — an
+/// inherent `impl T { ... }` block.
+///
+/// Use as `#[cano::task::poll]`.
+///
+/// Two surface forms on impl blocks:
+///
+/// 1. **Trait-impl form:** `#[task::poll] impl PollTask<S> for T { async fn poll(..) { ... } }` —
+///    user writes the trait header. The macro async-rewrites the `PollTask` impl AND emits a
+///    companion `impl Task<S> for T` that delegates `Task::run` via the `run_poll_loop` helper.
+/// 2. **Inherent-impl form:** `#[task::poll(state = S [, key = K])] impl T { async fn poll(..) { ... } }` —
+///    the macro builds the `impl PollTask<S [, K]> for T` header from the attribute args, enforces
+///    that `poll` is present (`config` / `name` may be overridden), and emits the same companion
+///    `impl Task<S [, K]> for T`.
+///
+/// On a trait definition (`#[task::poll] pub trait PollTask ...`) the macro just performs the
+/// async-fn-in-trait rewrite.
+///
+/// Because a blanket `impl<P: PollTask<..>> Task<..> for P` would conflict (E0119) with the
+/// analogous blanket impls for the other specialized task traits — a type can implement more than
+/// one — the companion `Task` impl is generated per-use-site rather than as a blanket.
+///
+/// The default `config()` injected by the inherent form is [`TaskConfig::minimal()`]
+/// (no retries) — the poll loop itself is the resilience mechanism.
+#[proc_macro_attribute]
+pub fn poll_task(attr: TokenStream, item: TokenStream) -> TokenStream {
+    poll_task_impl::expand(attr.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Apply to the `SteppedTask` trait definition, an
+/// `impl SteppedTask<S [, K]> for T` block, or — for less boilerplate — an
+/// inherent `impl T { ... }` block.
+///
+/// Use as `#[cano::task::stepped]`.
+///
+/// Two surface forms on impl blocks:
+///
+/// 1. **Trait-impl form:** `#[task::stepped] impl SteppedTask<S> for T { type Cursor = C; async fn step(..) { ... } }` —
+///    user writes the trait header. The macro async-rewrites the `SteppedTask` impl AND emits a
+///    companion `impl Task<S> for T` that delegates `Task::run` via the `run_stepped` helper.
+/// 2. **Inherent-impl form:** `#[task::stepped(state = S [, key = K])] impl T { async fn step(..) { ... } }` —
+///    the macro builds the `impl SteppedTask<S [, K]> for T` header from the attribute args, infers
+///    `type Cursor` from the `Option<C>` third parameter of `step`, enforces that `step` is present
+///    (`config` / `name` may be overridden), and emits the same companion `impl Task<S [, K]> for T`.
+///
+/// On a trait definition (`#[task::stepped] pub trait SteppedTask ...`) the macro just performs the
+/// async-fn-in-trait rewrite.
+///
+/// Because a blanket `impl<S: SteppedTask<..>> Task<..> for S` would conflict (E0119) with the
+/// analogous blanket impls for the other specialized task traits — a type can implement more than
+/// one — the companion `Task` impl is generated per-use-site rather than as a blanket.
+///
+/// The default `config()` injected by the inherent form is [`TaskConfig::default()`]
+/// (exponential backoff with 3 retries).
+#[proc_macro_attribute]
+pub fn stepped_task(attr: TokenStream, item: TokenStream) -> TokenStream {
+    stepped_task_impl::expand(attr.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
 }
 
 /// Derive an empty `cano::Resource` impl (uses the trait's default no-op

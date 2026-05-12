@@ -1,0 +1,52 @@
+name: E2E
+
+# Docker-based end-to-end hardening tests for crash recovery & sagas (the `cano-e2e`
+# workspace member): a Postgres container as the checkpoint store, the `cano_workflow_app`
+# binary running in its own container so it can be killed mid-flight and resumed. Slow and
+# Docker-dependent, so it's its own workflow — like the others, it only fires for pull
+# requests against `main` and pushes to `main`. (`ubuntu-latest` has Docker available.)
+on:
+  push:
+  #   branches: [ "main" ]
+  # pull_request:
+  #   branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: Docker e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.95.0
+          components: clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-e2e-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-e2e-
+
+      - name: Clippy (cano-e2e)
+        run: cargo clippy -p cano-e2e --all-targets -- -D warnings
+
+      - name: Build the app image
+        run: docker build -t cano-workflow-app:e2e -f cano-e2e/Dockerfile .
+
+      - name: Run e2e tests
+        run: cargo test -p cano-e2e --test e2e -- --test-threads=1

@@ -20,4 +20,5 @@ syn = { version = "2", features = ["full", "visit-mut"] }
 
 [dev-dependencies]
 cano = { path = "../cano" }
+serde = { version = "1", features = ["derive"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros"] }

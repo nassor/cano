@@ -190,13 +190,77 @@ img {
     width: auto;
 }
 
+/* Collapsible nav sections (<details> / <summary>) */
+.nav-top {
+    margin-bottom: var(--space-2);
+}
+
+.nav-section {
+    margin-top: var(--space-1);
+}
+
 .nav-section-label {
     font-size: var(--text-xs);
     font-weight: 600;
     color: var(--text-faint);
     text-transform: uppercase;
     letter-spacing: 0.08em;
-    padding: var(--space-6) var(--space-4) var(--space-2);
+    padding: var(--space-5) var(--space-4) var(--space-2);
+}
+
+/* When the label is a <summary>, make it a clickable disclosure with a chevron */
+summary.nav-section-label {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-2);
+    cursor: pointer;
+    user-select: none;
+    list-style: none;
+    border-radius: var(--radius-sm);
+    transition: color var(--duration-fast) ease;
+}
+
+summary.nav-section-label::-webkit-details-marker {
+    display: none;
+}
+
+summary.nav-section-label:hover {
+    color: var(--text-muted);
+}
+
+summary.nav-section-label:focus-visible {
+    outline: 2px solid var(--primary-color);
+    outline-offset: -2px;
+}
+
+summary.nav-section-label::after {
+    content: '';
+    flex: none;
+    width: 6px;
+    height: 6px;
+    border-right: 1.5px solid currentColor;
+    border-bottom: 1.5px solid currentColor;
+    transform: translateY(-1px) rotate(45deg);
+    transition: transform var(--duration-fast) ease;
+}
+
+details.nav-section[open] > summary.nav-section-label::after {
+    transform: translateY(2px) rotate(-135deg);
+}
+
+/* Indent the sub-links under a parent nav link (subfolder style) and give them a
+   guide rail so the nesting is legible */
+.nav-sublinks {
+    margin: 2px 0 var(--space-1);
+    padding-left: var(--space-4);
+    border-left: 1px solid var(--border-subtle);
+}
+
+.nav-sublinks a {
+    font-size: var(--text-sm);
+    padding-top: var(--space-2);
+    padding-bottom: var(--space-2);
 }
 
 .nav-links {
@@ -541,6 +605,44 @@ a.card:hover {
     font-family: 'Fira Code', monospace;
     font-size: var(--text-lg);
 }
+
+/* Outcome cards — fixed 2×2 grid, a tier-coloured left border + "key: value" rows + status pill */
+.outcome-cards {
+    grid-template-columns: repeat(2, 1fr);
+}
+
+.outcome-cards .card {
+    border-left: 3px solid var(--border-color);
+}
+
+.outcome-cards .card.outcome-ok { border-left-color: var(--success-color); }
+.outcome-cards .card.outcome-warn { border-left-color: var(--warning-color); }
+.outcome-cards .card.outcome-danger { border-left-color: var(--danger-color); }
+
+.outcome-cards .card h3 {
+    font-size: var(--text-lg);
+}
+
+.outcome-key {
+    display: block;
+    margin-bottom: 2px;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-faint);
+}
+
+.outcome-pill {
+    display: inline-block;
+    font-size: var(--text-xs);
+    font-weight: 600;
+    padding: 2px var(--space-2);
+    border-radius: var(--radius-sm);
+}
+
+.outcome-pill.cleared { background: var(--success-muted); color: var(--success-color); }
+.outcome-pill.kept { background: var(--warning-muted); color: var(--warning-color); }
 
 /* --------------------------------------------------------------------------
    7. Code Blocks & Inline Code
@@ -1112,7 +1214,7 @@ code {
 }
 
 /* --------------------------------------------------------------------------
-   16. Node lifecycle flow (nodes.html)
+   16. Lifecycle flow
    -------------------------------------------------------------------------- */
 .lifecycle-flow {
     display: grid;
@@ -1327,42 +1429,27 @@ code {
 }
 
 /* --------------------------------------------------------------------------
-   19. Feature flag banner (tracing.html)
+   19. Feature-flag tag — small inline "behind the X feature" marker
    -------------------------------------------------------------------------- */
-.feature-banner {
-    background: linear-gradient(135deg, var(--secondary-muted), var(--primary-muted));
-    border: 1px solid hsla(234, 89%, 74%, 0.3);
-    border-radius: var(--radius-lg);
-    padding: var(--space-5) var(--space-6);
-    margin: 0 0 var(--space-10);
-    display: flex;
-    align-items: flex-start;
-    gap: var(--space-4);
+.feature-tag {
+    display: inline-block;
+    font-size: var(--text-sm);
+    color: var(--text-muted);
+    background: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    padding: var(--space-2) var(--space-4);
+    margin: 0 0 var(--space-8);
 }
 
-.feature-banner .banner-icon {
-    font-size: var(--text-2xl);
-    line-height: 1;
-    flex-shrink: 0;
-    margin-top: 0.1rem;
+.feature-tag::before {
+    content: '\2699  ';
+    color: var(--text-faint);
 }
 
-.feature-banner .banner-content p {
-    margin-bottom: var(--space-2);
-    max-width: none;
-}
-
-.feature-banner .banner-content p:last-child {
-    margin-bottom: 0;
-}
-
-.feature-banner code {
-    background: hsla(0, 0%, 100%, 0.08);
+.feature-tag code {
     font-size: var(--text-xs);
-}
-
-.feature-banner strong {
-    color: #fff;
+    color: var(--text-color);
 }
 
 /* --------------------------------------------------------------------------
@@ -1847,12 +1934,6 @@ code {
 
     .mode-card {
         padding: var(--space-5);
-    }
-
-    .feature-banner {
-        flex-direction: column;
-        gap: var(--space-2);
-        padding: var(--space-4) var(--space-5);
     }
 
     .main-content h2[id] a.anchor-link,

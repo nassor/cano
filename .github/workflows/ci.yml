@@ -77,6 +77,12 @@ jobs:
     - name: Run doctests
       run: cargo test --doc --all-features
 
+    - name: Check cano-e2e compiles
+      # `cano-e2e` is excluded from the default workspace selection (heavy Docker test
+      # deps); a compile-only check of its lib + bin here keeps it from bit-rotting. The
+      # Docker tests (and clippy on them) run in `e2e.yml`.
+      run: cargo check -p cano-e2e
+
   security_audit:
     name: Security Audit
     runs-on: ubuntu-latest

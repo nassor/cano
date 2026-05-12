@@ -22,23 +22,22 @@
 //!
 //! | Error Type | When It Occurs | How to Fix |
 //! |------------|----------------|------------|
-//! | `NodeExecution` | Node `post` phase fails | Check your `post` method logic |
 //! | `TaskExecution` | `Task::run` fails | Check your `run` method logic |
-//! | `Preparation` | Node `prep` phase fails | Verify input data and store |
 //! | `Store` | Store operations fail | Check store state and keys |
-//! | `Workflow` | Workflow orchestration fails | Verify node registration and routing |
-//! | `Configuration` | Invalid node/workflow config | Check parameters and settings |
+//! | `Workflow` | Workflow orchestration fails | Verify task registration and routing |
+//! | `Configuration` | Invalid task/workflow config | Check parameters and settings |
 //! | `RetryExhausted` | All retries exhausted | Increase retries or fix root cause |
 //! | `Timeout` | Per-attempt timeout reached | Increase `attempt_timeout` or speed up the task |
 //! | `CircuitOpen` | Circuit breaker rejected the call | Wait for the breaker's `reset_timeout` or fix the upstream dependency |
+//! | `CheckpointStore` | Checkpoint persistence failed | Check the recovery store backend (disk, permissions, encoding) |
+//! | `CompensationFailed` | A `compensate` run failed during rollback | Inspect the aggregated errors; the original failure is `errors[0]` |
 //! | `Generic` | General errors | Check the specific error message |
 //!
-//! ## Using Errors in Your Nodes
+//! ## Using Errors in Your Tasks
 //!
-//! In your custom nodes, return specific error types for different failures.
-//! Use `CanoError::Preparation` for prep phase issues, `CanoError::NodeExecution`
-//! for post phase failures (exec is infallible), and `CanoError::TaskExecution`
-//! for errors from a `Task::run` implementation.
+//! In your custom tasks, return specific error types for different failures.
+//! Use `CanoError::TaskExecution` for errors from a `Task::run` implementation,
+//! and `CanoError::Store` for store-access failures.
 //!
 //! ## Store Error Integration
 //!
@@ -64,26 +63,15 @@
 ///
 /// ## 🎯 Error Categories
 ///
-/// ### NodeExecution
-/// Something went wrong during node execution — specifically, the `post` phase failed.
-/// (The `exec` phase is infallible by design; it cannot produce this error.)
+/// ### TaskExecution
+/// Something went wrong during a [`Task::run`](crate::task::Task::run) implementation.
 ///
 /// **Common causes:**
-/// - Failed store write in `post`
-/// - Business-logic validation in `post` rejected the `exec` result
-/// - External API call in `post` failed
+/// - Failed store write
+/// - Business-logic validation rejected an input
+/// - External API call failed
 ///
-/// **How to fix:** Check your node's `post` method logic and store writes.
-///
-/// ### Preparation  
-/// Something went wrong while preparing data in the `prep` phase.
-///
-/// **Common causes:**
-/// - Missing data in store
-/// - Invalid data format
-/// - Resource initialization failures
-///
-/// **How to fix:** Verify that previous nodes stored the expected data.
+/// **How to fix:** Check your task's `run` method logic and store writes.
 ///
 /// ### Store
 /// Store operations failed (get, put, remove, etc.).
@@ -99,21 +87,21 @@
 /// Workflow orchestration problems.
 ///
 /// **Common causes:**
-/// - Unregistered node references
+/// - Unregistered task references
 /// - Invalid action routing
 /// - Circular dependencies
 ///
-/// **How to fix:** Verify node registration and action string routing.
+/// **How to fix:** Verify task registration and action string routing.
 ///
 /// ### Configuration
-/// Invalid node or workflow configuration.
+/// Invalid task or workflow configuration.
 ///
 /// **Common causes:**
 /// - Invalid concurrency settings
 /// - Negative retry counts
 /// - Conflicting settings
 ///
-/// **How to fix:** Review node builder parameters and workflow setup.
+/// **How to fix:** Review task builder parameters and workflow setup.
 ///
 /// ### RetryExhausted
 /// All retry attempts have been exhausted.
@@ -128,7 +116,7 @@
 /// ## 💡 Usage Examples
 ///
 /// Create specific error types with helpful messages. Use the appropriate
-/// error variant (NodeExecution, Configuration, Store, etc.) and provide
+/// error variant (TaskExecution, Configuration, Store, etc.) and provide
 /// clear, actionable error messages that help users understand what went wrong.
 ///
 /// ## 🔄 Converting from Other Errors
@@ -138,23 +126,11 @@
 /// method or the `Into` trait for convenient conversion.
 #[derive(Debug, Clone)]
 pub enum CanoError {
-    /// Error during node execution — used for `post` phase failures.
-    ///
-    /// `exec` is infallible by design (returns `Self::ExecResult` directly).
-    /// This variant is emitted by the blanket `Task` impl when `post` fails.
-    NodeExecution(String),
-
     /// Error during task execution
     ///
     /// Use this when your task's `run` method encounters an error during
-    /// execution. This is the task-specific equivalent of NodeExecution.
+    /// execution.
     TaskExecution(String),
-
-    /// Error during node preparation phase (data loading/setup)
-    ///
-    /// Use this when your node's `prep` method fails to load or prepare data.
-    /// Often indicates missing or invalid data in store.
-    Preparation(String),
 
     /// Error in store operations (get/put/remove)
     ///
@@ -164,11 +140,11 @@ pub enum CanoError {
 
     /// Error in workflow orchestration (routing/registration)
     ///
-    /// Use this for workflow-level problems like unregistered nodes,
+    /// Use this for workflow-level problems like unregistered tasks,
     /// invalid action routing, or workflow configuration issues.
     Workflow(String),
 
-    /// Error in node or workflow configuration (invalid settings)
+    /// Error in task or workflow configuration (invalid settings)
     ///
     /// Use this for configuration problems like invalid parameters,
     /// conflicting settings, or constraint violations.
@@ -176,7 +152,7 @@ pub enum CanoError {
 
     /// All retry attempts have been exhausted
     ///
-    /// This error is automatically generated when a node fails and
+    /// This error is automatically generated when a task fails and
     /// all configured retry attempts have been used up.
     RetryExhausted(String),
 
@@ -198,6 +174,26 @@ pub enum CanoError {
     /// dependency is unhealthy, and immediate retries would only add load.
     CircuitOpen(String),
 
+    /// A checkpoint store operation failed.
+    ///
+    /// Emitted by [`crate::recovery::CheckpointStore`] implementations (including the
+    /// built-in `RedbCheckpointStore`, behind the `recovery` feature) when an append,
+    /// load, or clear cannot complete — for example a disk error, a permission
+    /// problem, or a row that fails to encode/decode.
+    CheckpointStore(String),
+
+    /// A workflow failed and at least one [`compensate`](crate::saga::CompensatableTask::compensate)
+    /// run also failed while rolling it back.
+    ///
+    /// `errors[0]` is the original failure that triggered compensation; `errors[1..]`
+    /// are the compensation errors, in the order they occurred (LIFO over the
+    /// compensation stack). A clean rollback — every `compensate` succeeded — does *not*
+    /// produce this variant: the original error is returned unchanged instead.
+    CompensationFailed {
+        /// The original failure followed by every compensation error.
+        errors: Vec<CanoError>,
+    },
+
     /// General-purpose error for other scenarios
     ///
     /// Use this for errors that don't fit the other categories.
@@ -215,19 +211,9 @@ pub enum CanoError {
 }
 
 impl CanoError {
-    /// Create a new node execution error
-    pub fn node_execution<S: Into<String>>(msg: S) -> Self {
-        CanoError::NodeExecution(msg.into())
-    }
-
     /// Create a new task execution error
     pub fn task_execution<S: Into<String>>(msg: S) -> Self {
         CanoError::TaskExecution(msg.into())
-    }
-
-    /// Create a new preparation error
-    pub fn preparation<S: Into<String>>(msg: S) -> Self {
-        CanoError::Preparation(msg.into())
     }
 
     /// Create a new store error
@@ -260,6 +246,17 @@ impl CanoError {
         CanoError::CircuitOpen(msg.into())
     }
 
+    /// Create a new checkpoint-store error
+    pub fn checkpoint_store<S: Into<String>>(msg: S) -> Self {
+        CanoError::CheckpointStore(msg.into())
+    }
+
+    /// Create a new compensation-failed error from the original failure plus the
+    /// compensation errors (the convention is `errors[0]` = original failure).
+    pub fn compensation_failed(errors: Vec<CanoError>) -> Self {
+        CanoError::CompensationFailed { errors }
+    }
+
     /// Create a new generic error
     pub fn generic<S: Into<String>>(msg: S) -> Self {
         CanoError::Generic(msg.into())
@@ -283,15 +280,17 @@ impl CanoError {
     /// Get the error message as a string slice
     pub fn message(&self) -> &str {
         match self {
-            CanoError::NodeExecution(msg) => msg,
             CanoError::TaskExecution(msg) => msg,
-            CanoError::Preparation(msg) => msg,
             CanoError::Store(msg) => msg,
             CanoError::Workflow(msg) => msg,
             CanoError::Configuration(msg) => msg,
             CanoError::RetryExhausted(msg) => msg,
             CanoError::Timeout(msg) => msg,
             CanoError::CircuitOpen(msg) => msg,
+            CanoError::CheckpointStore(msg) => msg,
+            CanoError::CompensationFailed { errors } => errors
+                .first()
+                .map_or("compensation failed", CanoError::message),
             CanoError::Generic(msg) => msg,
             CanoError::ResourceNotFound(msg) => msg,
             CanoError::ResourceTypeMismatch(msg) => msg,
@@ -302,15 +301,15 @@ impl CanoError {
     /// Get the error category as a string
     pub fn category(&self) -> &'static str {
         match self {
-            CanoError::NodeExecution(_) => "node_execution",
             CanoError::TaskExecution(_) => "task_execution",
-            CanoError::Preparation(_) => "preparation",
             CanoError::Store(_) => "store",
             CanoError::Workflow(_) => "workflow",
             CanoError::Configuration(_) => "configuration",
             CanoError::RetryExhausted(_) => "retry_exhausted",
             CanoError::Timeout(_) => "timeout",
             CanoError::CircuitOpen(_) => "circuit_open",
+            CanoError::CheckpointStore(_) => "checkpoint_store",
+            CanoError::CompensationFailed { .. } => "compensation_failed",
             CanoError::Generic(_) => "generic",
             CanoError::ResourceNotFound(_) => "resource_not_found",
             CanoError::ResourceTypeMismatch(_) => "resource_type_mismatch",
@@ -322,15 +321,25 @@ impl CanoError {
 impl std::fmt::Display for CanoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CanoError::NodeExecution(msg) => write!(f, "Node execution error: {msg}"),
             CanoError::TaskExecution(msg) => write!(f, "Task execution error: {msg}"),
-            CanoError::Preparation(msg) => write!(f, "Preparation error: {msg}"),
             CanoError::Store(msg) => write!(f, "Store error: {msg}"),
             CanoError::Workflow(msg) => write!(f, "Workflow error: {msg}"),
             CanoError::Configuration(msg) => write!(f, "Configuration error: {msg}"),
             CanoError::RetryExhausted(msg) => write!(f, "Retry exhausted: {msg}"),
             CanoError::Timeout(msg) => write!(f, "Timeout error: {msg}"),
             CanoError::CircuitOpen(msg) => write!(f, "Circuit open: {msg}"),
+            CanoError::CheckpointStore(msg) => write!(f, "Checkpoint store error: {msg}"),
+            CanoError::CompensationFailed { errors } => {
+                write!(f, "Compensation failed ({} error(s))", errors.len())?;
+                for (i, e) in errors.iter().enumerate() {
+                    if i == 0 {
+                        write!(f, "; original: {e}")?;
+                    } else {
+                        write!(f, "; compensation #{i}: {e}")?;
+                    }
+                }
+                Ok(())
+            }
             CanoError::Generic(msg) => write!(f, "Error: {msg}"),
             CanoError::ResourceNotFound(msg) => write!(f, "Resource not found: {msg}"),
             CanoError::ResourceTypeMismatch(msg) => write!(f, "Resource type mismatch: {msg}"),
@@ -344,15 +353,18 @@ impl std::error::Error for CanoError {}
 impl PartialEq for CanoError {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (CanoError::NodeExecution(a), CanoError::NodeExecution(b)) => a == b,
             (CanoError::TaskExecution(a), CanoError::TaskExecution(b)) => a == b,
-            (CanoError::Preparation(a), CanoError::Preparation(b)) => a == b,
             (CanoError::Store(a), CanoError::Store(b)) => a == b,
             (CanoError::Workflow(a), CanoError::Workflow(b)) => a == b,
             (CanoError::Configuration(a), CanoError::Configuration(b)) => a == b,
             (CanoError::RetryExhausted(a), CanoError::RetryExhausted(b)) => a == b,
             (CanoError::Timeout(a), CanoError::Timeout(b)) => a == b,
             (CanoError::CircuitOpen(a), CanoError::CircuitOpen(b)) => a == b,
+            (CanoError::CheckpointStore(a), CanoError::CheckpointStore(b)) => a == b,
+            (
+                CanoError::CompensationFailed { errors: a },
+                CanoError::CompensationFailed { errors: b },
+            ) => a == b,
             (CanoError::Generic(a), CanoError::Generic(b)) => a == b,
             (CanoError::ResourceNotFound(a), CanoError::ResourceNotFound(b)) => a == b,
             (CanoError::ResourceTypeMismatch(a), CanoError::ResourceTypeMismatch(b)) => a == b,
@@ -433,15 +445,15 @@ mod tests {
 
     #[test]
     fn test_error_creation() {
-        let error = CanoError::node_execution("Test error");
+        let error = CanoError::task_execution("Test error");
         assert_eq!(error.message(), "Test error");
-        assert_eq!(error.category(), "node_execution");
+        assert_eq!(error.category(), "task_execution");
     }
 
     #[test]
     fn test_error_display() {
-        let error = CanoError::NodeExecution("Test error".to_string());
-        assert_eq!(format!("{error}"), "Node execution error: Test error");
+        let error = CanoError::TaskExecution("Test error".to_string());
+        assert_eq!(format!("{error}"), "Task execution error: Test error");
     }
 
     #[test]
@@ -460,8 +472,8 @@ mod tests {
     #[test]
     fn test_error_categories() {
         assert_eq!(
-            CanoError::NodeExecution("".to_string()).category(),
-            "node_execution"
+            CanoError::TaskExecution("".to_string()).category(),
+            "task_execution"
         );
         assert_eq!(CanoError::store("".to_string()).category(), "store");
         assert_eq!(CanoError::Workflow("".to_string()).category(), "workflow");
@@ -507,22 +519,22 @@ mod tests {
 
     #[test]
     fn test_partial_eq_same_variant_same_message() {
-        let a = CanoError::NodeExecution("oops".to_string());
-        let b = CanoError::NodeExecution("oops".to_string());
+        let a = CanoError::TaskExecution("oops".to_string());
+        let b = CanoError::TaskExecution("oops".to_string());
         assert_eq!(a, b);
     }
 
     #[test]
     fn test_partial_eq_same_variant_different_message() {
-        let a = CanoError::NodeExecution("a".to_string());
-        let b = CanoError::NodeExecution("b".to_string());
+        let a = CanoError::TaskExecution("a".to_string());
+        let b = CanoError::TaskExecution("b".to_string());
         assert_ne!(a, b);
     }
 
     #[test]
     fn test_partial_eq_different_variants() {
-        let a = CanoError::NodeExecution("msg".to_string());
-        let b = CanoError::TaskExecution("msg".to_string());
+        let a = CanoError::TaskExecution("msg".to_string());
+        let b = CanoError::Workflow("msg".to_string());
         assert_ne!(a, b);
     }
 
@@ -603,6 +615,69 @@ mod tests {
         let timeout = CanoError::timeout("x");
         let circuit = CanoError::circuit_open("x");
         assert_ne!(timeout, circuit);
+    }
+
+    #[test]
+    fn test_checkpoint_store_constructor_and_category() {
+        let err = CanoError::checkpoint_store("disk full");
+        assert_eq!(err.message(), "disk full");
+        assert_eq!(err.category(), "checkpoint_store");
+        assert_eq!(format!("{err}"), "Checkpoint store error: disk full");
+    }
+
+    #[test]
+    fn test_checkpoint_store_partial_eq() {
+        let a = CanoError::checkpoint_store("x");
+        let b = CanoError::checkpoint_store("x");
+        assert_eq!(a, b);
+
+        let c = CanoError::checkpoint_store("x");
+        let d = CanoError::checkpoint_store("y");
+        assert_ne!(c, d);
+
+        // Different variant with the same message must not compare equal.
+        let circuit = CanoError::circuit_open("x");
+        let checkpoint = CanoError::checkpoint_store("x");
+        assert_ne!(circuit, checkpoint);
+    }
+
+    #[test]
+    fn test_compensation_failed_constructor_category_and_message() {
+        let err = CanoError::compensation_failed(vec![
+            CanoError::task_execution("charge declined"),
+            CanoError::generic("refund timed out"),
+        ]);
+        assert_eq!(err.category(), "compensation_failed");
+        // message() surfaces the original failure (errors[0]).
+        assert_eq!(err.message(), "charge declined");
+        let shown = format!("{err}");
+        assert!(shown.contains("Compensation failed (2 error(s))"));
+        assert!(shown.contains("original: Task execution error: charge declined"));
+        assert!(shown.contains("compensation #1: Error: refund timed out"));
+
+        // Empty-vec edge case: message() falls back to a static string.
+        assert_eq!(
+            CanoError::compensation_failed(vec![]).message(),
+            "compensation failed"
+        );
+    }
+
+    #[test]
+    fn test_compensation_failed_partial_eq() {
+        let a = CanoError::compensation_failed(vec![CanoError::generic("x")]);
+        let b = CanoError::compensation_failed(vec![CanoError::generic("x")]);
+        assert_eq!(a, b);
+
+        let c = CanoError::compensation_failed(vec![CanoError::generic("x")]);
+        let d =
+            CanoError::compensation_failed(vec![CanoError::generic("x"), CanoError::generic("y")]);
+        assert_ne!(c, d);
+
+        // Distinct from a same-message string variant.
+        assert_ne!(
+            CanoError::compensation_failed(vec![CanoError::generic("x")]),
+            CanoError::generic("x")
+        );
     }
 
     #[test]

@@ -13,32 +13,53 @@ keywords = ["ai", "async", "workflow", "data-processing", "scheduler"]
 categories = ["finance", "development-tools", "concurrency", "asynchronous", "science"]
 
 [dependencies]
-cano-macros = { version = "0.11", path = "../cano-macros" }
+cano-macros = { version = "0.12", path = "../cano-macros" }
 tokio = { version = "1.52.1", features = ["macros", "sync", "time", "rt-multi-thread"] }
 rand = "0.10"
 chrono = { version = "0.4", features = ["serde"], optional = true }
 cron = { version = "0.16", optional = true }
 futures-util = "0.3"
 parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tracing = { version = "0.1", optional = true }
+redb = { version = "4.1", optional = true }
+postcard = { version = "1", optional = true, features = ["use-std"] }
 
 [features]
 scheduler = ["dep:chrono", "dep:cron", "tokio/signal"]
 tracing = ["dep:tracing"]
-all = ["scheduler", "tracing"]
+recovery = ["dep:redb", "dep:postcard"]
+all = ["scheduler", "tracing", "recovery"]
 
 [dev-dependencies]
 axum = "0.8.9"
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 redb = "4.1"
 reqwest = { version = "0.13", features = ["json"] }
-rig-core = "0.35"
+rig-core = "0.36.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tempfile = "3"
 wide = "1.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1.52.1", features = ["macros", "sync", "time", "rt-multi-thread", "signal"] }
+
+# Subprocess driver for the SIGKILL recovery integration test (tests/recovery_e2e.rs).
+# A [[bin]] (not an example) so `cargo test --features recovery` builds it and sets
+# CARGO_BIN_EXE_recovery_resume for the test harness.
+[[bin]]
+name = "recovery_resume"
+path = "src/bin/recovery_resume.rs"
+required-features = ["recovery"]
+
+# Subprocess driver for the SIGKILL SteppedTask cursor-persistence e2e test
+# (tests/stepped_resume_e2e.rs).
+[[bin]]
+name = "stepped_resume"
+path = "src/bin/stepped_resume.rs"
+required-features = ["recovery"]
 
 [[example]]
 name = "ai_workflow_yes_and"
@@ -136,12 +157,88 @@ path = "examples/workflow_on_request.rs"
 name = "circuit_breaker"
 path = "examples/circuit_breaker.rs"
 
-[[bench]]
-name = "workflow_performance"
-harness = false
+[[example]]
+name = "workflow_observer"
+path = "examples/workflow_observer.rs"
+
+[[example]]
+name = "observer_metrics"
+path = "examples/observer_metrics.rs"
+
+[[example]]
+name = "workflow_recovery"
+path = "examples/workflow_recovery.rs"
+required-features = ["recovery"]
+
+[[example]]
+name = "saga_payment"
+path = "examples/saga_payment.rs"
+
+[[example]]
+name = "router_task"
+path = "examples/router_task.rs"
+
+[[example]]
+name = "poll_task"
+path = "examples/poll_task.rs"
+
+[[example]]
+name = "batch_task"
+path = "examples/batch_task.rs"
+
+[[example]]
+name = "stepped_task"
+path = "examples/stepped_task.rs"
+required-features = ["recovery"]
+
+[[example]]
+name = "processing_models_tour"
+path = "examples/processing_models_tour.rs"
+required-features = ["recovery"]
+
+[[example]]
+name = "join_strategies"
+path = "examples/join_strategies.rs"
+
+[[example]]
+name = "custom_checkpoint_store"
+path = "examples/custom_checkpoint_store.rs"
+
+[[example]]
+name = "saga_recovery"
+path = "examples/saga_recovery.rs"
+required-features = ["recovery"]
+
+[[example]]
+name = "circuit_breaker_manual"
+path = "examples/circuit_breaker_manual.rs"
+
+[[example]]
+name = "workflow_validation"
+path = "examples/workflow_validation.rs"
+
+[[example]]
+name = "split_bulkhead"
+path = "examples/split_bulkhead.rs"
+
+[[example]]
+name = "poll_retry_on_error"
+path = "examples/poll_retry_on_error.rs"
+
+[[example]]
+name = "panic_safety"
+path = "examples/panic_safety.rs"
+
+[[example]]
+name = "store_custom_backend"
+path = "examples/store_custom_backend.rs"
+
+[[example]]
+name = "resources_advanced"
+path = "examples/resources_advanced.rs"
 
 [[bench]]
-name = "node_performance"
+name = "workflow_performance"
 harness = false
 
 [[bench]]

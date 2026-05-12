@@ -95,13 +95,22 @@ async fn main() -> Result<(), CanoError> {
 ```
 </div>
 
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example workflow_resources</code> — a stateless config resource,
+a stateful counter resource (interior mutability), and a resource with real <code>setup</code> /
+<code>teardown</code> lifecycle work, all retrieved by type inside tasks.</p>
+</div>
+
 <!-- Section: Defining a Resource -->
 <hr class="section-divider">
 <h2 id="defining"><a href="#defining" class="anchor-link" aria-hidden="true">#</a>Defining a Resource</h2>
 
 <p>
-The <code>Resource</code> trait gives every dependency two lifecycle hooks. Both default to
-no-ops, so most resources need no manual impl.
+The <code>Resource</code> trait gives every dependency three hooks — two lifecycle, one
+observability. All default to no-ops (and <code>health()</code> defaults to
+<code>Healthy</code>), so most resources need no manual impl. <code>health()</code> is
+opt-in observability — it is never called during normal workflow execution; see
+<a href="../observers/#health">Observers &amp; Health Probes</a>.
 </p>
 
 <div class="code-block">
@@ -111,6 +120,7 @@ no-ops, so most resources need no manual impl.
 pub trait Resource: Send + Sync + 'static {
     async fn setup(&self) -> Result<(), CanoError> { Ok(()) }
     async fn teardown(&self) -> Result<(), CanoError> { Ok(()) }
+    async fn health(&self) -> HealthStatus { HealthStatus::Healthy }
 }
 
 ```
@@ -303,10 +313,18 @@ workflows.
 </tbody>
 </table>
 
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example resources_advanced</code> — enum-typed keys,
+<code>try_insert</code> returning <code>CanoError::ResourceDuplicateKey</code> on a repeated key, and the
+partial-LIFO rollback when a later resource's <code>setup</code> fails.</p>
+</div>
+
 <!-- Section: Lifecycle -->
 <hr class="section-divider">
 <h2 id="lifecycle"><a href="#lifecycle" class="anchor-link" aria-hidden="true">#</a>Lifecycle Guarantees</h2>
 
+<div class="diagram-frame">
+<p class="diagram-label">setup_all() in FIFO order; teardown in LIFO order</p>
 <div class="mermaid">
 sequenceDiagram
 participant E as Engine
@@ -322,6 +340,7 @@ Note over E: teardown_range(all) — LIFO
 E->>R2: teardown()
 E->>R1: teardown()
 E->>R0: teardown()
+</div>
 </div>
 
 <table class="styled-table">
@@ -472,6 +491,10 @@ fn build() -> Workflow<Step> {
 }
 
 ```
+</div>
+
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example workflow_bare</code> — a workflow with no resources at all.</p>
 </div>
 
 <!-- Section: API Reference -->

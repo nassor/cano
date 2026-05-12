@@ -1,548 +1,20 @@
-//! # Scheduler API
-//!
-//! Time-driven dispatch for [`Workflow`](crate::workflow::Workflow) instances —
-//! intervals, cron expressions, and manual triggers, plus optional per-flow
-//! backoff and trip semantics.
-//!
-//! Two-stage lifecycle:
-//!
-//! - [`Scheduler`] is the **builder**. Register workflows with [`every`](Scheduler::every) /
-//!   [`cron`](Scheduler::cron) / [`manual`](Scheduler::manual), attach optional
-//!   [`BackoffPolicy`] via [`set_backoff`](Scheduler::set_backoff), then call
-//!   [`start`](Scheduler::start) to consume the builder. `Scheduler` is **not** `Clone`.
-//! - [`RunningScheduler`] is the **live handle** returned by `start`. It owns the
-//!   spawned driver and per-flow loop tasks. It is cheap to clone — call
-//!   [`trigger`](RunningScheduler::trigger), [`status`](RunningScheduler::status),
-//!   [`stop`](RunningScheduler::stop), etc. from any task.
-//!
-//! Because `start` consumes `self`, double-starting the same builder is rejected
-//! at the type level.
-//!
-//! > **Note:** The scheduler is an optional feature. Enable the `"scheduler"`
-//! > feature in your `Cargo.toml`.
-//!
-//! ```toml
-//! [dependencies]
-//! cano = { version = "0.11", features = ["scheduler"] }
-//! ```
+//! `RunningScheduler` — the live, cloneable handle returned by [`Scheduler::start`](crate::scheduler::Scheduler::start).
 
-mod backoff;
-
-pub use backoff::BackoffPolicy;
-
-use crate::error::{CanoError, CanoResult};
-use crate::workflow::Workflow;
-use chrono::{DateTime, Utc};
-use cron::Schedule as CronSchedule;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::{Notify, RwLock, mpsc, oneshot, watch};
+
+use tokio::sync::{RwLock, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{Duration, sleep};
 
-#[cfg(feature = "tracing")]
-use tracing::Instrument;
+use crate::error::{CanoError, CanoResult};
 
-/// Commands sent over the internal scheduler control channel.
+use super::{FlowInfo, SchedulerCommand, Status};
+
+/// Live handle to a started [`Scheduler`](crate::scheduler::Scheduler).
 ///
-/// Using a typed enum instead of magic strings eliminates a class of runtime
-/// errors and makes the protocol self-documenting.
-enum SchedulerCommand {
-    Stop,
-    Trigger {
-        id: String,
-        response: oneshot::Sender<CanoResult<()>>,
-    },
-    Reset {
-        id: String,
-        response: oneshot::Sender<CanoResult<()>>,
-    },
-}
-
-/// Simplified scheduling options
-#[derive(Debug, Clone)]
-pub enum Schedule {
-    /// Run every Duration interval
-    Every(Duration),
-    /// Cron expression (for advanced users)
-    Cron(String),
-    /// Manual trigger only
-    Manual,
-}
-
-/// Simple workflow status.
-///
-/// `#[non_exhaustive]` because future scheduler features may add variants.
-/// External `match` arms must include a wildcard.
-#[derive(Debug, Clone, PartialEq)]
-#[non_exhaustive]
-pub enum Status {
-    Idle,
-    Running,
-    Completed,
-    /// Terminal failure for a flow without a [`BackoffPolicy`]. Carries the
-    /// last error message for observability.
-    ///
-    /// Invariant: only reachable when the flow has no policy attached.
-    /// `apply_outcome` upholds this; a debug-build assertion guards it.
-    /// Flows with a policy use [`Status::Backoff`] or [`Status::Tripped`]
-    /// instead, which is what avoids the legacy `Failed` flicker.
-    Failed(String),
-    /// Flow failed and is waiting until `until` before its next dispatch
-    /// (set only when a [`BackoffPolicy`] is attached).
-    Backoff {
-        until: DateTime<Utc>,
-        streak: u32,
-        last_error: String,
-    },
-    /// Flow has reached its [`BackoffPolicy::streak_limit`] and will not
-    /// dispatch again until [`Scheduler::reset_flow`] is called.
-    Tripped {
-        streak: u32,
-        last_error: String,
-    },
-}
-
-/// Workflow information.
-///
-/// Adding fields here is an additive change; downstream code that constructs
-/// `FlowInfo` literally (rare — usually only this crate constructs it) needs
-/// `..` rest patterns or to use the public-fields-with-default convention.
-#[derive(Debug, Clone)]
-pub struct FlowInfo {
-    pub id: String,
-    pub status: Status,
-    pub run_count: u64,
-    pub last_run: Option<DateTime<Utc>>,
-    /// Number of consecutive failures since the last success. Always 0 when
-    /// the flow has no [`BackoffPolicy`] attached.
-    pub failure_streak: u32,
-    /// When set, the next dispatch must wait until this time. Cleared on
-    /// success and on `reset_flow`.
-    pub next_eligible: Option<DateTime<Utc>>,
-}
-
-/// Internal schedule representation. The public [`Schedule`] keeps the cron
-/// expression as a string for ergonomics; we parse it once at registration
-/// time and cache the result so the spawned scheduler loop never re-parses.
-#[derive(Clone)]
-enum ParsedSchedule {
-    Every(Duration),
-    /// Boxed because `CronSchedule` is ~248 bytes and would dominate the enum size.
-    Cron(Box<CronSchedule>),
-    Manual,
-}
-
-/// Per-flow data stored in the scheduler. Carries the workflow, its initial
-/// state, the parsed schedule, the live `FlowInfo` shared with status readers,
-/// and an optional [`BackoffPolicy`].
-struct FlowData<TState, TResourceKey>
-where
-    TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
-{
-    workflow: Arc<Workflow<TState, TResourceKey>>,
-    initial_state: TState,
-    schedule: ParsedSchedule,
-    info: Arc<RwLock<FlowInfo>>,
-    /// `None` keeps the legacy "fail-and-retry-on-base-schedule" behavior.
-    /// `Some(policy)` activates the backoff/trip code path.
-    policy: Option<Arc<BackoffPolicy>>,
-}
-
-impl<TState, TResourceKey> Clone for FlowData<TState, TResourceKey>
-where
-    TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
-{
-    fn clone(&self) -> Self {
-        Self {
-            workflow: Arc::clone(&self.workflow),
-            initial_state: self.initial_state.clone(),
-            schedule: self.schedule.clone(),
-            info: Arc::clone(&self.info),
-            policy: self.policy.clone(),
-        }
-    }
-}
-
-/// Scheduler builder for registering workflows before launch.
-///
-/// `Scheduler` is the **builder** half of a two-stage API. Register every
-/// workflow via [`every`](Self::every) / [`cron`](Self::cron) /
-/// [`manual`](Self::manual), attach optional [`BackoffPolicy`] via
-/// [`set_backoff`](Self::set_backoff), then call [`start`](Self::start) to
-/// consume the builder and obtain a [`RunningScheduler`] handle. All control
-/// methods (`stop`, `trigger`, `status`, …) live on the running half.
-///
-/// `Scheduler` deliberately does **not** implement `Clone`. The control plane
-/// state (command channel, lifecycle flags, spawned task handles) lives on
-/// `RunningScheduler`, which is `Clone`-able and can be shared across tasks
-/// for status reads, manual triggers, and shutdown. Splitting these two
-/// roles makes a double-`start` impossible at the type level — `start`
-/// consumes `self`.
-///
-/// All workflows registered with a single `Scheduler` instance must share the
-/// same `TState` and `TResourceKey` types. The resource key type defaults to
-/// [`Cow<'static, str>`](std::borrow::Cow), which accepts both `&'static str`
-/// literals (allocation-free) and owned `String` keys. If your application
-/// requires workflows with different state enums, create a separate
-/// `Scheduler` instance for each state type.
-///
-/// Requires the `scheduler` feature.
-pub struct Scheduler<TState, TResourceKey = Cow<'static, str>>
-where
-    TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
-{
-    workflows: HashMap<String, FlowData<TState, TResourceKey>>,
-    /// Registration order of workflow ids. Setup runs FIFO, teardown LIFO.
-    /// Required because `HashMap` iteration order is undefined.
-    flow_order: Vec<String>,
-}
-
-impl<TState, TResourceKey> Scheduler<TState, TResourceKey>
-where
-    TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
-{
-    /// Create a new scheduler builder.
-    pub fn new() -> Self {
-        Self {
-            workflows: HashMap::new(),
-            flow_order: Vec::new(),
-        }
-    }
-
-    /// Add a workflow that runs every Duration interval
-    pub fn every(
-        &mut self,
-        id: &str,
-        workflow: Workflow<TState, TResourceKey>,
-        initial_state: TState,
-        interval: Duration,
-    ) -> CanoResult<()> {
-        self.add_flow_internal(id, workflow, initial_state, ParsedSchedule::Every(interval))
-    }
-
-    /// Add a workflow that runs every N seconds (convenience method)
-    pub fn every_seconds(
-        &mut self,
-        id: &str,
-        workflow: Workflow<TState, TResourceKey>,
-        initial_state: TState,
-        seconds: u64,
-    ) -> CanoResult<()> {
-        self.every(id, workflow, initial_state, Duration::from_secs(seconds))
-    }
-
-    /// Add a workflow that runs every N minutes (convenience method)
-    pub fn every_minutes(
-        &mut self,
-        id: &str,
-        workflow: Workflow<TState, TResourceKey>,
-        initial_state: TState,
-        minutes: u64,
-    ) -> CanoResult<()> {
-        self.every(
-            id,
-            workflow,
-            initial_state,
-            Duration::from_secs(minutes * 60),
-        )
-    }
-
-    /// Add a workflow that runs every N hours (convenience method)
-    pub fn every_hours(
-        &mut self,
-        id: &str,
-        workflow: Workflow<TState, TResourceKey>,
-        initial_state: TState,
-        hours: u64,
-    ) -> CanoResult<()> {
-        self.every(
-            id,
-            workflow,
-            initial_state,
-            Duration::from_secs(hours * 3600),
-        )
-    }
-
-    /// Add a workflow with cron schedule
-    pub fn cron(
-        &mut self,
-        id: &str,
-        workflow: Workflow<TState, TResourceKey>,
-        initial_state: TState,
-        expr: &str,
-    ) -> CanoResult<()> {
-        // Parse once at registration time so the scheduler loop can reuse the
-        // result without re-parsing on every wake-up (and without an `expect`).
-        let parsed = CronSchedule::from_str(expr)
-            .map_err(|e| CanoError::Configuration(format!("Invalid cron expression: {e}")))?;
-        self.add_flow_internal(
-            id,
-            workflow,
-            initial_state,
-            ParsedSchedule::Cron(Box::new(parsed)),
-        )
-    }
-
-    /// Add a manually triggered workflow
-    pub fn manual(
-        &mut self,
-        id: &str,
-        workflow: Workflow<TState, TResourceKey>,
-        initial_state: TState,
-    ) -> CanoResult<()> {
-        self.add_flow_internal(id, workflow, initial_state, ParsedSchedule::Manual)
-    }
-
-    fn add_flow_internal(
-        &mut self,
-        id: &str,
-        workflow: Workflow<TState, TResourceKey>,
-        initial_state: TState,
-        schedule: ParsedSchedule,
-    ) -> CanoResult<()> {
-        if self.workflows.contains_key(id) {
-            return Err(CanoError::Configuration(format!(
-                "Flow '{}' already exists",
-                id
-            )));
-        }
-
-        let info = Arc::new(RwLock::new(FlowInfo {
-            id: id.to_string(),
-            status: Status::Idle,
-            run_count: 0,
-            last_run: None,
-            failure_streak: 0,
-            next_eligible: None,
-        }));
-
-        self.workflows.insert(
-            id.to_string(),
-            FlowData {
-                workflow: Arc::new(workflow),
-                initial_state,
-                schedule,
-                info,
-                policy: None,
-            },
-        );
-        self.flow_order.push(id.to_string());
-
-        Ok(())
-    }
-
-    /// Number of registered flows.
-    pub fn len(&self) -> usize {
-        self.flow_order.len()
-    }
-
-    /// True if no flows have been registered yet.
-    pub fn is_empty(&self) -> bool {
-        self.flow_order.is_empty()
-    }
-
-    /// True if a flow with this id has been registered.
-    pub fn contains(&self, id: &str) -> bool {
-        self.workflows.contains_key(id)
-    }
-
-    /// Attach a [`BackoffPolicy`] to an existing flow.
-    ///
-    /// After failure the scheduler will sleep `policy.compute_delay(streak)`
-    /// before the next dispatch and trip the flow when `streak_limit` is hit.
-    /// Without this call a flow keeps the legacy "fail and try again on the
-    /// base schedule" behavior.
-    ///
-    /// `set_backoff` is a builder method — it can only be called before
-    /// [`Scheduler::start`] consumes `self`, which is enforced at the type
-    /// level.
-    ///
-    /// # Errors
-    ///
-    /// - [`CanoError::Configuration`] — `id` is not registered.
-    pub fn set_backoff(&mut self, id: &str, policy: BackoffPolicy) -> CanoResult<()> {
-        let flow = self.workflows.get_mut(id).ok_or_else(|| {
-            CanoError::Configuration(format!("Flow '{id}' not found — cannot set backoff"))
-        })?;
-        flow.policy = Some(Arc::new(policy));
-        Ok(())
-    }
-
-    /// Consume the builder and start the scheduler.
-    ///
-    /// Validates every registered workflow, runs `setup_all` for each in
-    /// registration order, then spawns the per-flow scheduling loops and the
-    /// command-driver task. Returns a [`RunningScheduler`] handle that owns
-    /// the live control plane: clone it freely to call `status` / `trigger` /
-    /// `stop` from multiple tasks, or call [`RunningScheduler::wait`] to
-    /// block until shutdown completes.
-    ///
-    /// On setup failure, already-setup workflows are torn down in reverse
-    /// (LIFO) order before the error propagates. No tasks are spawned in
-    /// that case — `start` is the only path that produces a
-    /// `RunningScheduler`, so a failed start cannot leave runtime state
-    /// behind.
-    ///
-    /// `start` consumes `self`, so it can only be called once per builder.
-    /// This makes a double-start impossible at the type level. To run
-    /// another scheduler with the same workflow set, build a fresh
-    /// `Scheduler`.
-    ///
-    /// # Errors
-    ///
-    /// - [`CanoError::Configuration`] — a registered workflow failed
-    ///   `validate()` or `validate_initial_state()`.
-    /// - Any resource setup error from a registered workflow.
-    pub async fn start(self) -> CanoResult<RunningScheduler<TState, TResourceKey>> {
-        let Self {
-            workflows,
-            flow_order,
-        } = self;
-
-        // Validate every registered workflow upfront so misconfigurations
-        // surface before any resource setup runs (matches
-        // `Workflow::orchestrate`'s contract). Iterating `flow_order`
-        // guarantees deterministic FIFO setup / LIFO teardown.
-        let ordered: Vec<&FlowData<TState, TResourceKey>> = flow_order
-            .iter()
-            .filter_map(|id| workflows.get(id))
-            .collect();
-        for flow in ordered.iter() {
-            flow.workflow
-                .validate()
-                .and_then(|_| flow.workflow.validate_initial_state(&flow.initial_state))?;
-        }
-        // Setup runs in registration order; on failure, the previously-setup
-        // workflows are torn down in reverse registration order.
-        for (idx, flow) in ordered.iter().enumerate() {
-            if let Err(e) = flow.workflow.resources.setup_all().await {
-                for prior in ordered[..idx].iter().rev() {
-                    let len = prior.workflow.resources.lifecycle_len();
-                    prior.workflow.resources.teardown_range(0..len).await;
-                }
-                return Err(e);
-            }
-        }
-        drop(ordered);
-
-        // Capacity of 64: Stop is sent once, each Trigger / Reset enqueues one
-        // item. try_send in trigger() / reset_flow() returns an error if this
-        // fills up rather than growing without bound.
-        let (command_tx, command_rx) = mpsc::channel::<SchedulerCommand>(64);
-
-        // Loop tasks clone the Notify and race the timer against `notified()`
-        // so `stop()` interrupts long sleeps immediately instead of waiting
-        // for the cron / interval to fire.
-        let stop_notify = Arc::new(Notify::new());
-        let running = Arc::new(RwLock::new(true));
-        let scheduler_tasks: Arc<RwLock<Vec<JoinHandle<()>>>> = Arc::new(RwLock::new(Vec::new()));
-
-        // Build a read-only flow-info registry for status / list / has_running_flows.
-        let mut flows_view: HashMap<String, Arc<RwLock<FlowInfo>>> =
-            HashMap::with_capacity(workflows.len());
-        for (id, fd) in &workflows {
-            flows_view.insert(id.clone(), Arc::clone(&fd.info));
-        }
-        let flows_view = Arc::new(flows_view);
-        let flow_order_view = Arc::new(flow_order.clone());
-
-        // Spawn per-flow scheduling loops. Manual flows have no loop — they
-        // run only on Trigger.
-        {
-            let mut tasks = scheduler_tasks.write().await;
-            for id in flow_order.iter() {
-                let Some(fd) = workflows.get(id) else {
-                    continue;
-                };
-                let workflow = Arc::clone(&fd.workflow);
-                let initial_state = fd.initial_state.clone();
-                let info = Arc::clone(&fd.info);
-                let policy = fd.policy.clone();
-                let running_clone = Arc::clone(&running);
-                let notify_clone = Arc::clone(&stop_notify);
-
-                match &fd.schedule {
-                    ParsedSchedule::Every(interval) => {
-                        let interval = *interval;
-                        let handle = tokio::spawn(spawn_every_loop(
-                            workflow,
-                            initial_state,
-                            info,
-                            policy,
-                            running_clone,
-                            notify_clone,
-                            interval,
-                        ));
-                        tasks.push(handle);
-                    }
-                    ParsedSchedule::Cron(cron_schedule) => {
-                        let cron_schedule = cron_schedule.clone();
-                        let handle = tokio::spawn(spawn_cron_loop(
-                            workflow,
-                            initial_state,
-                            info,
-                            policy,
-                            running_clone,
-                            notify_clone,
-                            cron_schedule,
-                        ));
-                        tasks.push(handle);
-                    }
-                    ParsedSchedule::Manual => {
-                        // Manual workflows don't run on their own.
-                    }
-                }
-            }
-        }
-
-        // Spawn the driver task. It owns the workflows HashMap (for Trigger /
-        // Reset lookups and teardown), drains scheduler_tasks on Stop, and
-        // emits the final result on the watch channel.
-        let (result_tx, result_rx) = watch::channel::<Option<CanoResult<()>>>(None);
-        let driver_handle = tokio::spawn(driver_task(
-            command_rx,
-            workflows,
-            flow_order,
-            Arc::clone(&running),
-            Arc::clone(&stop_notify),
-            Arc::clone(&scheduler_tasks),
-            result_tx,
-        ));
-
-        Ok(RunningScheduler {
-            command_tx,
-            flows: flows_view,
-            flow_order: flow_order_view,
-            result_rx,
-            scheduler_tasks,
-            driver_handle: Arc::new(driver_handle),
-            liveness: Arc::new(()),
-            _marker: std::marker::PhantomData,
-        })
-    }
-}
-
-impl<TState, TResourceKey> Default for Scheduler<TState, TResourceKey>
-where
-    TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
-{
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Live handle to a started [`Scheduler`].
-///
-/// Returned by [`Scheduler::start`]. Cheap to clone — every clone shares the
+/// Returned by [`Scheduler::start`](crate::scheduler::Scheduler::start). Cheap to clone — every clone shares the
 /// same control plane (command channel, flow info registry, shutdown result
 /// watch). Use clones across tasks to read status, manually trigger flows,
 /// and signal shutdown from anywhere.
@@ -562,32 +34,32 @@ where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
     TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
-    command_tx: mpsc::Sender<SchedulerCommand>,
+    pub(super) command_tx: mpsc::Sender<SchedulerCommand>,
     /// Read-only flow info registry. Cheap clones (Arc) for `status` / `list`
     /// / `has_running_flows`. Built once at start time; never mutated.
-    flows: Arc<HashMap<String, Arc<RwLock<FlowInfo>>>>,
-    flow_order: Arc<Vec<String>>,
+    pub(super) flows: Arc<HashMap<String, Arc<RwLock<FlowInfo>>>>,
+    pub(super) flow_order: Arc<Vec<String>>,
     /// Final shutdown result published by the driver task. Receivers loop
     /// `changed().await` until the value transitions to `Some(_)`.
-    result_rx: watch::Receiver<Option<CanoResult<()>>>,
+    pub(super) result_rx: watch::Receiver<Option<CanoResult<()>>>,
     /// Shared per-flow loop handles so `Drop` (last-clone fallback) and the
     /// driver task can reach them.
-    scheduler_tasks: Arc<RwLock<Vec<JoinHandle<()>>>>,
+    pub(super) scheduler_tasks: Arc<RwLock<Vec<JoinHandle<()>>>>,
     /// JoinHandle of the driver task. Wrapped in Arc so multiple clones can
     /// observe `is_finished()` and the last-clone Drop can `abort()`.
-    driver_handle: Arc<JoinHandle<()>>,
+    pub(super) driver_handle: Arc<JoinHandle<()>>,
     /// Strong-count sentinel for the user-visible clone count. Ignores the
     /// Arc references held by the spawned driver task so the last user-clone
     /// drop reliably triggers fallback abort.
     ///
     /// Field is named (not `_liveness`) so clippy does not warn about an
     /// unused field; it is read via `Arc::strong_count` in `Drop`.
-    liveness: Arc<()>,
+    pub(super) liveness: Arc<()>,
     /// Generics are anchored on the driver task (which owns the workflows
     /// HashMap); the handle itself only sees `FlowInfo`. PhantomData keeps
     /// `TState` / `TResourceKey` in the type signature so a `RunningScheduler`
     /// for one workflow set isn't accidentally interchangeable with another.
-    _marker: std::marker::PhantomData<fn() -> (TState, TResourceKey)>,
+    pub(super) _marker: std::marker::PhantomData<fn() -> (TState, TResourceKey)>,
 }
 
 impl<TState, TResourceKey> RunningScheduler<TState, TResourceKey>
@@ -813,621 +285,16 @@ where
     }
 }
 
-/// Per-flow `Every`-schedule loop body. Lives outside `start` so the driver
-/// task and the loops are decoupled — the driver owns the workflows
-/// HashMap, the loops just see the data they need.
-async fn spawn_every_loop<TState, TResourceKey>(
-    workflow: Arc<Workflow<TState, TResourceKey>>,
-    initial_state: TState,
-    info: Arc<RwLock<FlowInfo>>,
-    policy: Option<Arc<BackoffPolicy>>,
-    running: Arc<RwLock<bool>>,
-    stop_notify: Arc<Notify>,
-    interval: Duration,
-) where
-    TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
-{
-    if !*running.read().await {
-        return;
-    }
-
-    // Check if previous run is still active before executing. Tripped flows
-    // skip dispatch entirely; backoff flows fall through to the loop where
-    // the sleep math accounts for `next_eligible`.
-    if dispatchable_now(&info).await {
-        execute_flow(
-            Arc::clone(&workflow),
-            initial_state.clone(),
-            Arc::clone(&info),
-            policy.as_ref(),
-        )
-        .await;
-    }
-
-    loop {
-        // Sleep at least `interval`, but if a backoff window pushes us further
-        // out, sleep until that instant. `notify` still wins in the select!
-        // below.
-        let wait = wait_until_eligible(&info, interval).await;
-        tokio::select! {
-            _ = sleep(wait) => {}
-            _ = stop_notify.notified() => break,
-        }
-
-        // The notify_waiters → `notified()` race can be lost if sleep wins:
-        // notify_waiters only signals waiters blocked at the time of the
-        // call, so a follow-up `notified()` would not see it. The running
-        // flag serves as a sticky shutdown signal.
-        if !*running.read().await {
-            break;
-        }
-
-        if !dispatchable_now(&info).await {
-            continue;
-        }
-
-        execute_flow(
-            Arc::clone(&workflow),
-            initial_state.clone(),
-            Arc::clone(&info),
-            policy.as_ref(),
-        )
-        .await;
-    }
-}
-
-/// Per-flow `Cron`-schedule loop body. See [`spawn_every_loop`] for the
-/// rationale on splitting the loop bodies out of `start`.
-async fn spawn_cron_loop<TState, TResourceKey>(
-    workflow: Arc<Workflow<TState, TResourceKey>>,
-    initial_state: TState,
-    info: Arc<RwLock<FlowInfo>>,
-    policy: Option<Arc<BackoffPolicy>>,
-    running: Arc<RwLock<bool>>,
-    stop_notify: Arc<Notify>,
-    schedule: Box<CronSchedule>,
-) where
-    TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
-{
-    loop {
-        if !*running.read().await {
-            break;
-        }
-
-        let now = Utc::now();
-        let Some(next) = schedule.after(&now).next() else {
-            // No future cron firing — exit the loop cleanly.
-            break;
-        };
-        let wait_duration = (next - now).to_std().unwrap_or(Duration::from_secs(0));
-        tokio::select! {
-            _ = sleep(wait_duration) => {}
-            _ = stop_notify.notified() => break,
-        }
-
-        if !*running.read().await {
-            break;
-        }
-
-        // If a backoff window pushes us past this tick, skip dispatch and
-        // let the next iteration pick up the following cron firing.
-        let info_snapshot = info.read().await;
-        if let Some(eligible) = info_snapshot.next_eligible
-            && Utc::now() < eligible
-        {
-            #[cfg(feature = "tracing")]
-            tracing::debug!(
-                flow_id = %info_snapshot.id,
-                next_eligible = %eligible,
-                "cron tick suppressed by backoff window"
-            );
-            drop(info_snapshot);
-            continue;
-        }
-        drop(info_snapshot);
-
-        if !dispatchable_now(&info).await {
-            continue;
-        }
-
-        execute_flow(
-            Arc::clone(&workflow),
-            initial_state.clone(),
-            Arc::clone(&info),
-            policy.as_ref(),
-        )
-        .await;
-    }
-}
-
-/// Driver task: owns the rx side of the command channel plus the workflows
-/// HashMap (for Trigger / Reset lookups and final teardown). On Stop (or rx
-/// closed) flips the running flag, wakes the per-flow loops, drains
-/// `scheduler_tasks`, waits up to 30s for in-flight workflows to finish,
-/// runs resource teardown in LIFO order, and publishes the final result on
-/// the watch channel.
-async fn driver_task<TState, TResourceKey>(
-    mut rx: mpsc::Receiver<SchedulerCommand>,
-    workflows: HashMap<String, FlowData<TState, TResourceKey>>,
-    flow_order: Vec<String>,
-    running: Arc<RwLock<bool>>,
-    stop_notify: Arc<Notify>,
-    scheduler_tasks: Arc<RwLock<Vec<JoinHandle<()>>>>,
-    result_tx: watch::Sender<Option<CanoResult<()>>>,
-) where
-    TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
-{
-    while let Some(cmd) = rx.recv().await {
-        match cmd {
-            SchedulerCommand::Stop => {
-                // Explicit Stop signal — exit the rx loop and proceed to
-                // teardown. `rx.close()` closes the receiver so any further
-                // try_send from a `RunningScheduler` clone errors with
-                // `Closed`, surfacing a deterministic "not running" error.
-                rx.close();
-                break;
-            }
-            SchedulerCommand::Trigger { id, response } => {
-                let outcome = if let Some(flow) = workflows.get(&id) {
-                    // `reserve_flow` folds the Tripped and Running checks
-                    // under the same write lock as the `Status::Running`
-                    // flip, so there is no window where a concurrent
-                    // `apply_outcome` can trip the flow between the check
-                    // and the dispatch. Backoff windows are deliberately
-                    // not enforced on manual triggers — the operator
-                    // override is the documented behavior.
-                    match reserve_flow(Arc::clone(&flow.info)).await {
-                        ReserveOutcome::Reserved => {
-                            let workflow = Arc::clone(&flow.workflow);
-                            let initial_state = flow.initial_state.clone();
-                            let info = Arc::clone(&flow.info);
-                            let policy = flow.policy.clone();
-                            let handle = tokio::spawn(async move {
-                                execute_reserved_flow(
-                                    workflow,
-                                    initial_state,
-                                    info,
-                                    policy.as_ref(),
-                                )
-                                .await;
-                            });
-                            let mut tasks = scheduler_tasks.write().await;
-                            tasks.retain(|h| !h.is_finished());
-                            tasks.push(handle);
-                            Ok(())
-                        }
-                        ReserveOutcome::AlreadyRunning => Err(CanoError::Workflow(format!(
-                            "Flow '{id}' is already running"
-                        ))),
-                        ReserveOutcome::Tripped => Err(CanoError::Workflow(format!(
-                            "Flow '{id}' is tripped — call reset_flow before triggering"
-                        ))),
-                    }
-                } else {
-                    Err(CanoError::Workflow(format!(
-                        "No workflow registered with id '{id}'"
-                    )))
-                };
-
-                let _ = response.send(outcome);
-            }
-            SchedulerCommand::Reset { id, response } => {
-                let outcome = if let Some(flow) = workflows.get(&id) {
-                    let mut info_guard = flow.info.write().await;
-                    info_guard.failure_streak = 0;
-                    info_guard.next_eligible = None;
-                    // Don't clobber a `Running` status — a concurrent
-                    // execution would set Completed/Backoff/Tripped on its
-                    // own write.
-                    if !matches!(info_guard.status, Status::Running) {
-                        info_guard.status = Status::Idle;
-                    }
-                    Ok(())
-                } else {
-                    Err(CanoError::Workflow(format!(
-                        "No workflow registered with id '{id}'"
-                    )))
-                };
-
-                let _ = response.send(outcome);
-            }
-        }
-    }
-
-    // Shutdown phase. Reached either via explicit Stop or via rx-closed (all
-    // RunningScheduler clones dropped without stop). Either way we proceed
-    // through the same graceful drain.
-    *running.write().await = false;
-    // Wake any Every/Cron loop currently parked on its sleep so they observe
-    // `running == false` and exit immediately, bounding shutdown latency by
-    // how long an in-flight workflow takes — not by the schedule interval.
-    stop_notify.notify_waiters();
-
-    // Wait for all scheduler loop tasks to finish.
-    {
-        let mut tasks = scheduler_tasks.write().await;
-        while let Some(handle) = tasks.pop() {
-            let _ = handle.await;
-        }
-    }
-
-    // Wait for any running workflows to complete, bounded by 30s.
-    let timeout = Duration::from_secs(30);
-    let start_time = tokio::time::Instant::now();
-    let mut result: CanoResult<()> = Ok(());
-    'wait: loop {
-        let mut any_running = false;
-        for fd in workflows.values() {
-            if fd.info.read().await.status == Status::Running {
-                any_running = true;
-                break;
-            }
-        }
-        if !any_running {
-            break 'wait;
-        }
-        if start_time.elapsed() >= timeout {
-            result = Err(CanoError::Workflow(
-                "Timeout waiting for workflows to complete".to_string(),
-            ));
-            break 'wait;
-        }
-        sleep(Duration::from_millis(100)).await;
-    }
-
-    // Teardown workflow resources in reverse registration order (LIFO).
-    // Driven by `flow_order` rather than `HashMap::values()` to keep
-    // teardown deterministic across runs.
-    for id in flow_order.iter().rev() {
-        if let Some(flow) = workflows.get(id) {
-            let len = flow.workflow.resources.lifecycle_len();
-            flow.workflow.resources.teardown_range(0..len).await;
-        }
-    }
-
-    // Publish the final result. Receivers (`wait` / `stop`) loop on
-    // `changed().await` until they observe the Some(_) transition.
-    let _ = result_tx.send(Some(result));
-}
-
-async fn execute_flow<TState, TResourceKey>(
-    workflow: Arc<Workflow<TState, TResourceKey>>,
-    initial_state: TState,
-    info: Arc<RwLock<FlowInfo>>,
-    policy: Option<&Arc<BackoffPolicy>>,
-) where
-    TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
-{
-    if !matches!(
-        reserve_flow(Arc::clone(&info)).await,
-        ReserveOutcome::Reserved
-    ) {
-        return;
-    }
-
-    execute_reserved_flow(workflow, initial_state, info, policy).await;
-}
-
-/// Result of attempting to reserve a flow for dispatch. The Tripped and
-/// AlreadyRunning variants both mean "skip this dispatch" but are distinguished
-/// so the manual-trigger path can return distinct error messages.
-enum ReserveOutcome {
-    Reserved,
-    AlreadyRunning,
-    Tripped,
-}
-
-/// Atomically check the gating status and (on success) flip to `Running`,
-/// stamp `last_run`, and bump `run_count`. Folding the check and the write
-/// under one write-lock acquisition closes the TOCTOU window where a
-/// concurrent `apply_outcome` could trip a flow between a separate read
-/// and the dispatch.
-async fn reserve_flow(info: Arc<RwLock<FlowInfo>>) -> ReserveOutcome {
-    let mut info_guard = info.write().await;
-    match info_guard.status {
-        Status::Running => return ReserveOutcome::AlreadyRunning,
-        Status::Tripped { .. } => return ReserveOutcome::Tripped,
-        _ => {}
-    }
-
-    info_guard.status = Status::Running;
-    info_guard.last_run = Some(Utc::now());
-    info_guard.run_count += 1;
-    ReserveOutcome::Reserved
-}
-
-async fn execute_reserved_flow<TState, TResourceKey>(
-    workflow: Arc<Workflow<TState, TResourceKey>>,
-    initial_state: TState,
-    info: Arc<RwLock<FlowInfo>>,
-    policy: Option<&Arc<BackoffPolicy>>,
-) where
-    TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
-{
-    // Execute workflow — skip lifecycle (setup/teardown handled by start/stop)
-    #[cfg(feature = "tracing")]
-    let result = workflow
-        .execute_workflow(initial_state)
-        .instrument(tracing::info_span!("execute_flow"))
-        .await;
-
-    #[cfg(not(feature = "tracing"))]
-    let result = workflow.execute_workflow(initial_state).await;
-
-    apply_outcome(&info, result.map(|_| ()), policy.map(|p| p.as_ref())).await;
-}
-
-/// Atomic post-execution status write. With a policy attached the loop never
-/// flickers through `Status::Failed` on the way to `Backoff`/`Tripped` — a
-/// single write under the existing lock decides the terminal status for this
-/// run. Streak and `next_eligible` are reset on success.
-async fn apply_outcome(
-    info: &Arc<RwLock<FlowInfo>>,
-    result: Result<(), CanoError>,
-    policy: Option<&BackoffPolicy>,
-) {
-    let mut info_guard = info.write().await;
-    match result {
-        Ok(_) => {
-            info_guard.status = Status::Completed;
-            info_guard.failure_streak = 0;
-            info_guard.next_eligible = None;
-        }
-        Err(e) => {
-            let err_str = e.to_string();
-            match policy {
-                None => {
-                    debug_assert!(
-                        info_guard.failure_streak == 0,
-                        "Status::Failed path should never see a non-zero failure_streak (no policy is attached)"
-                    );
-                    info_guard.status = Status::Failed(err_str);
-                    // No policy: don't track streak / next_eligible.
-                }
-                Some(p) => {
-                    let new_streak = info_guard.failure_streak.saturating_add(1);
-                    info_guard.failure_streak = new_streak;
-                    if p.is_tripped(new_streak) {
-                        info_guard.next_eligible = None;
-                        info_guard.status = Status::Tripped {
-                            streak: new_streak,
-                            last_error: err_str,
-                        };
-                    } else {
-                        let delay = p.compute_delay(new_streak);
-                        let until = Utc::now()
-                            + chrono::Duration::from_std(delay).unwrap_or(chrono::Duration::zero());
-                        info_guard.next_eligible = Some(until);
-                        info_guard.status = Status::Backoff {
-                            until,
-                            streak: new_streak,
-                            last_error: err_str,
-                        };
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// `false` when the flow's status indicates we should skip this dispatch
-/// (already running, or tripped). Backoff windows are honored by the loop's
-/// sleep math, not by this gate, so the gate stays cheap.
-async fn dispatchable_now(info: &Arc<RwLock<FlowInfo>>) -> bool {
-    let guard = info.read().await;
-    !matches!(guard.status, Status::Running | Status::Tripped { .. })
-}
-
-/// Compute how long the Every loop should sleep before the next dispatch.
-/// Returns `max(interval, next_eligible - now)` so a backoff window pushes the
-/// next attempt out without affecting flows that are healthy.
-///
-/// Falls back to `interval` when `next_eligible` is unset, in the past, or
-/// negative (the latter via `to_std()` returning `Err`) — i.e. no extra delay
-/// is added once the backoff window has elapsed.
-async fn wait_until_eligible(info: &Arc<RwLock<FlowInfo>>, interval: Duration) -> Duration {
-    let snapshot = info.read().await;
-    if let Some(eligible) = snapshot.next_eligible {
-        let now = Utc::now();
-        if eligible > now {
-            let extra = (eligible - now).to_std().unwrap_or(Duration::from_secs(0));
-            return interval.max(extra);
-        }
-    }
-    interval
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::node::Node;
-    use crate::resource::Resources;
-    use cano_macros::node;
+    use crate::scheduler::test_support::*;
+    use crate::scheduler::{BackoffPolicy, Scheduler};
+    use crate::task;
+    use crate::task::{Task, TaskResult};
+    use crate::workflow::Workflow;
     use std::sync::atomic::{AtomicU32, Ordering};
-    use tokio::time::sleep;
-
-    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-    enum TestState {
-        Start,
-        Complete,
-        Error,
-    }
-
-    #[derive(Clone)]
-    struct TestNode {
-        execution_count: Arc<AtomicU32>,
-        should_fail: bool,
-    }
-
-    impl TestNode {
-        fn new() -> Self {
-            Self {
-                execution_count: Arc::new(AtomicU32::new(0)),
-                should_fail: false,
-            }
-        }
-
-        fn new_failing() -> Self {
-            Self {
-                execution_count: Arc::new(AtomicU32::new(0)),
-                should_fail: true,
-            }
-        }
-    }
-
-    #[node]
-    impl Node<TestState> for TestNode {
-        type PrepResult = ();
-        type ExecResult = ();
-
-        async fn prep(&self, _res: &Resources) -> CanoResult<()> {
-            Ok(())
-        }
-
-        async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
-            self.execution_count.fetch_add(1, Ordering::Relaxed);
-        }
-
-        async fn post(
-            &self,
-            _res: &Resources,
-            _exec_res: Self::ExecResult,
-        ) -> CanoResult<TestState> {
-            if self.should_fail {
-                Err(CanoError::NodeExecution("Test failure".to_string()))
-            } else {
-                Ok(TestState::Complete)
-            }
-        }
-    }
-
-    fn create_test_workflow() -> Workflow<TestState> {
-        Workflow::bare()
-            .register(TestState::Start, TestNode::new())
-            .add_exit_state(TestState::Complete)
-            .add_exit_state(TestState::Error)
-    }
-
-    fn create_failing_workflow() -> Workflow<TestState> {
-        Workflow::bare()
-            .register(TestState::Start, TestNode::new_failing())
-            .add_exit_state(TestState::Complete)
-            .add_exit_state(TestState::Error)
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_scheduler_creation() {
-        let scheduler: Scheduler<TestState> = Scheduler::new();
-        assert!(scheduler.is_empty());
-        assert_eq!(scheduler.len(), 0);
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_add_workflow_every_seconds() {
-        let mut scheduler = Scheduler::<TestState>::new();
-        let workflow = create_test_workflow();
-
-        scheduler
-            .every_seconds("test_task", workflow, TestState::Start, 5)
-            .unwrap();
-
-        assert_eq!(scheduler.len(), 1);
-        assert!(scheduler.contains("test_task"));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_add_workflow_every_minutes() {
-        let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-        let workflow = create_test_workflow();
-
-        scheduler
-            .every_minutes("test_task", workflow, TestState::Start, 2)
-            .unwrap();
-
-        assert!(scheduler.contains("test_task"));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_add_workflow_every_hours() {
-        let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-        let workflow = create_test_workflow();
-
-        scheduler
-            .every_hours("test_task", workflow, TestState::Start, 1)
-            .unwrap();
-
-        assert!(scheduler.contains("test_task"));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_add_workflow_every_duration() {
-        let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-        let workflow = create_test_workflow();
-
-        scheduler
-            .every(
-                "test_task",
-                workflow,
-                TestState::Start,
-                Duration::from_millis(100),
-            )
-            .unwrap();
-        assert!(scheduler.contains("test_task"));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_add_workflow_cron() {
-        let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-        let workflow = create_test_workflow();
-
-        scheduler
-            .cron("test_task", workflow, TestState::Start, "0 */5 * * * *")
-            .unwrap();
-        assert!(scheduler.contains("test_task"));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_add_workflow_cron_invalid() {
-        let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-        let workflow = create_test_workflow();
-
-        let err = scheduler
-            .cron("test_task", workflow, TestState::Start, "invalid cron")
-            .unwrap_err();
-        assert!(matches!(err, CanoError::Configuration(_)));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_add_workflow_manual() {
-        let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-        let workflow = create_test_workflow();
-
-        scheduler
-            .manual("test_task", workflow, TestState::Start)
-            .unwrap();
-        assert!(scheduler.contains("test_task"));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_duplicate_workflow_id() {
-        let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-        let workflow1 = create_test_workflow();
-        let workflow2 = create_test_workflow();
-
-        scheduler
-            .every_seconds("test_task", workflow1, TestState::Start, 5)
-            .unwrap();
-
-        let err = scheduler
-            .every_seconds("test_task", workflow2, TestState::Start, 10)
-            .unwrap_err();
-        assert!(matches!(err, CanoError::Configuration(_)));
-    }
+    use tokio::time::{Duration, sleep};
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_start_rejects_misconfigured_workflow() {
@@ -1436,7 +303,7 @@ mod tests {
         // first scheduled execution.
         let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
         let bad_workflow: Workflow<TestState> =
-            Workflow::bare().register(TestState::Start, TestNode::new());
+            Workflow::bare().register(TestState::Start, TestTask::new());
 
         scheduler
             .every_seconds("bad", bad_workflow, TestState::Start, 60)
@@ -1452,7 +319,7 @@ mod tests {
         // must catch this at start, before any resource setup runs.
         let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
         let workflow: Workflow<TestState> = Workflow::bare()
-            .register(TestState::Start, TestNode::new())
+            .register(TestState::Start, TestTask::new())
             .add_exit_state(TestState::Complete);
 
         scheduler
@@ -1666,27 +533,13 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_manual_trigger_rejects_overlap() {
         #[derive(Clone)]
-        struct SlowNode;
+        struct SlowTask;
 
-        #[node]
-        impl Node<TestState> for SlowNode {
-            type PrepResult = ();
-            type ExecResult = ();
-
-            async fn prep(&self, _res: &Resources) -> CanoResult<()> {
-                Ok(())
-            }
-
-            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
+        #[task]
+        impl Task<TestState> for SlowTask {
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
                 sleep(Duration::from_millis(300)).await;
-            }
-
-            async fn post(
-                &self,
-                _res: &Resources,
-                _exec_res: Self::ExecResult,
-            ) -> CanoResult<TestState> {
-                Ok(TestState::Complete)
+                Ok(TaskResult::Single(TestState::Complete))
             }
         }
 
@@ -1694,7 +547,7 @@ mod tests {
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
             let workflow = Workflow::bare()
-                .register(TestState::Start, SlowNode)
+                .register(TestState::Start, SlowTask)
                 .add_exit_state(TestState::Complete)
                 .add_exit_state(TestState::Error);
             scheduler
@@ -1802,28 +655,14 @@ mod tests {
         // to finish, a concurrent trigger() must surface "not running" instead
         // of enqueueing into the closed command channel.
         #[derive(Clone)]
-        struct SlowNode;
+        struct SlowTask;
 
-        #[node]
-        impl Node<TestState> for SlowNode {
-            type PrepResult = ();
-            type ExecResult = ();
-
-            async fn prep(&self, _res: &Resources) -> CanoResult<()> {
-                Ok(())
-            }
-
-            async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
+        #[task]
+        impl Task<TestState> for SlowTask {
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
                 // Hold Status::Running long enough to span the shutdown window.
                 sleep(Duration::from_millis(400)).await;
-            }
-
-            async fn post(
-                &self,
-                _res: &Resources,
-                _exec_res: Self::ExecResult,
-            ) -> CanoResult<TestState> {
-                Ok(TestState::Complete)
+                Ok(TaskResult::Single(TestState::Complete))
             }
         }
 
@@ -1831,7 +670,7 @@ mod tests {
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
             let slow_workflow = Workflow::bare()
-                .register(TestState::Start, SlowNode)
+                .register(TestState::Start, SlowTask)
                 .add_exit_state(TestState::Complete)
                 .add_exit_state(TestState::Error);
             scheduler
@@ -1898,15 +737,15 @@ mod tests {
 
     // ----- Backoff / trip / reset tests -----
 
-    /// Node that fails until its internal counter reaches `succeed_after`.
+    /// Task that fails until its internal counter reaches `succeed_after`.
     /// Used to drive deterministic streak behavior in the tests below.
     #[derive(Clone)]
-    struct FlakyNode {
+    struct FlakyTask {
         attempts: Arc<AtomicU32>,
         succeed_after: u32,
     }
 
-    impl FlakyNode {
+    impl FlakyTask {
         fn always_failing() -> Self {
             Self {
                 attempts: Arc::new(AtomicU32::new(0)),
@@ -1922,38 +761,27 @@ mod tests {
         }
     }
 
-    #[node]
-    impl Node<TestState> for FlakyNode {
-        type PrepResult = ();
-        type ExecResult = bool;
-
+    #[task]
+    impl Task<TestState> for FlakyTask {
         // Disable retries so each scheduler dispatch is a single attempt.
         // The scheduler's BackoffPolicy is the only retry layer under test.
         fn config(&self) -> crate::task::TaskConfig {
             crate::task::TaskConfig::minimal()
         }
 
-        async fn prep(&self, _res: &Resources) -> CanoResult<()> {
-            Ok(())
-        }
-
-        async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
+        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
             let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
-            attempt >= self.succeed_after
-        }
-
-        async fn post(&self, _res: &Resources, ok: Self::ExecResult) -> CanoResult<TestState> {
-            if ok {
-                Ok(TestState::Complete)
+            if attempt >= self.succeed_after {
+                Ok(TaskResult::Single(TestState::Complete))
             } else {
-                Err(CanoError::NodeExecution("flaky".to_string()))
+                Err(CanoError::TaskExecution("flaky".to_string()))
             }
         }
     }
 
-    fn flaky_workflow(node: FlakyNode) -> Workflow<TestState> {
+    fn flaky_workflow(task: FlakyTask) -> Workflow<TestState> {
         Workflow::bare()
-            .register(TestState::Start, node)
+            .register(TestState::Start, task)
             .add_exit_state(TestState::Complete)
             .add_exit_state(TestState::Error)
     }
@@ -1965,7 +793,7 @@ mod tests {
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            let workflow = flaky_workflow(FlakyNode::always_failing());
+            let workflow = flaky_workflow(FlakyTask::always_failing());
             scheduler
                 .every(
                     "flaky",
@@ -2013,7 +841,7 @@ mod tests {
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            let workflow = flaky_workflow(FlakyNode::always_failing());
+            let workflow = flaky_workflow(FlakyTask::always_failing());
             scheduler
                 .every(
                     "trippy",
@@ -2073,7 +901,7 @@ mod tests {
             // (the "first attempt after reset") is again a failure, but with
             // streak_limit=10 (we'll bump the policy via re-registration trick
             // — instead we just verify the reset clears the trip and advances).
-            let workflow = flaky_workflow(FlakyNode::succeed_on_attempt(5));
+            let workflow = flaky_workflow(FlakyTask::succeed_on_attempt(5));
             scheduler
                 .every(
                     "reset_me",
@@ -2139,7 +967,7 @@ mod tests {
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            let workflow = flaky_workflow(FlakyNode::succeed_on_attempt(3));
+            let workflow = flaky_workflow(FlakyTask::succeed_on_attempt(3));
             scheduler
                 .every(
                     "recover",
@@ -2183,7 +1011,7 @@ mod tests {
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            let workflow = flaky_workflow(FlakyNode::always_failing());
+            let workflow = flaky_workflow(FlakyTask::always_failing());
             scheduler
                 .manual("manual_flaky", workflow, TestState::Start)
                 .unwrap();
@@ -2282,7 +1110,7 @@ mod tests {
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            let workflow = flaky_workflow(FlakyNode::always_failing());
+            let workflow = flaky_workflow(FlakyTask::always_failing());
             scheduler
                 .every(
                     "long_backoff",
@@ -2331,44 +1159,42 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn test_no_policy_preserves_failed_status() {
-        // A flow registered without `set_backoff` keeps the legacy semantics:
-        // failures land as Status::Failed and re-fire on the base interval.
+    async fn test_default_policy_parks_failed_flow_in_backoff() {
+        // A flow registered without `set_backoff` still gets BackoffPolicy::default(),
+        // so a failure parks it in Backoff (never the removed Failed status) and
+        // tracks the streak.
         let timeout = Duration::from_secs(3);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            let workflow = flaky_workflow(FlakyNode::always_failing());
+            let workflow = flaky_workflow(FlakyTask::always_failing());
             scheduler
                 .every(
-                    "legacy",
+                    "defaulted",
                     workflow,
                     TestState::Start,
                     Duration::from_millis(40),
                 )
                 .unwrap();
-            // Intentionally no set_backoff call.
+            // Intentionally no set_backoff call — the default policy applies.
 
             let running = scheduler.start().await.unwrap();
 
-            // Poll until we observe a non-Running status with run_count ≥ 3.
-            // The loop alternates Running ↔ Failed quickly, so a single sleep
-            // can land on either side. Polling makes the test robust without
-            // hiding bugs (a stuck status never escapes the inner timeout).
+            // Poll until we observe a non-Running status with at least one run.
             let snap = loop {
                 sleep(Duration::from_millis(50)).await;
-                let s = running.status("legacy").await.unwrap();
-                if !matches!(s.status, Status::Running) && s.run_count >= 3 {
+                let s = running.status("defaulted").await.unwrap();
+                if !matches!(s.status, Status::Running) && s.run_count >= 1 {
                     break s;
                 }
             };
 
             assert!(
-                matches!(snap.status, Status::Failed(_)),
-                "no-policy flow must report Failed, got: {:?}",
+                matches!(snap.status, Status::Backoff { .. }),
+                "default-policy flow must park in Backoff, got: {:?}",
                 snap.status
             );
-            assert_eq!(snap.failure_streak, 0, "no streak tracking without policy");
-            assert!(snap.next_eligible.is_none());
+            assert!(snap.failure_streak >= 1, "streak must be tracked");
+            assert!(snap.next_eligible.is_some());
 
             running.stop().await.unwrap();
         })
@@ -2386,9 +1212,9 @@ mod tests {
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            // Flaky node that fails first then succeeds, so the manual
+            // Flaky task that fails first then succeeds, so the manual
             // override can be observed advancing run_count past the failure.
-            let workflow = flaky_workflow(FlakyNode::succeed_on_attempt(2));
+            let workflow = flaky_workflow(FlakyTask::succeed_on_attempt(2));
             scheduler
                 .manual("flow", workflow, TestState::Start)
                 .unwrap();
@@ -2453,7 +1279,7 @@ mod tests {
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            let workflow = flaky_workflow(FlakyNode::always_failing());
+            let workflow = flaky_workflow(FlakyTask::always_failing());
             scheduler
                 .every(
                     "flow",
@@ -2524,7 +1350,7 @@ mod tests {
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            let workflow = flaky_workflow(FlakyNode::always_failing());
+            let workflow = flaky_workflow(FlakyTask::always_failing());
             scheduler
                 .cron("flow", workflow, TestState::Start, "* * * * * *")
                 .unwrap();
@@ -2579,7 +1405,7 @@ mod tests {
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            let workflow = flaky_workflow(FlakyNode::always_failing());
+            let workflow = flaky_workflow(FlakyTask::always_failing());
             scheduler
                 .manual("flow", workflow, TestState::Start)
                 .unwrap();
@@ -2639,14 +1465,14 @@ mod tests {
     async fn test_drop_aborts_loops_when_no_stop() {
         // Drop on the last RunningScheduler clone should abort the spawned
         // driver and per-flow loop tasks instead of leaking them. We assert
-        // via the node's own execution_count — once we drop the handle, the
+        // via the task's own execution_count — once we drop the handle, the
         // count must freeze.
         let timeout = Duration::from_secs(5);
         let result = tokio::time::timeout(timeout, async {
-            let node = TestNode::new();
-            let count = Arc::clone(&node.execution_count);
+            let task = TestTask::new();
+            let count = Arc::clone(&task.execution_count);
             let workflow = Workflow::bare()
-                .register(TestState::Start, node)
+                .register(TestState::Start, task)
                 .add_exit_state(TestState::Complete)
                 .add_exit_state(TestState::Error);
 

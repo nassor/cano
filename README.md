@@ -25,18 +25,22 @@ It excels at managing complex lifecycles where state transitions matter:
 *   **AI Agents**: Multi-step inference chains with shared context and memory.
 *   **Background Systems**: Scheduled maintenance, periodic reporting, and distributed cron jobs.
 
-The engine is built on three core concepts: **Tasks/Nodes** for logic, **Workflows** for state transitions, and **Schedulers** for timing.
+The engine is built on three core concepts: **Tasks** for logic, **Workflows** for state transitions, and **Schedulers** for timing.
 
 ## Features
 
 - **Type-Safe State Machines**: Enum-driven transitions with compile-time guarantees.
-- **Flexible Processing Units**: Choose between simple `Task`s or structured `Node`s (Prep/Exec/Post lifecycle).
+- **Multiple Processing Models**: `Task` for general-purpose work, plus `RouterTask`, `PollTask`, `BatchTask`, and `SteppedTask` for specialized shapes — mixed freely in one workflow.
 - **Parallel Execution (Split/Join)**: Run tasks concurrently and join results with strategies like `All`, `Any`, `Quorum`, or `PartialResults`.
 - **Robust Retry Logic**: Configurable strategies including exponential backoff with jitter and per-attempt timeouts.
 - **Circuit Breaker**: Shared `CircuitBreaker` short-circuits calls to failing dependencies before the retry loop, with configurable failure threshold, cool-down, and half-open probing.
 - **Built-in Scheduling**: Cron-based, interval, and manual triggers for background jobs.
-- **Observability**: Integrated `tracing` support for deep insights into workflow execution.
+- **Crash Recovery**: Pluggable `CheckpointStore` records every FSM state entry; `Workflow::resume_from` rehydrates a crashed run and continues. Ships with an embedded, ACID `RedbCheckpointStore` behind the `recovery` feature.
+- **Sagas / Compensation**: Pair a forward step with a `compensate` action via `CompensatableTask` + `register_with_compensation`; if a later step fails, the engine rolls back the work already done in reverse order (and replays the rollback across a crash when checkpointing is on).
+- **Observability**: Integrated `tracing` spans, plus synchronous `WorkflowObserver` hooks for lifecycle/failure events (with a ready-made `TracingObserver`) and `Resource::health()` probes (`Resources::check_all_health`).
 - **Performance-Focused**: Minimizes heap allocations by leveraging stack-based objects wherever possible, giving you control over where allocations occur.
+
+Everything above is opt-in and zero-cost when unused. For how the *resilient, self-healing* tagline maps to concrete primitives — retries, timeouts, circuit breakers, bulkheads, panic safety, checkpoint+resume, sagas, observers, health probes — see the [Resilience](https://nassor.github.io/cano/resilience/), [Recovery](https://nassor.github.io/cano/recovery/) and [Saga](https://nassor.github.io/cano/saga/) guides.
 
 ## Simple Example: Parallel Processing
 
@@ -117,6 +121,69 @@ async fn main() -> Result<(), CanoError> {
 }
 ```
 
+## Crash Recovery & Resume
+
+Attach a `CheckpointStore` and the workflow records one `CheckpointRow` per state entered — *before* that state's task runs. After a crash, `resume_from(workflow_id)` reloads the run and re-enters the FSM at the last checkpointed state. The resumed state's task **re-runs**, so tasks at and after the resume point must be idempotent.
+
+```rust
+use cano::prelude::*;
+use cano::RedbCheckpointStore;            // behind the `recovery` feature
+use std::sync::Arc;
+
+# #[derive(Debug, Clone, PartialEq, Eq, Hash)] enum Step { Start, Work, Done }
+# #[derive(Clone)] struct StartTask; #[derive(Clone)] struct WorkTask;
+# #[task(state = Step)] impl StartTask { async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> { Ok(TaskResult::Single(Step::Work)) } }
+# #[task(state = Step)] impl WorkTask { async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> { Ok(TaskResult::Single(Step::Done)) } }
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let store = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
+let workflow = Workflow::bare()
+    .register(Step::Start, StartTask)
+    .register(Step::Work, WorkTask)
+    .add_exit_state(Step::Done)
+    .with_checkpoint_store(store)
+    .with_workflow_id("run-42");
+
+// First time: run forward (checkpoints are written along the way).
+let _ = workflow.orchestrate(Step::Start).await;
+
+// After a crash: pick up where it left off.
+let final_state = workflow.resume_from("run-42").await?;
+# let _ = final_state; Ok(())
+# }
+```
+
+The `CheckpointStore` trait is backend-agnostic (no feature flag) — implement it over Postgres, an HTTP service, anything; `RedbCheckpointStore` is just the batteries-included default. `cargo run --example workflow_recovery --features recovery` walks through a full crash-and-resume cycle. See the [Recovery guide](https://nassor.github.io/cano/recovery/).
+
+## Sagas / Compensation
+
+For steps that mutate external systems, write a `#[saga::task(state = …)]` — like a plain `#[task]`, but its `run` returns the next state *and* an `Output`, and it has a `compensate` that undoes the step given that `Output` — and register it with `register_with_compensation`. The engine keeps a per-run compensation stack; if a later state fails, it drains the stack in reverse and runs each `compensate`. A clean rollback returns the original error (and clears the checkpoint log if one is attached); a failed `compensate` produces `CanoError::CompensationFailed` with the original error plus every compensation error.
+
+```rust
+use cano::prelude::*;
+use serde::{Serialize, Deserialize};
+
+# #[derive(Debug, Clone, PartialEq, Eq, Hash)] enum Step { Reserve, Ship, Done }
+#[derive(Serialize, Deserialize)]
+struct Reservation { sku: String, qty: u32 }
+
+struct ReserveInventory;
+
+#[saga::task(state = Step)]
+impl ReserveInventory {
+    type Output = Reservation;
+    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {
+        // ... reserve the stock ...
+        Ok((TaskResult::Single(Step::Ship), Reservation { sku: "WIDGET-7".into(), qty: 3 }))
+    }
+    async fn compensate(&self, _res: &Resources, output: Reservation) -> Result<(), CanoError> {
+        // ... release output.qty of output.sku — must be idempotent ...
+        let _ = output; Ok(())
+    }
+}
+```
+
+With a checkpoint store attached, outputs are persisted and `resume_from` rehydrates the stack — so a failure after a crash still rolls back work done before it. Compensation is for single-task states only. `cargo run --example saga_payment` walks through a reserve-charge-ship rollback. See the [Saga guide](https://nassor.github.io/cano/saga/).
+
 ## Documentation
 
 For complete documentation, examples, and guides, please visit our website:
@@ -130,6 +197,20 @@ You can also find:
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
+
+## AI Disclosure
+
+The primary developer of this repository uses AI coding assistants while
+working on Cano. At the time of writing, the assistants in regular use are:
+
+- **Claude Code** (Anthropic API), and
+- **Qwen** and **DeepSeek** models running locally.
+
+All AI-assisted output is reviewed, edited, tested, and submitted by a human
+developer who is fully responsible for the resulting code. AI tools are
+treated as accelerators, not authors. See
+[AI_USAGE_POLICY.md](AI_USAGE_POLICY.md) for the full policy that contributors
+are expected to follow when using AI assistants on this project.
 
 ## License
 

@@ -1,19 +1,33 @@
 +++
-title = "Tasks"
+title = "Task"
 description = "Learn how to use Tasks in Cano - simple, flexible processing units for async workflows in Rust."
 template = "page.html"
 +++
 
 <div class="content-wrapper">
-<h1>Tasks</h1>
+<h1>Task</h1>
 <p class="subtitle">Simple, flexible processing units for your workflows.</p>
 
 <p>
 A <code>Task</code> is the fundamental building block of a Cano workflow: a single <code>run</code>
-method that decides the next state. Tasks receive a <code>&amp;Resources</code> reference at
-dispatch time — see <a href="../resources/">Resources</a> for how to register and retrieve typed
-dependencies. For a structured prep / exec / post lifecycle, see <a href="../nodes/">Nodes</a>.
+method that decides the next state. <strong>Start here</strong> — <code>Task</code> is the default
+choice for every processing unit. The other four processing models
+(<a href="../router-task/">RouterTask</a>,
+<a href="../poll-task/">PollTask</a>, <a href="../batch-task/">BatchTask</a>,
+<a href="../stepped-task/">SteppedTask</a>) are specialisations you reach for only when a task
+has a shape that one of them fits better — see <a href="#task-family">The Task Family</a> below for
+the decision matrix. Tasks receive a <code>&amp;Resources</code> reference at dispatch time — see
+<a href="../resources/">Resources</a> for how to register and retrieve typed dependencies.
 </p>
+
+<div class="callout callout-tip">
+<div class="callout-label">New to Cano?</div>
+<p>
+Read <a href="../workflows/">Workflows</a> and <a href="../resources/">Resources</a> first — every
+example on this page wires a task into a <code>Workflow</code> and pulls dependencies from a
+<code>Resources</code> map. Then come back here.
+</p>
+</div>
 
 <!-- Table of Contents -->
 <nav class="page-toc" aria-label="Table of contents">
@@ -23,8 +37,8 @@ dependencies. For a structured prep / exec / post lifecycle, see <a href="../nod
 <li><a href="#resource-free">Resource-Free Tasks</a></li>
 <li><a href="#config-retries">Configuration &amp; Retries</a></li>
 <li><a href="#patterns">Real-World Task Patterns</a></li>
-<li><a href="#task-vs-node">Task vs Node</a></li>
-<li><a href="#when-to-use">When to Use Tasks vs Nodes</a></li>
+<li><a href="#task-family">The Task Family: Four More Processing Models</a></li>
+<li><a href="#choosing">Choosing a Processing Model</a></li>
 </ol>
 </nav>
 
@@ -72,6 +86,11 @@ impl GeneratorTask {
 }
 
 ```
+</div>
+
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example task_simple</code> — a two-task generate/count workflow
+like the snippet above.</p>
 </div>
 
 <!-- Section: Resource-Free Tasks -->
@@ -125,6 +144,8 @@ The <code>TaskConfig</code> struct allows you to specify the retry behavior.
 </p>
 
 <h3>Retry Strategy Examples</h3>
+<div class="diagram-frame">
+<p class="diagram-label">Retry with backoff between attempts</p>
 <div class="mermaid">
 sequenceDiagram
 participant W as Workflow
@@ -137,6 +158,7 @@ T-->>W: Fail
 Note over W: Wait (longer)
 W->>T: Retry 2
 T-->>W: Success ✓
+</div>
 </div>
 
 <div class="card-stack retry-cards">
@@ -205,91 +227,34 @@ whether to retry. The deadline resets on every attempt, and retry exhaustion sti
 </div>
 </div>
 
-<div class="card-stack retry-cards">
-<div class="card">
-<h3>Circuit Breaker</h3>
-<p>Share one breaker across tasks; an open breaker short-circuits the call before the retry loop runs.</p>
+<h3 id="config-circuit-breaker"><a href="#config-circuit-breaker" class="anchor-link" aria-hidden="true">#</a>Wiring a Circuit Breaker</h3>
+<p>
+A <code>CircuitBreaker</code> can be attached to a task's config via
+<code>TaskConfig::with_circuit_breaker(Arc::clone(&amp;breaker))</code>. The retry loop consults it
+<em>before</em> each attempt; an open breaker short-circuits the whole loop with
+<code>CanoError::CircuitOpen</code> (returned raw, not wrapped in <code>RetryExhausted</code>), so a
+dependency that is already down is not hammered. Share one <code>Arc&lt;CircuitBreaker&gt;</code>
+across every task that hits the same dependency so they trip together.
+</p>
+
 <div class="code-block">
-<span class="code-block-label">Circuit breaker config</span>
+<span class="code-block-label">Attaching a breaker to a task config</span>
 
 ```rust
-use cano::prelude::*;
-use std::sync::Arc;
-use std::time::Duration;
-
-fn build_config() -> TaskConfig {
-    let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
-        failure_threshold: 5,
-        reset_timeout: Duration::from_secs(30),
-        half_open_max_calls: 1,
-    }));
-
+fn build_config(breaker: Arc<CircuitBreaker>) -> TaskConfig {
     TaskConfig::default()
         .with_exponential_retry(3)
-        .with_circuit_breaker(Arc::clone(&breaker))
+        .with_circuit_breaker(breaker)
 }
 ```
 </div>
-<h4>How the circuit breaker composes with retries</h4>
+
 <p>
-The breaker is consulted <em>before</em> each attempt. While <code>Closed</code>, calls flow through and
-consecutive failures are counted toward <code>failure_threshold</code>; when the threshold trips the
-breaker to <code>Open</code>, <code>run_with_retries</code> returns <code>CanoError::CircuitOpen</code>
-immediately — without invoking the task body and without consuming a retry attempt — so the
-underlying dependency is not hammered while it is unhealthy. After <code>reset_timeout</code> elapses,
-the next call lazily transitions to <code>HalfOpen</code>, which admits up to
-<code>half_open_max_calls</code> trial calls; that many consecutive successes close the breaker, and
-any failure reopens it with a fresh cool-down (so to reach the close-threshold every admitted
-trial must succeed — setting <code>half_open_max_calls</code> &gt; 1 means "admit up to N concurrent
-probes, close only after N of them all succeed"). A timed-out attempt
-(<code>CanoError::Timeout</code> from <code>attempt_timeout</code>) is recorded as a circuit failure
-just like any other error, so the breaker also protects against slow upstreams. The same
-<code>Arc&lt;CircuitBreaker&gt;</code> can be shared across multiple tasks (or across parallel split
-tasks) so a trip from any caller protects every caller — see
-<code>examples/circuit_breaker.rs</code> for an end-to-end demo.
+The breaker itself — its <code>Closed → Open { until } → HalfOpen</code> state machine,
+<code>CircuitPolicy</code>, the lazy <code>Open → HalfOpen</code> transition, and the manual
+<code>try_acquire</code> / <code>record_success</code> / <code>record_failure</code> RAII API — is
+documented in the <a href="../resilience/#circuit-breaker">Resilience guide</a>.
 </p>
-<h4>Recovery requires a fresh call</h4>
-<p>
-A breaker tripped <em>mid-loop</em> ends the retry loop immediately, even when remaining retry
-attempts could outlast the breaker's <code>reset_timeout</code>. Recovery requires a fresh
-<code>run_with_retries</code> call after the cool-down — the loop will not silently re-probe the
-breaker on its own. Retries against an open breaker would only add load to a dependency the
-breaker is already protecting.
-</p>
-<h4>Default integration vs. <code>Resource</code> registration</h4>
-<p>
-<code>TaskConfig::with_circuit_breaker(...)</code> is the recommended path: the retry loop both
-short-circuits on <code>CircuitOpen</code> and guarantees the breaker observes each call's outcome
-before/after the task body. <code>CircuitBreaker</code> also implements
-<code>Resource</code>, so it can be registered in <code>Resources</code> and looked up by key —
-but that pattern bypasses both the retry-loop short-circuit and the
-before-call/after-call ordering guarantee, since the caller drives <code>try_acquire</code> /
-<code>record_success</code> / <code>record_failure</code> manually. Reach for the
-<code>Resource</code> path only when one task body needs to share one breaker across several
-internal sub-calls.
-</p>
-<h4>Stale outcomes are ignored across state transitions</h4>
-<p>
-Permits issued by <code>try_acquire</code> are tagged with the breaker's current
-<em>epoch</em> — a counter bumped on every <code>Closed → Open</code>,
-<code>Open → HalfOpen</code>, <code>HalfOpen → Open</code>, and <code>HalfOpen → Closed</code>
-transition. When a permit is consumed (success, failure, or RAII drop) the breaker checks the
-permit's epoch against the current one and discards stale outcomes silently. This means a slow
-caller whose call straddles a state-machine session — for example, a request that started in
-<code>Closed</code> and only returned after the breaker tripped, cooled down, and entered a new
-<code>HalfOpen</code> probe — cannot accidentally close the breaker on the strength of a result
-that was never meant to be a probe.
-</p>
-<h4>Policy validation</h4>
-<p>
-<code>CircuitBreaker::new</code> panics on misconfigured policy at construction —
-<code>half_open_max_calls == 0</code> would deadlock the breaker permanently in
-<code>HalfOpen</code> (no probe could ever be admitted), and values approaching
-<code>u32::MAX</code> would either saturate the success counter before reaching the threshold or
-take effectively forever to close. Treat both as programmer errors caught before any task runs.
-</p>
-</div>
-</div>
 
 <h3>Real-World Example: API Client with Retry</h3>
 
@@ -515,92 +480,87 @@ impl AggregatorTask {
 </div>
 </section>
 
-<!-- Section: Task vs Node -->
+<!-- Section: The Task Family -->
 <hr class="section-divider">
-<h2 id="task-vs-node"><a href="#task-vs-node" class="anchor-link" aria-hidden="true">#</a>Task vs Node</h2>
+<h2 id="task-family"><a href="#task-family" class="anchor-link" aria-hidden="true">#</a>The Task Family: Four More Processing Models</h2>
 <p>
-Cano supports both <code>Task</code> and <code>Node</code> interfaces. Every Node automatically implements Task, so they can be mixed in the same workflow.
+Beyond the plain <code>Task</code>, Cano ships
+<strong>four more <code>Task</code>-derived processing models</strong>. Each is a specialised shape —
+they all ultimately dispatch as a <code>Task</code>, so you mix them freely in one workflow — and
+each has its own page with the full reference.
 </p>
 
-<div class="comparison-grid">
-<div class="comparison-col">
-<h3>Task</h3>
-<p><strong>Best for:</strong> Simple logic, quick prototyping, functional style.</p>
-<ul>
-<li>Single <code>run()</code> method</li>
-<li>Direct control over flow</li>
-<li>Supports <code>run_bare()</code> for resource-free tasks</li>
-</ul>
+<div class="card-stack">
+<div class="card">
+<h3><a href="../router-task/">RouterTask</a></h3>
+<p>Side-effect-free branching: a <code>route</code> method that picks the next state and writes
+nothing. Registered with <code>register_router</code>; leaves no checkpoint row.</p>
+<p><strong>Reach for it when:</strong> branching on a flag / data shape with no side effects.</p>
 </div>
-<div class="comparison-col">
-<h3>Node</h3>
-<p><strong>Best for:</strong> Complex operations, robust error handling, structured data flow.</p>
-<ul>
-<li>3 Phases: <code>prep</code>, <code>exec</code>, <code>post</code></li>
-<li>Full-pipeline retry: <code>prep</code> &rarr; <code>exec</code> &rarr; <code>post</code> restarts on failure</li>
-<li>Separation of concerns (IO vs Compute)</li>
-</ul>
+<div class="card">
+<h3><a href="../poll-task/">PollTask</a></h3>
+<p>"Wait-until" loops: a <code>poll</code> method that returns <code>Ready</code> or
+<code>Pending { delay_ms }</code>, looping with adaptive backoff — no blocked thread.</p>
+<p><strong>Reach for it when:</strong> waiting on an external job, queue, or flag flip.</p>
 </div>
+<div class="card">
+<h3><a href="../batch-task/">BatchTask</a></h3>
+<p>Fan out over data: <code>load → process_item (×N, bounded concurrency, per-item retry) → finish</code>,
+re-joined in one state.</p>
+<p><strong>Reach for it when:</strong> mapping a sub-operation over a collection with a single re-join.</p>
 </div>
-
-<div class="code-block">
-<span class="code-block-label"><span class="label-icon">&#128260;</span> Mixing Tasks and Nodes</span>
-
-```rust
-// Mixing Tasks and Nodes in one workflow
-let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
-    .register(State::Init, SimpleTask)            // Task
-    .register(State::Process, ComplexNode::new()) // Node
-    .register(State::Finish, FinishTask);         // Another Task
-
-```
+<div class="card">
+<h3><a href="../stepped-task/">SteppedTask</a></h3>
+<p>Resumable iterative work: a <code>step(cursor)</code> method whose cursor is checkpointed each
+step, so a crash resumes mid-loop. Registered with <code>register_stepped</code>.</p>
+<p><strong>Reach for it when:</strong> long page-by-page scans, chunked migrations — crash-resume finer than per-state.</p>
+</div>
 </div>
 
-<!-- Section: When to Use -->
+<!-- Section: Choosing a Processing Model -->
 <hr class="section-divider">
-<h2 id="when-to-use"><a href="#when-to-use" class="anchor-link" aria-hidden="true">#</a>When to Use Tasks vs Nodes?</h2>
-<p>Choose the right abstraction for your use case:</p>
+<h2 id="choosing"><a href="#choosing" class="anchor-link" aria-hidden="true">#</a>Choosing a Processing Model</h2>
+<p>
+All five models dispatch as a <code>Task</code>, so you can mix them in one workflow. Start from
+<code>Task</code> and move to a specialised model only when your work has its shape:
+</p>
 
 <table class="styled-table">
 <thead>
 <tr>
-<th>Scenario</th>
-<th>Use Task</th>
-<th>Use Node</th>
+<th>Model</th>
+<th>Reach for it when…</th>
+<th>Register with</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td>Data transformation</td>
-<td>Simple transform</td>
-<td>Complex with validation</td>
+<td><strong><code>Task</code></strong></td>
+<td>The default — a single <code>run</code> that does the work and picks the next state. Everything else is a specialisation of this.</td>
+<td><code>register</code></td>
 </tr>
 <tr>
-<td>API calls</td>
-<td>Simple requests</td>
-<td>With auth &amp; retry logic</td>
+<td><a href="../router-task/"><strong><code>RouterTask</code></strong></a></td>
+<td>You're only <em>deciding</em> the next state — branching on a flag or data shape — with no side effects and no recovery footprint.</td>
+<td><code>register_router</code></td>
 </tr>
 <tr>
-<td>Validation</td>
-<td>Quick checks</td>
-<td>Usually overkill</td>
+<td><a href="../poll-task/"><strong><code>PollTask</code></strong></a></td>
+<td>You need to <em>wait until</em> something is ready — an external job, a queue, a flag flip — without blocking a thread.</td>
+<td><code>register</code></td>
 </tr>
 <tr>
-<td>File operations</td>
-<td>For simple cases</td>
-<td>Load, process, save pattern</td>
+<td><a href="../batch-task/"><strong><code>BatchTask</code></strong></a></td>
+<td>You're doing the <em>same sub-operation over a collection</em>, with bounded concurrency and per-item retry, re-joined in one state.</td>
+<td><code>register</code></td>
 </tr>
 <tr>
-<td>Prototyping</td>
-<td>Fastest iteration</td>
-<td>More structure</td>
-</tr>
-<tr>
-<td>Production systems</td>
-<td>When simple is sufficient</td>
-<td>For robust operations</td>
+<td><a href="../stepped-task/"><strong><code>SteppedTask</code></strong></a></td>
+<td>You have a <em>long iterative job</em> (page-by-page scan, chunked migration) you want to crash-resume mid-loop, finer than per-state.</td>
+<td><code>register_stepped</code></td>
 </tr>
 </tbody>
 </table>
+
 </div>
 

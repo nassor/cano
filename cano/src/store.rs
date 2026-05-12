@@ -24,7 +24,7 @@
 //!
 //! ### Optional Helper, Not a Requirement
 //!
-//! These store helpers are optional conveniences. Your pipeline nodes can use:
+//! These store helpers are optional conveniences. Your pipeline tasks can use:
 //! - The provided `MemoryStore` for simple in-memory sharing
 //! - Any custom resource type that exposes the storage API your workflow needs
 //! - Any other storage solution that fits your architecture
@@ -35,12 +35,10 @@
 //! through generic methods. Store any type and retrieve it safely - the system
 //! handles type mismatches gracefully.
 //!
-//! ## 🏗️ Integration with Processing Nodes
+//! ## 🏗️ Integration with Tasks
 //!
-//! In pipeline nodes, use the store in different phases:
-//! - `prep()`: Read input data from previous stages
-//! - `exec()`: Process data (store is available but not required)
-//! - `post()`: Store results for downstream stages
+//! In a `Task::run`, use the store to read inputs left by earlier states and
+//! write results for downstream states.
 //!
 //! ## 🔧 Available Store Options
 //!
@@ -52,7 +50,7 @@
 //! ### Custom Storage Resources
 //!
 //! Register specialized storage backends like databases, file systems, or
-//! distributed caches directly in [`Resources`](crate::Resources). Tasks and nodes
+//! distributed caches directly in [`Resources`](crate::Resources). Tasks
 //! retrieve them by concrete type and call the API exposed by that resource.
 //!
 //! ## 💡 Best Practices

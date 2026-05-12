@@ -19,21 +19,6 @@
 //! - **Element-wise Operations**: Vectorized addition, scaling, and statistical calculations
 //! - **Memory Access Patterns**: Aligned memory access for optimal SIMD performance
 //!
-//! ## Key Features
-//!
-//! - Uses Cano's three-phase node execution (prep, exec, post)
-//! - Inter-node communication through shared MemoryStore
-//! - State-driven workflow orchestration with typed transitions
-//! - Performance monitoring with execution timing
-//! - Graceful handling of partial SIMD vectors (when data size isn't divisible by 8)
-//!
-//! ## Performance Benefits
-//!
-//! The SIMD operations provide significant performance improvements over scalar operations:
-//! - Matrix multiplication: ~8x theoretical speedup for float32 operations
-//! - Element-wise operations: Nearly linear scaling with vector width
-//! - Statistical calculations: Reduced loop iterations and improved cache utilization
-//!
 //! ## Usage
 //!
 //! ```bash
@@ -196,7 +181,7 @@ enum PipelineState {
     Error,
 }
 
-/// Data generation node - creates random matrices
+/// Data generation task - creates random matrices
 #[derive(Clone)]
 struct MatrixGenerator {
     size: usize,
@@ -209,25 +194,18 @@ impl MatrixGenerator {
     }
 }
 
-#[cano::node]
-impl Node<PipelineState> for MatrixGenerator {
-    type PrepResult = ();
-    type ExecResult = Vec<SimdMatrix>;
-
+#[cano::task]
+impl Task<PipelineState> for MatrixGenerator {
     fn config(&self) -> TaskConfig {
         TaskConfig::minimal()
     }
 
-    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<PipelineState>, CanoError> {
         println!(
-            "🔢 Preparing to generate {} {}x{} matrices...",
+            "Preparing to generate {} {}x{} matrices...",
             self.count, self.size, self.size
         );
-        Ok(())
-    }
-
-    async fn exec(&self, _prep_res: Self::PrepResult) -> Self::ExecResult {
-        println!("🔢 Generating matrices...");
+        println!("Generating matrices...");
 
         let mut matrices = Vec::new();
 
@@ -247,49 +225,35 @@ impl Node<PipelineState> for MatrixGenerator {
             }
         }
 
-        matrices
-    }
-
-    async fn post(
-        &self,
-        res: &Resources,
-        exec_res: Self::ExecResult,
-    ) -> Result<PipelineState, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
-        store.put("matrices", exec_res)?;
-        println!("✅ Matrix generation complete!");
-        Ok(PipelineState::Multiply)
+        store.put("matrices", matrices)?;
+        println!("Matrix generation complete!");
+        Ok(TaskResult::Single(PipelineState::Multiply))
     }
 }
 
-/// Matrix multiplication node using SIMD
+/// Matrix multiplication task using SIMD
 #[derive(Clone)]
 struct SimdMatrixMultiplier;
 
-#[cano::node]
-impl Node<PipelineState> for SimdMatrixMultiplier {
-    type PrepResult = Vec<SimdMatrix>;
-    type ExecResult = Vec<SimdMatrix>;
-
+#[cano::task]
+impl Task<PipelineState> for SimdMatrixMultiplier {
     fn config(&self) -> TaskConfig {
         TaskConfig::minimal()
     }
 
-    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<PipelineState>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
-        println!("🧮 Loading matrices for SIMD multiplication...");
+        println!("Loading matrices for SIMD multiplication...");
         let matrices: Vec<SimdMatrix> = store.get("matrices")?;
-        Ok(matrices)
-    }
 
-    async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
-        println!("🧮 Performing SIMD matrix multiplications...");
+        println!("Performing SIMD matrix multiplications...");
         let start = Instant::now();
 
         let mut results = Vec::new();
 
         // Multiply consecutive pairs of matrices
-        for chunk in prep_res.chunks(2) {
+        for chunk in matrices.chunks(2) {
             if chunk.len() == 2 {
                 let result = chunk[0].multiply_simd(&chunk[1]);
                 results.push(result);
@@ -298,26 +262,17 @@ impl Node<PipelineState> for SimdMatrixMultiplier {
 
         let duration = start.elapsed();
         println!(
-            "✅ Matrix multiplications complete in {:?} (SIMD accelerated)",
+            "Matrix multiplications complete in {:?} (SIMD accelerated)",
             duration
         );
         println!("  Processed {} matrix pairs", results.len());
 
-        results
-    }
-
-    async fn post(
-        &self,
-        res: &Resources,
-        exec_res: Self::ExecResult,
-    ) -> Result<PipelineState, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
-        store.put("multiplied_matrices", exec_res)?;
-        Ok(PipelineState::Transform)
+        store.put("multiplied_matrices", results)?;
+        Ok(TaskResult::Single(PipelineState::Transform))
     }
 }
 
-/// Matrix transformation node - applies scaling and addition using SIMD
+/// Matrix transformation task - applies scaling and addition using SIMD
 #[derive(Clone)]
 struct SimdMatrixTransformer {
     scale_factor: f32,
@@ -329,32 +284,26 @@ impl SimdMatrixTransformer {
     }
 }
 
-#[cano::node]
-impl Node<PipelineState> for SimdMatrixTransformer {
-    type PrepResult = Vec<SimdMatrix>;
-    type ExecResult = Vec<SimdMatrix>;
-
+#[cano::task]
+impl Task<PipelineState> for SimdMatrixTransformer {
     fn config(&self) -> TaskConfig {
         TaskConfig::minimal()
     }
 
-    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<PipelineState>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
-        println!("🔄 Loading matrices for SIMD transformations...");
+        println!("Loading matrices for SIMD transformations...");
         let matrices: Vec<SimdMatrix> = store.get("multiplied_matrices")?;
-        Ok(matrices)
-    }
 
-    async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
         println!(
-            "🔄 Applying SIMD transformations (scale factor: {})...",
+            "Applying SIMD transformations (scale factor: {})...",
             self.scale_factor
         );
         let start = Instant::now();
 
         let mut results: Vec<SimdMatrix> = Vec::new();
 
-        for (i, matrix) in prep_res.iter().enumerate() {
+        for (i, matrix) in matrices.iter().enumerate() {
             // Scale the matrix using SIMD
             let scaled = matrix.scale_simd(self.scale_factor);
 
@@ -370,52 +319,37 @@ impl Node<PipelineState> for SimdMatrixTransformer {
 
         let duration = start.elapsed();
         println!(
-            "✅ Matrix transformations complete in {:?} (SIMD accelerated)",
+            "Matrix transformations complete in {:?} (SIMD accelerated)",
             duration
         );
-        println!("  Processed {} matrices", prep_res.len());
+        println!("  Processed {} matrices", matrices.len());
 
-        results
-    }
-
-    async fn post(
-        &self,
-        res: &Resources,
-        exec_res: Self::ExecResult,
-    ) -> Result<PipelineState, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
-        store.put("transformed_matrices", exec_res)?;
-        Ok(PipelineState::Statistics)
+        store.put("transformed_matrices", results)?;
+        Ok(TaskResult::Single(PipelineState::Statistics))
     }
 }
 
-/// Statistical analysis node using SIMD for vector operations
+/// Statistical analysis task using SIMD for vector operations
 #[derive(Clone)]
 struct SimdStatisticsCalculator;
 
-#[cano::node]
-impl Node<PipelineState> for SimdStatisticsCalculator {
-    type PrepResult = Vec<SimdMatrix>;
-    type ExecResult = Vec<(f32, f32, f32)>; // (sum, mean, variance)
-
+#[cano::task]
+impl Task<PipelineState> for SimdStatisticsCalculator {
     fn config(&self) -> TaskConfig {
         TaskConfig::minimal()
     }
 
-    async fn prep(&self, res: &Resources) -> Result<Self::PrepResult, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<PipelineState>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
-        println!("📊 Loading matrices for statistics calculation...");
+        println!("Loading matrices for statistics calculation...");
         let matrices: Vec<SimdMatrix> = store.get("transformed_matrices")?;
-        Ok(matrices)
-    }
 
-    async fn exec(&self, prep_res: Self::PrepResult) -> Self::ExecResult {
-        println!("📊 Calculating matrix statistics using SIMD...");
+        println!("Calculating matrix statistics using SIMD...");
         let start = Instant::now();
 
-        let mut results = Vec::new();
+        let mut results: Vec<(f32, f32, f32)> = Vec::new();
 
-        for matrix in prep_res {
+        for matrix in &matrices {
             // Calculate sum using SIMD
             let mut sum = f32x8::ZERO;
             let data_len = matrix.data.len();
@@ -458,22 +392,13 @@ impl Node<PipelineState> for SimdStatisticsCalculator {
 
         let duration = start.elapsed();
         println!(
-            "✅ Statistics calculation complete in {:?} (SIMD accelerated)",
+            "Statistics calculation complete in {:?} (SIMD accelerated)",
             duration
         );
 
-        results
-    }
+        store.put("statistics", results.clone())?;
 
-    async fn post(
-        &self,
-        res: &Resources,
-        exec_res: Self::ExecResult,
-    ) -> Result<PipelineState, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
-        store.put("statistics", exec_res.clone())?;
-
-        for (i, (sum, mean, variance)) in exec_res.iter().enumerate() {
+        for (i, (sum, mean, variance)) in results.iter().enumerate() {
             println!(
                 "  Matrix {}: sum={:.2}, mean={:.2}, variance={:.2}",
                 i + 1,
@@ -483,18 +408,18 @@ impl Node<PipelineState> for SimdStatisticsCalculator {
             );
         }
 
-        Ok(PipelineState::Complete)
+        Ok(TaskResult::Single(PipelineState::Complete))
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("🚀 Starting SIMD Matrix Processing Pipeline");
+    println!("Starting SIMD Matrix Processing Pipeline");
     println!("This example demonstrates SIMD-accelerated mathematical operations");
     println!("using the 'wide' crate in a Cano workflow pipeline.\n");
 
     // Quick SIMD vs Scalar performance comparison
-    println!("🏁 Quick Performance Comparison (SIMD vs Scalar):");
+    println!("Quick Performance Comparison (SIMD vs Scalar):");
     let test_matrix_a = {
         let mut data = Vec::with_capacity(16 * 16);
         for _ in 0..(16 * 16) {
@@ -524,16 +449,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  SIMD 16x16 matrix multiplication:   {simd_duration:?}");
     if scalar_duration > simd_duration {
         let speedup = scalar_duration.as_nanos() as f64 / simd_duration.as_nanos() as f64;
-        println!("  🚀 SIMD speedup: {speedup:.2}x faster!\n");
+        println!("  SIMD speedup: {speedup:.2}x faster!\n");
     } else {
-        println!("  📊 Results may vary based on CPU architecture\n");
+        println!("  Results may vary based on CPU architecture\n");
     }
 
     let start_time = Instant::now();
 
     let store = MemoryStore::default();
 
-    // Create the workflow with SIMD-accelerated nodes using new API
+    // Create the workflow with SIMD-accelerated tasks
     let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(PipelineState::Generate, MatrixGenerator::new(64, 20)) // 64x64 matrices, 20 of them
         .register(PipelineState::Multiply, SimdMatrixMultiplier)
@@ -541,31 +466,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .register(PipelineState::Statistics, SimdStatisticsCalculator)
         .add_exit_states(vec![PipelineState::Complete, PipelineState::Error]);
 
-    println!("🔧 Pipeline configured with nodes");
-    println!("Pipeline: Generate → Multiply → Transform → Statistics → Complete\n");
+    println!("Pipeline configured with tasks");
+    println!("Pipeline: Generate -> Multiply -> Transform -> Statistics -> Complete\n");
 
     // Execute the workflow
     let _final_state = workflow.orchestrate(PipelineState::Generate).await?;
 
     let total_duration = start_time.elapsed();
-    println!("\n🎉 SIMD Matrix Processing Pipeline completed!");
+    println!("\nSIMD Matrix Processing Pipeline completed!");
     println!("Total execution time: {total_duration:?}");
 
     if let Ok(stats) = store.get::<Vec<(f32, f32, f32)>>("statistics") {
         println!(
-            "📈 Final results: {} statistical summaries generated",
+            "Final results: {} statistical summaries generated",
             stats.len()
         );
     }
 
-    println!("\n💡 This example showcased:");
-    println!("  • Data generation in the first pipeline stage");
-    println!("  • SIMD-accelerated matrix multiplication");
-    println!("  • SIMD-accelerated element-wise operations");
-    println!("  • SIMD-accelerated statistical calculations");
-    println!("  • Processing 8 float32 values simultaneously using f32x8");
-    println!("  • Three-phase node execution (prep, exec, post)");
-    println!("  • Inter-node communication through shared store");
+    println!("\nThis example showcased:");
+    println!("  Data generation in the first pipeline stage");
+    println!("  SIMD-accelerated matrix multiplication");
+    println!("  SIMD-accelerated element-wise operations");
+    println!("  SIMD-accelerated statistical calculations");
+    println!("  Processing 8 float32 values simultaneously using f32x8");
+    println!("  Inter-task communication through shared store");
 
     Ok(())
 }

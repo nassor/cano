@@ -32,16 +32,43 @@
             <img src="{{ get_url(path='logo.png') }}" alt="">
             Cano
         </a>
-        <ul class="nav-links">
+        <ul class="nav-links nav-top">
             <li><a href="{{ get_url(path='@/_index.md') }}">Home</a></li>
-            <li><a href="{{ get_url(path='@/task.md') }}">Tasks</a></li>
-            <li><a href="{{ get_url(path='@/nodes.md') }}">Nodes</a></li>
-            <li><a href="{{ get_url(path='@/workflows.md') }}">Workflows</a></li>
-            <li><a href="{{ get_url(path='@/resources.md') }}">Resources</a></li>
-            <li><a href="{{ get_url(path='@/store.md') }}">Store</a></li>
-            <li><a href="{{ get_url(path='@/scheduler.md') }}">Scheduler</a></li>
-            <li><a href="{{ get_url(path='@/tracing.md') }}">Tracing</a></li>
         </ul>
+        <details class="nav-section" id="nav-concepts" open>
+            <summary class="nav-section-label">Concepts</summary>
+            <ul class="nav-links">
+                <li><a href="{{ get_url(path='@/workflows.md') }}">Workflows</a></li>
+                <li><a href="{{ get_url(path='@/resources.md') }}">Resources</a></li>
+                <li>
+                    <a href="{{ get_url(path='@/task.md') }}">Tasks</a>
+                    <ul class="nav-links nav-sublinks">
+                        <li><a href="{{ get_url(path='@/router-task.md') }}">RouterTask</a></li>
+                        <li><a href="{{ get_url(path='@/poll-task.md') }}">PollTask</a></li>
+                        <li><a href="{{ get_url(path='@/batch-task.md') }}">BatchTask</a></li>
+                        <li><a href="{{ get_url(path='@/stepped-task.md') }}">SteppedTask</a></li>
+                    </ul>
+                </li>
+                <li><a href="{{ get_url(path='@/store.md') }}">MemoryStore</a></li>
+                <li><a href="{{ get_url(path='@/split-join.md') }}">Split &amp; Join</a></li>
+                <li><a href="{{ get_url(path='@/scheduler.md') }}">Scheduler</a></li>
+            </ul>
+        </details>
+        <details class="nav-section" id="nav-resilience">
+            <summary class="nav-section-label">Resilience</summary>
+            <ul class="nav-links">
+                <li><a href="{{ get_url(path='@/resilience.md') }}">Resilience</a></li>
+                <li><a href="{{ get_url(path='@/recovery.md') }}">Recovery</a></li>
+                <li><a href="{{ get_url(path='@/saga.md') }}">Saga</a></li>
+            </ul>
+        </details>
+        <details class="nav-section" id="nav-observability">
+            <summary class="nav-section-label">Observability</summary>
+            <ul class="nav-links">
+                <li><a href="{{ get_url(path='@/tracing.md') }}">Tracing</a></li>
+                <li><a href="{{ get_url(path='@/observers.md') }}">Observers</a></li>
+            </ul>
+        </details>
         <div class="sidebar-footer">
             <span class="version-badge">v{{ config.extra.version }}</span>
             <div class="sidebar-links">

@@ -28,11 +28,8 @@ struct FlakyJob {
     fail_count: u32,
 }
 
-#[node(state = FlowState)]
+#[task(state = FlowState)]
 impl FlakyJob {
-    type PrepResult = ();
-    type ExecResult = bool;
-
     fn config(&self) -> TaskConfig {
         // Disable per-task retries so the scheduler-level backoff is the only
         // retry layer in play. Otherwise each scheduled dispatch would already
@@ -40,11 +37,7 @@ impl FlakyJob {
         TaskConfig::minimal()
     }
 
-    async fn prep(&self, _res: &Resources) -> Result<Self::PrepResult, CanoError> {
-        Ok(())
-    }
-
-    async fn exec(&self, _prep: Self::PrepResult) -> Self::ExecResult {
+    async fn run_bare(&self) -> Result<TaskResult<FlowState>, CanoError> {
         let n = self.runs.fetch_add(1, Ordering::SeqCst) + 1;
         let succeeded = n > self.fail_count;
         println!(
@@ -52,21 +45,17 @@ impl FlakyJob {
             chrono::Utc::now().format("%H:%M:%S%.3f"),
             if succeeded { "OK" } else { "FAIL" }
         );
-        succeeded
-    }
-
-    async fn post(&self, _res: &Resources, ok: Self::ExecResult) -> Result<FlowState, CanoError> {
-        if ok {
-            Ok(FlowState::Done)
+        if succeeded {
+            Ok(TaskResult::Single(FlowState::Done))
         } else {
-            Err(CanoError::node_execution("flaky job failure"))
+            Err(CanoError::task_execution("flaky job failure"))
         }
     }
 }
 
 #[tokio::main]
 async fn main() -> CanoResult<()> {
-    println!("⏰ Scheduler Backoff Example");
+    println!("Scheduler Backoff Example");
     println!("============================");
 
     let mut scheduler: Scheduler<FlowState> = Scheduler::new();

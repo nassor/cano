@@ -1,4 +1,6 @@
-//! Shared attribute-arg parser for `#[node(...)]` / `#[task(...)]`.
+//! Shared attribute-arg parser for `#[task(...)]` / `#[compensatable_task(...)]`
+//! / `#[router_task(...)]` / `#[poll_task(...)]` / `#[batch_task(...)]` /
+//! `#[stepped_task(...)]`.
 //!
 //! Recognised keys:
 //! - `state = T` — required when the macro is applied to an inherent `impl X { ... }`
@@ -35,4 +37,19 @@ impl AttrArgs {
         syn::parse::Parser::parse2(parser, attr)?;
         Ok(out)
     }
+}
+
+/// Fold a non-empty `Vec<syn::Error>` into a single `syn::Error` by chaining
+/// all errors with [`syn::Error::combine`].
+///
+/// # Panics
+///
+/// Panics if `errors` is empty.
+pub(crate) fn combine_errors(mut errors: Vec<syn::Error>) -> syn::Error {
+    let mut iter = errors.drain(..);
+    let mut acc = iter.next().expect("combine_errors called with empty vec");
+    for e in iter {
+        acc.combine(e);
+    }
+    acc
 }

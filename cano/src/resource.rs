@@ -90,7 +90,7 @@
 //!     store: Arc<MemoryStore>,
 //! }
 //!
-//! // ... inside a Node::prep:
+//! // ... inside a Task::run:
 //! let PrepDeps { settings, store } = PrepDeps::from_resources(res)?;
 //! ```
 //!
@@ -149,6 +149,48 @@ use std::ops::Range;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
+// Health status
+// ---------------------------------------------------------------------------
+
+/// Health of a single [`Resource`], as reported by [`Resource::health`].
+///
+/// Returned per-resource by [`Resources::check_all_health`] and folded into a
+/// single worst-case value by [`Resources::aggregate_health`]. Health checks
+/// are *opt-in observability* — the engine never calls [`Resource::health`]
+/// during normal workflow execution.
+///
+/// This enum is `#[non_exhaustive]`; match it with a wildcard arm.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum HealthStatus {
+    /// The resource is fully operational.
+    Healthy,
+    /// The resource is still usable but impaired (e.g. a degraded replica,
+    /// partial connectivity, elevated latency). The string explains why.
+    Degraded(String),
+    /// The resource is not usable. The string explains why.
+    Unhealthy(String),
+}
+
+impl HealthStatus {
+    /// Returns `true` only for [`HealthStatus::Healthy`].
+    #[must_use]
+    pub fn is_healthy(&self) -> bool {
+        matches!(self, HealthStatus::Healthy)
+    }
+
+    /// Severity rank used to fold many statuses into the worst one:
+    /// `Healthy` (0) < `Degraded` (1) < `Unhealthy` (2).
+    fn severity(&self) -> u8 {
+        match self {
+            HealthStatus::Healthy => 0,
+            HealthStatus::Degraded(_) => 1,
+            HealthStatus::Unhealthy(_) => 2,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Resource trait
 // ---------------------------------------------------------------------------
 
@@ -200,6 +242,15 @@ pub trait Resource: Send + Sync + 'static {
     async fn teardown(&self) -> Result<(), CanoError> {
         Ok(())
     }
+
+    /// Report the current health of this resource.
+    ///
+    /// Invoked only by [`Resources::check_all_health`] and
+    /// [`Resources::aggregate_health`] — never automatically during workflow
+    /// execution. The default implementation returns [`HealthStatus::Healthy`].
+    async fn health(&self) -> HealthStatus {
+        HealthStatus::Healthy
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -218,8 +269,12 @@ pub struct Resources<TResourceKey = Cow<'static, str>>
 where
     TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
-    /// Type-erased resource values, keyed for fast lookup.
-    data: HashMap<TResourceKey, Box<dyn Any + Send + Sync>>,
+    /// Type-erased resource values, keyed for fast lookup. The `usize` is the
+    /// resource's index into [`lifecycle`](Self::lifecycle); [`check_all_health`]
+    /// uses it to recover the `dyn Resource` handle for a keyed health report.
+    ///
+    /// [`check_all_health`]: Self::check_all_health
+    data: HashMap<TResourceKey, (Box<dyn Any + Send + Sync>, usize)>,
     /// Ordered list of resources for FIFO setup / LIFO teardown.
     lifecycle: Vec<Arc<dyn Resource>>,
 }
@@ -318,7 +373,8 @@ impl<TResourceKey: Hash + Eq + Send + Sync + 'static> Resources<TResourceKey> {
             !self.data.contains_key(&key),
             "duplicate resource key inserted into Resources; use try_insert to handle duplicates as Result"
         );
-        self.data.insert(key, Box::new(Arc::clone(&arc)));
+        let idx = self.lifecycle.len();
+        self.data.insert(key, (Box::new(Arc::clone(&arc)), idx));
         self.lifecycle.push(arc as Arc<dyn Resource>);
         self
     }
@@ -361,7 +417,8 @@ impl<TResourceKey: Hash + Eq + Send + Sync + 'static> Resources<TResourceKey> {
                 "duplicate resource key inserted into Resources",
             ));
         }
-        self.data.insert(key, Box::new(Arc::clone(&arc)));
+        let idx = self.lifecycle.len();
+        self.data.insert(key, (Box::new(Arc::clone(&arc)), idx));
         self.lifecycle.push(arc as Arc<dyn Resource>);
         Ok(self)
     }
@@ -392,7 +449,7 @@ impl<TResourceKey: Hash + Eq + Send + Sync + 'static> Resources<TResourceKey> {
         TResourceKey: std::borrow::Borrow<Q>,
         Q: Hash + Eq + ?Sized,
     {
-        let boxed = self.data.get(key).ok_or_else(|| {
+        let (boxed, _idx) = self.data.get(key).ok_or_else(|| {
             CanoError::ResourceNotFound(format!(
                 "no resource found for the given key (requested type: {})",
                 std::any::type_name::<R>(),
@@ -453,6 +510,44 @@ impl<TResourceKey: Hash + Eq + Send + Sync + 'static> Resources<TResourceKey> {
     /// needed. Public callers should use [`teardown_all`](Self::teardown_all).
     pub(crate) fn lifecycle_len(&self) -> usize {
         self.lifecycle.len()
+    }
+
+    /// Call [`Resource::health`] on every registered resource and return the
+    /// results keyed by the same key passed to [`insert`](Self::insert).
+    ///
+    /// Checks run sequentially (one `await` at a time), so a slow `health`
+    /// implementation delays the rest. Returns an empty map when no resources
+    /// are registered.
+    ///
+    /// Requires `TResourceKey: Clone` because the returned map owns a copy of
+    /// each key. Use [`aggregate_health`](Self::aggregate_health) when you only
+    /// need the overall worst status and don't want that bound.
+    pub async fn check_all_health(&self) -> HashMap<TResourceKey, HealthStatus>
+    where
+        TResourceKey: Clone,
+    {
+        let mut out = HashMap::with_capacity(self.data.len());
+        for (key, (_, idx)) in &self.data {
+            let status = self.lifecycle[*idx].health().await;
+            out.insert(key.clone(), status);
+        }
+        out
+    }
+
+    /// Call [`Resource::health`] on every registered resource and fold the
+    /// results into the single worst status (`Healthy` < `Degraded` < `Unhealthy`).
+    ///
+    /// Checks run sequentially in lifecycle (insertion) order. Returns
+    /// [`HealthStatus::Healthy`] when no resources are registered.
+    pub async fn aggregate_health(&self) -> HealthStatus {
+        let mut worst = HealthStatus::Healthy;
+        for resource in &self.lifecycle {
+            let status = resource.health().await;
+            if status.severity() > worst.severity() {
+                worst = status;
+            }
+        }
+        worst
     }
 }
 
@@ -888,5 +983,87 @@ mod tests {
             .expect("fresh key must insert");
         assert!(resources.get::<TypeA, str>("a").is_ok());
         assert!(resources.get::<TypeB, str>("b").is_ok());
+    }
+
+    // ------------------------------------------------------------------
+    // 14. health probes: default Healthy, custom statuses, aggregation
+    // ------------------------------------------------------------------
+
+    struct DegradedResource;
+    #[resource]
+    impl Resource for DegradedResource {
+        async fn health(&self) -> HealthStatus {
+            HealthStatus::Degraded("replica lag".to_string())
+        }
+    }
+
+    struct UnhealthyResource;
+    #[resource]
+    impl Resource for UnhealthyResource {
+        async fn health(&self) -> HealthStatus {
+            HealthStatus::Unhealthy("connection refused".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_default_health_is_healthy() {
+        let resources = Resources::<String>::new().insert("a".to_string(), TypeA);
+        let health = resources.check_all_health().await;
+        assert_eq!(health.get("a"), Some(&HealthStatus::Healthy));
+        assert_eq!(resources.aggregate_health().await, HealthStatus::Healthy);
+    }
+
+    #[tokio::test]
+    async fn test_check_all_health_reports_per_resource_status() {
+        let resources = Resources::<String>::new()
+            .insert("ok".to_string(), TypeA)
+            .insert("degraded".to_string(), DegradedResource)
+            .insert("down".to_string(), UnhealthyResource);
+
+        let health = resources.check_all_health().await;
+        assert_eq!(health.len(), 3);
+        assert_eq!(health.get("ok"), Some(&HealthStatus::Healthy));
+        assert_eq!(
+            health.get("degraded"),
+            Some(&HealthStatus::Degraded("replica lag".to_string()))
+        );
+        assert_eq!(
+            health.get("down"),
+            Some(&HealthStatus::Unhealthy("connection refused".to_string()))
+        );
+    }
+
+    #[tokio::test]
+    async fn test_aggregate_health_returns_worst_status() {
+        let degraded_only = Resources::<String>::new()
+            .insert("ok".to_string(), TypeA)
+            .insert("degraded".to_string(), DegradedResource);
+        assert_eq!(
+            degraded_only.aggregate_health().await,
+            HealthStatus::Degraded("replica lag".to_string())
+        );
+
+        let with_unhealthy = Resources::<String>::new()
+            .insert("ok".to_string(), TypeA)
+            .insert("degraded".to_string(), DegradedResource)
+            .insert("down".to_string(), UnhealthyResource);
+        assert_eq!(
+            with_unhealthy.aggregate_health().await,
+            HealthStatus::Unhealthy("connection refused".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn test_health_on_empty_resources() {
+        let resources: Resources<String> = Resources::new();
+        assert!(resources.check_all_health().await.is_empty());
+        assert_eq!(resources.aggregate_health().await, HealthStatus::Healthy);
+    }
+
+    #[test]
+    fn test_health_status_is_healthy_helper() {
+        assert!(HealthStatus::Healthy.is_healthy());
+        assert!(!HealthStatus::Degraded("x".to_string()).is_healthy());
+        assert!(!HealthStatus::Unhealthy("x".to_string()).is_healthy());
     }
 }

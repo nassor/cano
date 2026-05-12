@@ -1,15 +1,15 @@
 +++
-title = "Store"
-description = "Learn how to use the Store in Cano - thread-safe shared state for pipeline data passing between workflow stages."
+title = "MemoryStore"
+description = "MemoryStore in Cano - the default thread-safe, in-memory shared state for passing data between workflow stages."
 template = "page.html"
 +++
 
 <div class="content-wrapper">
-<h1>Store</h1>
-<p class="subtitle">Thread-safe shared state for pipeline data passing between workflow stages.</p>
+<h1>MemoryStore</h1>
+<p class="subtitle">The default in-memory shared state for passing data between workflow stages.</p>
 
 <p>
-The store is the shared data layer that connects workflow stages. Tasks and nodes write
+The store is the shared data layer that connects workflow stages. Tasks write
 values during their execution and read values produced by upstream stages. The default
 implementation, <code>MemoryStore</code>, is an <code>Arc&lt;RwLock&lt;HashMap&gt;&gt;</code>
 that is safe to clone and share across async tasks. Custom backends can be registered
@@ -18,7 +18,7 @@ as typed <code>Resource</code> values and retrieved by concrete type.
 
 <p>
 <code>MemoryStore</code> is registered inside a <a href="../resources/"><code>Resources</code></a>
-dictionary and retrieved in tasks and nodes with
+dictionary and retrieved in tasks with
 <code>res.get::&lt;MemoryStore, _&gt;("store")?</code>. This makes the store one
 of many named dependencies a workflow can carry, alongside database pools, HTTP clients,
 configuration, or any other type that implements the <code>Resource</code> trait. See
@@ -44,6 +44,8 @@ the full <code>insert</code> / <code>get</code> API.
 <hr class="section-divider">
 <h2 id="thread-safety"><a href="#thread-safety" class="anchor-link" aria-hidden="true">#</a>Thread Safety Model</h2>
 
+<div class="diagram-frame">
+<p class="diagram-label">One shared map, many readers and writers</p>
 <div class="mermaid">
 graph LR
 S["Arc&lt;RwLock&lt;HashMap&gt;&gt;"]
@@ -51,6 +53,7 @@ S --> R1["Task A (read)"]
 S --> R2["Task B (read)"]
 S --> W1["Task C (write)"]
 style S fill:#1e293b,stroke:#38bdf8
+</div>
 </div>
 
 <p>
@@ -309,6 +312,11 @@ async fn main() -> Result<(), CanoError> {
 ```
 </div>
 
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example workflow_stack_store</code> — uses a <code>MemoryStore</code>
+as a shared stack passed between workflow stages.</p>
+</div>
+
 <!-- Section: Custom Store Backends -->
 <hr class="section-divider">
 <h2 id="custom-backends"><a href="#custom-backends" class="anchor-link" aria-hidden="true">#</a>Custom Store Resources</h2>
@@ -316,7 +324,7 @@ async fn main() -> Result<(), CanoError> {
 <p>
 For custom storage, define a concrete type with the API your workflow needs and
 implement <code>Resource</code> for it. Register that type in <code>Resources</code>, then retrieve it by
-concrete type inside tasks or nodes. This keeps storage dependencies explicit and avoids
+concrete type inside tasks. This keeps storage dependencies explicit and avoids
 an unnecessary storage trait layer now that <code>Resources</code> provides typed dependency lookup.
 </p>
 
@@ -422,6 +430,13 @@ resource type that owns an object-safe client or repository trait.
 </p>
 </div>
 
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example store_custom_backend</code> — a small
+<code>NamespacedStore</code> wrapping a <code>MemoryStore</code> with key prefixing, registered as a
+resource and retrieved by type, plus a <code>get_shared::&lt;T&gt;()</code> demo (<code>Arc::ptr_eq</code>
+proves the zero-copy share of a large value between tasks).</p>
+</div>
+
 <!-- Section: Error Handling -->
 <hr class="section-divider">
 <h2 id="error-handling"><a href="#error-handling" class="anchor-link" aria-hidden="true">#</a>Error Handling</h2>
@@ -430,7 +445,7 @@ resource type that owns an object-safe client or repository trait.
 Store operations return <code>StoreResult&lt;T&gt;</code>, which is
 <code>Result&lt;T, StoreError&gt;</code>. <code>StoreError</code> converts automatically
 to <code>CanoError::Store</code> via the <code>From</code> impl, so the <code>?</code>
-operator works transparently in task and node methods.
+operator works transparently in task methods.
 </p>
 
 <div class="card-grid error-cards">
