@@ -28,6 +28,7 @@ counters and histograms — see <a href="../metrics/">Metrics</a>.</p>
 <li><a href="#scheduler-tracing">Scheduler Tracing</a></li>
 <li><a href="#custom-spans">Custom Spans</a></li>
 <li><a href="#custom-instrumentation">Custom Instrumentation</a></li>
+<li><a href="#correlating-metrics">Correlating with Metrics</a></li>
 <li><a href="#example-output">Example Output</a></li>
 <li><a href="#full-example">Full Example</a></li>
 </ol>
@@ -51,7 +52,7 @@ observer events as <code>tracing</code> events under the <code>cano::observer</c
 <h2 id="setup"><a href="#setup" class="anchor-link" aria-hidden="true">#</a>Setup</h2>
 <p>Enable the <code>tracing</code> feature flag in your <code>Cargo.toml</code>. You can also use
 <code>features = ["all"]</code> to enable everything (<code>scheduler</code> + <code>tracing</code> +
-<code>recovery</code>) at once.</p>
+<code>recovery</code> + <code>metrics</code>) at once.</p>
 
 ```toml
 [dependencies]
@@ -59,7 +60,7 @@ cano = { version = "0.12", features = ["tracing"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# Or enable everything (scheduler + tracing + recovery):
+# Or enable everything (scheduler + tracing + recovery + metrics):
 # cano = { version = "0.12", features = ["all"] }
 
 ```
@@ -197,7 +198,7 @@ execution in log output.</p>
 </div>
 
 ```toml
-# Enable everything: scheduler + tracing + recovery
+# Enable everything: scheduler + tracing + recovery + metrics
 [dependencies]
 cano = { version = "0.12", features = ["all"] }
 
@@ -286,6 +287,34 @@ impl PaymentTask {
 
 ```
 
+<hr class="section-divider">
+
+<h2 id="correlating-metrics"><a href="#correlating-metrics" class="anchor-link" aria-hidden="true">#</a>Correlating with Metrics</h2>
+<p>
+When the <a href="../metrics/"><code>metrics</code></a> feature is also enabled, tracing spans and
+<code>metrics</code> interoperate through the spans themselves. With the
+<a href="https://docs.rs/metrics-tracing-context/" target="_blank"><code>metrics-tracing-context</code></a>
+crate wired in — a <code>TracingContextLayer</code> around your metrics recorder plus a
+<code>MetricsLayer</code> on your <code>tracing-subscriber</code> registry — every <code>cano_*</code>
+metric emitted <em>while a span is entered</em> inherits that span's fields as labels.
+</p>
+<p>
+So a custom span you attach with <code>with_tracing_span</code> (or simply open around
+<code>orchestrate()</code>) flows its fields — a <code>request_id</code>, a <code>tenant</code>, … — onto
+the metrics recorded during that run. Cano's own default <code>workflow_orchestrate</code> and
+<code>workflow_resume</code> spans carry a <code>workflow_id</code> field whenever one is set via
+<code>with_workflow_id</code>, so it shows up both in the trace output and as a metric label.
+</p>
+
+<div class="callout callout-info">
+<span class="callout-label">See also</span>
+<p>
+<a href="../metrics/#correlating-traces">Metrics → Correlating with Traces</a> has the full layer
+wiring, the cardinality caveat for <code>TracingContextLayer::all()</code>, and the runnable
+<code>metrics_tracing_context</code> example
+(<code>cargo run --example metrics_tracing_context --features "metrics tracing"</code>).
+</p>
+</div>
 <hr class="section-divider">
 
 <h2 id="example-output"><a href="#example-output" class="anchor-link" aria-hidden="true">#</a>Example Output</h2>

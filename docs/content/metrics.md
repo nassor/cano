@@ -26,6 +26,7 @@ sibling observability feature, see <a href="../tracing/">Tracing</a>.</p>
 <li><a href="#describe">Registering Descriptions</a></li>
 <li><a href="#cardinality">Cardinality</a></li>
 <li><a href="#cost">Cost</a></li>
+<li><a href="#correlating-traces">Correlating with Traces</a></li>
 <li><a href="#known-limitation">Known Limitation</a></li>
 <li><a href="#full-example">Full Example</a></li>
 </ol>
@@ -102,12 +103,17 @@ Workflow::bare()
 <p>It emits these counters (each incremented on the corresponding observer hook):</p>
 <ul>
 <li><code>cano_state_enters_total{state}</code> — on <code>on_state_enter</code></li>
-<li><code>cano_observed_task_runs_total{task, outcome}</code> — on <code>on_task_success</code> / <code>on_task_failure</code> (<code>outcome</code> ∈ <code>success</code>|<code>failure</code>)</li>
+<li><code>cano_observed_task_runs_total{task, outcome}</code> — on <code>on_task_success</code> / <code>on_task_failure</code> (<code>outcome</code> ∈ <code>completed</code>|<code>failed</code>)</li>
 <li><code>cano_task_retries_total{task}</code> — on <code>on_retry</code></li>
 <li><code>cano_circuit_open_events_total{task}</code> — on <code>on_circuit_open</code></li>
 <li><code>cano_checkpoints_observed_total</code> — on <code>on_checkpoint</code></li>
 <li><code>cano_resumes_total</code> — on <code>on_resume</code></li>
 </ul>
+<p>
+<code>on_task_start</code> is intentionally <em>not</em> counted — every dispatch already shows up in
+<code>cano_observed_task_runs_total{outcome}</code>, so a separate "start" counter would just be the
+sum of the <code>completed</code> and <code>failed</code> rows.
+</p>
 <p>
 <code>MetricsObserver</code> is in the prelude behind the <code>metrics</code> feature — no extra import needed
 when you use <code>use cano::prelude::*</code>.
@@ -245,6 +251,71 @@ you are building a latency-critical service that does not collect metrics, leave
 Otherwise, when a recorder is installed, the overhead is the same as any other <code>metrics</code>-crate
 emission — a hash-map lookup plus atomic increment, comparable to a log line.
 </p>
+<hr class="section-divider">
+
+<h2 id="correlating-traces"><a href="#correlating-traces" class="anchor-link" aria-hidden="true">#</a>Correlating with Traces</h2>
+<p>
+When you also enable the <a href="../tracing/"><code>tracing</code></a> feature, <code>metrics</code> and
+<code>tracing</code> interoperate through tracing <strong>spans</strong>: the
+<a href="https://docs.rs/metrics-tracing-context/" target="_blank"><code>metrics-tracing-context</code></a>
+crate makes any metric emitted <em>inside</em> a span inherit that span's fields as labels. This is
+wiring you do in your application — Cano never depends on <code>metrics-tracing-context</code> itself
+(the same posture it takes toward <code>tracing-subscriber</code>).
+</p>
+
+```toml
+[dependencies]
+cano = { version = "0.12", features = ["metrics", "tracing"] }
+metrics-tracing-context = "0.18"
+tracing-subscriber = "0.3"
+
+```
+
+```rust
+use metrics_tracing_context::{MetricsLayer, TracingContextLayer};
+use metrics_util::layers::Layer;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+// 1. Wrap your metrics recorder so it reads the current span's fields.
+let recorder = TracingContextLayer::all().layer(your_recorder);
+metrics::set_global_recorder(recorder).expect("install metrics recorder");
+cano::metrics::describe();
+
+// 2. Add MetricsLayer to your tracing subscriber so spans expose their fields.
+tracing_subscriber::registry()
+    .with(MetricsLayer::new())
+    .with(tracing_subscriber::fmt::layer())
+    .init();
+
+```
+
+<p>
+With both layers installed, a span you open around <code>Workflow::orchestrate</code> — e.g.
+<code>info_span!("api_request", request_id = …)</code> — tags every <code>cano_*</code> metric recorded
+during that run with <code>request_id</code>. Cano's own default <code>workflow_orchestrate</code> and
+<code>workflow_resume</code> spans carry a <code>workflow_id</code> field whenever one is set via
+<code>with_workflow_id</code>, so that becomes a metric label too. Span fields are <em>merged</em> with
+the explicit labels Cano already attaches (<code>state</code>, <code>task</code>, <code>flow</code>,
+<code>outcome</code>, …) — Cano deliberately does not name any span field after an existing metric
+label, so there is no merge ambiguity.
+</p>
+
+<div class="callout callout-warning">
+<span class="callout-label">Cardinality</span>
+<p>
+<code>TracingContextLayer::all()</code> promotes <em>every</em> field of every entered span as a label —
+including Cano-internal span fields such as <code>max_attempts</code> from the retry-loop spans. For
+production, prefer <code>TracingContextLayer::new(filter)</code> with a <code>LabelFilter</code> that
+allow-lists just the fields you author, to keep metric cardinality bounded.
+</p>
+</div>
+
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example metrics_tracing_context --features "metrics tracing"</code>
+— wires the two layers, runs a workflow under a <code>workflow_id</code> and another inside a user
+<code>api_request</code> span, and prints the captured metrics so you can see the <code>workflow_id</code>
+and <code>request_id</code> labels propagated purely from span context.</p>
+</div>
 <hr class="section-divider">
 
 <h2 id="known-limitation"><a href="#known-limitation" class="anchor-link" aria-hidden="true">#</a>Known Limitation</h2>

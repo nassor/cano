@@ -38,8 +38,6 @@
         <details class="nav-section" id="nav-concepts" open>
             <summary class="nav-section-label">Concepts</summary>
             <ul class="nav-links">
-                <li><a href="{{ get_url(path='@/workflows.md') }}">Workflows</a></li>
-                <li><a href="{{ get_url(path='@/resources.md') }}">Resources</a></li>
                 <li>
                     <a href="{{ get_url(path='@/task.md') }}">Tasks</a>
                     <ul class="nav-links nav-sublinks">
@@ -49,8 +47,18 @@
                         <li><a href="{{ get_url(path='@/stepped-task.md') }}">SteppedTask</a></li>
                     </ul>
                 </li>
-                <li><a href="{{ get_url(path='@/store.md') }}">MemoryStore</a></li>
-                <li><a href="{{ get_url(path='@/split-join.md') }}">Split &amp; Join</a></li>
+                <li>
+                    <a href="{{ get_url(path='@/resources.md') }}">Resources</a>
+                    <ul class="nav-links nav-sublinks">
+                        <li><a href="{{ get_url(path='@/store.md') }}">MemoryStore</a></li>
+                    </ul>
+                </li>
+                <li>
+                    <a href="{{ get_url(path='@/workflows.md') }}">Workflows</a>
+                    <ul class="nav-links nav-sublinks">
+                        <li><a href="{{ get_url(path='@/split-join.md') }}">Split &amp; Join</a></li>
+                    </ul>
+                </li>
                 <li><a href="{{ get_url(path='@/scheduler.md') }}">Scheduler</a></li>
             </ul>
         </details>

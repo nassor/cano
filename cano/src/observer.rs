@@ -109,6 +109,11 @@ pub trait WorkflowObserver: Send + Sync + 'static {
 /// → `task_attempt`, etc.). Use it *alongside* that instrumentation, or on its own when you
 /// only want the high-level events.
 ///
+/// To turn `tracing` span context into `metrics` labels (so a span you open around
+/// [`Workflow::orchestrate`](crate::workflow::Workflow::orchestrate) tags the `cano_*`
+/// metrics emitted inside it), see the *"Correlating metrics with traces"* section of the
+/// `cano::metrics` module docs (requires the `metrics` feature).
+///
 /// All events are emitted under the `cano::observer` target, so they can be filtered
 /// independently — e.g. `RUST_LOG=cano::observer=debug`. Event levels mirror the engine's
 /// existing instrumentation for the analogous sites:
@@ -190,7 +195,8 @@ impl WorkflowObserver for TracingObserver {
 ///
 /// Requires the `metrics` feature. Complements (does not replace) the always-on
 /// `#[cfg(feature = "metrics")]` direct instrumentation elsewhere in the engine (workflow run
-/// duration, circuit internals, scheduler flows, …) — see [`crate::metrics`].
+/// duration, circuit internals, scheduler flows, …) — see [`crate::metrics`], which also
+/// documents how to correlate these metrics with `tracing` spans.
 #[cfg(feature = "metrics")]
 #[derive(Debug, Clone, Default)]
 pub struct MetricsObserver;
@@ -198,6 +204,7 @@ pub struct MetricsObserver;
 #[cfg(feature = "metrics")]
 impl MetricsObserver {
     /// Construct a `MetricsObserver`.
+    #[must_use]
     pub fn new() -> Self {
         Self
     }

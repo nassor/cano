@@ -48,6 +48,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 chrono = { version = "0.4", features = ["serde"] }
 tokio = { version = "1.52.1", features = ["macros", "sync", "time", "rt-multi-thread", "signal"] }
 metrics-util = { version = "0.20.3", features = ["debugging"] }
+metrics-tracing-context = "0.18.1"
 
 # Subprocess driver for the SIGKILL recovery integration test (tests/recovery_e2e.rs).
 # A [[bin]] (not an example) so `cargo test --features recovery` builds it and sets
@@ -128,6 +129,11 @@ required-features = ["tracing", "scheduler"]
 name = "metrics_demo"
 path = "examples/metrics_demo.rs"
 required-features = ["metrics", "scheduler"]
+
+[[example]]
+name = "metrics_tracing_context"
+path = "examples/metrics_tracing_context.rs"
+required-features = ["metrics", "tracing"]
 
 [[example]]
 name = "workflow_stack_store"

@@ -41,6 +41,45 @@
 //! macros take owned label values) regardless of whether a recorder is installed. That cost
 //! is small and bounded, but if you have a latency-critical build that does not collect
 //! metrics, leave the feature off.
+//!
+//! ## Correlating metrics with traces
+//!
+//! `metrics` and `tracing` interop through tracing **spans**: the
+//! [`metrics-tracing-context`](https://docs.rs/metrics-tracing-context) crate lets any
+//! metric emitted *inside* a span pick up that span's fields as labels. This is wiring you
+//! do on your side — Cano never depends on `metrics-tracing-context` (same posture it takes
+//! toward `tracing-subscriber`):
+//!
+//! ```ignore
+//! use metrics_tracing_context::{MetricsLayer, TracingContextLayer};
+//! use metrics_util::layers::Layer;
+//! use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+//!
+//! // 1. wrap your metrics recorder so it reads the current span's fields
+//! let recorder = TracingContextLayer::all().layer(your_recorder);
+//! metrics::set_global_recorder(recorder).unwrap();
+//!
+//! // 2. add MetricsLayer to your tracing subscriber so spans expose their fields
+//! tracing_subscriber::registry()
+//!     .with(MetricsLayer::new())
+//!     .with(tracing_subscriber::fmt::layer())
+//!     .init();
+//! ```
+//!
+//! With both layers installed, a span you open around [`Workflow::orchestrate`](crate::Workflow::orchestrate)
+//! (e.g. `info_span!("api_request", request_id = …)`) flows `request_id` onto every `cano_*`
+//! metric recorded during that workflow run. Cano's own default `workflow_orchestrate` and
+//! `workflow_resume` spans carry a `workflow_id` field (when one is set via
+//! [`with_workflow_id`](crate::Workflow::with_workflow_id)), so that becomes a metric label
+//! too. Note that span fields are *merged* with the explicit labels Cano already attaches
+//! (`state`, `task`, `flow`, `outcome`, …) — Cano deliberately does **not** name any span
+//! field after an existing metric label, so there is no merge ambiguity. See the
+//! `metrics_tracing_context` example for a runnable end-to-end wiring.
+//!
+//! One caveat: `TracingContextLayer::all()` promotes *every* field of every entered span as a
+//! label — including Cano-internal span fields such as `max_attempts` from the retry-loop
+//! spans. For production use a `TracingContextLayer::new(filter)` with a `LabelFilter` that
+//! allow-lists the fields you actually want, to keep metric cardinality bounded.
 
 use metrics::{
     Unit, counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram,

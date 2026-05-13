@@ -654,7 +654,13 @@ where
         #[cfg(feature = "tracing")]
         let workflow_span = self.tracing_span.clone().unwrap_or_else(|| {
             if tracing::enabled!(tracing::Level::INFO) {
-                info_span!("workflow_orchestrate")
+                // `workflow_id` is recorded so that, when the `metrics-tracing-context`
+                // bridge is wired up, every Cano metric emitted while this span is entered
+                // inherits a `workflow_id` label. `Option<&str>` records nothing for `None`.
+                info_span!(
+                    "workflow_orchestrate",
+                    workflow_id = self.workflow_id.as_deref()
+                )
             } else {
                 tracing::Span::none()
             }

@@ -252,7 +252,9 @@ where
         #[cfg(feature = "tracing")]
         let workflow_span = self.tracing_span.clone().unwrap_or_else(|| {
             if tracing::enabled!(tracing::Level::INFO) {
-                info_span!("workflow_resume")
+                // `workflow_id` is recorded so the `metrics-tracing-context` bridge can
+                // attach it as a label to Cano metrics emitted during the resumed run.
+                info_span!("workflow_resume", workflow_id = workflow_id.as_str())
             } else {
                 tracing::Span::none()
             }
