@@ -205,14 +205,18 @@ where
 
         loop {
             // The `Debug` label of the state being entered. Needed for observer
-            // `on_state_enter` and for checkpoint rows; skipped (no allocation)
-            // when neither is in play — the common, zero-overhead case.
-            let state_label: Option<String> =
-                if !self.observers.is_empty() || self.checkpoint_store.is_some() {
-                    Some(format!("{current_state:?}"))
-                } else {
-                    None
-                };
+            // `on_state_enter`, checkpoint rows, and the `metrics` feature's
+            // `state` label; skipped (no allocation) when none are in play — the
+            // common, zero-overhead case. Computed once per iteration and
+            // reused on every hot path below.
+            let need_state_label = !self.observers.is_empty()
+                || self.checkpoint_store.is_some()
+                || cfg!(feature = "metrics");
+            let state_label: Option<String> = if need_state_label {
+                Some(format!("{current_state:?}"))
+            } else {
+                None
+            };
 
             // Notify observers of every state entry, including the initial state
             // and any terminal exit state.
@@ -257,10 +261,12 @@ where
                     // Router is unreachable here (is_router guard above), Split has no single task_id.
                     _ => String::new(),
                 };
-                if let Err(e) = store
+                let append_result = store
                     .append(wf_id, CheckpointRow::new(sequence, label, task_id))
-                    .await
-                {
+                    .await;
+                #[cfg(feature = "metrics")]
+                crate::metrics::checkpoint_append(append_result.is_ok());
+                if let Err(e) = append_result {
                     let err = CanoError::checkpoint_store(format!("append checkpoint: {e}"));
                     return self
                         .run_compensations(workflow_id.as_deref(), compensation_stack, err)
@@ -295,6 +301,13 @@ where
             #[cfg(feature = "tracing")]
             debug!(current_state = ?current_state, "Executing state");
 
+            // Reuse the already-computed label (see `need_state_label` above —
+            // `metrics` feature is in that condition so this is always `Some`).
+            #[cfg(feature = "metrics")]
+            let _state_label = state_label.as_deref().unwrap_or_default();
+            #[cfg(feature = "metrics")]
+            let _dispatch_started = std::time::Instant::now();
+
             // Dispatch by entry type. Any `Err` triggers a compensation drain.
             let step: Result<TState, CanoError> = match state_entry.as_ref() {
                 StateEntry::Single { task, config } => {
@@ -316,10 +329,16 @@ where
                         .await
                 }
                 StateEntry::CompensatableSingle { task, config } => {
-                    match self
+                    let comp_result = self
                         .execute_compensatable_task(task.clone(), Arc::clone(config))
-                        .await
-                    {
+                        .await;
+                    #[cfg(feature = "metrics")]
+                    crate::metrics::task_dispatch_duration(
+                        _state_label,
+                        "compensatable",
+                        _dispatch_started.elapsed(),
+                    );
+                    match comp_result {
                         Ok((next_state, output_blob)) => {
                             let task_name = task.name().into_owned();
                             // Persist a completion row carrying the output so a resumed
@@ -330,7 +349,10 @@ where
                                 let label = state_label.as_deref().unwrap_or_default();
                                 let row = CheckpointRow::new(sequence, label, task_name.clone())
                                     .with_output(output_blob.clone());
-                                if let Err(e) = store.append(wf_id, row).await {
+                                let comp_append_result = store.append(wf_id, row).await;
+                                #[cfg(feature = "metrics")]
+                                crate::metrics::checkpoint_append(comp_append_result.is_ok());
+                                if let Err(e) = comp_append_result {
                                     let err = CanoError::checkpoint_store(format!(
                                         "append compensation checkpoint: {e}"
                                     ));
@@ -378,6 +400,23 @@ where
                     .await
                 }
             };
+
+            // CompensatableSingle records its own duration earlier (before the
+            // completion-row append) so it is excluded here to avoid double-counting.
+            #[cfg(feature = "metrics")]
+            if let Some(kind) = match state_entry.as_ref() {
+                StateEntry::Single { .. } => Some("single"),
+                StateEntry::Router { .. } => Some("router"),
+                StateEntry::Split { .. } => Some("split"),
+                StateEntry::CompensatableSingle { .. } => None,
+                StateEntry::Stepped { .. } => Some("stepped"),
+            } {
+                crate::metrics::task_dispatch_duration(
+                    _state_label,
+                    kind,
+                    _dispatch_started.elapsed(),
+                );
+            }
 
             current_state = match step {
                 Ok(s) => s,
@@ -533,14 +572,20 @@ where
                 Ok(ErasedStep::Done(TaskResult::Single(next_state))) => {
                     #[cfg(feature = "tracing")]
                     tracing::debug!(next_state = ?next_state, "Stepped task completed");
+                    #[cfg(feature = "metrics")]
+                    crate::metrics::step_iteration(true);
                     break Ok(next_state);
                 }
                 Ok(ErasedStep::Done(TaskResult::Split(_))) => {
+                    #[cfg(feature = "metrics")]
+                    crate::metrics::step_iteration(true);
                     break Err(CanoError::workflow(
                         "Stepped task returned split result — split is not supported for Stepped states",
                     ));
                 }
                 Ok(ErasedStep::More(new_cursor_bytes)) => {
+                    #[cfg(feature = "metrics")]
+                    crate::metrics::step_iteration(false);
                     // Persist the cursor before advancing so a crash between steps
                     // can resume from this exact position.
                     if let (Some(store), Some(wf_id)) =
@@ -548,7 +593,10 @@ where
                     {
                         let row = CheckpointRow::new(*sequence, state_label, task_name.as_ref())
                             .with_cursor(new_cursor_bytes.clone());
-                        if let Err(e) = store.append(wf_id, row).await {
+                        let cursor_append_result = store.append(wf_id, row).await;
+                        #[cfg(feature = "metrics")]
+                        crate::metrics::checkpoint_append(cursor_append_result.is_ok());
+                        if let Err(e) = cursor_append_result {
                             break Err(CanoError::checkpoint_store(format!(
                                 "append step cursor checkpoint: {e}"
                             )));
@@ -701,6 +749,13 @@ where
         let split_result = self
             .collect_results(join_set, &join_config, total_tasks)
             .await?;
+
+        #[cfg(feature = "metrics")]
+        crate::metrics::split_branch_results(
+            split_result.successes.len(),
+            split_result.errors.len(),
+            split_result.cancelled.len(),
+        );
 
         // Fire per-task observer events for everything that ran to completion.
         // Cancelled tasks are intentionally silent (no dedicated hook), and an

@@ -8,7 +8,7 @@
 [![Downloads](https://img.shields.io/crates/d/cano.svg)](https://crates.io/crates/cano)
 [![License](https://img.shields.io/crates/l/cano.svg)](https://github.com/nassor/cano/blob/main/LICENSE)
 [![CI](https://github.com/nassor/cano/workflows/CI/badge.svg)](https://github.com/nassor/cano/actions)
-[![Rust Version](https://img.shields.io/badge/rust-1.95%2B-blue.svg)](https://www.rust-lang.org)
+[![Rust Version](https://img.shields.io/badge/rust-1.89%2B-blue.svg)](https://www.rust-lang.org)
 
 <em>**Orchestrate complex async processes with finite state machines, parallel execution, and built-in scheduling.**</em>
 
@@ -37,7 +37,7 @@ The engine is built on three core concepts: **Tasks** for logic, **Workflows** f
 - **Built-in Scheduling**: Cron-based, interval, and manual triggers for background jobs.
 - **Crash Recovery**: Pluggable `CheckpointStore` records every FSM state entry; `Workflow::resume_from` rehydrates a crashed run and continues. Ships with an embedded, ACID `RedbCheckpointStore` behind the `recovery` feature.
 - **Sagas / Compensation**: Pair a forward step with a `compensate` action via `CompensatableTask` + `register_with_compensation`; if a later step fails, the engine rolls back the work already done in reverse order (and replays the rollback across a crash when checkpointing is on).
-- **Observability**: Integrated `tracing` spans, plus synchronous `WorkflowObserver` hooks for lifecycle/failure events (with a ready-made `TracingObserver`) and `Resource::health()` probes (`Resources::check_all_health`).
+- **Observability**: Optional `tracing` (spans + events, plus `TracingObserver`) and `metrics` (a `MetricsObserver` plus low-cardinality counters / histograms / gauges via the [`metrics`](https://docs.rs/metrics) facade) features for deep insight into workflow, task, retry, split/join, circuit-breaker, scheduler, processing-loop, recovery and saga internals; plus synchronous `WorkflowObserver` hooks for lifecycle/failure events and `Resource::health()` probes (`Resources::check_all_health`).
 - **Performance-Focused**: Minimizes heap allocations by leveraging stack-based objects wherever possible, giving you control over where allocations occur.
 
 Everything above is opt-in and zero-cost when unused. For how the *resilient, self-healing* tagline maps to concrete primitives — retries, timeouts, circuit breakers, bulkheads, panic safety, checkpoint+resume, sagas, observers, health probes — see the [Resilience](https://nassor.github.io/cano/resilience/), [Recovery](https://nassor.github.io/cano/recovery/) and [Saga](https://nassor.github.io/cano/saga/) guides.

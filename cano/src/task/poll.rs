@@ -299,8 +299,14 @@ where
 
     loop {
         match p.poll(res).await {
-            Ok(PollOutcome::Ready(result)) => return Ok(result),
+            Ok(PollOutcome::Ready(result)) => {
+                #[cfg(feature = "metrics")]
+                crate::metrics::poll_iteration(true);
+                return Ok(result);
+            }
             Ok(PollOutcome::Pending { delay_ms }) => {
+                #[cfg(feature = "metrics")]
+                crate::metrics::poll_iteration(false);
                 consecutive_errors = 0;
                 if delay_ms > 0 {
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
@@ -759,6 +765,72 @@ mod tests {
         assert!(
             elapsed < std::time::Duration::from_millis(500),
             "timeout took too long: {elapsed:?}"
+        );
+    }
+}
+
+#[cfg(all(test, feature = "metrics"))]
+mod metrics_tests {
+    use super::*;
+    use crate::metrics::test_support::*;
+    use crate::task::Task;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    enum St {
+        Done,
+    }
+
+    // PollTask returning Pending twice then Ready(Single(Done))
+    struct TwicePendingPoller {
+        count: Arc<AtomicU32>,
+    }
+
+    // Use the trait-impl form: inside cano the inherent form emits ::cano:: paths
+    // that don't resolve; trait-impl form works everywhere.
+    #[crate::task::poll]
+    impl PollTask<St> for TwicePendingPoller {
+        async fn poll(&self, _res: &Resources) -> Result<PollOutcome<St>, CanoError> {
+            let n = self.count.fetch_add(1, Ordering::Relaxed);
+            if n < 2 {
+                Ok(PollOutcome::Pending { delay_ms: 0 })
+            } else {
+                Ok(PollOutcome::Ready(TaskResult::Single(St::Done)))
+            }
+        }
+    }
+
+    /// Test via run_poll_loop (the free fn used when registered via Workflow::register
+    /// with the inherent macro form, and directly exercising the loop body in poll.rs).
+    ///
+    /// Note: inside `cano`, the trait-impl form of `#[task::poll]` inlines the loop body
+    /// rather than delegating to `run_poll_loop`; so we call `run_poll_loop` directly here.
+    /// External callers using the inherent `#[task::poll(state = S)]` form always
+    /// delegate to `run_poll_loop`.
+    #[test]
+    fn poll_iterations_counted_pending_twice_ready_once() {
+        let (result, rows) = run_with_recorder(|| async {
+            let poller = TwicePendingPoller {
+                count: Arc::new(AtomicU32::new(0)),
+            };
+            let res = crate::resource::Resources::new();
+            run_poll_loop(&poller, &res).await
+        });
+        assert!(result.is_ok(), "poll loop should succeed: {result:?}");
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_poll_iterations_total",
+                &[("outcome", "pending")]
+            ),
+            2,
+            "expected 2 pending iterations"
+        );
+        assert_eq!(
+            counter(&rows, "cano_poll_iterations_total", &[("outcome", "ready")]),
+            1,
+            "expected 1 ready iteration"
         );
     }
 }

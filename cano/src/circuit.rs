@@ -257,24 +257,37 @@ impl CircuitBreaker {
                 half_open_max_calls = self.policy.half_open_max_calls,
                 "circuit breaker transition: Open -> HalfOpen"
             );
+            #[cfg(feature = "metrics")]
+            crate::metrics::circuit_transition("open_to_halfopen");
         }
 
         let epoch = inner.epoch;
-        match inner.state {
+        let result = match inner.state {
             CircuitState::Closed => Ok(Permit::new(Arc::clone(self), false, epoch)),
             CircuitState::Open { .. } => Err(CanoError::circuit_open(
                 "circuit breaker open: rejecting call",
             )),
             CircuitState::HalfOpen => {
                 if inner.half_open_in_flight >= self.policy.half_open_max_calls {
-                    return Err(CanoError::circuit_open(
+                    Err(CanoError::circuit_open(
                         "circuit breaker half-open: trial slot exhausted",
-                    ));
+                    ))
+                } else {
+                    inner.half_open_in_flight += 1;
+                    Ok(Permit::new(Arc::clone(self), true, epoch))
                 }
-                inner.half_open_in_flight += 1;
-                Ok(Permit::new(Arc::clone(self), true, epoch))
             }
+        };
+        #[cfg(feature = "metrics")]
+        {
+            drop(inner);
+            crate::metrics::circuit_acquire(if result.is_ok() {
+                "acquired"
+            } else {
+                "rejected"
+            });
         }
+        result
     }
 
     /// Record a successful call, consuming the permit.
@@ -284,6 +297,8 @@ impl CircuitBreaker {
     /// have been observed.
     pub fn record_success(&self, mut permit: Permit) {
         permit.consumed = true;
+        #[cfg(feature = "metrics")]
+        crate::metrics::circuit_outcome("success");
         let mut inner = self.inner.lock().expect("circuit breaker mutex poisoned");
 
         // Stale outcome from a prior epoch: the in-flight slot, if any, was
@@ -311,6 +326,8 @@ impl CircuitBreaker {
                         successes = self.policy.half_open_max_calls,
                         "circuit breaker transition: HalfOpen -> Closed"
                     );
+                    #[cfg(feature = "metrics")]
+                    crate::metrics::circuit_transition("halfopen_to_closed");
                 }
             }
             CircuitState::Open { .. } => {
@@ -335,6 +352,8 @@ impl CircuitBreaker {
     }
 
     fn do_record_failure(&self, was_half_open: bool, permit_epoch: u64) {
+        #[cfg(feature = "metrics")]
+        crate::metrics::circuit_outcome("failure");
         let mut inner = self.inner.lock().expect("circuit breaker mutex poisoned");
 
         // Stale outcome from a prior epoch — see `record_success` for rationale.
@@ -359,6 +378,8 @@ impl CircuitBreaker {
                         reset_timeout_ms = self.policy.reset_timeout.as_millis() as u64,
                         "circuit breaker transition: Closed -> Open"
                     );
+                    #[cfg(feature = "metrics")]
+                    crate::metrics::circuit_transition("closed_to_open");
                 }
             }
             CircuitState::HalfOpen => {
@@ -372,6 +393,8 @@ impl CircuitBreaker {
                     reset_timeout_ms = self.policy.reset_timeout.as_millis() as u64,
                     "circuit breaker transition: HalfOpen -> Open"
                 );
+                #[cfg(feature = "metrics")]
+                crate::metrics::circuit_transition("halfopen_to_open");
             }
             CircuitState::Open { .. } => {
                 // Unreachable when epoch is current; the epoch check above filters
@@ -710,5 +733,87 @@ mod tests {
             breaker.record_failure(p);
         }
         assert!(matches!(breaker.state(), CircuitState::Open { .. }));
+    }
+}
+
+#[cfg(all(test, feature = "metrics"))]
+mod metrics_tests {
+    use super::*;
+    use crate::metrics::test_support::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[test]
+    fn closed_to_open_and_outcomes_are_recorded() {
+        let ((), rows) = run_with_recorder(|| async {
+            let b = Arc::new(CircuitBreaker::new(CircuitPolicy {
+                failure_threshold: 2,
+                reset_timeout: Duration::from_secs(60),
+                half_open_max_calls: 1,
+            }));
+            let p = b.try_acquire().unwrap();
+            b.record_success(p);
+            let p = b.try_acquire().unwrap();
+            b.record_failure(p);
+            let p = b.try_acquire().unwrap();
+            b.record_failure(p);
+            assert!(b.try_acquire().is_err());
+        });
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_circuit_acquires_total",
+                &[("result", "acquired")]
+            ),
+            3
+        );
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_circuit_acquires_total",
+                &[("result", "rejected")]
+            ),
+            1
+        );
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_circuit_outcomes_total",
+                &[("outcome", "success")]
+            ),
+            1
+        );
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_circuit_outcomes_total",
+                &[("outcome", "failure")]
+            ),
+            2
+        );
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_circuit_transitions_total",
+                &[("transition", "closed_to_open")]
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn dropped_unconsumed_permit_counts_as_failure() {
+        let ((), rows) = run_with_recorder(|| async {
+            let b = Arc::new(CircuitBreaker::new(CircuitPolicy::default()));
+            let _p = b.try_acquire().unwrap();
+        });
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_circuit_outcomes_total",
+                &[("outcome", "failure")]
+            ),
+            1
+        );
     }
 }

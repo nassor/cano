@@ -654,7 +654,13 @@ where
         #[cfg(feature = "tracing")]
         let workflow_span = self.tracing_span.clone().unwrap_or_else(|| {
             if tracing::enabled!(tracing::Level::INFO) {
-                info_span!("workflow_orchestrate")
+                // `workflow_id` is recorded so that, when the `metrics-tracing-context`
+                // bridge is wired up, every Cano metric emitted while this span is entered
+                // inherits a `workflow_id` label. `Option<&str>` records nothing for `None`.
+                info_span!(
+                    "workflow_orchestrate",
+                    workflow_id = self.workflow_id.as_deref()
+                )
             } else {
                 tracing::Span::none()
             }
@@ -682,16 +688,35 @@ where
     }
 
     async fn run_workflow(&self, initial_state: TState) -> Result<TState, CanoError> {
+        #[cfg(feature = "metrics")]
+        let _active = crate::metrics::WorkflowActiveGuard::new();
+        #[cfg(feature = "metrics")]
+        let _started = std::time::Instant::now();
+
         let workflow_future = self.execute_workflow(initial_state);
 
-        if let Some(timeout_duration) = self.workflow_timeout {
+        let result = if let Some(timeout_duration) = self.workflow_timeout {
             match tokio::time::timeout(timeout_duration, workflow_future).await {
-                Ok(result) => result,
-                Err(_) => Err(CanoError::workflow("Workflow timeout exceeded")),
+                Ok(inner) => inner,
+                Err(_) => {
+                    #[cfg(feature = "metrics")]
+                    crate::metrics::workflow_run("timeout", _started.elapsed());
+                    return Err(CanoError::workflow("Workflow timeout exceeded"));
+                }
             }
         } else {
             workflow_future.await
-        }
+        };
+        #[cfg(feature = "metrics")]
+        crate::metrics::workflow_run(
+            if result.is_ok() {
+                "completed"
+            } else {
+                "failed"
+            },
+            _started.elapsed(),
+        );
+        result
     }
 }
 
@@ -777,6 +802,174 @@ where
                 &format!("{} compensators", self.compensators.len()),
             )
             .finish()
+    }
+}
+
+#[cfg(all(test, feature = "metrics"))]
+mod metrics_tests {
+    use crate::metrics::test_support::*;
+    use crate::prelude::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    enum S {
+        Start,
+        Mid,
+        Done,
+    }
+    struct GoTo(S);
+    #[crate::task]
+    impl Task<S> for GoTo {
+        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+            Ok(TaskResult::Single(self.0.clone()))
+        }
+    }
+    struct Boom;
+    #[crate::task]
+    impl Task<S> for Boom {
+        fn config(&self) -> TaskConfig {
+            TaskConfig::minimal()
+        }
+        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+            Err(CanoError::task_execution("boom"))
+        }
+    }
+    fn ok_workflow() -> Workflow<S> {
+        Workflow::bare()
+            .register(S::Start, GoTo(S::Mid))
+            .register(S::Mid, GoTo(S::Done))
+            .add_exit_state(S::Done)
+    }
+
+    #[test]
+    fn successful_run_records_outcome_duration_and_clears_active_gauge() {
+        let (res, rows) = run_with_recorder(|| async { ok_workflow().orchestrate(S::Start).await });
+        assert_eq!(res.unwrap(), S::Done);
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_workflow_runs_total",
+                &[("outcome", "completed")]
+            ),
+            1
+        );
+        assert_eq!(
+            histogram_count(
+                &rows,
+                "cano_workflow_duration_seconds",
+                &[("outcome", "completed")]
+            ),
+            1
+        );
+        assert_eq!(gauge(&rows, "cano_workflow_active", &[]), 0.0);
+    }
+
+    #[test]
+    fn failed_run_records_failed_outcome() {
+        let (res, rows) = run_with_recorder(|| async {
+            Workflow::bare()
+                .register(S::Start, Boom)
+                .add_exit_state(S::Done)
+                .orchestrate(S::Start)
+                .await
+        });
+        assert!(res.is_err());
+        assert_eq!(
+            counter(&rows, "cano_workflow_runs_total", &[("outcome", "failed")]),
+            1
+        );
+        assert_eq!(gauge(&rows, "cano_workflow_active", &[]), 0.0);
+    }
+
+    #[test]
+    fn per_state_task_durations_are_recorded_single_and_split() {
+        let (res, rows) = run_with_recorder(|| async { ok_workflow().orchestrate(S::Start).await });
+        assert_eq!(res.unwrap(), S::Done);
+        assert_eq!(
+            histogram_count(
+                &rows,
+                "cano_task_duration_seconds",
+                &[("state", "Start"), ("kind", "single")]
+            ),
+            1
+        );
+        assert_eq!(
+            histogram_count(
+                &rows,
+                "cano_task_duration_seconds",
+                &[("state", "Mid"), ("kind", "single")]
+            ),
+            1
+        );
+    }
+
+    #[derive(Clone)]
+    struct Branch {
+        fail: bool,
+    }
+    #[crate::task]
+    impl Task<S> for Branch {
+        fn config(&self) -> TaskConfig {
+            TaskConfig::minimal()
+        }
+        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+            if self.fail {
+                Err(CanoError::task_execution("nope"))
+            } else {
+                Ok(TaskResult::Single(S::Done))
+            }
+        }
+    }
+
+    #[test]
+    fn split_records_branch_results_and_a_split_kind_duration() {
+        let (res, rows) = run_with_recorder(|| async {
+            Workflow::bare()
+                .register_split(
+                    S::Start,
+                    vec![
+                        Branch { fail: false },
+                        Branch { fail: true },
+                        Branch { fail: false },
+                    ],
+                    JoinConfig::new(JoinStrategy::PartialResults(2), S::Done),
+                )
+                .add_exit_state(S::Done)
+                .orchestrate(S::Start)
+                .await
+        });
+        assert_eq!(res.unwrap(), S::Done);
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_split_branch_results_total",
+                &[("result", "success")]
+            ),
+            2
+        );
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_split_branch_results_total",
+                &[("result", "failure")]
+            ),
+            1
+        );
+        assert_eq!(
+            counter_opt(
+                &rows,
+                "cano_split_branch_results_total",
+                &[("result", "cancelled")]
+            ),
+            None
+        );
+        assert_eq!(
+            histogram_count(
+                &rows,
+                "cano_task_duration_seconds",
+                &[("state", "Start"), ("kind", "split")]
+            ),
+            1
+        );
     }
 }
 

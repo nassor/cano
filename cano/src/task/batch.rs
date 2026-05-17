@@ -357,35 +357,50 @@ where
     use futures_util::StreamExt as _;
     use std::sync::Arc;
 
-    let items: Arc<Vec<B::Item>> = Arc::new(b.load(res).await?);
+    // Wrap the load→process→finish body in an inner async block so that a `load`
+    // failure (early `?` return) still reaches the `batch_run` metric emit below.
+    let result: Result<TaskResult<S>, CanoError> = async {
+        let items: Arc<Vec<B::Item>> = Arc::new(b.load(res).await?);
 
-    let retry_mode = b.item_retry();
-    let conc = b.concurrency().max(1);
-    let n = items.len();
+        let retry_mode = b.item_retry();
+        let conc = b.concurrency().max(1);
+        let n = items.len();
 
-    // Use index-based iteration so each closure captures only an `Arc` clone and
-    // an index — no lifetime tied to the local `items` Vec (which would cause
-    // "FnOnce not general enough" errors with `buffer_unordered`).
-    let mut indexed: Vec<(usize, Result<B::ItemOutput, CanoError>)> =
-        futures_util::stream::iter(0..n)
-            .map(|i| {
-                let items_ref = Arc::clone(&items);
-                let mode = retry_mode.clone();
-                async move {
-                    let result = run_item_with_retry(b, &items_ref[i], &mode).await;
-                    (i, result)
-                }
-            })
-            .buffer_unordered(conc)
-            .collect()
-            .await;
+        // Use index-based iteration so each closure captures only an `Arc` clone and
+        // an index — no lifetime tied to the local `items` Vec (which would cause
+        // "FnOnce not general enough" errors with `buffer_unordered`).
+        let mut indexed: Vec<(usize, Result<B::ItemOutput, CanoError>)> =
+            futures_util::stream::iter(0..n)
+                .map(|i| {
+                    let items_ref = Arc::clone(&items);
+                    let mode = retry_mode.clone();
+                    async move {
+                        let result = run_item_with_retry(b, &items_ref[i], &mode).await;
+                        (i, result)
+                    }
+                })
+                .buffer_unordered(conc)
+                .collect()
+                .await;
 
-    // Restore input order — `buffer_unordered` may settle items out of order.
-    indexed.sort_unstable_by_key(|(i, _)| *i);
-    let outputs: Vec<Result<B::ItemOutput, CanoError>> =
-        indexed.into_iter().map(|(_, r)| r).collect();
+        // Restore input order — `buffer_unordered` may settle items out of order.
+        indexed.sort_unstable_by_key(|(i, _)| *i);
+        let outputs: Vec<Result<B::ItemOutput, CanoError>> =
+            indexed.into_iter().map(|(_, r)| r).collect();
 
-    b.finish(res, outputs).await
+        #[cfg(feature = "metrics")]
+        crate::metrics::batch_items(
+            outputs.iter().filter(|r| r.is_ok()).count(),
+            outputs.iter().filter(|r| r.is_err()).count(),
+        );
+
+        b.finish(res, outputs).await
+    }
+    .await;
+
+    #[cfg(feature = "metrics")]
+    crate::metrics::batch_run(result.is_ok());
+    result
 }
 
 /// Inline per-item retry loop that only requires `ItemOutput: Send` (not `Sync`).
@@ -871,5 +886,121 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, TaskResult::Single(Step::Done));
+    }
+}
+
+#[cfg(all(test, feature = "metrics"))]
+mod metrics_tests {
+    use super::*;
+    use crate::metrics::test_support::*;
+    use crate::task::Task;
+    use crate::workflow::Workflow;
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    enum St {
+        Process,
+        Done,
+    }
+
+    // BatchTask loading 3 items; process_item errors on item index 1; finish returns Done
+    struct ThreeItemBatch;
+
+    // Use the trait-impl form: inside cano the inherent form emits ::cano:: paths
+    // that don't resolve; trait-impl form works everywhere.
+    #[crate::task::batch]
+    impl BatchTask<St> for ThreeItemBatch {
+        type Item = usize;
+        type ItemOutput = usize;
+
+        async fn load(&self, _res: &Resources) -> Result<Vec<Self::Item>, CanoError> {
+            Ok(vec![0, 1, 2])
+        }
+
+        async fn process_item(&self, item: &Self::Item) -> Result<Self::ItemOutput, CanoError> {
+            if *item == 1 {
+                Err(CanoError::task_execution("item 1 failed"))
+            } else {
+                Ok(*item)
+            }
+        }
+
+        async fn finish(
+            &self,
+            _res: &Resources,
+            _outputs: Vec<Result<Self::ItemOutput, CanoError>>,
+        ) -> Result<TaskResult<St>, CanoError> {
+            Ok(TaskResult::Single(St::Done))
+        }
+    }
+
+    #[test]
+    fn batch_metrics_counted_correctly() {
+        let (result, rows) = run_with_recorder(|| async {
+            let workflow = Workflow::bare()
+                .register(St::Process, ThreeItemBatch)
+                .add_exit_state(St::Done);
+            workflow.orchestrate(St::Process).await
+        });
+        assert!(result.is_ok(), "workflow should succeed: {result:?}");
+        assert_eq!(
+            counter(&rows, "cano_batch_runs_total", &[("outcome", "completed")]),
+            1,
+            "expected 1 completed batch run"
+        );
+        assert_eq!(
+            counter(&rows, "cano_batch_items_total", &[("result", "ok")]),
+            2,
+            "expected 2 ok items"
+        );
+        assert_eq!(
+            counter(&rows, "cano_batch_items_total", &[("result", "err")]),
+            1,
+            "expected 1 err item"
+        );
+    }
+
+    // BatchTask whose load always fails — batch_run(false) must still be emitted.
+    struct LoadFailsBatch;
+
+    #[crate::task::batch]
+    impl BatchTask<St> for LoadFailsBatch {
+        type Item = u32;
+        type ItemOutput = u32;
+
+        async fn load(&self, _res: &Resources) -> Result<Vec<Self::Item>, CanoError> {
+            Err(CanoError::task_execution("load failed"))
+        }
+
+        async fn process_item(&self, item: &Self::Item) -> Result<Self::ItemOutput, CanoError> {
+            Ok(*item)
+        }
+
+        async fn finish(
+            &self,
+            _res: &Resources,
+            _outputs: Vec<Result<Self::ItemOutput, CanoError>>,
+        ) -> Result<TaskResult<St>, CanoError> {
+            Ok(TaskResult::Single(St::Done))
+        }
+    }
+
+    #[test]
+    fn batch_run_emitted_on_load_failure() {
+        let (result, rows) = run_with_recorder(|| async {
+            let res = crate::resource::Resources::new();
+            run_batch(&LoadFailsBatch, &res).await
+        });
+        assert!(result.is_err(), "load failure should propagate as Err");
+        assert_eq!(
+            counter(&rows, "cano_batch_runs_total", &[("outcome", "failed")]),
+            1,
+            "expected 1 failed batch run even when load errors"
+        );
+        // batch_items must NOT be emitted — load failed before processing
+        assert_eq!(
+            counter_opt(&rows, "cano_batch_items_total", &[("result", "ok")]),
+            None,
+            "batch_items must not be emitted when load fails"
+        );
     }
 }

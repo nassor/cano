@@ -192,6 +192,10 @@
 //! - `scheduler` (requires `scheduler` feature): `Scheduler` (builder) and `RunningScheduler` (live handle) — cron and interval scheduling
 //! - [`mod@resource`]: [`Resource`] trait, [`Resources`] dictionary, and [`HealthStatus`] — lifecycle-aware resource management and health probes
 //! - [`observer`]: [`WorkflowObserver`] — synchronous lifecycle/failure event hooks (and [`TracingObserver`], behind the `tracing` feature)
+//! - `metrics` (requires `metrics` feature): a `MetricsObserver` plus low-cardinality
+//!   counters / histograms / gauges for workflow, task, retry, split/join, circuit-breaker,
+//!   scheduler, processing-loop, recovery and saga internals — call `cano::metrics::describe()`
+//!   for the full list with help text and units
 //! - [`recovery`]: [`CheckpointStore`] / [`CheckpointRow`] — append-only checkpoint log for crash recovery (and `RedbCheckpointStore`, behind the `recovery` feature)
 //! - [`saga`]: [`CompensatableTask`] — pair a forward step with a compensating action; failures roll back via [`Workflow::register_with_compensation`]
 //! - [`store`]: [`MemoryStore`] — a typed in-memory store that implements [`Resource`]
@@ -212,6 +216,9 @@ pub mod saga;
 pub mod store;
 pub mod task;
 pub mod workflow;
+
+#[cfg(feature = "metrics")]
+pub mod metrics;
 
 #[cfg(feature = "scheduler")]
 pub mod scheduler;
@@ -242,6 +249,9 @@ pub use workflow::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult, State
 
 #[cfg(feature = "tracing")]
 pub use observer::TracingObserver;
+
+#[cfg(feature = "metrics")]
+pub use observer::MetricsObserver;
 
 #[cfg(feature = "scheduler")]
 pub use scheduler::{BackoffPolicy, FlowInfo, RunningScheduler, Schedule, Scheduler, Status};
@@ -313,6 +323,9 @@ pub mod prelude {
 
     #[cfg(feature = "tracing")]
     pub use crate::TracingObserver;
+
+    #[cfg(feature = "metrics")]
+    pub use crate::MetricsObserver;
 
     #[cfg(feature = "recovery")]
     pub use crate::RedbCheckpointStore;

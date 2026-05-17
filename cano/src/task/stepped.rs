@@ -260,11 +260,18 @@ where
     let mut cursor: Option<S::Cursor> = None;
 
     loop {
-        match s.step(res, cursor).await? {
-            StepOutcome::More(new_cursor) => {
+        match s.step(res, cursor).await {
+            Err(e) => return Err(e),
+            Ok(StepOutcome::More(new_cursor)) => {
+                #[cfg(feature = "metrics")]
+                crate::metrics::step_iteration(false);
                 cursor = Some(new_cursor);
             }
-            StepOutcome::Done(result) => return Ok(result),
+            Ok(StepOutcome::Done(result)) => {
+                #[cfg(feature = "metrics")]
+                crate::metrics::step_iteration(true);
+                return Ok(result);
+            }
         }
     }
 }
@@ -774,5 +781,86 @@ mod tests {
         let result = Task::run(&stepper, &res).await.unwrap();
         assert_eq!(result, TaskResult::Single(MyState::Done));
         assert_eq!(calls.load(Ordering::Relaxed), 4);
+    }
+}
+
+#[cfg(all(test, feature = "metrics"))]
+mod metrics_tests {
+    use super::*;
+    use crate::metrics::test_support::*;
+    use crate::task::Task;
+    use crate::workflow::Workflow;
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    enum St {
+        Work,
+        Done,
+    }
+
+    // SteppedTask: More twice, then Done
+    struct TwoMoreOneDone;
+
+    // Use the trait-impl form: inside cano the inherent form emits ::cano:: paths
+    // that don't resolve; trait-impl form works everywhere.
+    #[crate::task::stepped]
+    impl SteppedTask<St> for TwoMoreOneDone {
+        type Cursor = u32;
+
+        async fn step(
+            &self,
+            _res: &Resources,
+            cursor: Option<u32>,
+        ) -> Result<StepOutcome<u32, St>, CanoError> {
+            let n = cursor.unwrap_or(0) + 1;
+            if n >= 3 {
+                Ok(StepOutcome::Done(TaskResult::Single(St::Done)))
+            } else {
+                Ok(StepOutcome::More(n))
+            }
+        }
+    }
+
+    /// Test via run_stepped (the free fn used when registered via Workflow::register
+    /// with the inherent macro form, and directly exercising the loop body in stepped.rs)
+    #[test]
+    fn step_iterations_counted_via_run_stepped() {
+        let (result, rows) = run_with_recorder(|| async {
+            let stepper = TwoMoreOneDone;
+            let res = crate::resource::Resources::new();
+            run_stepped(&stepper, &res).await
+        });
+        assert!(result.is_ok(), "run_stepped should succeed: {result:?}");
+        assert_eq!(
+            counter(&rows, "cano_step_iterations_total", &[("outcome", "more")]),
+            2,
+            "expected 2 more iterations (via run_stepped)"
+        );
+        assert_eq!(
+            counter(&rows, "cano_step_iterations_total", &[("outcome", "done")]),
+            1,
+            "expected 1 done iteration (via run_stepped)"
+        );
+    }
+
+    /// Test via Workflow::register_stepped (engine-owned step loop in execute_stepped_task)
+    #[test]
+    fn step_iterations_counted_via_register_stepped() {
+        let (result, rows) = run_with_recorder(|| async {
+            let workflow = Workflow::bare()
+                .register_stepped(St::Work, TwoMoreOneDone)
+                .add_exit_state(St::Done);
+            workflow.orchestrate(St::Work).await
+        });
+        assert!(result.is_ok(), "workflow should succeed: {result:?}");
+        assert_eq!(
+            counter(&rows, "cano_step_iterations_total", &[("outcome", "more")]),
+            2,
+            "expected 2 more iterations (via register_stepped)"
+        );
+        assert_eq!(
+            counter(&rows, "cano_step_iterations_total", &[("outcome", "done")]),
+            1,
+            "expected 1 done iteration (via register_stepped)"
+        );
     }
 }

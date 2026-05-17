@@ -38,7 +38,6 @@ many of those tasks run at once.
 <li class="toc-sub"><a href="#pattern-dynamic">Dynamic Task Generation</a></li>
 <li class="toc-sub"><a href="#pattern-resource">Resource-Limited Processing</a></li>
 <li class="toc-sub"><a href="#pattern-continuous">Continuous Workflow</a></li>
-<li><a href="#workflow-on-request">Workflow per HTTP Request</a></li>
 </ol>
 </nav>
 <hr class="section-divider">
@@ -1127,82 +1126,4 @@ async fn main() -> Result<(), CanoError> {
     Ok(())
 }
 ```
-<hr class="section-divider">
-
-<h2 id="workflow-on-request"><a href="#workflow-on-request" class="anchor-link" aria-hidden="true">#</a>Workflow per HTTP Request</h2>
-<p>
-A very common pattern is triggering a workflow for every incoming HTTP request, running the FSM to
-completion, and returning the results in the response. Cano workflows are cheap to construct — tasks are
-small <code>Clone</code> structs wrapped in <code>Arc</code> internally — so building one per request is
-fast, and split/join inside the workflow gives you per-request parallelism for free.
-</p>
-
-<div class="callout callout-warning">
-<span class="callout-label">Store isolation</span>
-<p>
-The <code>MemoryStore</code> is <code>Arc</code>-wrapped, so cloning a workflow shares the same store. For
-request-scoped data, create a <strong>fresh store per request</strong> to avoid data leaking between
-concurrent requests.
-</p>
-</div>
-
-<div class="diagram-frame">
-<p class="diagram-label">Workflow per Request</p>
-<div class="mermaid">
-sequenceDiagram
-participant Client
-participant Handler as HTTP Handler
-participant Store as MemoryStore
-participant WF as Workflow FSM
-Client->>Handler: POST /process {text}
-Handler->>Store: put("input_text", text)
-Handler->>WF: orchestrate(Parse)
-WF->>Store: get / put during tasks
-WF-->>Handler: Ok(Done)
-Handler->>Store: get("word_count"), get("uppercased")
-Handler-->>Client: 200 JSON response
-</div>
-</div>
-
-<p>The shape of the handler:</p>
-<ol>
-<li>Create a <strong>fresh <code>MemoryStore</code></strong> for the request and write the request data into it with <code>store.put()</code>.</li>
-<li>Build the workflow with a <strong>factory function</strong> that takes the store, then call <code>workflow.orchestrate(initial_state)</code> to drive the FSM to an exit state.</li>
-<li>Read the results back out of the store and return them in the HTTP response. The exit state returned by <code>orchestrate()</code> tells you which terminal branch ran — use it for success/error response logic.</li>
-</ol>
-
-```rust
-// One factory, called per request with a fresh store.
-fn build_workflow(store: MemoryStore) -> Workflow<TextPipelineState> {
-    Workflow::new(Resources::new().insert("store", store))
-        .register(TextPipelineState::Parse, ParseTask)
-        .register(TextPipelineState::Transform, TransformTask)
-        .add_exit_state(TextPipelineState::Done)
-        .with_timeout(Duration::from_secs(5))
-}
-
-// Inside an HTTP handler:
-let store = MemoryStore::new();              // fresh store — full isolation
-store.put("input_text", text)?;
-let workflow = build_workflow(store.clone());
-let final_state = workflow.orchestrate(TextPipelineState::Parse).await?; // which terminal branch ran
-let word_count: usize = store.get("word_count")?;
-```
-
-<div class="callout callout-tip">
-<span class="callout-label">Tip</span>
-<p>
-Use <code>.with_timeout()</code> on the workflow to keep a hung request from blocking indefinitely. For
-read-heavy workloads with shared reference data, pre-populate one store, share it via <code>Arc</code>,
-and use per-request keys to avoid collisions. The full Axum version is in
-<code>cargo run --example workflow_on_request</code>.
-</p>
-</div>
-
-<p>
-For a larger, production-shaped example that chains several split/join points with mixed strategies —
-context gathering with <code>All</code>, bidding with <code>PartialTimeout</code>, scoring and tracking
-with <code>All</code>, plus graceful error fan-out — see <code>cargo run --example workflow_ad_exchange</code>.
-</p>
-
 </div>

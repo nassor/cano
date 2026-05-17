@@ -1,0 +1,2 @@
+{%- set parts = config.extra.version | split(pat=".") -%}
+{% if commented %}# {% endif %}cano = { version = "{{ parts[0] }}.{{ parts[1] }}", features = [{% for f in features %}"{{ f }}"{% if not loop.last %}, {% endif %}{% endfor %}] }

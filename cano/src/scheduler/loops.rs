@@ -362,6 +362,13 @@ async fn execute_reserved_flow<TState, TResourceKey>(
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
     TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
+    #[cfg(feature = "metrics")]
+    let _active = crate::metrics::SchedulerFlowActiveGuard::new();
+    #[cfg(feature = "metrics")]
+    let _flow_id = info.read().await.id.clone();
+    #[cfg(feature = "metrics")]
+    let _started = std::time::Instant::now();
+
     // Execute workflow — skip lifecycle (setup/teardown handled by start/stop)
     #[cfg(feature = "tracing")]
     let result = workflow
@@ -371,6 +378,9 @@ async fn execute_reserved_flow<TState, TResourceKey>(
 
     #[cfg(not(feature = "tracing"))]
     let result = workflow.execute_workflow(initial_state).await;
+
+    #[cfg(feature = "metrics")]
+    crate::metrics::scheduler_flow_run(&_flow_id, result.is_ok(), _started.elapsed());
 
     apply_outcome(&info, result.map(|_| ()), policy).await;
 }
@@ -401,6 +411,8 @@ async fn apply_outcome(
                     streak: new_streak,
                     last_error: err_str,
                 };
+                #[cfg(feature = "metrics")]
+                crate::metrics::scheduler_flow_tripped(&info_guard.id);
             } else {
                 let delay = policy.compute_delay(new_streak);
                 let until = Utc::now()
@@ -411,6 +423,8 @@ async fn apply_outcome(
                     streak: new_streak,
                     last_error: err_str,
                 };
+                #[cfg(feature = "metrics")]
+                crate::metrics::scheduler_flow_backoff(&info_guard.id);
             }
         }
     }
