@@ -117,7 +117,7 @@ the FSM dispatch hot path stays allocation-light whether or not you wire any of 
 <p>Full coverage: the <a href="resilience/">Resilience</a>, <a href="recovery/">Recovery</a>, <a href="saga/">Saga</a> and <a href="observers/">Observers</a> guides.</p>
 
 <h2>Getting Started</h2>
-<p>Cano requires <strong>Rust 1.95.0+</strong> (edition 2024). Add it to your <code>Cargo.toml</code>:</p>
+<p>Cano requires <strong>Rust 1.89.0+</strong> (edition 2024). Add it to your <code>Cargo.toml</code>:</p>
 
 <div class="getting-started-code">
 
