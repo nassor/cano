@@ -284,12 +284,6 @@ pub fn describe() {
     }
 }
 
-/// `format!("{:?}")` of an FSM state, used as the low-cardinality `state` label value.
-#[inline]
-pub(crate) fn state_label<S: std::fmt::Debug>(state: &S) -> String {
-    format!("{state:?}")
-}
-
 // ----- RAII gauge guards -----
 
 /// Increments [`WORKFLOW_ACTIVE`] on construction, decrements on drop — survives every

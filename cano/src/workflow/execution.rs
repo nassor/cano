@@ -205,14 +205,18 @@ where
 
         loop {
             // The `Debug` label of the state being entered. Needed for observer
-            // `on_state_enter` and for checkpoint rows; skipped (no allocation)
-            // when neither is in play — the common, zero-overhead case.
-            let state_label: Option<String> =
-                if !self.observers.is_empty() || self.checkpoint_store.is_some() {
-                    Some(format!("{current_state:?}"))
-                } else {
-                    None
-                };
+            // `on_state_enter`, checkpoint rows, and the `metrics` feature's
+            // `state` label; skipped (no allocation) when none are in play — the
+            // common, zero-overhead case. Computed once per iteration and
+            // reused on every hot path below.
+            let need_state_label = !self.observers.is_empty()
+                || self.checkpoint_store.is_some()
+                || cfg!(feature = "metrics");
+            let state_label: Option<String> = if need_state_label {
+                Some(format!("{current_state:?}"))
+            } else {
+                None
+            };
 
             // Notify observers of every state entry, including the initial state
             // and any terminal exit state.
@@ -297,8 +301,10 @@ where
             #[cfg(feature = "tracing")]
             debug!(current_state = ?current_state, "Executing state");
 
+            // Reuse the already-computed label (see `need_state_label` above —
+            // `metrics` feature is in that condition so this is always `Some`).
             #[cfg(feature = "metrics")]
-            let _state_label = crate::metrics::state_label(&current_state);
+            let _state_label = state_label.as_deref().unwrap_or_default();
             #[cfg(feature = "metrics")]
             let _dispatch_started = std::time::Instant::now();
 
@@ -328,7 +334,7 @@ where
                         .await;
                     #[cfg(feature = "metrics")]
                     crate::metrics::task_dispatch_duration(
-                        &_state_label,
+                        _state_label,
                         "compensatable",
                         _dispatch_started.elapsed(),
                     );
@@ -406,7 +412,7 @@ where
                 StateEntry::Stepped { .. } => Some("stepped"),
             } {
                 crate::metrics::task_dispatch_duration(
-                    &_state_label,
+                    _state_label,
                     kind,
                     _dispatch_started.elapsed(),
                 );
