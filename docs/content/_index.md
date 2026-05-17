@@ -123,7 +123,7 @@ the FSM dispatch hot path stays allocation-light whether or not you wire any of 
 
 ```toml
 [dependencies]
-cano = { version = "0.12", features = ["all"] }
+{{ cano_dep(features=["all"]) }}
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 ```

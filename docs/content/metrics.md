@@ -56,14 +56,14 @@ observer hooks as <code>metrics</code>-crate counters.
 
 ```toml
 [dependencies]
-cano = { version = "0.12", features = ["metrics"] }
+{{ cano_dep(features=["metrics"]) }}
 
 # The metrics crate is a facade — you also need a recorder/exporter:
 metrics-exporter-prometheus = "0.16"  # for production
 # or: metrics-util = "0.18"           # for testing / debugging snapshots
 
 # Or enable everything (scheduler + tracing + recovery + metrics):
-# cano = { version = "0.12", features = ["all"] }
+{{ cano_dep(features=["all"], commented=true) }}
 
 ```
 
@@ -265,7 +265,7 @@ wiring you do in your application — Cano never depends on <code>metrics-tracin
 
 ```toml
 [dependencies]
-cano = { version = "0.12", features = ["metrics", "tracing"] }
+{{ cano_dep(features=["metrics", "tracing"]) }}
 metrics-tracing-context = "0.18"
 tracing-subscriber = "0.3"
 
