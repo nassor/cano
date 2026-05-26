@@ -211,7 +211,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create a temporary checkpoint store.
     let dir = tempfile::tempdir()?;
-    let store = Arc::new(RedbCheckpointStore::new(dir.path().join("tour.redb"))?);
+    let checkpoint_store = Arc::new(RedbCheckpointStore::new(dir.path().join("tour.redb"))?);
 
     // --- counter resource + background incrementer ---
     const THRESHOLD: u32 = 4;
@@ -239,7 +239,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .register(Stage::Crunch, Cruncher)
         .register_stepped(Stage::Grind, Grinder)
         .add_exit_state(Stage::Done)
-        .with_checkpoint_store(store.clone())
+        .with_checkpoint_store(checkpoint_store.clone())
         .with_workflow_id(run_id);
 
     let result = workflow.orchestrate(Stage::Route).await?;
@@ -248,7 +248,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\ncompleted at {result:?}");
 
     // The checkpoint log is cleared on a successful run.
-    let rows = store.load_run(run_id).await?;
+    let rows = checkpoint_store.load_run(run_id).await?;
     println!(
         "\ncheckpoint log after successful run: {} row(s) (cleared on success)",
         rows.len()

@@ -181,12 +181,12 @@ impl WorkTask {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
+    let checkpoint_store = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
     let workflow = Workflow::bare()
         .register(Step::Start, StartTask)
         .register(Step::Work, WorkTask)
         .add_exit_state(Step::Done)
-        .with_checkpoint_store(store)
+        .with_checkpoint_store(checkpoint_store)
         .with_workflow_id("run-42");
 
     // First time: run forward (checkpoints are written along the way).

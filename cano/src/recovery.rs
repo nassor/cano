@@ -61,10 +61,10 @@
 //!
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), CanoError> {
-//! let store = InMemoryStore::default();
-//! store.append("run-1", CheckpointRow::new(0, "Start", "fetch")).await?;
-//! store.append("run-1", CheckpointRow::new(1, "Done", "process")).await?;
-//! assert_eq!(store.load_run("run-1").await?.len(), 2);
+//! let checkpoint_store = InMemoryStore::default();
+//! checkpoint_store.append("run-1", CheckpointRow::new(0, "Start", "fetch")).await?;
+//! checkpoint_store.append("run-1", CheckpointRow::new(1, "Done", "process")).await?;
+//! assert_eq!(checkpoint_store.load_run("run-1").await?.len(), 2);
 //! # Ok(())
 //! # }
 //! ```

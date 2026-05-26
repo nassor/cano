@@ -160,7 +160,7 @@ impl FinalizeTask {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let store = Arc::new(MapStore::default());
+    let checkpoint_store = Arc::new(MapStore::default());
     let run_id = "demo-custom-store";
 
     let workflow = Workflow::new(Resources::new().insert("crash", CrashOnce::default()))
@@ -168,7 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .register(Step::Process, ProcessTask)
         .register(Step::Finalize, FinalizeTask)
         .add_exit_state(Step::Done)
-        .with_checkpoint_store(store.clone() as Arc<dyn CheckpointStore>)
+        .with_checkpoint_store(checkpoint_store.clone() as Arc<dyn CheckpointStore>)
         .with_workflow_id(run_id);
 
     // --- First run: Process crashes; the checkpoint log is kept. -------
@@ -179,7 +179,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\nCheckpoint log after run 1 (crash left it intact):");
-    for row in store.load_run(run_id).await? {
+    for row in checkpoint_store.load_run(run_id).await? {
         println!(
             "  seq={:<3} state={:<9} task={:<20} kind={:?}",
             row.sequence, row.state, row.task_id, row.kind
@@ -187,7 +187,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Verify the duplicate-sequence rejection.
-    let dup_result = store
+    let dup_result = checkpoint_store
         .append(run_id, CheckpointRow::new(0, "Init", "InitTask"))
         .await;
     assert!(
@@ -206,7 +206,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(final_state, Step::Done);
 
     println!("\nCheckpoint log after successful run (cleared by engine):");
-    let remaining = store.load_run(run_id).await?;
+    let remaining = checkpoint_store.load_run(run_id).await?;
     if remaining.is_empty() {
         println!("  (empty — engine cleared it on success)");
     } else {

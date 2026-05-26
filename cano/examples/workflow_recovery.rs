@@ -95,16 +95,16 @@ impl FinalizeTask {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
-    let store = Arc::new(RedbCheckpointStore::new(dir.path().join("recovery.redb"))?);
+    let checkpoint_store = Arc::new(RedbCheckpointStore::new(dir.path().join("recovery.redb"))?);
     let run_id = "demo-run-42";
 
-    // One workflow definition, one store — reused across both calls below.
+    // One workflow definition, one checkpoint store — reused across both calls below.
     let workflow = Workflow::new(Resources::new().insert("crash", CrashOnce::default()))
         .register(Step::Start, StartTask)
         .register(Step::Process, ProcessTask)
         .register(Step::Finalize, FinalizeTask)
         .add_exit_state(Step::Done)
-        .with_checkpoint_store(store.clone())
+        .with_checkpoint_store(checkpoint_store.clone())
         .with_workflow_id(run_id)
         .with_observer(Arc::new(Watcher));
 
@@ -113,7 +113,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("  stopped: {e}");
     }
     println!("checkpoint log after run 1 (the crash left it intact):");
-    for row in store.load_run(run_id).await? {
+    for row in checkpoint_store.load_run(run_id).await? {
         println!("  #{:<2} {:<9} {}", row.sequence, row.state, row.task_id);
     }
 
@@ -121,7 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let final_state = workflow.resume_from(run_id).await?;
     println!("  reached {final_state:?} — checkpoint log cleared on success");
     assert_eq!(final_state, Step::Done);
-    assert!(store.load_run(run_id).await?.is_empty());
+    assert!(checkpoint_store.load_run(run_id).await?.is_empty());
 
     Ok(())
 }

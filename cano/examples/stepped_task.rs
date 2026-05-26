@@ -129,7 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create a temporary directory for the checkpoint database.
     let dir = tempfile::tempdir()?;
-    let store = Arc::new(RedbCheckpointStore::new(dir.path().join("stepped.redb"))?);
+    let checkpoint_store = Arc::new(RedbCheckpointStore::new(dir.path().join("stepped.redb"))?);
 
     println!("=== stepped_task example ({TOTAL} items) ===\n");
 
@@ -137,7 +137,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .register_stepped(Stage::Crunch, Cruncher { total: TOTAL })
         .register(Stage::Report, Reporter { total: TOTAL })
         .add_exit_state(Stage::Done)
-        .with_checkpoint_store(store.clone())
+        .with_checkpoint_store(checkpoint_store.clone())
         .with_workflow_id(run_id);
 
     let result = workflow.orchestrate(Stage::Crunch).await?;
@@ -146,7 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\ncompleted at {result:?}");
 
     // On a successful run the engine clears the checkpoint log.
-    let rows = store.load_run(run_id).await?;
+    let rows = checkpoint_store.load_run(run_id).await?;
     println!(
         "\ncheckpoint log after successful run: {} row(s) (cleared on success)",
         rows.len()
