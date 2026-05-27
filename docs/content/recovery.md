@@ -29,6 +29,7 @@ implementation. A workflow with no checkpoint store keeps its zero-overhead beha
 <li><a href="#attaching">Attaching a Checkpoint Store</a></li>
 <li><a href="#what-is-recorded">What Gets Recorded</a></li>
 <li><a href="#resuming">Resuming a Run</a></li>
+<li><a href="#versioning">Workflow Versioning</a></li>
 <li><a href="#idempotency">The Idempotency Contract</a></li>
 <li><a href="#trait">The <code>CheckpointStore</code> Trait</a></li>
 <li><a href="#redb">Built-in: <code>RedbCheckpointStore</code></a></li>
@@ -99,6 +100,7 @@ pub struct CheckpointRow {
     pub task_id: String,          // Task::name() for a single-task state; "" for split / exit
     pub kind: RowKind,            // what this row records — see RowKind
     pub output_blob: Option<Vec<u8>>,  // serialized payload for compensation / stepped cursor (else None)
+    pub workflow_version: u32,    // user-stamped version; see `Workflow::with_workflow_version` (default 0)
 }
 
 #[non_exhaustive]
@@ -173,8 +175,57 @@ assert_eq!(final_state, Step::Done);
 
 <p>
 <code>resume_from</code> errors with <code>CanoError::CheckpointStore</code> when the store fails or
-there are no rows for the id, and with <code>CanoError::Workflow</code> when the recorded state
-label doesn't match any state of <em>this</em> workflow definition.
+there are no rows for the id, with <code>CanoError::Workflow</code> when the recorded state
+label doesn't match any state of <em>this</em> workflow definition, and with
+<code>CanoError::WorkflowVersionMismatch { stored, expected }</code> when the latest row's
+<code>workflow_version</code> disagrees with the version configured on this workflow — see
+<a href="#versioning">Workflow Versioning</a> below.
+</p>
+<hr class="section-divider">
+
+<h2 id="versioning"><a href="#versioning" class="anchor-link" aria-hidden="true">#</a>Workflow Versioning</h2>
+<p>
+When the FSM shape changes between deploys — states added or removed, a cursor schema renamed,
+split branches reordered — a checkpoint written by the old shape can no longer be safely resumed
+under the new shape. Re-entering a state that no longer exists, or feeding the wrong cursor format
+to a <a href="../stepped-task/">SteppedTask</a>, produces silent corruption rather than a clean
+error. <code>Workflow::with_workflow_version(u32)</code> is the opt-in guard against that.
+</p>
+
+```rust
+let workflow = Workflow::new(resources)
+    .register(MyState::Start, StartTask)
+    .register(MyState::Process, ProcessTask)
+    .add_exit_state(MyState::Done)
+    .with_checkpoint_store(checkpoint_store)
+    .with_workflow_id("orders-v2")
+    .with_workflow_version(2);
+```
+
+<p>
+Every appended <code>CheckpointRow</code> is stamped with the configured version (default
+<code>0</code> for workflows that never call the builder). On <code>resume_from</code>, the engine
+compares the highest-sequence row's <code>workflow_version</code> against
+<code>self.workflow_version</code> <em>before</em> resources' <code>setup_all</code> or any FSM entry
+runs. A mismatch returns <code>CanoError::WorkflowVersionMismatch { stored, expected }</code>
+immediately — no task re-runs, no partial side effects.
+</p>
+
+<p>
+<strong>Operator guidance:</strong> bump the version whenever a deploy changes the FSM in a way
+that would make a pre-change checkpoint nonsensical — renamed or removed states, changed
+<a href="../stepped-task/">SteppedTask</a> cursor format, reordered split branches, restructured
+<a href="../saga/">compensation</a> outputs. Leave it alone for behavior-preserving changes:
+retry-policy tweaks, observability additions, internal refactors, new states added <em>after</em>
+the current exit state.
+</p>
+
+<p>
+Workflows that never call <code>with_workflow_version</code> use <code>0</code> on both sides, so
+the equality check is a no-op and behavior is identical to a pre-versioning workflow. Rows written
+by older versions of the library — before <code>workflow_version</code> existed on disk — decode as
+<code>0</code> via a backward-compatibility fallback in <code>RedbCheckpointStore</code>, so
+existing databases resume transparently with no migration step.
 </p>
 <hr class="section-divider">
 
@@ -227,15 +278,16 @@ impl InMemoryStore {
 ```
 
 <p>
-Contract: <code>append</code> durably persists the row — <strong>including its <code>kind</code> and
-<code>output_blob</code></strong> — and must <strong>reject a duplicate <code>(workflow_id, sequence)</code></strong>
+Contract: <code>append</code> durably persists the row — <strong>including its <code>kind</code>,
+<code>output_blob</code>, and <code>workflow_version</code></strong> — and must <strong>reject a duplicate <code>(workflow_id, sequence)</code></strong>
 with an <code>Err</code> rather than overwriting (a collision means two runs share a workflow id;
 <code>RedbCheckpointStore</code> enforces this via its composite key, as does the Postgres impl in
 <code>cano-e2e</code> via its primary key). <code>load_run</code> returns every row ever appended for
 the id, <strong>sorted ascending by <code>sequence</code></strong>, or an empty <code>Vec</code> for
 an unknown id; <code>clear</code> removes a run's rows and must not touch any other id (clearing an
 unknown id is a no-op). The example above stores the whole <code>CheckpointRow</code>, so it carries
-<code>kind</code> for free — a store that maps rows to columns needs a <code>kind</code> column. The
+<code>kind</code> and <code>workflow_version</code> for free — a store that maps rows to columns
+needs columns for both (see <a href="#versioning">Workflow Versioning</a>). The
 engine calls <code>clear</code> automatically when a run reaches an exit state — and after a fully successful
 <a href="../saga/">compensation rollback</a> — so a finished run leaves no recovery log behind
 (it's best-effort: a <code>clear</code> failure is logged, not fatal). Implementations must be
