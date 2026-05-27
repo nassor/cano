@@ -35,6 +35,17 @@ struct StoredRow {
     task_id: String,
     output_blob: Option<Vec<u8>>,
     kind: super::RowKind,
+    workflow_version: u32,
+}
+
+/// Pre-versioning on-disk shape. Kept solely as a decode fallback so existing
+/// redb databases written before `workflow_version` was added still load.
+#[derive(serde::Deserialize)]
+struct StoredRowV0 {
+    state: String,
+    task_id: String,
+    output_blob: Option<Vec<u8>>,
+    kind: super::RowKind,
 }
 
 /// The key range covering every row for `workflow_id`, in ascending `sequence` order.
@@ -84,6 +95,7 @@ impl CheckpointStore for RedbCheckpointStore {
             task_id: row.task_id,
             output_blob: row.output_blob,
             kind: row.kind,
+            workflow_version: row.workflow_version,
         };
         let bytes = postcard::to_stdvec(&payload)
             .map_err(|e| CanoError::CheckpointStore(format!("encode checkpoint row: {e}")))?;
@@ -121,16 +133,33 @@ impl CheckpointStore for RedbCheckpointStore {
         for entry in table.range(workflow_range(workflow_id)).map_err(redb_err)? {
             let (key, value) = entry.map_err(redb_err)?;
             let sequence = key.value().1;
-            let payload: StoredRow = postcard::from_bytes(value.value())
-                .map_err(|e| CanoError::CheckpointStore(format!("decode checkpoint row: {e}")))?;
-
-            rows.push(CheckpointRow {
-                sequence,
-                state: payload.state,
-                task_id: payload.task_id,
-                output_blob: payload.output_blob,
-                kind: payload.kind,
-            });
+            let bytes = value.value();
+            let row = match postcard::from_bytes::<StoredRow>(bytes) {
+                Ok(payload) => CheckpointRow {
+                    sequence,
+                    state: payload.state,
+                    task_id: payload.task_id,
+                    output_blob: payload.output_blob,
+                    kind: payload.kind,
+                    workflow_version: payload.workflow_version,
+                },
+                Err(new_err) => match postcard::from_bytes::<StoredRowV0>(bytes) {
+                    Ok(legacy) => CheckpointRow {
+                        sequence,
+                        state: legacy.state,
+                        task_id: legacy.task_id,
+                        output_blob: legacy.output_blob,
+                        kind: legacy.kind,
+                        workflow_version: 0,
+                    },
+                    Err(_) => {
+                        return Err(CanoError::CheckpointStore(format!(
+                            "decode checkpoint row: {new_err}"
+                        )));
+                    }
+                },
+            };
+            rows.push(row);
         }
         Ok(rows)
     }
@@ -476,5 +505,66 @@ mod tests {
         assert_eq!(rows[2].state, "C");
         assert_eq!(rows[2].kind, super::super::RowKind::StepCursor);
         assert_eq!(rows[2].output_blob.as_deref(), Some(&[4u8, 5][..]));
+    }
+
+    // -- workflow_version persistence ---------------------------------------
+
+    #[tokio::test]
+    async fn workflow_version_roundtrips_through_redb_store() {
+        let dir = tempdir().unwrap();
+        let store = RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap();
+        let row = CheckpointRow::new(0, "Start", "task").with_workflow_version(7);
+        store.append("wf-roundtrip", row).await.unwrap();
+        let loaded = store.load_run("wf-roundtrip").await.unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].workflow_version, 7);
+    }
+
+    #[tokio::test]
+    async fn legacy_stored_row_decodes_as_workflow_version_zero() {
+        // Mirror of the pre-versioning on-disk shape so the test can *write*
+        // a legacy blob. The production `StoredRowV0` is Deserialize-only by
+        // design (it only ever has to read old data), so we define a local
+        // serializable twin here with the exact same field order.
+        #[derive(serde::Serialize)]
+        struct LegacyWrite {
+            state: String,
+            task_id: String,
+            output_blob: Option<Vec<u8>>,
+            kind: super::super::RowKind,
+        }
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ckpt.redb");
+
+        // Write a V0-shape blob (no workflow_version field) directly into the
+        // table to simulate a database written before versioning existed.
+        {
+            let db = Database::create(&path).unwrap();
+            let tx = db.begin_write().unwrap();
+            {
+                let mut table = tx.open_table(CHECKPOINTS).unwrap();
+                let legacy = LegacyWrite {
+                    state: "Start".into(),
+                    task_id: "task".into(),
+                    output_blob: None,
+                    kind: super::super::RowKind::StateEntry,
+                };
+                let bytes = postcard::to_stdvec(&legacy).unwrap();
+                table.insert(("wf-legacy", 0u64), bytes.as_slice()).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        // Now open the store the normal way and confirm the legacy row decodes
+        // with workflow_version defaulted to 0.
+        let store = RedbCheckpointStore::new(&path).unwrap();
+        let rows = store.load_run("wf-legacy").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].sequence, 0);
+        assert_eq!(rows[0].state, "Start");
+        assert_eq!(rows[0].task_id, "task");
+        assert_eq!(rows[0].kind, super::super::RowKind::StateEntry);
+        assert_eq!(rows[0].workflow_version, 0);
     }
 }

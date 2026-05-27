@@ -208,6 +208,20 @@ pub enum CanoError {
 
     /// A resource key was inserted twice into the same Resources map
     ResourceDuplicateKey(String),
+
+    /// A persisted checkpoint row's workflow version does not match the
+    /// version configured on this workflow.
+    ///
+    /// Emitted when resuming a checkpointed run whose stored schema version
+    /// differs from what the current workflow expects. The run cannot safely
+    /// continue because the on-disk state was produced by an incompatible
+    /// workflow definition.
+    WorkflowVersionMismatch {
+        /// The version recorded on the persisted checkpoint row.
+        stored: u32,
+        /// The version configured on this workflow.
+        expected: u32,
+    },
 }
 
 impl CanoError {
@@ -277,6 +291,12 @@ impl CanoError {
         CanoError::ResourceDuplicateKey(msg.into())
     }
 
+    /// Create a new workflow-version-mismatch error from the stored and
+    /// expected version numbers.
+    pub fn workflow_version_mismatch(stored: u32, expected: u32) -> Self {
+        CanoError::WorkflowVersionMismatch { stored, expected }
+    }
+
     /// Get the error message as a string slice
     pub fn message(&self) -> &str {
         match self {
@@ -295,6 +315,9 @@ impl CanoError {
             CanoError::ResourceNotFound(msg) => msg,
             CanoError::ResourceTypeMismatch(msg) => msg,
             CanoError::ResourceDuplicateKey(msg) => msg,
+            CanoError::WorkflowVersionMismatch { .. } => {
+                "workflow version mismatch (stored vs expected)"
+            }
         }
     }
 
@@ -314,6 +337,7 @@ impl CanoError {
             CanoError::ResourceNotFound(_) => "resource_not_found",
             CanoError::ResourceTypeMismatch(_) => "resource_type_mismatch",
             CanoError::ResourceDuplicateKey(_) => "resource_duplicate_key",
+            CanoError::WorkflowVersionMismatch { .. } => "workflow_version_mismatch",
         }
     }
 }
@@ -344,6 +368,10 @@ impl std::fmt::Display for CanoError {
             CanoError::ResourceNotFound(msg) => write!(f, "Resource not found: {msg}"),
             CanoError::ResourceTypeMismatch(msg) => write!(f, "Resource type mismatch: {msg}"),
             CanoError::ResourceDuplicateKey(msg) => write!(f, "Resource duplicate key: {msg}"),
+            CanoError::WorkflowVersionMismatch { stored, expected } => write!(
+                f,
+                "Workflow version mismatch: stored={stored}, expected={expected}"
+            ),
         }
     }
 }
@@ -369,6 +397,16 @@ impl PartialEq for CanoError {
             (CanoError::ResourceNotFound(a), CanoError::ResourceNotFound(b)) => a == b,
             (CanoError::ResourceTypeMismatch(a), CanoError::ResourceTypeMismatch(b)) => a == b,
             (CanoError::ResourceDuplicateKey(a), CanoError::ResourceDuplicateKey(b)) => a == b,
+            (
+                CanoError::WorkflowVersionMismatch {
+                    stored: s1,
+                    expected: e1,
+                },
+                CanoError::WorkflowVersionMismatch {
+                    stored: s2,
+                    expected: e2,
+                },
+            ) => s1 == s2 && e1 == e2,
             _ => false,
         }
     }
@@ -686,5 +724,25 @@ mod tests {
         let mismatch = CanoError::resource_type_mismatch("key");
         // Same message, different variants — must not be equal
         assert_ne!(not_found, mismatch);
+    }
+
+    #[test]
+    fn test_workflow_version_mismatch_constructor_category_and_display() {
+        let err = CanoError::workflow_version_mismatch(1, 2);
+        assert_eq!(err.category(), "workflow_version_mismatch");
+        assert!(err.message().contains("stored"));
+        let shown = format!("{err}");
+        assert!(shown.contains("Workflow version mismatch"));
+        assert!(shown.contains("stored=1"));
+        assert!(shown.contains("expected=2"));
+    }
+
+    #[test]
+    fn test_workflow_version_mismatch_partial_eq() {
+        let a = CanoError::workflow_version_mismatch(0, 1);
+        let b = CanoError::workflow_version_mismatch(0, 1);
+        assert_eq!(a, b);
+        let c = CanoError::workflow_version_mismatch(1, 2);
+        assert_ne!(a, c);
     }
 }

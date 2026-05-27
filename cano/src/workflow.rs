@@ -165,6 +165,11 @@ where
     /// is set on that path (the first checkpoint write errors if it's missing);
     /// [`resume_from`](Self::resume_from) takes the id explicitly.
     workflow_id: Option<String>,
+    /// Version stamped onto every [`CheckpointRow`](crate::recovery::CheckpointRow) the
+    /// engine appends, and checked against the persisted version when
+    /// [`resume_from`](Self::resume_from) replays a run. Defaults to `0`; set via
+    /// [`with_workflow_version`](Self::with_workflow_version).
+    workflow_version: u32,
     /// Optional tracing span
     #[cfg(feature = "tracing")]
     tracing_span: Option<Span>,
@@ -187,6 +192,7 @@ where
             compensators: HashMap::new(),
             checkpoint_store: None,
             workflow_id: None,
+            workflow_version: 0,
             #[cfg(feature = "tracing")]
             tracing_span: None,
         }
@@ -466,6 +472,42 @@ where
         self
     }
 
+    /// Stamp this version onto every [`CheckpointRow`](crate::recovery::CheckpointRow)
+    /// the engine appends, and reject [`resume_from`](Self::resume_from) when the
+    /// persisted version differs. Defaults to `0`.
+    ///
+    /// Bump the version whenever the FSM shape changes between deploys (added or
+    /// removed states, cursor schema, compensation output layout) so a resumed run
+    /// can't silently land on an incompatible workflow definition — the mismatch
+    /// surfaces as [`CanoError::WorkflowVersionMismatch`](crate::CanoError::WorkflowVersionMismatch).
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use cano::prelude::*;
+    ///
+    /// # #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    /// # enum State { Start, Done }
+    /// # #[derive(Clone)]
+    /// # struct MyTask;
+    /// # #[task]
+    /// # impl Task<State> for MyTask {
+    /// #     async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> {
+    /// #         Ok(TaskResult::Single(State::Done))
+    /// #     }
+    /// # }
+    /// let workflow = Workflow::bare()
+    ///     .register(State::Start, MyTask)
+    ///     .add_exit_state(State::Done)
+    ///     .with_workflow_version(2);
+    ///
+    /// assert!(workflow.validate().is_ok());
+    /// ```
+    pub fn with_workflow_version(mut self, version: u32) -> Self {
+        self.workflow_version = version;
+        self
+    }
+
     /// Set a tracing span for this workflow (requires "tracing" feature)
     #[cfg(feature = "tracing")]
     pub fn with_tracing_span(mut self, span: Span) -> Self {
@@ -737,6 +779,7 @@ where
             compensators: self.compensators.clone(),
             checkpoint_store: self.checkpoint_store.clone(),
             workflow_id: self.workflow_id.clone(),
+            workflow_version: self.workflow_version,
             #[cfg(feature = "tracing")]
             tracing_span: self.tracing_span.clone(),
         }
@@ -796,6 +839,7 @@ where
             .field("exit_states", &self.exit_states)
             .field("workflow_timeout", &self.workflow_timeout)
             .field("workflow_id", &self.workflow_id)
+            .field("workflow_version", &self.workflow_version)
             .field("checkpoint_store", &self.checkpoint_store.is_some())
             .field(
                 "compensators",

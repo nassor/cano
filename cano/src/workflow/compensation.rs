@@ -281,6 +281,12 @@ where
                 "no checkpoint rows for workflow id {workflow_id:?}"
             ))
         })?;
+        if last.workflow_version != self.workflow_version {
+            return Err(CanoError::workflow_version_mismatch(
+                last.workflow_version,
+                self.workflow_version,
+            ));
+        }
         let resume_state = self.state_from_label(&last.state).ok_or_else(|| {
             CanoError::workflow(format!(
                 "checkpoint state {:?} is not a registered or exit state of this workflow",
@@ -2264,6 +2270,41 @@ mod tests {
             vec![("A".to_string(), 42u32)],
             "StepCursor row must not become a compensation entry"
         );
+    }
+
+    #[tokio::test]
+    async fn workflow_version_is_stamped_on_every_appended_row() {
+        let store = Arc::new(MemCheckpoints::default());
+        let workflow = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Process))
+            .register(TestState::Process, SimpleTask::new(TestState::Complete))
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone())
+            .with_workflow_id("ver-run")
+            .with_workflow_version(7);
+        workflow.orchestrate(TestState::Start).await.unwrap();
+        let rows = store.audit_rows("ver-run");
+        assert!(rows.iter().all(|r| r.workflow_version == 7));
+        assert!(!rows.is_empty(), "expected at least one appended row");
+    }
+
+    #[tokio::test]
+    async fn resume_from_rejects_workflow_version_mismatch() {
+        let store = Arc::new(MemCheckpoints::default());
+        store
+            .append(
+                "ver-mismatch",
+                CheckpointRow::new(0, "Start", "").with_workflow_version(1),
+            )
+            .await
+            .unwrap();
+        let workflow = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Complete))
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone())
+            .with_workflow_version(2);
+        let err = workflow.resume_from("ver-mismatch").await.unwrap_err();
+        assert_eq!(err, CanoError::workflow_version_mismatch(1, 2));
     }
 }
 
