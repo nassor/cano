@@ -141,6 +141,15 @@ where
     pub(crate) resources: Arc<Resources<TResourceKey>>,
     /// Global workflow timeout
     workflow_timeout: Option<Duration>,
+    /// Total wall-clock budget for the entire `orchestrate` / `resume_from` call.
+    /// When set, the FSM aborts the in-flight task at its next await point as soon
+    /// as the budget elapses and drains the compensation stack against
+    /// [`compensation_timeout`](Self::compensation_timeout) (or a sensible default).
+    /// `None` by default — workflows without this budget keep their zero-cost behavior.
+    pub(crate) total_timeout: Option<Duration>,
+    /// Optional bound on the saga compensation drain after a total-timeout trip.
+    /// When unset, the engine derives a default from the remaining wall-clock budget.
+    pub(crate) compensation_timeout: Option<Duration>,
     /// Exit states that terminate workflow. Stored as a Vec because typical
     /// workflows have ≤16 exit states; linear scan beats HashSet on cache locality.
     exit_states: Vec<TState>,
@@ -186,6 +195,8 @@ where
             states: HashMap::new(),
             resources: Arc::new(resources),
             workflow_timeout: None,
+            total_timeout: None,
+            compensation_timeout: None,
             exit_states: Vec::new(),
             validated: OnceLock::new(),
             observers: Vec::new(),
@@ -201,6 +212,94 @@ where
     /// Set global workflow timeout
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.workflow_timeout = Some(timeout);
+        self
+    }
+
+    /// Set a wall-clock budget for the entire `orchestrate` (or `resume_from`) call.
+    ///
+    /// When the budget elapses, the in-flight task is aborted at its next await
+    /// point, the compensation stack is drained against a bounded budget (see
+    /// [`with_compensation_timeout`](Self::with_compensation_timeout)), and the call
+    /// returns [`CanoError::WorkflowTimeout`](crate::CanoError::WorkflowTimeout)
+    /// — or [`CanoError::CompensationFailed`](crate::CanoError::CompensationFailed)
+    /// if rollback itself fails. Contrast with [`with_timeout`](Self::with_timeout),
+    /// which is a single `tokio::time::timeout` around the whole future and offers
+    /// no graceful compensation, and with
+    /// [`TaskConfig::with_attempt_timeout`](crate::task::TaskConfig::with_attempt_timeout),
+    /// which bounds each individual task attempt.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use cano::prelude::*;
+    /// use std::time::Duration;
+    ///
+    /// # #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    /// # enum Step { Start, Done }
+    /// # #[derive(Clone)]
+    /// # struct Slow;
+    /// # #[task]
+    /// # impl Task<Step> for Slow {
+    /// #     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    /// #         tokio::time::sleep(Duration::from_millis(50)).await;
+    /// #         Ok(TaskResult::Single(Step::Done))
+    /// #     }
+    /// # }
+    /// #
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), CanoError> {
+    /// let workflow = Workflow::bare()
+    ///     .with_total_timeout(Duration::from_millis(10))
+    ///     .register(Step::Start, Slow)
+    ///     .add_exit_state(Step::Done);
+    ///
+    /// let err = workflow
+    ///     .orchestrate(Step::Start)
+    ///     .await
+    ///     .expect_err("budget elapses before Done");
+    /// // The engine wraps task errors with state context; unwrap to get the inner timeout.
+    /// let inner = match &err {
+    ///     CanoError::WithStateContext { source, .. } => source.as_ref(),
+    ///     other => other,
+    /// };
+    /// assert!(matches!(inner, CanoError::WorkflowTimeout { .. }));
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn with_total_timeout(mut self, timeout: Duration) -> Self {
+        self.total_timeout = Some(timeout);
+        self
+    }
+
+    /// Override the wall-clock budget for the saga compensation drain after a
+    /// total-timeout trip. Defaults to `min(remaining_budget / 2, 30s)` — that is,
+    /// half of whatever budget is left when the timeout fires, capped at 30 seconds.
+    /// Set explicitly to give compensations a known ceiling.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// # use cano::prelude::*;
+    /// # use std::time::Duration;
+    /// # #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    /// # enum Step { Start, Done }
+    /// # #[derive(Clone)]
+    /// # struct Noop;
+    /// # #[task]
+    /// # impl Task<Step> for Noop {
+    /// #     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    /// #         Ok(TaskResult::Single(Step::Done))
+    /// #     }
+    /// # }
+    /// let workflow = Workflow::bare()
+    ///     .with_total_timeout(Duration::from_secs(30))
+    ///     .with_compensation_timeout(Duration::from_secs(5))
+    ///     .register(Step::Start, Noop)
+    ///     .add_exit_state(Step::Done);
+    /// # let _ = workflow;
+    /// ```
+    pub fn with_compensation_timeout(mut self, timeout: Duration) -> Self {
+        self.compensation_timeout = Some(timeout);
         self
     }
 
@@ -736,7 +835,12 @@ where
         #[cfg(feature = "metrics")]
         let _started = std::time::Instant::now();
 
-        let workflow_future = self.execute_workflow(initial_state);
+        // Wall-clock budget for the entire FSM call when `with_total_timeout` is set.
+        // `None` keeps the previous zero-cost behavior — the FSM loop awaits dispatches
+        // directly with no `timeout_at` wrapper.
+        let total_budget = self.total_timeout.map(|d| (std::time::Instant::now(), d));
+
+        let workflow_future = self.execute_workflow(initial_state, total_budget);
 
         let result = if let Some(timeout_duration) = self.workflow_timeout {
             match tokio::time::timeout(timeout_duration, workflow_future).await {
@@ -773,6 +877,8 @@ where
             states: self.states.clone(),
             resources: Arc::clone(&self.resources),
             workflow_timeout: self.workflow_timeout,
+            total_timeout: self.total_timeout,
+            compensation_timeout: self.compensation_timeout,
             exit_states: self.exit_states.clone(),
             // Fresh OnceLock: cloned workflows re-validate on first orchestrate.
             validated: OnceLock::new(),
@@ -839,6 +945,8 @@ where
             .field("states", &format!("{} states", self.states.len()))
             .field("exit_states", &self.exit_states)
             .field("workflow_timeout", &self.workflow_timeout)
+            .field("total_timeout", &self.total_timeout)
+            .field("compensation_timeout", &self.compensation_timeout)
             .field("workflow_id", &self.workflow_id)
             .field("workflow_version", &self.workflow_version)
             .field("checkpoint_store", &self.checkpoint_store.is_some())
@@ -1314,5 +1422,48 @@ mod tests {
             .add_exit_state(TestState::Complete);
 
         assert!(workflow.validate().is_ok());
+    }
+
+    // ------------------------------------------------------------------
+    // with_total_timeout / with_compensation_timeout builder tests
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_with_total_timeout_stores_value_and_clones() {
+        use std::time::Duration;
+        let wf = Workflow::<TestState>::bare()
+            .with_total_timeout(Duration::from_secs(5))
+            .with_compensation_timeout(Duration::from_millis(750))
+            .register(TestState::Start, SimpleTask::new(TestState::Complete))
+            .add_exit_state(TestState::Complete);
+        assert_eq!(wf.total_timeout, Some(Duration::from_secs(5)));
+        assert_eq!(wf.compensation_timeout, Some(Duration::from_millis(750)));
+        let cloned = wf.clone();
+        assert_eq!(cloned.total_timeout, Some(Duration::from_secs(5)));
+        assert_eq!(
+            cloned.compensation_timeout,
+            Some(Duration::from_millis(750))
+        );
+    }
+
+    #[test]
+    fn test_with_total_timeout_defaults_to_none() {
+        let wf = Workflow::<TestState>::bare();
+        assert_eq!(wf.total_timeout, None);
+        assert_eq!(wf.compensation_timeout, None);
+    }
+
+    #[test]
+    fn test_workflow_debug_includes_total_and_compensation_timeouts() {
+        use std::time::Duration;
+        let wf = Workflow::<TestState>::bare()
+            .with_total_timeout(Duration::from_secs(5))
+            .with_compensation_timeout(Duration::from_millis(750));
+        let debug_str = format!("{wf:?}");
+        assert!(debug_str.contains("total_timeout"), "got: {debug_str}");
+        assert!(
+            debug_str.contains("compensation_timeout"),
+            "got: {debug_str}"
+        );
     }
 }

@@ -189,6 +189,10 @@ name = "saga_payment"
 path = "examples/saga_payment.rs"
 
 [[example]]
+name = "workflow_total_timeout"
+path = "examples/workflow_total_timeout.rs"
+
+[[example]]
 name = "router_task"
 path = "examples/router_task.rs"
 

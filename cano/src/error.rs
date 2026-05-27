@@ -28,6 +28,7 @@
 //! | `Configuration` | Invalid task/workflow config | Check parameters and settings |
 //! | `RetryExhausted` | All retries exhausted | Inspect `source` for the underlying cause; increase retries if transient |
 //! | `Timeout` | Per-attempt timeout reached | Increase `attempt_timeout` or speed up the task |
+//! | `WorkflowTimeout` | Workflow total budget exceeded (`Workflow::with_total_timeout`) | Increase the total timeout or speed up the workflow |
 //! | `CircuitOpen` | Circuit breaker rejected the call | Wait for the breaker's `reset_timeout` or fix the upstream dependency |
 //! | `CheckpointStore` | Checkpoint persistence failed | Check the recovery store backend (disk, permissions, encoding) |
 //! | `CompensationFailed` | A `compensate` run failed during rollback | Inspect the aggregated errors; the original failure is `errors[0]` |
@@ -175,6 +176,28 @@ pub enum CanoError {
     /// [`CanoError::RetryExhausted`].
     Timeout(String),
 
+    /// A workflow's total wall-clock budget was exceeded.
+    ///
+    /// Emitted by [`Workflow::orchestrate`](crate::workflow::Workflow::orchestrate)
+    /// and [`resume_from`](crate::workflow::Workflow::resume_from) when the budget set
+    /// by [`with_total_timeout`](crate::workflow::Workflow::with_total_timeout) elapses
+    /// before the FSM reaches an exit state. The in-flight task is aborted at its next
+    /// await point, and the compensation stack is drained (against its own bounded
+    /// budget) before this error surfaces — except when compensation itself fails, in
+    /// which case [`CanoError::CompensationFailed`] is returned instead.
+    ///
+    /// Surfaced through [`CanoError::WithStateContext`] — like every other task error
+    /// from `orchestrate` / `resume_from` — so callers should unwrap one layer (or
+    /// match on `source`) to pattern-match this variant. A dirty rollback yields
+    /// [`CanoError::CompensationFailed`] instead, whose `errors[0]` carries the
+    /// wrapped timeout.
+    WorkflowTimeout {
+        /// Total wall-clock elapsed when the budget tripped.
+        elapsed: std::time::Duration,
+        /// The budget set via `with_total_timeout`.
+        limit: std::time::Duration,
+    },
+
     /// A call was rejected because the circuit breaker is open.
     ///
     /// Emitted by [`crate::circuit::CircuitBreaker::try_acquire`] (and surfaced through the
@@ -310,6 +333,11 @@ impl CanoError {
         CanoError::Timeout(msg.into())
     }
 
+    /// Create a new workflow-total-timeout error from the elapsed and limit durations.
+    pub fn workflow_timeout(elapsed: std::time::Duration, limit: std::time::Duration) -> Self {
+        CanoError::WorkflowTimeout { elapsed, limit }
+    }
+
     /// Create a new circuit-open error
     pub fn circuit_open<S: Into<String>>(msg: S) -> Self {
         CanoError::CircuitOpen(msg.into())
@@ -384,6 +412,7 @@ impl CanoError {
             CanoError::Configuration(msg) => msg,
             CanoError::RetryExhausted { source, .. } => source.message(),
             CanoError::Timeout(msg) => msg,
+            CanoError::WorkflowTimeout { .. } => "workflow total timeout exceeded",
             CanoError::CircuitOpen(msg) => msg,
             CanoError::CheckpointStore(msg) => msg,
             CanoError::CompensationFailed { errors } => errors
@@ -409,6 +438,7 @@ impl CanoError {
             CanoError::Configuration(_) => "configuration",
             CanoError::RetryExhausted { .. } => "retry_exhausted",
             CanoError::Timeout(_) => "timeout",
+            CanoError::WorkflowTimeout { .. } => "workflow_timeout",
             CanoError::CircuitOpen(_) => "circuit_open",
             CanoError::CheckpointStore(_) => "checkpoint_store",
             CanoError::CompensationFailed { .. } => "compensation_failed",
@@ -433,6 +463,10 @@ impl std::fmt::Display for CanoError {
                 write!(f, "Retry exhausted after {attempts} attempt(s): {source}")
             }
             CanoError::Timeout(msg) => write!(f, "Timeout error: {msg}"),
+            CanoError::WorkflowTimeout { elapsed, limit } => write!(
+                f,
+                "Workflow total timeout exceeded: elapsed={elapsed:?} limit={limit:?}"
+            ),
             CanoError::CircuitOpen(msg) => write!(f, "Circuit open: {msg}"),
             CanoError::CheckpointStore(msg) => write!(f, "Checkpoint store error: {msg}"),
             CanoError::CompensationFailed { errors } => {
@@ -504,6 +538,16 @@ impl PartialEq for CanoError {
                 },
             ) => a_attempts == b_attempts && a_source == b_source,
             (CanoError::Timeout(a), CanoError::Timeout(b)) => a == b,
+            (
+                CanoError::WorkflowTimeout {
+                    elapsed: e1,
+                    limit: l1,
+                },
+                CanoError::WorkflowTimeout {
+                    elapsed: e2,
+                    limit: l2,
+                },
+            ) => e1 == e2 && l1 == l2,
             (CanoError::CircuitOpen(a), CanoError::CircuitOpen(b)) => a == b,
             (CanoError::CheckpointStore(a), CanoError::CheckpointStore(b)) => a == b,
             (
@@ -945,5 +989,38 @@ mod tests {
         let err = CanoError::retry_exhausted(5, CanoError::task_execution("boom"));
         let src = err.source().expect("must expose inner via Error::source");
         assert!(src.to_string().contains("boom"));
+    }
+
+    #[test]
+    fn test_workflow_timeout_constructor_category_and_display() {
+        use std::time::Duration;
+        let err =
+            CanoError::workflow_timeout(Duration::from_millis(150), Duration::from_millis(100));
+        assert_eq!(err.category(), "workflow_timeout");
+        assert_eq!(err.message(), "workflow total timeout exceeded");
+        let shown = format!("{err}");
+        assert!(shown.contains("Workflow total timeout exceeded"));
+        assert!(shown.contains("150ms"));
+        assert!(shown.contains("100ms"));
+    }
+
+    #[test]
+    fn test_workflow_timeout_partial_eq() {
+        use std::time::Duration;
+        let a = CanoError::workflow_timeout(Duration::from_secs(1), Duration::from_secs(2));
+        let b = CanoError::workflow_timeout(Duration::from_secs(1), Duration::from_secs(2));
+        assert_eq!(a, b);
+
+        // Different `limit` must not compare equal.
+        let c = CanoError::workflow_timeout(Duration::from_secs(3), Duration::from_secs(2));
+        assert_ne!(a, c, "different limit must not compare equal");
+
+        // Different `elapsed` must not compare equal.
+        let d = CanoError::workflow_timeout(Duration::from_secs(1), Duration::from_secs(5));
+        assert_ne!(a, d, "different elapsed must not compare equal");
+
+        // Distinct from same-category string variant.
+        let attempt_timeout = CanoError::timeout("workflow total timeout exceeded");
+        assert_ne!(a, attempt_timeout);
     }
 }

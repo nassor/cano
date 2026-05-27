@@ -369,15 +369,22 @@ async fn execute_reserved_flow<TState, TResourceKey>(
     #[cfg(feature = "metrics")]
     let _started = std::time::Instant::now();
 
+    // Compute the total-timeout budget for this flow invocation. Mirrors the
+    // logic in `Workflow::run_workflow` so scheduler-driven runs honor
+    // `with_total_timeout` the same way orchestrate-driven runs do.
+    let total_budget = workflow
+        .total_timeout
+        .map(|d| (std::time::Instant::now(), d));
+
     // Execute workflow — skip lifecycle (setup/teardown handled by start/stop)
     #[cfg(feature = "tracing")]
     let result = workflow
-        .execute_workflow(initial_state)
+        .execute_workflow(initial_state, total_budget)
         .instrument(tracing::info_span!("execute_flow"))
         .await;
 
     #[cfg(not(feature = "tracing"))]
-    let result = workflow.execute_workflow(initial_state).await;
+    let result = workflow.execute_workflow(initial_state, total_budget).await;
 
     #[cfg(feature = "metrics")]
     crate::metrics::scheduler_flow_run(&_flow_id, result.is_ok(), _started.elapsed());

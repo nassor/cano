@@ -97,6 +97,15 @@ pub trait WorkflowObserver: Send + Sync + 'static {
     /// after the run has been rehydrated. `sequence` is the sequence of the last
     /// persisted row; execution continues from the state recorded by that row.
     fn on_resume(&self, _workflow_id: &str, _sequence: u64) {}
+
+    /// Called when [`Workflow::with_total_timeout`](crate::workflow::Workflow::with_total_timeout)'s
+    /// wall-clock budget is exhausted before the FSM reaches an exit state. `elapsed`
+    /// is the actual time spent and `limit` is the configured budget; both come from
+    /// the same `Instant` measured at workflow entry. Followed on the public API's
+    /// return by a `CanoError::WithStateContext` wrapping a `CanoError::WorkflowTimeout`
+    /// (clean rollback), or a `CanoError::CompensationFailed` whose `errors[0]` is the
+    /// wrapped timeout (dirty rollback).
+    fn on_workflow_timeout(&self, _elapsed: std::time::Duration, _limit: std::time::Duration) {}
 }
 
 /// A [`WorkflowObserver`] that re-emits every event as a [`tracing`](https://docs.rs/tracing)
@@ -128,6 +137,7 @@ pub trait WorkflowObserver: Send + Sync + 'static {
 /// | [`on_circuit_open`](WorkflowObserver::on_circuit_open) | `WARN` | `"circuit breaker rejected task"` | `task_id` |
 /// | [`on_checkpoint`](WorkflowObserver::on_checkpoint) | `DEBUG` | `"checkpoint appended"` | `workflow_id`, `sequence` |
 /// | [`on_resume`](WorkflowObserver::on_resume) | `INFO` | `"workflow resumed from checkpoint"` | `workflow_id`, `sequence` |
+/// | [`on_workflow_timeout`](WorkflowObserver::on_workflow_timeout) | `WARN` | `"workflow total timeout exceeded"` | `elapsed_ms`, `limit_ms` |
 ///
 /// # Example
 ///
@@ -185,6 +195,13 @@ impl WorkflowObserver for TracingObserver {
     }
     fn on_resume(&self, workflow_id: &str, sequence: u64) {
         tracing::info!(workflow_id, sequence, "workflow resumed from checkpoint");
+    }
+    fn on_workflow_timeout(&self, elapsed: std::time::Duration, limit: std::time::Duration) {
+        tracing::warn!(
+            elapsed_ms = elapsed.as_millis() as u64,
+            limit_ms = limit.as_millis() as u64,
+            "workflow total timeout exceeded"
+        );
     }
 }
 
@@ -462,6 +479,38 @@ mod tests {
             }
         }
         assert!(Anon.name().contains("Anon"), "{}", Anon.name());
+    }
+
+    #[test]
+    fn on_workflow_timeout_default_is_no_op_and_callable_via_trait_object() {
+        use std::sync::Arc;
+        use std::time::Duration;
+        struct NoopObs;
+        impl WorkflowObserver for NoopObs {}
+        let obs: Arc<dyn WorkflowObserver> = Arc::new(NoopObs);
+        // Compiles and runs — proves default body exists with the expected signature.
+        obs.on_workflow_timeout(Duration::from_millis(150), Duration::from_millis(100));
+    }
+
+    #[test]
+    fn on_workflow_timeout_can_be_overridden_to_record_event() {
+        use std::sync::{Arc, Mutex};
+        use std::time::Duration;
+        #[derive(Default)]
+        struct Recorder(Mutex<Vec<(Duration, Duration)>>);
+        impl WorkflowObserver for Recorder {
+            fn on_workflow_timeout(&self, elapsed: Duration, limit: Duration) {
+                self.0.lock().unwrap().push((elapsed, limit));
+            }
+        }
+        let obs = Arc::new(Recorder::default());
+        let dyn_obs: Arc<dyn WorkflowObserver> = obs.clone();
+        dyn_obs.on_workflow_timeout(Duration::from_millis(150), Duration::from_millis(100));
+        let events = obs.0.lock().unwrap().clone();
+        assert_eq!(
+            events,
+            vec![(Duration::from_millis(150), Duration::from_millis(100))]
+        );
     }
 }
 

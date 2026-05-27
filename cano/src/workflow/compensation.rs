@@ -23,12 +23,36 @@ use super::{Workflow, notify_observers, panic_payload_message};
 #[cfg(feature = "tracing")]
 use tracing::{debug, info, info_span};
 
+/// Resolve the per-drain compensation deadline.
+///
+/// When the user explicitly set [`with_compensation_timeout`](crate::workflow::Workflow::with_compensation_timeout)
+/// that value wins. Otherwise the engine derives a budget from the remaining total
+/// time: half of what's left, capped at 30s, with 30s as the floor when nothing is left.
+pub(super) fn resolve_compensation_deadline(
+    remaining: std::time::Duration,
+    override_: Option<std::time::Duration>,
+) -> std::time::Duration {
+    if let Some(d) = override_ {
+        return d;
+    }
+    let cap = std::time::Duration::from_secs(30);
+    if remaining.is_zero() {
+        cap
+    } else {
+        (remaining / 2).min(cap)
+    }
+}
+
 impl<TState, TResourceKey> Workflow<TState, TResourceKey>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
     TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// Drain the compensation stack (LIFO) after a terminal workflow failure.
+    ///
+    /// Thin shim over [`run_compensations_bounded`](Self::run_compensations_bounded)
+    /// without a wall-clock deadline — each compensator runs until it returns
+    /// (bounded only by its own `attempt_timeout`).
     ///
     /// Each entry's [`compensate`](crate::saga::CompensatableTask::compensate) runs once
     /// (bounded by the task's [`attempt_timeout`](crate::task::TaskConfig::attempt_timeout)
@@ -43,8 +67,30 @@ where
     pub(super) async fn run_compensations(
         &self,
         workflow_id: Option<&str>,
+        stack: Vec<CompensationEntry>,
+        original: CanoError,
+    ) -> Result<TState, CanoError> {
+        self.run_compensations_bounded(workflow_id, stack, original, None)
+            .await
+    }
+
+    /// Like [`run_compensations`](Self::run_compensations) but bounded by an optional
+    /// wall-clock deadline.
+    ///
+    /// When `comp_deadline` is `Some(d)`, each per-entry compensation future is wrapped in
+    /// [`tokio::time::timeout_at`]: if the deadline elapses, a
+    /// [`CanoError::Timeout`] mentioning "compensation deadline" is collected for that
+    /// entry and the drain continues to the next entry (which, with the deadline already
+    /// past, will time out immediately too — surfaced as one error per remaining entry).
+    /// When `comp_deadline` is `None`, behaviour is identical to the previous
+    /// `run_compensations` — only the per-task `attempt_timeout` bounds individual
+    /// compensators.
+    pub(super) async fn run_compensations_bounded(
+        &self,
+        workflow_id: Option<&str>,
         mut stack: Vec<CompensationEntry>,
         original: CanoError,
+        comp_deadline: Option<tokio::time::Instant>,
     ) -> Result<TState, CanoError> {
         if stack.is_empty() {
             return Err(original);
@@ -68,7 +114,7 @@ where
                     let attempt_timeout = compensator.config().attempt_timeout;
                     let compensate_fut =
                         compensator.compensate(&self.resources, &entry.output_blob);
-                    let bounded = async {
+                    let inner = async {
                         match attempt_timeout {
                             Some(d) => tokio::time::timeout(d, compensate_fut)
                                 .await
@@ -81,8 +127,20 @@ where
                             None => compensate_fut.await,
                         }
                     };
+                    let task_id_for_deadline = entry.task_id.clone();
+                    let with_deadline = async move {
+                        match comp_deadline {
+                            Some(d) => match tokio::time::timeout_at(d, inner).await {
+                                Ok(inner_result) => inner_result,
+                                Err(_) => Err(CanoError::timeout(format!(
+                                    "compensate for {task_id_for_deadline:?} exceeded compensation deadline"
+                                ))),
+                            },
+                            None => inner.await,
+                        }
+                    };
                     #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
-                    let compensate_ok = match AssertUnwindSafe(bounded).catch_unwind().await {
+                    let compensate_ok = match AssertUnwindSafe(with_deadline).catch_unwind().await {
                         Ok(Ok(())) => true,
                         Ok(Err(e)) => {
                             #[cfg(feature = "tracing")]
@@ -353,12 +411,14 @@ where
         #[cfg(feature = "metrics")]
         let _started = std::time::Instant::now();
 
+        let total_budget = self.total_timeout.map(|d| (std::time::Instant::now(), d));
         let exec = self.execute_workflow_from(
             resume_state,
             start_sequence,
             Some(workflow_id),
             compensation_stack,
             resume_cursors,
+            total_budget,
         );
         let result = if let Some(timeout_duration) = self.workflow_timeout {
             match tokio::time::timeout(timeout_duration, exec).await {
@@ -1522,6 +1582,9 @@ mod tests {
     enum CompFaultKind {
         Panic,
         Hang,
+        /// Sleep for the given duration inside `compensate`, then return `Ok(())`.
+        /// Used to exercise the bounded-deadline drain path.
+        Sleep(Duration),
     }
     #[saga::task]
     impl CompensatableTask<TestState> for CompFault {
@@ -1545,6 +1608,10 @@ mod tests {
                 CompFaultKind::Hang => {
                     std::future::pending::<()>().await;
                     unreachable!()
+                }
+                CompFaultKind::Sleep(d) => {
+                    tokio::time::sleep(d).await;
+                    Ok(())
                 }
             }
         }
@@ -1650,6 +1717,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_compensations_bounded_aborts_slow_compensations_and_reports_them() {
+        // Drive `run_compensations_bounded` directly. Build a workflow with two compensators
+        // (Fast + Slow), hand-craft the compensation stack with serialized outputs, and pass
+        // a 50ms deadline. Slow sleeps ~1s in `compensate` — the deadline must abort it and
+        // surface a `CompensationFailed` whose collected errors mention the compensation
+        // deadline. The drain must NOT block on Slow for the full second.
+        let log: CompLog = Arc::new(Mutex::new(Vec::new()));
+        let workflow = Workflow::bare()
+            .register_with_compensation(
+                TestState::Start,
+                CompTask::ok("Fast", 1, TestState::Process, &log),
+            )
+            .register_with_compensation(
+                TestState::Process,
+                CompFault {
+                    name: "Slow",
+                    value: 2,
+                    next: TestState::Complete,
+                    on_compensate: CompFaultKind::Sleep(Duration::from_secs(1)),
+                    attempt_timeout: None,
+                },
+            )
+            .add_exit_state(TestState::Complete);
+
+        // Hand-build the stack: Fast registered first, Slow registered second, so a LIFO
+        // drain pops Slow first.
+        let stack = vec![
+            CompensationEntry {
+                task_id: Arc::from("Fast"),
+                output_blob: serde_json::to_vec(&1u32).unwrap(),
+            },
+            CompensationEntry {
+                task_id: Arc::from("Slow"),
+                output_blob: serde_json::to_vec(&2u32).unwrap(),
+            },
+        ];
+        let original = CanoError::task_execution("forward boom");
+
+        let started = std::time::Instant::now();
+        let result = workflow
+            .run_compensations_bounded(
+                None,
+                stack,
+                original,
+                Some(tokio::time::Instant::now() + Duration::from_millis(50)),
+            )
+            .await;
+        assert!(
+            started.elapsed() < Duration::from_millis(800),
+            "bounded drain must abort Slow well under its 1s sleep"
+        );
+
+        let err = result.unwrap_err();
+        match err {
+            CanoError::CompensationFailed { errors } => {
+                assert_eq!(errors[0].message(), "forward boom");
+                assert!(
+                    errors[1..]
+                        .iter()
+                        .any(|e| e.message().contains("compensation deadline")),
+                    "at least one error must mention the compensation deadline: {errors:?}"
+                );
+            }
+            other => panic!("expected CompensationFailed, got {other:?}"),
+        }
+        // Fast was registered before Slow on the stack. With a 50ms deadline that's already
+        // elapsed by the time the second iteration starts, Fast is also aborted — and even
+        // if it managed to squeak through, the test passes as long as Slow surfaced a
+        // deadline error. We only assert the deadline-error shape above.
+    }
+
+    #[test]
+    fn resolve_compensation_deadline_uses_override_when_set() {
+        use crate::workflow::compensation::resolve_compensation_deadline;
+        let d =
+            resolve_compensation_deadline(Duration::from_secs(60), Some(Duration::from_secs(7)));
+        assert_eq!(d, Duration::from_secs(7));
+    }
+
+    #[test]
+    fn resolve_compensation_deadline_caps_at_thirty_seconds() {
+        use crate::workflow::compensation::resolve_compensation_deadline;
+        let d = resolve_compensation_deadline(Duration::from_secs(120), None);
+        assert_eq!(d, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn resolve_compensation_deadline_uses_half_remaining() {
+        use crate::workflow::compensation::resolve_compensation_deadline;
+        let d = resolve_compensation_deadline(Duration::from_secs(10), None);
+        assert_eq!(d, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn resolve_compensation_deadline_handles_zero_remaining() {
+        use crate::workflow::compensation::resolve_compensation_deadline;
+        let d = resolve_compensation_deadline(Duration::from_secs(0), None);
+        assert_eq!(d, Duration::from_secs(30));
+    }
+
+    #[tokio::test]
     async fn double_compensate_on_resume_is_avoided() {
         let store = Arc::new(MemCheckpoints::default());
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
@@ -1713,6 +1881,72 @@ mod tests {
             vec![("B".to_string(), 2), ("A".to_string(), 1)],
             "B compensated exactly once"
         );
+    }
+
+    #[tokio::test]
+    async fn resume_from_honors_total_timeout() {
+        // `resume_from` must thread `total_timeout` into the FSM loop the same way the
+        // forward `run`/`orchestrate` path does. Without it, a slow resumed task would
+        // run to completion regardless of the configured budget.
+        let store = Arc::new(MemCheckpoints::default());
+        // Seed: run got as far as entering `Process` before crashing — resume re-runs Process.
+        store
+            .append("resume-budget", CheckpointRow::new(0, "Process", ""))
+            .await
+            .unwrap();
+
+        // SlowProcess sleeps well past the total budget so the only way the test passes
+        // is if the engine-level timeout fires.
+        #[derive(Clone)]
+        struct SlowProcess;
+        #[task]
+        impl Task<TestState> for SlowProcess {
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                Ok(TaskResult::Single(TestState::Complete))
+            }
+        }
+
+        #[derive(Default)]
+        struct Rec(Mutex<Vec<(Duration, Duration)>>);
+        impl WorkflowObserver for Rec {
+            fn on_workflow_timeout(&self, elapsed: Duration, limit: Duration) {
+                self.0.lock().unwrap().push((elapsed, limit));
+            }
+        }
+        let rec = Arc::new(Rec::default());
+
+        let workflow = Workflow::bare()
+            .with_total_timeout(Duration::from_millis(40))
+            .with_observer(rec.clone())
+            .register(TestState::Start, SimpleTask::new(TestState::Process))
+            .register(TestState::Process, SlowProcess)
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone());
+
+        let started = std::time::Instant::now();
+        let err = workflow.resume_from("resume-budget").await.unwrap_err();
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_millis(300),
+            "resume_from should not wait for the slow task: {elapsed:?}"
+        );
+
+        let inner = match &err {
+            CanoError::WithStateContext { source, .. } => source.as_ref(),
+            other => other,
+        };
+        assert!(
+            matches!(inner, CanoError::WorkflowTimeout { .. }),
+            "got: {err}"
+        );
+
+        let events = rec.0.lock().unwrap().clone();
+        assert_eq!(events.len(), 1, "on_workflow_timeout should fire once");
+        let (elapsed_hook, limit_hook) = events[0];
+        assert_eq!(limit_hook, Duration::from_millis(40));
+        assert!(elapsed_hook >= limit_hook);
     }
 
     // ---- Cross-model interoperability ----
