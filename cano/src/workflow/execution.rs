@@ -189,7 +189,7 @@ where
         &self,
         initial_state: TState,
         start_sequence: u64,
-        workflow_id: Option<String>,
+        workflow_id: Option<Arc<str>>,
         mut compensation_stack: Vec<CompensationEntry>,
         // Map of `state_label → latest serialized cursor bytes` for `Stepped` states
         // being resumed. Populated by `resume_from`; empty on a fresh run.
@@ -592,7 +592,7 @@ where
         &self,
         task: Arc<dyn ErasedSteppedTask<TState, TResourceKey>>,
         config: Arc<crate::task::TaskConfig>,
-        workflow_id: &Option<String>,
+        workflow_id: &Option<Arc<str>>,
         state_label: &str,
         sequence: &mut u64,
         resume_cursor: Option<Vec<u8>>,

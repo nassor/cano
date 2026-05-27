@@ -246,15 +246,15 @@ where
     /// - [`CanoError::Workflow`] — the recorded state label doesn't match any state of
     ///   this workflow (e.g. resuming against a different workflow definition).
     /// - Any [`CanoError`] propagated from a task during the resumed execution.
-    pub async fn resume_from(&self, workflow_id: impl Into<String>) -> Result<TState, CanoError> {
-        let workflow_id = workflow_id.into();
+    pub async fn resume_from(&self, workflow_id: impl Into<Arc<str>>) -> Result<TState, CanoError> {
+        let workflow_id: Arc<str> = workflow_id.into();
 
         #[cfg(feature = "tracing")]
         let workflow_span = self.tracing_span.clone().unwrap_or_else(|| {
             if tracing::enabled!(tracing::Level::INFO) {
                 // `workflow_id` is recorded so the `metrics-tracing-context` bridge can
                 // attach it as a label to Cano metrics emitted during the resumed run.
-                info_span!("workflow_resume", workflow_id = workflow_id.as_str())
+                info_span!("workflow_resume", workflow_id = workflow_id.as_ref())
             } else {
                 tracing::Span::none()
             }
@@ -1326,7 +1326,7 @@ mod tests {
 
     fn three_state_checkpointed(
         store: Arc<MemCheckpoints>,
-        id: impl Into<String>,
+        id: impl Into<Arc<str>>,
     ) -> Workflow<TestState> {
         Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Process))

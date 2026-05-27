@@ -164,7 +164,7 @@ where
     /// (`orchestrate`) direction. Required whenever [`checkpoint_store`](Self::checkpoint_store)
     /// is set on that path (the first checkpoint write errors if it's missing);
     /// [`resume_from`](Self::resume_from) takes the id explicitly.
-    workflow_id: Option<String>,
+    workflow_id: Option<Arc<str>>,
     /// Version stamped onto every [`CheckpointRow`](crate::recovery::CheckpointRow) the
     /// engine appends, and checked against the persisted version when
     /// [`resume_from`](Self::resume_from) replays a run. Defaults to `0`; set via
@@ -467,7 +467,7 @@ where
     /// Required whenever a [`checkpoint_store`](Self::with_checkpoint_store) is attached.
     /// [`resume_from`](Self::resume_from) takes the id explicitly, so this builder is only
     /// needed for the forward (`orchestrate`) direction.
-    pub fn with_workflow_id(mut self, workflow_id: impl Into<String>) -> Self {
+    pub fn with_workflow_id(mut self, workflow_id: impl Into<Arc<str>>) -> Self {
         self.workflow_id = Some(workflow_id.into());
         self
     }
