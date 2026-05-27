@@ -136,7 +136,7 @@ where
 pub(crate) struct CompensationEntry {
     /// The compensatable task's [`name`](CompensatableTask::name) — the key the engine
     /// uses to find the matching compensator.
-    pub task_id: String,
+    pub task_id: Arc<str>,
     /// The serialized output, replayed into [`CompensatableTask::compensate`].
     pub output_blob: Vec<u8>,
 }

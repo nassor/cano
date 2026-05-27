@@ -49,10 +49,10 @@ where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
     TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
-    workflows: HashMap<String, FlowData<TState, TResourceKey>>,
+    workflows: HashMap<Arc<str>, FlowData<TState, TResourceKey>>,
     /// Registration order of workflow ids. Setup runs FIFO, teardown LIFO.
     /// Required because `HashMap` iteration order is undefined.
-    flow_order: Vec<String>,
+    flow_order: Vec<Arc<str>>,
 }
 
 impl<TState, TResourceKey> Scheduler<TState, TResourceKey>
@@ -166,8 +166,9 @@ where
             )));
         }
 
+        let id: Arc<str> = Arc::from(id);
         let info = Arc::new(RwLock::new(FlowInfo {
-            id: id.to_string(),
+            id: Arc::clone(&id),
             status: Status::Idle,
             run_count: 0,
             last_run: None,
@@ -176,7 +177,7 @@ where
         }));
 
         self.workflows.insert(
-            id.to_string(),
+            Arc::clone(&id),
             FlowData {
                 workflow: Arc::new(workflow),
                 initial_state,
@@ -185,7 +186,7 @@ where
                 policy: Arc::new(BackoffPolicy::default()),
             },
         );
-        self.flow_order.push(id.to_string());
+        self.flow_order.push(id);
 
         Ok(())
     }
@@ -296,10 +297,10 @@ where
         let scheduler_tasks: Arc<RwLock<Vec<JoinHandle<()>>>> = Arc::new(RwLock::new(Vec::new()));
 
         // Build a read-only flow-info registry for status / list / has_running_flows.
-        let mut flows_view: HashMap<String, Arc<RwLock<FlowInfo>>> =
+        let mut flows_view: HashMap<Arc<str>, Arc<RwLock<FlowInfo>>> =
             HashMap::with_capacity(workflows.len());
         for (id, fd) in &workflows {
-            flows_view.insert(id.clone(), Arc::clone(&fd.info));
+            flows_view.insert(Arc::clone(id), Arc::clone(&fd.info));
         }
         let flows_view = Arc::new(flows_view);
         let flow_order_view = Arc::new(flow_order.clone());

@@ -366,14 +366,14 @@ where
                     );
                     match comp_result {
                         Ok((next_state, output_blob)) => {
-                            let task_name = task.name().into_owned();
+                            let task_name: Arc<str> = Arc::from(task.name());
                             // Persist a completion row carrying the output so a resumed
                             // run rehydrates this compensation entry.
                             if let (Some(store), Some(wf_id)) =
                                 (&self.checkpoint_store, workflow_id.as_deref())
                             {
                                 let label = state_label.as_deref().unwrap_or_default();
-                                let row = CheckpointRow::new(sequence, label, task_name.clone())
+                                let row = CheckpointRow::new(sequence, label, &*task_name)
                                     .with_output(output_blob.clone())
                                     .with_workflow_version(self.workflow_version);
                                 let comp_append_result = store.append(wf_id, row).await;

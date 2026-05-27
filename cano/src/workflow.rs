@@ -154,7 +154,7 @@ where
     /// keyed by the task's [`name`](crate::saga::CompensatableTask::name). Used to look a
     /// compensator up by id when draining the compensation stack — including a stack
     /// rehydrated from a checkpoint log, where only the `task_id` string is available.
-    compensators: HashMap<String, Arc<dyn ErasedCompensatable<TState, TResourceKey>>>,
+    compensators: HashMap<Arc<str>, Arc<dyn ErasedCompensatable<TState, TResourceKey>>>,
     /// Optional append-only checkpoint store. When set (alongside [`workflow_id`](Self::workflow_id)),
     /// every state entry writes a [`CheckpointRow`](crate::recovery::CheckpointRow) before the state's task runs, so a
     /// crashed run can be resumed via [`resume_from`](Self::resume_from). `None` by default —
@@ -291,15 +291,16 @@ where
     /// (now-stale) entry from the [`compensators`](Self::compensators) registry, so a later
     /// `register*` for the same state doesn't leave a dangling compensator reachable by id.
     fn forget_compensator_for(&mut self, state: &TState) {
-        let stale_name = if let Some(StateEntry::CompensatableSingle { task, .. }) =
-            self.states.get(state).map(|e| e.as_ref())
-        {
-            Some(task.name().into_owned())
-        } else {
-            None
-        };
+        let stale_name: Option<Arc<str>> =
+            if let Some(StateEntry::CompensatableSingle { task, .. }) =
+                self.states.get(state).map(|e| e.as_ref())
+            {
+                Some(Arc::from(task.name()))
+            } else {
+                None
+            };
         if let Some(name) = stale_name {
-            self.compensators.remove(&name);
+            self.compensators.remove(&*name);
         }
     }
 
@@ -323,7 +324,7 @@ where
     {
         self.forget_compensator_for(&state);
         let config = Arc::new(task.config());
-        let name = task.name().into_owned();
+        let name: Arc<str> = Arc::from(task.name());
         let erased: Arc<dyn ErasedCompensatable<TState, TResourceKey>> =
             Arc::new(crate::saga::CompensatableAdapter(Arc::new(task)));
         self.compensators.insert(name, Arc::clone(&erased));

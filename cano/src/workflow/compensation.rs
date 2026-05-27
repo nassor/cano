@@ -313,7 +313,7 @@ where
             .filter(|r| r.kind == RowKind::CompensationCompletion)
             .filter_map(|r| {
                 r.output_blob.as_ref().map(|blob| CompensationEntry {
-                    task_id: r.task_id.clone(),
+                    task_id: Arc::from(r.task_id.as_str()),
                     output_blob: blob.clone(),
                 })
             })

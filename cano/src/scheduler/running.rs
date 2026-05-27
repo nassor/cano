@@ -37,8 +37,8 @@ where
     pub(super) command_tx: mpsc::Sender<SchedulerCommand>,
     /// Read-only flow info registry. Cheap clones (Arc) for `status` / `list`
     /// / `has_running_flows`. Built once at start time; never mutated.
-    pub(super) flows: Arc<HashMap<String, Arc<RwLock<FlowInfo>>>>,
-    pub(super) flow_order: Arc<Vec<String>>,
+    pub(super) flows: Arc<HashMap<Arc<str>, Arc<RwLock<FlowInfo>>>>,
+    pub(super) flow_order: Arc<Vec<Arc<str>>>,
     /// Final shutdown result published by the driver task. Receivers loop
     /// `changed().await` until the value transitions to `Some(_)`.
     pub(super) result_rx: watch::Receiver<Option<CanoResult<()>>>,
@@ -139,7 +139,7 @@ where
         let (response_tx, response_rx) = oneshot::channel();
         self.command_tx
             .try_send(SchedulerCommand::Trigger {
-                id: id.to_string(),
+                id: Arc::from(id),
                 response: response_tx,
             })
             .map_err(|e| match e {
@@ -185,7 +185,7 @@ where
         let (response_tx, response_rx) = oneshot::channel();
         self.command_tx
             .try_send(SchedulerCommand::Reset {
-                id: id.to_string(),
+                id: Arc::from(id),
                 response: response_tx,
             })
             .map_err(|e| match e {
@@ -454,7 +454,7 @@ mod tests {
         let running = scheduler.start().await.unwrap();
         let status = running.status("test_task").await.expect("must exist");
 
-        assert_eq!(status.id, "test_task");
+        assert_eq!(&*status.id, "test_task");
         assert_eq!(status.status, Status::Idle);
         assert_eq!(status.run_count, 0);
         assert!(status.last_run.is_none());
@@ -484,10 +484,10 @@ mod tests {
         let running = scheduler.start().await.unwrap();
         let flows = running.list().await;
         assert_eq!(flows.len(), 3);
-        let ids: Vec<String> = flows.iter().map(|f| f.id.clone()).collect();
-        assert!(ids.contains(&"task1".to_string()));
-        assert!(ids.contains(&"task2".to_string()));
-        assert!(ids.contains(&"task3".to_string()));
+        let ids: Vec<&str> = flows.iter().map(|f| f.id.as_ref()).collect();
+        assert!(ids.contains(&"task1"));
+        assert!(ids.contains(&"task2"));
+        assert!(ids.contains(&"task3"));
 
         running.stop().await.unwrap();
     }

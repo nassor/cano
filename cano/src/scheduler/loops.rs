@@ -169,8 +169,8 @@ pub(super) async fn spawn_cron_loop<TState, TResourceKey>(
 /// the watch channel.
 pub(super) async fn driver_task<TState, TResourceKey>(
     mut rx: mpsc::Receiver<SchedulerCommand>,
-    workflows: HashMap<String, FlowData<TState, TResourceKey>>,
-    flow_order: Vec<String>,
+    workflows: HashMap<Arc<str>, FlowData<TState, TResourceKey>>,
+    flow_order: Vec<Arc<str>>,
     running: Arc<RwLock<bool>>,
     stop_notify: Arc<Notify>,
     scheduler_tasks: Arc<RwLock<Vec<JoinHandle<()>>>>,
@@ -402,7 +402,7 @@ async fn apply_outcome(
             info_guard.next_eligible = None;
         }
         Err(e) => {
-            let err_str = e.to_string();
+            let err_str: Arc<str> = Arc::from(e.to_string());
             let new_streak = info_guard.failure_streak.saturating_add(1);
             info_guard.failure_streak = new_streak;
             if policy.is_tripped(new_streak) {
