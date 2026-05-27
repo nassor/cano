@@ -96,7 +96,7 @@ the FSM dispatch hot path stays allocation-light whether or not you wire any of 
 <h3>Resilient — recover from transient faults</h3>
 <ul>
 <li>Retries — fixed, or exponential backoff with jitter</li>
-<li>Per-attempt timeouts</li>
+<li>Per-attempt timeouts and <a href="resilience/#workflow-total-timeout">workflow total timeout</a> with bounded compensation drain</li>
 <li><a href="resilience/#circuit-breaker">Circuit breaker</a> — short-circuit a failing dependency</li>
 <li>Split <a href="split-join/#bulkhead">bulkhead</a> — cap concurrent parallel tasks</li>
 <li>Panic safety — a panicking task becomes an error, never unwinds the engine</li>
@@ -125,7 +125,6 @@ the FSM dispatch hot path stays allocation-light whether or not you wire any of 
 [dependencies]
 {{ cano_dep(features=["all"]) }}
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-
 ```
 
 </div>

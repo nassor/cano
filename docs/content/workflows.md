@@ -334,9 +334,14 @@ during execution. Understanding these errors helps you build robust error recove
 <td>Use <code>register_split()</code> instead of <code>register()</code> for parallel tasks</td>
 </tr>
 <tr>
+<td><code>CanoError::WorkflowTimeout</code></td>
+<td>Wall-clock budget set via <code>Workflow::with_total_timeout()</code> elapsed; in-flight task aborted, compensation stack drained. Surfaced under <code>CanoError::WithStateContext</code>.</td>
+<td>Increase <code>with_total_timeout()</code> or speed up the workflow; see <a href="../resilience/#workflow-total-timeout">Resilience → Workflow Total Timeout</a></td>
+</tr>
+<tr>
 <td><code>CanoError::Workflow</code></td>
-<td>Workflow timeout exceeded</td>
-<td>Increase <code>with_timeout()</code> or optimize task execution time</td>
+<td>Legacy <code>with_timeout()</code> outer <code>tokio::time::timeout</code> elapsed (no graceful compensation)</td>
+<td>Prefer <code>with_total_timeout()</code> for new code; otherwise increase <code>with_timeout()</code> or optimize task execution time</td>
 </tr>
 <tr>
 <td><code>CanoError::Configuration</code></td>

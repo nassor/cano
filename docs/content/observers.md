@@ -139,6 +139,15 @@ once per state entry, only on a workflow configured with <code>Workflow::with_ch
 <code>sequence</code> is the last persisted row's sequence; execution continues from the state
 that row recorded.</p>
 </div>
+<div class="card">
+<h3 id="on-workflow-timeout"><a href="#on-workflow-timeout" class="anchor-link" aria-hidden="true">#</a><code>on_workflow_timeout(elapsed: Duration, limit: Duration)</code></h3>
+<p>Fired when <a href="../resilience/#workflow-total-timeout"><code>Workflow::with_total_timeout</code></a>'s
+wall-clock budget is exhausted before the FSM reaches an exit state. Fires once per timeout trip,
+before the compensation drain runs. Followed on the public API's return by
+<code>CanoError::WithStateContext</code> wrapping a <code>CanoError::WorkflowTimeout</code> (clean
+rollback) or <code>CanoError::CompensationFailed</code> if a <code>compensate</code> also fails
+(its <code>errors[0]</code> carries the wrapped timeout).</p>
+</div>
 </div>
 
 <p>
@@ -261,6 +270,7 @@ Because the events carry the <code>cano::observer</code> target, you can filter 
 <tr><td><code>on_circuit_open</code></td><td><code>WARN</code></td><td><code>"circuit breaker rejected task"</code></td><td><code>task_id</code></td></tr>
 <tr><td><code>on_checkpoint</code></td><td><code>DEBUG</code></td><td><code>"checkpoint appended"</code></td><td><code>workflow_id</code>, <code>sequence</code></td></tr>
 <tr><td><code>on_resume</code></td><td><code>INFO</code></td><td><code>"workflow resumed from checkpoint"</code></td><td><code>workflow_id</code>, <code>sequence</code></td></tr>
+<tr><td><code>on_workflow_timeout</code></td><td><code>WARN</code></td><td><code>"workflow total timeout exceeded"</code></td><td><code>elapsed_ms</code>, <code>limit_ms</code></td></tr>
 </tbody>
 </table>
 <hr class="section-divider">
