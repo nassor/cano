@@ -156,7 +156,13 @@ async fn racing_runs_of_one_id_on_a_real_file() {
         match h.await.unwrap() {
             Ok(St::Done) => completed += 1,
             Ok(other) => panic!("unexpected success state {other:?}"),
-            Err(e) => assert_eq!(e.category(), "checkpoint_store", "got {e}"),
+            Err(e) => {
+                let inner = match &e {
+                    CanoError::WithStateContext { source, .. } => source.as_ref(),
+                    other => other,
+                };
+                assert_eq!(inner.category(), "checkpoint_store", "got {e}");
+            }
         }
     }
     assert!(
@@ -184,7 +190,11 @@ async fn crash_mid_work_then_resume_does_not_re_run_start() {
             .orchestrate(St::Start)
             .await
             .expect_err("generation 1 must crash before reaching Done");
-        assert_eq!(err.category(), "checkpoint_store");
+        let inner = match &err {
+            CanoError::WithStateContext { source, .. } => source.as_ref(),
+            other => other,
+        };
+        assert_eq!(inner.category(), "checkpoint_store");
     }
     assert_eq!(
         side_effects(&sidefx),

@@ -374,10 +374,7 @@ where
                     if max_attempts <= 1 {
                         return Err(e);
                     }
-                    return Err(CanoError::retry_exhausted(format!(
-                        "Task failed after {} attempt(s): {}",
-                        attempt, e
-                    )));
+                    return Err(CanoError::retry_exhausted(attempt as u32, e));
                 } else {
                     notify_observers(config, |o, name| o.on_retry(name, attempt as u32));
                     if let Some(delay) = config.retry_mode.delay_for_attempt(attempt - 1) {
@@ -716,7 +713,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(
-            matches!(err, CanoError::RetryExhausted(_)),
+            matches!(err, CanoError::RetryExhausted { .. }),
             "expected RetryExhausted, got: {err}"
         );
         let msg = err.to_string();
@@ -793,7 +790,7 @@ mod tests {
         assert_eq!(counter.load(Ordering::SeqCst), 3);
         let err = result.unwrap_err();
         assert!(
-            matches!(err, CanoError::RetryExhausted(_)),
+            matches!(err, CanoError::RetryExhausted { .. }),
             "expected RetryExhausted after retry exhaustion, got: {err}"
         );
     }

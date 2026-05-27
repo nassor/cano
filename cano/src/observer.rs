@@ -424,7 +424,12 @@ mod tests {
             .with_observer(observer.clone());
 
         let err = workflow.orchestrate(S::Start).await.unwrap_err();
-        assert!(matches!(err, CanoError::CircuitOpen(_)), "{err}");
+        // The FSM wraps the failure with state context; the inner is CircuitOpen.
+        let inner = match &err {
+            CanoError::WithStateContext { source, .. } => source.as_ref(),
+            other => other,
+        };
+        assert!(matches!(inner, CanoError::CircuitOpen(_)), "{err}");
 
         let events = observer.events();
         assert!(

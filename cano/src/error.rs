@@ -26,11 +26,12 @@
 //! | `Store` | Store operations fail | Check store state and keys |
 //! | `Workflow` | Workflow orchestration fails | Verify task registration and routing |
 //! | `Configuration` | Invalid task/workflow config | Check parameters and settings |
-//! | `RetryExhausted` | All retries exhausted | Increase retries or fix root cause |
+//! | `RetryExhausted` | All retries exhausted | Inspect `source` for the underlying cause; increase retries if transient |
 //! | `Timeout` | Per-attempt timeout reached | Increase `attempt_timeout` or speed up the task |
 //! | `CircuitOpen` | Circuit breaker rejected the call | Wait for the breaker's `reset_timeout` or fix the upstream dependency |
 //! | `CheckpointStore` | Checkpoint persistence failed | Check the recovery store backend (disk, permissions, encoding) |
 //! | `CompensationFailed` | A `compensate` run failed during rollback | Inspect the aggregated errors; the original failure is `errors[0]` |
+//! | `WithStateContext` | A task failed during `Workflow::orchestrate` / `resume_from` | Read `state`, `attempt`, and `transitions_so_far`; inspect `source` for the underlying cause |
 //! | `Generic` | General errors | Check the specific error message |
 //!
 //! ## Using Errors in Your Tasks
@@ -150,11 +151,19 @@ pub enum CanoError {
     /// conflicting settings, or constraint violations.
     Configuration(String),
 
-    /// All retry attempts have been exhausted
+    /// All retry attempts have been exhausted.
     ///
     /// This error is automatically generated when a task fails and
-    /// all configured retry attempts have been used up.
-    RetryExhausted(String),
+    /// all configured retry attempts have been used up. `source` carries
+    /// the final attempt's underlying error structurally so callers can
+    /// recover the bare cause via [`std::error::Error::source`].
+    RetryExhausted {
+        /// 1-based count of attempts made before giving up
+        /// (initial attempt + retries).
+        attempts: u32,
+        /// The error from the last attempt.
+        source: Box<CanoError>,
+    },
 
     /// A bounded operation exceeded its deadline.
     ///
@@ -222,6 +231,48 @@ pub enum CanoError {
         /// The version configured on this workflow.
         expected: u32,
     },
+
+    /// A task failure annotated with the FSM state, attempt number, and
+    /// transition path that produced it.
+    ///
+    /// Wraps the original error (`source`) so callers can recover the bare
+    /// cause via `Error::source` while still surfacing where in the workflow
+    /// it occurred. Constructed via [`CanoError::with_state_context`], which
+    /// refuses to double-wrap an existing `WithStateContext` or a
+    /// `CompensationFailed`.
+    ///
+    /// ```
+    /// use cano::CanoError;
+    ///
+    /// let inner = CanoError::task_execution("connection refused");
+    /// let err = CanoError::with_state_context(
+    ///     "Process",
+    ///     2,
+    ///     vec!["Start".to_string(), "Fetch".to_string(), "Process".to_string()],
+    ///     inner,
+    /// );
+    ///
+    /// // Inspect the failure structurally.
+    /// match err {
+    ///     CanoError::WithStateContext { state, attempt, transitions_so_far, source } => {
+    ///         assert_eq!(state, "Process");
+    ///         assert_eq!(attempt, 2);
+    ///         assert_eq!(transitions_so_far.last().map(String::as_str), Some("Process"));
+    ///         assert!(matches!(*source, CanoError::TaskExecution(_)));
+    ///     }
+    ///     _ => unreachable!(),
+    /// }
+    /// ```
+    WithStateContext {
+        /// The FSM state whose task failed.
+        state: String,
+        /// The 1-based attempt number that produced this failure.
+        attempt: u32,
+        /// The states visited so far, in order, ending with `state`.
+        transitions_so_far: Vec<String>,
+        /// The underlying error that triggered this failure.
+        source: Box<CanoError>,
+    },
 }
 
 impl CanoError {
@@ -245,9 +296,13 @@ impl CanoError {
         CanoError::Configuration(msg.into())
     }
 
-    /// Create a new retry exhausted error
-    pub fn retry_exhausted<S: Into<String>>(msg: S) -> Self {
-        CanoError::RetryExhausted(msg.into())
+    /// Create a new retry-exhausted error from the attempt count and the
+    /// final attempt's underlying error.
+    pub fn retry_exhausted(attempts: u32, source: CanoError) -> Self {
+        CanoError::RetryExhausted {
+            attempts,
+            source: Box::new(source),
+        }
     }
 
     /// Create a new timeout error
@@ -297,6 +352,29 @@ impl CanoError {
         CanoError::WorkflowVersionMismatch { stored, expected }
     }
 
+    /// Annotate a task failure with the FSM state, attempt number, and
+    /// transition path that produced it.
+    ///
+    /// Short-circuits when `source` is already a `WithStateContext` or a
+    /// `CompensationFailed`: those errors carry their own structured context
+    /// and are returned unchanged.
+    pub fn with_state_context(
+        state: impl Into<String>,
+        attempt: u32,
+        transitions_so_far: Vec<String>,
+        source: CanoError,
+    ) -> Self {
+        match source {
+            CanoError::WithStateContext { .. } | CanoError::CompensationFailed { .. } => source,
+            other => CanoError::WithStateContext {
+                state: state.into(),
+                attempt,
+                transitions_so_far,
+                source: Box::new(other),
+            },
+        }
+    }
+
     /// Get the error message as a string slice
     pub fn message(&self) -> &str {
         match self {
@@ -304,7 +382,7 @@ impl CanoError {
             CanoError::Store(msg) => msg,
             CanoError::Workflow(msg) => msg,
             CanoError::Configuration(msg) => msg,
-            CanoError::RetryExhausted(msg) => msg,
+            CanoError::RetryExhausted { source, .. } => source.message(),
             CanoError::Timeout(msg) => msg,
             CanoError::CircuitOpen(msg) => msg,
             CanoError::CheckpointStore(msg) => msg,
@@ -318,6 +396,7 @@ impl CanoError {
             CanoError::WorkflowVersionMismatch { .. } => {
                 "workflow version mismatch (stored vs expected)"
             }
+            CanoError::WithStateContext { source, .. } => source.message(),
         }
     }
 
@@ -328,7 +407,7 @@ impl CanoError {
             CanoError::Store(_) => "store",
             CanoError::Workflow(_) => "workflow",
             CanoError::Configuration(_) => "configuration",
-            CanoError::RetryExhausted(_) => "retry_exhausted",
+            CanoError::RetryExhausted { .. } => "retry_exhausted",
             CanoError::Timeout(_) => "timeout",
             CanoError::CircuitOpen(_) => "circuit_open",
             CanoError::CheckpointStore(_) => "checkpoint_store",
@@ -338,6 +417,7 @@ impl CanoError {
             CanoError::ResourceTypeMismatch(_) => "resource_type_mismatch",
             CanoError::ResourceDuplicateKey(_) => "resource_duplicate_key",
             CanoError::WorkflowVersionMismatch { .. } => "workflow_version_mismatch",
+            CanoError::WithStateContext { .. } => "with_state_context",
         }
     }
 }
@@ -349,7 +429,9 @@ impl std::fmt::Display for CanoError {
             CanoError::Store(msg) => write!(f, "Store error: {msg}"),
             CanoError::Workflow(msg) => write!(f, "Workflow error: {msg}"),
             CanoError::Configuration(msg) => write!(f, "Configuration error: {msg}"),
-            CanoError::RetryExhausted(msg) => write!(f, "Retry exhausted: {msg}"),
+            CanoError::RetryExhausted { attempts, source } => {
+                write!(f, "Retry exhausted after {attempts} attempt(s): {source}")
+            }
             CanoError::Timeout(msg) => write!(f, "Timeout error: {msg}"),
             CanoError::CircuitOpen(msg) => write!(f, "Circuit open: {msg}"),
             CanoError::CheckpointStore(msg) => write!(f, "Checkpoint store error: {msg}"),
@@ -372,11 +454,37 @@ impl std::fmt::Display for CanoError {
                 f,
                 "Workflow version mismatch: stored={stored}, expected={expected}"
             ),
+            CanoError::WithStateContext {
+                state,
+                attempt,
+                transitions_so_far,
+                source,
+            } => {
+                write!(f, "state={state} attempt={attempt} path=[")?;
+                for (i, s) in transitions_so_far.iter().enumerate() {
+                    if i == 0 {
+                        write!(f, "{s}")?;
+                    } else {
+                        write!(f, ", {s}")?;
+                    }
+                }
+                write!(f, "] caused by: {source}")
+            }
         }
     }
 }
 
-impl std::error::Error for CanoError {}
+impl std::error::Error for CanoError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CanoError::WithStateContext { source, .. }
+            | CanoError::RetryExhausted { source, .. } => {
+                Some(source.as_ref() as &(dyn std::error::Error + 'static))
+            }
+            _ => None,
+        }
+    }
+}
 
 impl PartialEq for CanoError {
     fn eq(&self, other: &Self) -> bool {
@@ -385,7 +493,16 @@ impl PartialEq for CanoError {
             (CanoError::Store(a), CanoError::Store(b)) => a == b,
             (CanoError::Workflow(a), CanoError::Workflow(b)) => a == b,
             (CanoError::Configuration(a), CanoError::Configuration(b)) => a == b,
-            (CanoError::RetryExhausted(a), CanoError::RetryExhausted(b)) => a == b,
+            (
+                CanoError::RetryExhausted {
+                    attempts: a_attempts,
+                    source: a_source,
+                },
+                CanoError::RetryExhausted {
+                    attempts: b_attempts,
+                    source: b_source,
+                },
+            ) => a_attempts == b_attempts && a_source == b_source,
             (CanoError::Timeout(a), CanoError::Timeout(b)) => a == b,
             (CanoError::CircuitOpen(a), CanoError::CircuitOpen(b)) => a == b,
             (CanoError::CheckpointStore(a), CanoError::CheckpointStore(b)) => a == b,
@@ -407,6 +524,20 @@ impl PartialEq for CanoError {
                     expected: e2,
                 },
             ) => s1 == s2 && e1 == e2,
+            (
+                CanoError::WithStateContext {
+                    state: s1,
+                    attempt: a1,
+                    transitions_so_far: t1,
+                    source: src1,
+                },
+                CanoError::WithStateContext {
+                    state: s2,
+                    attempt: a2,
+                    transitions_so_far: t2,
+                    source: src2,
+                },
+            ) => s1 == s2 && a1 == a2 && t1 == t2 && src1 == src2,
             _ => false,
         }
     }
@@ -744,5 +875,75 @@ mod tests {
         assert_eq!(a, b);
         let c = CanoError::workflow_version_mismatch(1, 2);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_with_state_context_constructor_category_and_message() {
+        let inner = CanoError::task_execution("connection refused");
+        let err = CanoError::with_state_context(
+            "Process",
+            2,
+            vec![
+                "Start".to_string(),
+                "Fetch".to_string(),
+                "Process".to_string(),
+            ],
+            inner.clone(),
+        );
+        assert_eq!(err.category(), "with_state_context");
+        assert_eq!(err.message(), "connection refused");
+        let shown = format!("{err}");
+        assert!(shown.contains("state=Process"));
+        assert!(shown.contains("attempt=2"));
+        assert!(shown.contains("path=[Start, Fetch, Process]"));
+    }
+
+    #[test]
+    fn test_with_state_context_does_not_wrap_compensation_failed() {
+        let cf = CanoError::compensation_failed(vec![CanoError::generic("x")]);
+        let wrapped = CanoError::with_state_context("S", 1, vec!["S".into()], cf.clone());
+        assert_eq!(wrapped, cf, "must not re-wrap CompensationFailed");
+    }
+
+    #[test]
+    fn test_with_state_context_source_chain() {
+        use std::error::Error;
+        let inner = CanoError::task_execution("boom");
+        let err = CanoError::with_state_context("S", 1, vec!["S".to_string()], inner);
+        let src = err.source().expect("must expose inner via Error::source");
+        assert!(src.to_string().contains("boom"));
+    }
+
+    #[test]
+    fn test_retry_exhausted_constructor_category_and_message() {
+        let inner = CanoError::task_execution("connection refused");
+        let err = CanoError::retry_exhausted(3, inner.clone());
+        assert_eq!(err.category(), "retry_exhausted");
+        // message() delegates to the inner source.
+        assert_eq!(err.message(), "connection refused");
+        let shown = format!("{err}");
+        assert!(shown.contains("Retry exhausted after 3 attempt(s)"));
+        assert!(shown.contains("connection refused"));
+    }
+
+    #[test]
+    fn test_retry_exhausted_partial_eq() {
+        let a = CanoError::retry_exhausted(2, CanoError::task_execution("x"));
+        let b = CanoError::retry_exhausted(2, CanoError::task_execution("x"));
+        assert_eq!(a, b);
+
+        let c = CanoError::retry_exhausted(3, CanoError::task_execution("x"));
+        assert_ne!(a, c, "different attempts must not compare equal");
+
+        let d = CanoError::retry_exhausted(2, CanoError::task_execution("y"));
+        assert_ne!(a, d, "different sources must not compare equal");
+    }
+
+    #[test]
+    fn test_retry_exhausted_source_chain() {
+        use std::error::Error;
+        let err = CanoError::retry_exhausted(5, CanoError::task_execution("boom"));
+        let src = err.source().expect("must expose inner via Error::source");
+        assert!(src.to_string().contains("boom"));
     }
 }

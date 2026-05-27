@@ -688,7 +688,13 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
         let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
-        assert_eq!(err.category(), "checkpoint_store");
+        // Errors raised inside `execute_workflow_from` are wrapped with state context;
+        // the inner error remains a checkpoint_store error.
+        let inner = match &err {
+            CanoError::WithStateContext { source, .. } => source.as_ref(),
+            other => other,
+        };
+        assert_eq!(inner.category(), "checkpoint_store");
         assert!(err.message().contains("workflow id"));
     }
 
@@ -949,8 +955,12 @@ mod tests {
             .add_exit_state(TestState::Complete);
 
         let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
-        // Clean rollback → the original failure is surfaced unchanged.
-        assert_eq!(err.category(), "task_execution");
+        // Clean rollback → the original failure is surfaced, wrapped with state context.
+        let inner = match &err {
+            CanoError::WithStateContext { source, .. } => source.as_ref(),
+            other => other,
+        };
+        assert_eq!(inner.category(), "task_execution");
         assert_eq!(err.message(), "D forward failed");
         // A, B, C were compensated in reverse registration order. D failed forward, so it
         // never produced an output and is not on the stack.
@@ -1039,7 +1049,7 @@ mod tests {
         let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         match err {
             CanoError::CompensationFailed { errors } => {
-                // [original (D forward failed), B's compensate failure].
+                // [original (D forward failed, wrapped with state context), B's compensate failure].
                 assert_eq!(errors.len(), 2);
                 assert_eq!(errors[0].message(), "D forward failed");
                 assert!(errors[1].message().contains("B compensate failed"));
@@ -1055,6 +1065,71 @@ mod tests {
                 ("A".to_string(), 1),
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn compensation_failed_errors_first_is_state_context_wrapped() {
+        // S1 (Start, "A") commits a compensation entry; S2 (Process, "B") fails forward;
+        // S1's compensate also fails on rollback. The resulting CompensationFailed must have
+        // errors[0] = WithStateContext { state = "Process", source = original task failure }
+        // and errors[1] = A's compensate failure.
+        let log: CompLog = Arc::new(Mutex::new(Vec::new()));
+        let workflow = Workflow::bare()
+            .register_with_compensation(
+                TestState::Start,
+                CompTask {
+                    name: "A",
+                    value: 1,
+                    next_state: TestState::Process,
+                    log: log.clone(),
+                    fail_forward: false,
+                    fail_compensate: true,
+                },
+            )
+            .register_with_compensation(
+                TestState::Process,
+                CompTask {
+                    name: "B",
+                    value: 2,
+                    next_state: TestState::Complete,
+                    log: log.clone(),
+                    fail_forward: true,
+                    fail_compensate: false,
+                },
+            )
+            .add_exit_state(TestState::Complete);
+
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        match err {
+            CanoError::CompensationFailed { errors } => {
+                assert!(
+                    errors.len() >= 2,
+                    "original + at least one comp failure, got {errors:?}"
+                );
+                match &errors[0] {
+                    CanoError::WithStateContext {
+                        state,
+                        attempt,
+                        transitions_so_far,
+                        source,
+                    } => {
+                        assert_eq!(state, "Process");
+                        assert_eq!(*attempt, 1);
+                        assert_eq!(
+                            *transitions_so_far,
+                            vec!["Start".to_string(), "Process".to_string()]
+                        );
+                        assert!(
+                            matches!(**source, CanoError::TaskExecution(_)),
+                            "expected inner TaskExecution, got {source:?}"
+                        );
+                    }
+                    other => panic!("errors[0] should be WithStateContext, got {other:?}"),
+                }
+                assert!(errors[1].message().contains("A compensate failed"));
+            }
+            other => panic!("expected CompensationFailed, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -1315,7 +1390,17 @@ mod tests {
                 Ok(TestState::Complete) => completed += 1,
                 Ok(other) => panic!("unexpected success state {other:?}"),
                 // The loser of the seq-0 race fails fast with a conflict, not corruption.
-                Err(e) => assert_eq!(e.category(), "checkpoint_store", "unexpected error: {e}"),
+                Err(e) => {
+                    let inner = match &e {
+                        CanoError::WithStateContext { source, .. } => source.as_ref(),
+                        other => other,
+                    };
+                    assert_eq!(
+                        inner.category(),
+                        "checkpoint_store",
+                        "unexpected error: {e}"
+                    );
+                }
             }
         }
         assert!(
@@ -1341,7 +1426,11 @@ mod tests {
             .orchestrate(TestState::Start)
             .await
             .unwrap_err();
-        assert_eq!(err.category(), "checkpoint_store");
+        let inner = match &err {
+            CanoError::WithStateContext { source, .. } => source.as_ref(),
+            other => other,
+        };
+        assert_eq!(inner.category(), "checkpoint_store");
         assert!(err.message().contains("conflict"), "got: {err}");
         // The leftover log is intact — the run can still be resumed.
         assert_eq!(store.rows("run").len(), 2);
@@ -1400,8 +1489,13 @@ mod tests {
         let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         match err {
             CanoError::CompensationFailed { errors } => {
-                // [the append failure that ended the run, then A's compensate failure].
-                assert_eq!(errors[0].category(), "checkpoint_store");
+                // [the append failure that ended the run (now wrapped with state context),
+                // then A's compensate failure].
+                let inner0 = match &errors[0] {
+                    CanoError::WithStateContext { source, .. } => source.as_ref(),
+                    other => other,
+                };
+                assert_eq!(inner0.category(), "checkpoint_store");
                 assert!(errors[1].message().contains("A compensate failed"));
             }
             other => panic!("expected CompensationFailed, got {other:?}"),
@@ -1871,7 +1965,11 @@ mod tests {
             .with_checkpoint_store(store.clone())
             .with_workflow_id("nope");
         let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
-        assert_eq!(err.category(), "task_execution");
+        let inner = match &err {
+            CanoError::WithStateContext { source, .. } => source.as_ref(),
+            other => other,
+        };
+        assert_eq!(inner.category(), "task_execution");
         // The Start checkpoint row is kept (empty stack ⇒ original error, no `clear`) —
         // so the run can still be resumed.
         assert_eq!(store.rows("nope").len(), 1);

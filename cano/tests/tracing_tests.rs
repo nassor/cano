@@ -274,10 +274,13 @@ async fn test_tracing_observer_captures_events() {
         )
         .add_exit_state(Flow::Done)
         .with_observer(Arc::new(TracingObserver::new()));
-    assert!(matches!(
-        cb_wf.orchestrate(Flow::B).await,
-        Err(CanoError::CircuitOpen(_))
-    ));
+    let cb_err = cb_wf.orchestrate(Flow::B).await.unwrap_err();
+    // The FSM wraps task failures with state context; the inner is CircuitOpen.
+    let inner_cb = match &cb_err {
+        CanoError::WithStateContext { source, .. } => source.as_ref(),
+        other => other,
+    };
+    assert!(matches!(inner_cb, CanoError::CircuitOpen(_)));
 
     drop(guard);
     let output = String::from_utf8(buf.lock().unwrap().clone()).unwrap();

@@ -199,6 +199,12 @@ where
     ) -> Result<TState, CanoError> {
         let mut current_state = initial_state;
         let mut sequence = start_sequence;
+        // Path of states entered so far (one push per loop iteration, including
+        // router states and the terminal exit state). Stored as `TState` to
+        // avoid per-iteration `format!` allocations on the success path;
+        // formatted to `Vec<String>` only when folded into a `WithStateContext`
+        // on failure. Dropped on success.
+        let mut transitions_so_far: Vec<TState> = Vec::new();
 
         #[cfg(feature = "tracing")]
         info!(initial_state = ?current_state, "Starting workflow execution");
@@ -217,6 +223,11 @@ where
             } else {
                 None
             };
+
+            // Record the state being entered for state-context error wrapping.
+            // Unconditional — every state entered (including Router and exit
+            // states) appears in `transitions_so_far`.
+            transitions_so_far.push(current_state.clone());
 
             // Notify observers of every state entry, including the initial state
             // and any terminal exit state.
@@ -247,8 +258,14 @@ where
                         let err = CanoError::checkpoint_store(
                             "checkpointing requires a workflow id (call with_workflow_id)",
                         );
+                        let wrapped = Self::wrap_with_state_context(
+                            &current_state,
+                            &transitions_so_far,
+                            1,
+                            err,
+                        );
                         return self
-                            .run_compensations(workflow_id.as_deref(), compensation_stack, err)
+                            .run_compensations(workflow_id.as_deref(), compensation_stack, wrapped)
                             .await;
                     }
                 };
@@ -272,8 +289,10 @@ where
                 crate::metrics::checkpoint_append(append_result.is_ok());
                 if let Err(e) = append_result {
                     let err = CanoError::checkpoint_store(format!("append checkpoint: {e}"));
+                    let wrapped =
+                        Self::wrap_with_state_context(&current_state, &transitions_so_far, 1, err);
                     return self
-                        .run_compensations(workflow_id.as_deref(), compensation_stack, err)
+                        .run_compensations(workflow_id.as_deref(), compensation_stack, wrapped)
                         .await;
                 }
                 notify_observers(&self.observers, |o| o.on_checkpoint(wf_id, sequence));
@@ -296,8 +315,10 @@ where
                         "No task registered for state: {:?}",
                         current_state
                     ));
+                    let wrapped =
+                        Self::wrap_with_state_context(&current_state, &transitions_so_far, 1, err);
                     return self
-                        .run_compensations(workflow_id.as_deref(), compensation_stack, err)
+                        .run_compensations(workflow_id.as_deref(), compensation_stack, wrapped)
                         .await;
                 }
             };
@@ -312,7 +333,8 @@ where
             #[cfg(feature = "metrics")]
             let _dispatch_started = std::time::Instant::now();
 
-            // Dispatch by entry type. Any `Err` triggers a compensation drain.
+            // Dispatch by entry type. Any `Err(err)` triggers a compensation
+            // drain after the error is wrapped with state context.
             let step: Result<TState, CanoError> = match state_entry.as_ref() {
                 StateEntry::Single { task, config } => {
                     self.execute_single_task(task.clone(), Arc::clone(config))
@@ -365,11 +387,17 @@ where
                                         task_id: task_name,
                                         output_blob,
                                     });
+                                    let wrapped = Self::wrap_with_state_context(
+                                        &current_state,
+                                        &transitions_so_far,
+                                        1,
+                                        err,
+                                    );
                                     return self
                                         .run_compensations(
                                             workflow_id.as_deref(),
                                             compensation_stack,
-                                            err,
+                                            wrapped,
                                         )
                                         .await;
                                 }
@@ -426,12 +454,47 @@ where
             current_state = match step {
                 Ok(s) => s,
                 Err(e) => {
+                    let attempt = Self::attempts_from_error(&e);
+                    let wrapped = Self::wrap_with_state_context(
+                        &current_state,
+                        &transitions_so_far,
+                        attempt,
+                        e,
+                    );
                     return self
-                        .run_compensations(workflow_id.as_deref(), compensation_stack, e)
+                        .run_compensations(workflow_id.as_deref(), compensation_stack, wrapped)
                         .await;
                 }
             };
         }
+    }
+
+    /// Compute the 1-based attempt number that produced `err`. The count lives
+    /// inside `RetryExhausted`; every other variant means we stopped on the
+    /// first attempt.
+    pub(super) fn attempts_from_error(err: &CanoError) -> u32 {
+        match err {
+            CanoError::RetryExhausted { attempts, .. } => *attempts,
+            _ => 1,
+        }
+    }
+
+    /// Annotate a task failure with the FSM state, attempt number, and transition
+    /// path that produced it. Formats the path into `Vec<String>` here so the FSM
+    /// loop can keep its tracker as `Vec<TState>` and skip per-iteration String
+    /// allocations on the success path. The constructor short-circuits when
+    /// `err` is itself already a `WithStateContext` or a `CompensationFailed`.
+    fn wrap_with_state_context(
+        current_state: &TState,
+        transitions_so_far: &[TState],
+        attempt: u32,
+        err: CanoError,
+    ) -> CanoError {
+        let path: Vec<String> = transitions_so_far
+            .iter()
+            .map(|s| format!("{s:?}"))
+            .collect();
+        CanoError::with_state_context(format!("{current_state:?}"), attempt, path, err)
     }
 
     async fn execute_single_task(
@@ -1712,7 +1775,12 @@ mod tests {
             .orchestrate(TestState::Start)
             .await
             .expect_err("panic must surface as Err");
-        match err {
+        // The FSM wraps the failure with state context; the inner is the TaskExecution.
+        let inner = match &err {
+            CanoError::WithStateContext { source, .. } => source.as_ref(),
+            other => other,
+        };
+        match inner {
             CanoError::TaskExecution(msg) => {
                 assert!(msg.contains("panic"), "expected 'panic' in: {msg}");
                 assert!(msg.contains("boom"), "expected 'boom' in: {msg}");
@@ -1846,7 +1914,15 @@ mod tests {
             .orchestrate(TestState::Start)
             .await
             .expect_err("expected attempt timeout to exhaust retries");
-        assert!(matches!(err, CanoError::RetryExhausted(_)), "got {err:?}");
+        // The FSM wraps the failure with state context; the inner is RetryExhausted.
+        let inner = match &err {
+            CanoError::WithStateContext { source, .. } => source.as_ref(),
+            other => other,
+        };
+        assert!(
+            matches!(inner, CanoError::RetryExhausted { .. }),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -1972,10 +2048,126 @@ mod tests {
             .orchestrate(TestState::Start)
             .await
             .expect_err("split result from stepped must error");
+        // The FSM wraps the failure with state context; the inner is a Workflow error.
+        let inner = match &err {
+            CanoError::WithStateContext { source, .. } => source.as_ref(),
+            other => other,
+        };
         assert!(
-            matches!(err, CanoError::Workflow(_)),
+            matches!(inner, CanoError::Workflow(_)),
             "expected Workflow error, got {err:?}"
         );
         assert!(err.to_string().contains("split"), "got: {err}");
+    }
+
+    // ---- WithStateContext wrapping ----
+
+    #[tokio::test]
+    async fn orchestrate_wraps_task_failure_with_state_context() {
+        // Use a no-retry fail task so the wrapped error's `source` is the raw
+        // `TaskExecution`, not a `RetryExhausted`. `FailTask` itself uses the
+        // default exponential-backoff retry policy, which would turn `attempt`
+        // into the total attempt count and the source into `RetryExhausted`.
+        #[derive(Clone)]
+        struct FailNoRetry;
+        #[task]
+        impl Task<TestState> for FailNoRetry {
+            fn config(&self) -> task_mod::TaskConfig {
+                task_mod::TaskConfig::minimal()
+            }
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+                Err(CanoError::task_execution("boom"))
+            }
+        }
+
+        let workflow = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Process))
+            .register(TestState::Process, FailNoRetry)
+            .add_exit_state(TestState::Complete);
+
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        match err {
+            CanoError::WithStateContext {
+                state,
+                attempt,
+                transitions_so_far,
+                source,
+            } => {
+                assert_eq!(state, "Process");
+                assert_eq!(attempt, 1);
+                assert_eq!(
+                    transitions_so_far,
+                    vec!["Start".to_string(), "Process".to_string()]
+                );
+                assert!(matches!(*source, CanoError::TaskExecution(_)));
+            }
+            other => panic!("expected WithStateContext, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wrapped_error_attempt_equals_max_attempts_on_retry_exhausted() {
+        #[derive(Clone)]
+        struct AlwaysFails;
+        #[task]
+        impl Task<TestState> for AlwaysFails {
+            fn config(&self) -> task_mod::TaskConfig {
+                task_mod::TaskConfig::new().with_fixed_retry(2, Duration::from_millis(0))
+            }
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+                Err(CanoError::task_execution("nope"))
+            }
+        }
+        let err = Workflow::bare()
+            .register(TestState::Start, AlwaysFails)
+            .add_exit_state(TestState::Complete)
+            .orchestrate(TestState::Start)
+            .await
+            .unwrap_err();
+        match err {
+            CanoError::WithStateContext {
+                attempt, source, ..
+            } => {
+                assert_eq!(attempt, 3, "1 initial + 2 retries");
+                assert!(matches!(*source, CanoError::RetryExhausted { .. }));
+            }
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn router_states_appear_in_wrapped_path() {
+        use crate::task::RouterTask;
+
+        struct AlwaysRoute;
+
+        #[task_mod::router]
+        impl RouterTask<TestState> for AlwaysRoute {
+            async fn route(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
+                Ok(TaskResult::Single(TestState::Process))
+            }
+        }
+
+        let workflow = Workflow::bare()
+            .register_router(TestState::Start, AlwaysRoute)
+            .register(TestState::Process, FailTask::new(true))
+            .add_exit_state(TestState::Complete);
+
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        match err {
+            CanoError::WithStateContext {
+                transitions_so_far,
+                state,
+                ..
+            } => {
+                assert_eq!(state, "Process");
+                assert_eq!(
+                    transitions_so_far,
+                    vec!["Start".to_string(), "Process".to_string()],
+                    "router state must appear in path"
+                );
+            }
+            other => panic!("expected WithStateContext, got {other:?}"),
+        }
     }
 }
