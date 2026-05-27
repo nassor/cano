@@ -207,6 +207,10 @@ discriminant keeps the two apart.)</li>
 work purely from <code>(res, output)</code>, and the workflow definition (state labels +
 <code>register_with_compensation</code> calls) must match across processes — the same constraint that
 already applies to resume itself.</li>
+<li>If the resuming workflow's <a href="../recovery/#versioning"><code>workflow_version</code></a>
+disagrees with the version stamped on the persisted rows, <code>resume_from</code> returns
+<code>CanoError::WorkflowVersionMismatch</code> <em>before</em> the compensation stack is
+rehydrated — <strong>so there is no rollback to perform when versions don't match.</strong></li>
 </ul>
 
 <div class="callout callout-tip">

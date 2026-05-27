@@ -70,7 +70,7 @@ It excels at managing complex lifecycles where state transitions matter:
 <div class="feature-card animate-in">
 <div class="feature-icon" aria-hidden="true">&#128190;</div>
 <h3>Crash Recovery</h3>
-<p>Pluggable <code>CheckpointStore</code> records every state entry; <code>resume_from</code> rehydrates a crashed run. Embedded, ACID <code>RedbCheckpointStore</code> behind the <code>recovery</code> feature.</p>
+<p>Pluggable <code>CheckpointStore</code> records every state entry with an optional <code>workflow_version</code> stamp; <code>resume_from</code> rehydrates a crashed run and refuses checkpoints whose version disagrees with the workflow. Embedded, ACID <code>RedbCheckpointStore</code> behind the <code>recovery</code> feature.</p>
 </div>
 <div class="feature-card animate-in">
 <div class="feature-icon secondary" aria-hidden="true">&#8634;</div>

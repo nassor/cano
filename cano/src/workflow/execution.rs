@@ -262,7 +262,11 @@ where
                     _ => String::new(),
                 };
                 let append_result = store
-                    .append(wf_id, CheckpointRow::new(sequence, label, task_id))
+                    .append(
+                        wf_id,
+                        CheckpointRow::new(sequence, label, task_id)
+                            .with_workflow_version(self.workflow_version),
+                    )
                     .await;
                 #[cfg(feature = "metrics")]
                 crate::metrics::checkpoint_append(append_result.is_ok());
@@ -348,7 +352,8 @@ where
                             {
                                 let label = state_label.as_deref().unwrap_or_default();
                                 let row = CheckpointRow::new(sequence, label, task_name.clone())
-                                    .with_output(output_blob.clone());
+                                    .with_output(output_blob.clone())
+                                    .with_workflow_version(self.workflow_version);
                                 let comp_append_result = store.append(wf_id, row).await;
                                 #[cfg(feature = "metrics")]
                                 crate::metrics::checkpoint_append(comp_append_result.is_ok());
@@ -592,7 +597,8 @@ where
                         (&self.checkpoint_store, workflow_id.as_deref())
                     {
                         let row = CheckpointRow::new(*sequence, state_label, task_name.as_ref())
-                            .with_cursor(new_cursor_bytes.clone());
+                            .with_cursor(new_cursor_bytes.clone())
+                            .with_workflow_version(self.workflow_version);
                         let cursor_append_result = store.append(wf_id, row).await;
                         #[cfg(feature = "metrics")]
                         crate::metrics::checkpoint_append(cursor_append_result.is_ok());

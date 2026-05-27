@@ -78,14 +78,17 @@ async fn migrate(client: &Client) -> anyhow::Result<()> {
     client
         .batch_execute(
             "CREATE TABLE IF NOT EXISTS cano_checkpoints (
-                 workflow_id text     NOT NULL,
-                 sequence    bigint   NOT NULL,
-                 state       text     NOT NULL,
-                 task_id     text     NOT NULL,
-                 output_blob bytea,
-                 kind        smallint NOT NULL DEFAULT 0,
+                 workflow_id      text     NOT NULL,
+                 sequence         bigint   NOT NULL,
+                 state            text     NOT NULL,
+                 task_id          text     NOT NULL,
+                 output_blob      bytea,
+                 kind             smallint NOT NULL DEFAULT 0,
+                 workflow_version bigint   NOT NULL DEFAULT 0,
                  PRIMARY KEY (workflow_id, sequence)
              );
+             ALTER TABLE cano_checkpoints
+                 ADD COLUMN IF NOT EXISTS workflow_version bigint NOT NULL DEFAULT 0;
              CREATE TABLE IF NOT EXISTS ledger (
                  workflow_id text   NOT NULL,
                  account     text   NOT NULL,
@@ -138,12 +141,13 @@ impl CheckpointStore for PostgresCheckpointStore {
     async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
         let seq = row.sequence as i64;
         let kind = row_kind_to_db(&row.kind);
+        let workflow_version = row.workflow_version as i64;
         let res = self
             .client
             .execute(
                 "INSERT INTO cano_checkpoints \
-                     (workflow_id, sequence, state, task_id, output_blob, kind) \
-                 VALUES ($1, $2, $3, $4, $5, $6)",
+                     (workflow_id, sequence, state, task_id, output_blob, kind, workflow_version) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
                 &[
                     &workflow_id,
                     &seq,
@@ -151,6 +155,7 @@ impl CheckpointStore for PostgresCheckpointStore {
                     &row.task_id,
                     &row.output_blob,
                     &kind,
+                    &workflow_version,
                 ],
             )
             .await;
@@ -169,26 +174,32 @@ impl CheckpointStore for PostgresCheckpointStore {
         let rows = self
             .client
             .query(
-                "SELECT sequence, state, task_id, output_blob, kind FROM cano_checkpoints
-                 WHERE workflow_id = $1 ORDER BY sequence ASC",
+                "SELECT sequence, state, task_id, output_blob, kind, workflow_version \
+                 FROM cano_checkpoints WHERE workflow_id = $1 ORDER BY sequence ASC",
                 &[&workflow_id],
             )
             .await
             .map_err(|e| CanoError::checkpoint_store(format!("load_run: {e}")))?;
-        Ok(rows
-            .iter()
+        rows.iter()
             .map(|r| {
                 let seq: i64 = r.get(0);
                 let kind_int: i16 = r.get(4);
-                CheckpointRow {
+                let workflow_version_i64: i64 = r.get(5);
+                let workflow_version: u32 = workflow_version_i64.try_into().map_err(|_| {
+                    CanoError::checkpoint_store(format!(
+                        "workflow_version {workflow_version_i64} out of u32 range"
+                    ))
+                })?;
+                Ok(CheckpointRow {
                     sequence: seq as u64,
                     state: r.get(1),
                     task_id: r.get(2),
                     output_blob: r.get(3),
                     kind: row_kind_from_db(kind_int),
-                }
+                    workflow_version,
+                })
             })
-            .collect())
+            .collect()
     }
 
     async fn clear(&self, workflow_id: &str) -> Result<(), CanoError> {

@@ -187,7 +187,7 @@ will warn you if you discard the return value. If you forget to capture it, the 
 
 <p>
 The same builder also carries the cross-cutting concerns: <code>with_checkpoint_store</code> /
-<code>with_workflow_id</code> / <code>resume_from</code> for <a href="../recovery/">crash recovery</a>,
+<code>with_workflow_id</code> / <code>with_workflow_version</code> / <code>resume_from</code> for <a href="../recovery/">crash recovery</a>,
 <code>register_with_compensation</code> for <a href="../saga/">sagas</a>, <code>with_observer</code> for
 <a href="../observers/">observers</a>, and per-task <code>TaskConfig</code> for retries, timeouts, and
 <a href="../resilience/">circuit breakers</a>.

@@ -19,6 +19,13 @@
 //! - **Optional default.** With the `recovery` feature enabled, [`RedbCheckpointStore`]
 //!   provides an embedded, ACID, daemon-free implementation backed by
 //!   [`redb`](https://docs.rs/redb). The default build pulls in no extra dependencies.
+//! - **Versioned.** Each [`CheckpointRow`] carries a user-stamped
+//!   [`workflow_version`](CheckpointRow::workflow_version) tag (default `0`); set it via
+//!   [`Workflow::with_workflow_version`](crate::workflow::Workflow::with_workflow_version)
+//!   and [`resume_from`](crate::workflow::Workflow::resume_from) will reject any row
+//!   whose stored version disagrees. Rows written by builds that predate this field
+//!   decode as `workflow_version = 0`, so existing checkpoint databases keep replaying
+//!   under a workflow that hasn't opted in to a non-zero version.
 //!
 //! ## Example
 //!
@@ -112,6 +119,9 @@ pub struct CheckpointRow {
     /// Why this row was written; drives how [`resume_from`](crate::workflow::Workflow::resume_from)
     /// routes the row during replay.
     pub kind: RowKind,
+    /// User-declared workflow version stamped at append time. Default `0` for rows
+    /// written by a workflow that did not call `Workflow::with_workflow_version`.
+    pub workflow_version: u32,
 }
 
 impl CheckpointRow {
@@ -123,6 +133,7 @@ impl CheckpointRow {
             task_id: task_id.into(),
             output_blob: None,
             kind: RowKind::StateEntry,
+            workflow_version: 0,
         }
     }
 
@@ -145,6 +156,14 @@ impl CheckpointRow {
     pub fn with_cursor(mut self, cursor_blob: Vec<u8>) -> Self {
         self.output_blob = Some(cursor_blob);
         self.kind = RowKind::StepCursor;
+        self
+    }
+
+    /// Stamp this row with the workflow's user-declared version. Chained with `new`
+    /// (and optionally `with_output` / `with_cursor`) at append time so each row carries
+    /// the version of the workflow definition that produced it.
+    pub fn with_workflow_version(mut self, version: u32) -> Self {
+        self.workflow_version = version;
         self
     }
 }
@@ -291,6 +310,18 @@ mod tests {
     async fn load_run_unknown_id_is_empty() {
         let store = InMemoryStore::default();
         assert!(store.load_run("nope").await.unwrap().is_empty());
+    }
+
+    #[test]
+    fn checkpoint_row_default_workflow_version_is_zero() {
+        let row = CheckpointRow::new(0, "Start", "task");
+        assert_eq!(row.workflow_version, 0);
+    }
+
+    #[test]
+    fn checkpoint_row_with_workflow_version_sets_field() {
+        let row = CheckpointRow::new(0, "Start", "task").with_workflow_version(42);
+        assert_eq!(row.workflow_version, 42);
     }
 
     #[tokio::test]

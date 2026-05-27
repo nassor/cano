@@ -157,6 +157,13 @@
 //! `RedbCheckpointStore` is a ready-made embedded, ACID implementation. Workflows
 //! without a checkpoint store pay nothing. See the `workflow_recovery` example.
 //!
+//! [`Workflow::with_workflow_version`] stamps a `u32` version onto every appended
+//! [`CheckpointRow`] (default `0`); [`Workflow::resume_from`] then refuses to replay a
+//! checkpoint whose stored version differs, returning
+//! [`CanoError::WorkflowVersionMismatch`]. Bump it when the FSM shape changes between
+//! deploys (added/removed states, cursor schema, compensation output layout) to avoid
+//! silently resuming onto an incompatible workflow definition.
+//!
 //! ### Sagas & Compensation
 //!
 //! For steps that mutate external systems, implement [`CompensatableTask`] (its `run`
