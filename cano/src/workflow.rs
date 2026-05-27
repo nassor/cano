@@ -451,8 +451,8 @@ where
     /// State labels are the `Debug` rendering of `TState`; resume relies on each registered
     /// (or exit) state having a distinct `Debug` form, which holds for any `#[derive(Debug)]`
     /// enum.
-    pub fn with_checkpoint_store(mut self, store: Arc<dyn CheckpointStore>) -> Self {
-        self.checkpoint_store = Some(store);
+    pub fn with_checkpoint_store(mut self, checkpoint_store: Arc<dyn CheckpointStore>) -> Self {
+        self.checkpoint_store = Some(checkpoint_store);
         self
     }
 

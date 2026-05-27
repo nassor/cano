@@ -55,7 +55,8 @@ graph TD
     T1 --> Join{Join All}
     T2 --> Join
     T3 --> Join
-    Join --> Complete([Complete])
+    Join --> Aggregate[AggregateTask]
+    Aggregate --> Complete([Complete])
 ```
 
 ```rust
@@ -65,27 +66,51 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum FlowState {
     Start,
+    Aggregate,
     Complete,
 }
 
-// A task that simulates fetching data from a source.
+// A task that simulates fetching a numeric value from a source.
 #[derive(Clone)]
 struct FetchSourceTask {
     source_id: u32,
 }
 
-#[task]
-impl Task<FlowState> for FetchSourceTask {
+#[task(state = FlowState)]
+impl FetchSourceTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<FlowState>, CanoError> {
         // Look up the shared store from the workflow's resources.
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore, _>("store")?;
 
         // Simulate async work.
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        // Store the per-source result for downstream aggregation.
+        // Each source contributes a value; downstream aggregation will sum them.
+        let value: u64 = (self.source_id as u64) * 10;
         let key = format!("source_{}", self.source_id);
-        store.put(&key, format!("data_from_{}", self.source_id))?;
+        store.put(&key, value)?;
+
+        Ok(TaskResult::Single(FlowState::Aggregate))
+    }
+}
+
+// Runs after the split: reads each per-source value back out and sums them.
+struct AggregateTask {
+    source_ids: Vec<u32>,
+}
+
+#[task(state = FlowState)]
+impl AggregateTask {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<FlowState>, CanoError> {
+        let store = res.get::<MemoryStore, _>("store")?;
+
+        let mut total: u64 = 0;
+        for id in &self.source_ids {
+            let value: u64 = store.get(&format!("source_{}", id))?;
+            total += value;
+        }
+        store.put("total", total)?;
+        println!("Aggregated total: {total}");
 
         Ok(TaskResult::Single(FlowState::Complete))
     }
@@ -97,20 +122,21 @@ async fn main() -> Result<(), CanoError> {
     let resources = Resources::new().insert("store", MemoryStore::new());
 
     // 2. Define parallel tasks.
-    let sources = vec![
-        FetchSourceTask { source_id: 1 },
-        FetchSourceTask { source_id: 2 },
-        FetchSourceTask { source_id: 3 },
-    ];
+    let source_ids = vec![1, 2, 3];
+    let sources: Vec<FetchSourceTask> = source_ids
+        .iter()
+        .map(|&source_id| FetchSourceTask { source_id })
+        .collect();
 
     // 3. Configure the join strategy.
-    // Wait for ALL tasks to complete successfully before moving to Complete.
-    let join_config = JoinConfig::new(JoinStrategy::All, FlowState::Complete)
+    // Wait for ALL fetches to succeed, then transition to Aggregate.
+    let join_config = JoinConfig::new(JoinStrategy::All, FlowState::Aggregate)
         .with_timeout(Duration::from_secs(5));
 
-    // 4. Build the workflow: Start -> Split into parallel tasks -> Complete.
+    // 4. Build the workflow: Start -> Split fetches -> Aggregate -> Complete.
     let workflow = Workflow::new(resources)
         .register_split(FlowState::Start, sources, join_config)
+        .register(FlowState::Aggregate, AggregateTask { source_ids })
         .add_exit_state(FlowState::Complete);
 
     // 5. Run.
@@ -127,29 +153,50 @@ Attach a `CheckpointStore` and the workflow records one `CheckpointRow` per stat
 
 ```rust
 use cano::prelude::*;
-use cano::RedbCheckpointStore;            // behind the `recovery` feature
+use cano::RedbCheckpointStore; // behind the `recovery` feature
 use std::sync::Arc;
 
-# #[derive(Debug, Clone, PartialEq, Eq, Hash)] enum Step { Start, Work, Done }
-# #[derive(Clone)] struct StartTask; #[derive(Clone)] struct WorkTask;
-# #[task(state = Step)] impl StartTask { async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> { Ok(TaskResult::Single(Step::Work)) } }
-# #[task(state = Step)] impl WorkTask { async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> { Ok(TaskResult::Single(Step::Done)) } }
-# async fn run() -> Result<(), Box<dyn std::error::Error>> {
-let store = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
-let workflow = Workflow::bare()
-    .register(Step::Start, StartTask)
-    .register(Step::Work, WorkTask)
-    .add_exit_state(Step::Done)
-    .with_checkpoint_store(store)
-    .with_workflow_id("run-42");
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Step { Start, Work, Done }
 
-// First time: run forward (checkpoints are written along the way).
-let _ = workflow.orchestrate(Step::Start).await;
+#[derive(Clone)]
+struct StartTask;
 
-// After a crash: pick up where it left off.
-let final_state = workflow.resume_from("run-42").await?;
-# let _ = final_state; Ok(())
-# }
+#[task(state = Step)]
+impl StartTask {
+    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+        Ok(TaskResult::Single(Step::Work))
+    }
+}
+
+#[derive(Clone)]
+struct WorkTask;
+
+#[task(state = Step)]
+impl WorkTask {
+    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+        Ok(TaskResult::Single(Step::Done))
+    }
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let checkpoint_store = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
+    let workflow = Workflow::bare()
+        .register(Step::Start, StartTask)
+        .register(Step::Work, WorkTask)
+        .add_exit_state(Step::Done)
+        .with_checkpoint_store(checkpoint_store)
+        .with_workflow_id("run-42");
+
+    // First time: run forward (checkpoints are written along the way).
+    let _ = workflow.orchestrate(Step::Start).await;
+
+    // After a crash: pick up where it left off.
+    let final_state = workflow.resume_from("run-42").await?;
+    println!("Resumed to: {:?}", final_state);
+    Ok(())
+}
 ```
 
 The `CheckpointStore` trait is backend-agnostic (no feature flag) — implement it over Postgres, an HTTP service, anything; `RedbCheckpointStore` is just the batteries-included default. `cargo run --example workflow_recovery --features recovery` walks through a full crash-and-resume cycle. See the [Recovery guide](https://nassor.github.io/cano/recovery/).
@@ -162,7 +209,9 @@ For steps that mutate external systems, write a `#[saga::task(state = …)]` —
 use cano::prelude::*;
 use serde::{Serialize, Deserialize};
 
-# #[derive(Debug, Clone, PartialEq, Eq, Hash)] enum Step { Reserve, Ship, Done }
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Step { Reserve, Ship, Done }
+
 #[derive(Serialize, Deserialize)]
 struct Reservation { sku: String, qty: u32 }
 
@@ -171,13 +220,19 @@ struct ReserveInventory;
 #[saga::task(state = Step)]
 impl ReserveInventory {
     type Output = Reservation;
+
     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {
         // ... reserve the stock ...
-        Ok((TaskResult::Single(Step::Ship), Reservation { sku: "WIDGET-7".into(), qty: 3 }))
+        Ok((
+            TaskResult::Single(Step::Ship),
+            Reservation { sku: "WIDGET-7".into(), qty: 3 },
+        ))
     }
+
     async fn compensate(&self, _res: &Resources, output: Reservation) -> Result<(), CanoError> {
         // ... release output.qty of output.sku — must be idempotent ...
-        let _ = output; Ok(())
+        let _ = output;
+        Ok(())
     }
 }
 ```

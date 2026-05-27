@@ -187,9 +187,9 @@ use cano::prelude::*;
 use cano::RedbCheckpointStore;            // requires the `recovery` feature
 use std::sync::Arc;
 
-let store = RedbCheckpointStore::new("/var/lib/myapp/checkpoints.redb")?;
+let checkpoint_store = RedbCheckpointStore::new("/var/lib/myapp/checkpoints.redb")?;
 let workflow = Workflow::new(resources)
-    .with_checkpoint_store(Arc::new(store))
+    .with_checkpoint_store(Arc::new(checkpoint_store))
     .with_workflow_id("nightly-crunch")
     .register_stepped(Stage::Crunch, Cruncher)   // cursor persisted after each step
     .register(Stage::Report, Reporter)

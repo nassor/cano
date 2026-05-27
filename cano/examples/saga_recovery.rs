@@ -19,7 +19,7 @@
 //! task that always fails (simulating an external outage). The failure triggers LIFO
 //! compensation: `Authorize.compensate` runs first, then `Reserve.compensate`.
 //!
-//! Demo (b): after the clean rollback, `store.load_run(id)` returns an empty vec —
+//! Demo (b): after the clean rollback, `checkpoint_store.load_run(id)` returns an empty vec —
 //! the engine cleared the log on success of the compensation chain.
 
 use std::sync::Arc;
@@ -144,7 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build a unique path in the OS temp dir so multiple runs don't collide.
     let db_path =
         std::env::temp_dir().join(format!("cano_saga_recovery_{}.redb", std::process::id()));
-    let store = Arc::new(RedbCheckpointStore::new(&db_path)?);
+    let checkpoint_store = Arc::new(RedbCheckpointStore::new(&db_path)?);
     let run_id = "saga-recovery-demo";
 
     println!("=== Saga + Recovery Demo ===");
@@ -156,7 +156,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .register_with_compensation(Step::Authorize, AuthorizePayment)
         .register(Step::Charge, ChargePayment) // plain — always fails
         .add_exit_state(Step::Done)
-        .with_checkpoint_store(store.clone())
+        .with_checkpoint_store(checkpoint_store.clone())
         .with_workflow_id(run_id);
 
     // --- (a) First run: Charge fails; compensations drain LIFO. ----------
@@ -168,7 +168,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- (b) Checkpoint log cleared on clean rollback. -------------------
     println!("\nCheckpoint log after clean rollback:");
-    let rows = store.load_run(run_id).await?;
+    let rows = checkpoint_store.load_run(run_id).await?;
     if rows.is_empty() {
         println!("  (empty — engine cleared the log after a clean compensation run)");
     } else {

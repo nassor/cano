@@ -73,13 +73,13 @@ impl WorkTask {
     }
 }
 
-let store = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
+let checkpoint_store = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
 
 let workflow = Workflow::bare()
     .register(Step::Start, StartTask)
     .register(Step::Work, WorkTask)
     .add_exit_state(Step::Done)
-    .with_checkpoint_store(store)
+    .with_checkpoint_store(checkpoint_store)
     .with_workflow_id("run-42");
 
 workflow.orchestrate(Step::Start).await?;
@@ -159,12 +159,12 @@ use cano::prelude::*;
 use cano::RedbCheckpointStore;
 use std::sync::Arc;
 
-let store = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
+let checkpoint_store = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
 let workflow = Workflow::bare()
     .register(Step::Start, StartTask)
     .register(Step::Work, WorkTask)
     .add_exit_state(Step::Done)
-    .with_checkpoint_store(store);
+    .with_checkpoint_store(checkpoint_store);
 
 // Some earlier process crashed mid-run; pick up where it left off.
 let final_state = workflow.resume_from("run-42").await?;
@@ -267,8 +267,8 @@ checkpoint table. It is cheap to clone — the handle is held behind an <code>Ar
 use cano::RedbCheckpointStore;
 use std::sync::Arc;
 
-let store: Arc<RedbCheckpointStore> = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
-// pass it to the workflow: .with_checkpoint_store(store)
+let checkpoint_store: Arc<RedbCheckpointStore> = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
+// pass it to the workflow: .with_checkpoint_store(checkpoint_store)
 ```
 
 <p>
@@ -362,14 +362,14 @@ impl FinalizeTask {
     }
 }
 
-let store = Arc::new(RedbCheckpointStore::new("recovery.redb")?);
+let checkpoint_store = Arc::new(RedbCheckpointStore::new("recovery.redb")?);
 let resources = Resources::new().insert("crash", CrashOnce::default());
 let workflow = Workflow::new(resources)
     .register(Step::Start, StartTask)
     .register(Step::Process, ProcessTask)
     .register(Step::Finalize, FinalizeTask)
     .add_exit_state(Step::Done)
-    .with_checkpoint_store(store.clone())
+    .with_checkpoint_store(checkpoint_store.clone())
     .with_workflow_id("demo-run");
 
 // Run 1: crashes inside ProcessTask. The Start and Process rows are already durable.
@@ -381,7 +381,7 @@ assert_eq!(final_state, Step::Done);
 
 // The append-only log: Start, Process (crash), Process (re-run), Finalize, Done —
 // all RowKind::StateEntry here, since this workflow has no compensatable or stepped states.
-for row in store.load_run("demo-run").await? {
+for row in checkpoint_store.load_run("demo-run").await? {
     println!("#{} {:?} {}  {}", row.sequence, row.kind, row.state, row.task_id);
 }
 ```
