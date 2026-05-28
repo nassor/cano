@@ -131,9 +131,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(s) => println!("  outcome: Ok({s:?})  (unexpected)"),
             Err(e) => {
                 println!("  outcome: Err(\"{e}\")");
-                // Confirm the error variant and that the panic message is preserved.
+                // `orchestrate` wraps every task failure in `WithStateContext`; unwrap
+                // one layer before inspecting the underlying variant.
+                let inner = match &e {
+                    CanoError::WithStateContext { source, .. } => source.as_ref(),
+                    other => other,
+                };
                 assert!(
-                    matches!(&e, CanoError::TaskExecution(msg) if msg.contains("panic")),
+                    matches!(inner, CanoError::TaskExecution(msg) if msg.contains("panic")),
                     "expected TaskExecution with 'panic' in message, got: {e:?}"
                 );
                 println!("  confirmed: CanoError::TaskExecution carrying the panic message");
@@ -160,8 +165,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(s) => println!("  outcome: Ok({s:?})  (unexpected)"),
             Err(e) => {
                 println!("  outcome: Err(\"{e}\")");
+                let inner = match &e {
+                    CanoError::WithStateContext { source, .. } => source.as_ref(),
+                    other => other,
+                };
                 assert!(
-                    matches!(&e, CanoError::TaskExecution(msg) if msg.contains("panic")),
+                    matches!(inner, CanoError::TaskExecution(msg) if msg.contains("panic")),
                     "expected TaskExecution, got: {e:?}"
                 );
                 println!("  confirmed: original panic error returned after clean compensation");
