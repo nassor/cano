@@ -209,7 +209,21 @@ where
         }
     }
 
-    /// Set global workflow timeout
+    /// Set a blunt wall-clock timeout for the entire `orchestrate` /
+    /// `resume_from` call.
+    ///
+    /// Implemented as a single `tokio::time::timeout` around the workflow
+    /// future. The in-flight task is dropped at its next await point and the
+    /// call returns `CanoError::Workflow("Workflow timeout exceeded")` —
+    /// compensation does **not** run.
+    ///
+    /// **Superseded by [`with_total_timeout`](Self::with_total_timeout) when
+    /// both are set**: the total-timeout path takes over and this value is
+    /// ignored, because letting both wrappers race would drop the inner
+    /// compensation drain mid-flight and leave the checkpoint log inconsistent.
+    /// Prefer `with_total_timeout` for new code — it triggers graceful
+    /// compensation, fires `on_workflow_timeout`, and bounds rollback via
+    /// [`with_compensation_timeout`](Self::with_compensation_timeout).
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.workflow_timeout = Some(timeout);
         self
@@ -272,9 +286,14 @@ where
     }
 
     /// Override the wall-clock budget for the saga compensation drain after a
-    /// total-timeout trip. Defaults to `min(remaining_budget / 2, 30s)` — that is,
-    /// half of whatever budget is left when the timeout fires, capped at 30 seconds.
-    /// Set explicitly to give compensations a known ceiling.
+    /// failure under [`with_total_timeout`](Self::with_total_timeout). Defaults
+    /// to `min(total_timeout / 2, 30s)` — half of the user's configured total,
+    /// capped at 30 seconds. Set explicitly to give compensations a known ceiling.
+    ///
+    /// Applies whenever `with_total_timeout` is set, regardless of failure
+    /// cause: a per-attempt timeout, a circuit-open burst, a checkpoint-store
+    /// error, or the engine-fired workflow timeout all drain under the same
+    /// bounded budget.
     ///
     /// # Example
     ///
@@ -567,6 +586,12 @@ where
     /// Required whenever a [`checkpoint_store`](Self::with_checkpoint_store) is attached.
     /// [`resume_from`](Self::resume_from) takes the id explicitly, so this builder is only
     /// needed for the forward (`orchestrate`) direction.
+    ///
+    /// **Breaking change in this release:** the bound narrowed from
+    /// `impl Into<String>` to `impl Into<Arc<str>>`. `String`, `&str`, and
+    /// `Arc<str>` still call this directly. Generic wrappers parameterized on
+    /// `T: Into<String>` need to switch the bound to `T: Into<Arc<str>>`
+    /// (which any `String`/`&str`/`Arc<str>` callers already satisfy).
     pub fn with_workflow_id(mut self, workflow_id: impl Into<Arc<str>>) -> Self {
         self.workflow_id = Some(workflow_id.into());
         self
@@ -842,17 +867,24 @@ where
 
         let workflow_future = self.execute_workflow(initial_state, total_budget);
 
-        let result = if let Some(timeout_duration) = self.workflow_timeout {
-            match tokio::time::timeout(timeout_duration, workflow_future).await {
-                Ok(inner) => inner,
-                Err(_) => {
-                    #[cfg(feature = "metrics")]
-                    crate::metrics::workflow_run("timeout", _started.elapsed());
-                    return Err(CanoError::workflow("Workflow timeout exceeded"));
+        // When `with_total_timeout` is set it strictly supersedes the legacy
+        // `with_timeout`: the total-budget path handles cancellation gracefully
+        // (drains compensations under a bounded deadline, fires `on_workflow_timeout`).
+        // Letting the legacy outer `tokio::time::timeout` *also* fire would race the
+        // inner drain and drop it mid-flight — leaving the checkpoint log
+        // inconsistent. Skip the outer wrapper in that case.
+        let result = match (self.workflow_timeout, total_budget) {
+            (Some(timeout_duration), None) => {
+                match tokio::time::timeout(timeout_duration, workflow_future).await {
+                    Ok(inner) => inner,
+                    Err(_) => {
+                        #[cfg(feature = "metrics")]
+                        crate::metrics::workflow_run("timeout", _started.elapsed());
+                        return Err(CanoError::workflow("Workflow timeout exceeded"));
+                    }
                 }
             }
-        } else {
-            workflow_future.await
+            _ => workflow_future.await,
         };
         #[cfg(feature = "metrics")]
         crate::metrics::workflow_run(
