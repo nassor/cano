@@ -217,12 +217,17 @@ pub enum CanoError {
     /// A workflow failed and at least one [`compensate`](crate::saga::CompensatableTask::compensate)
     /// run also failed while rolling it back.
     ///
-    /// `errors[0]` is the original failure that triggered compensation; `errors[1..]`
-    /// are the compensation errors, in the order they occurred (LIFO over the
-    /// compensation stack). A clean rollback — every `compensate` succeeded — does *not*
-    /// produce this variant: the original error is returned unchanged instead.
+    /// `errors[0]` is the original failure that triggered compensation, **as wrapped
+    /// by the FSM in [`WithStateContext`](CanoError::WithStateContext)** — match on
+    /// `errors[0]`'s [`source`](std::error::Error::source) (or unwrap one layer via
+    /// `match errors[0] { CanoError::WithStateContext { source, .. } => &**source, other => other }`)
+    /// to inspect the underlying variant. `errors[1..]` are the compensation errors, in the
+    /// order they occurred (LIFO over the compensation stack). A clean rollback — every
+    /// `compensate` succeeded — does *not* produce this variant: the original error is
+    /// returned unchanged instead.
     CompensationFailed {
-        /// The original failure followed by every compensation error.
+        /// The original failure (wrapped via `WithStateContext`) followed by every
+        /// compensation error.
         errors: Vec<CanoError>,
     },
 
@@ -383,9 +388,16 @@ impl CanoError {
     /// Annotate a task failure with the FSM state, attempt number, and
     /// transition path that produced it.
     ///
-    /// Short-circuits when `source` is already a `WithStateContext` or a
-    /// `CompensationFailed`: those errors carry their own structured context
-    /// and are returned unchanged.
+    /// Short-circuits in two cases so the wrap doesn't fight the existing
+    /// structured context the source already carries:
+    ///
+    /// - `WithStateContext` is returned unchanged. A task that itself runs a
+    ///   nested workflow surfaces the *inner* state/path, not the outer; if
+    ///   you need both layers, inspect the inner failure via
+    ///   [`source`](std::error::Error::source) before re-raising.
+    /// - `CompensationFailed` is returned unchanged. Its `errors[0]` is
+    ///   already wrapped with state context by the FSM, so re-wrapping the
+    ///   aggregate would bury the per-rollback errors one layer deeper.
     pub fn with_state_context(
         state: impl Into<String>,
         attempt: u32,
@@ -429,8 +441,24 @@ impl CanoError {
         }
     }
 
-    /// Get the error category as a string
+    /// Get the error category as a string.
+    ///
+    /// Unwraps `WithStateContext` (the FSM's uniform state-annotation wrapper)
+    /// so external code that branches on `category` — alerts, metrics, log
+    /// filters — keeps matching the underlying kind. Use [`outer_category`](Self::outer_category)
+    /// to read the wrapper itself.
     pub fn category(&self) -> &'static str {
+        match self {
+            CanoError::WithStateContext { source, .. } => source.category(),
+            other => other.outer_category(),
+        }
+    }
+
+    /// Get the *outer* error category — the variant of `self` without
+    /// unwrapping `WithStateContext`. Use when you need to distinguish a raw
+    /// failure from one annotated with state context (the FSM wraps every
+    /// `orchestrate` / `resume_from` failure in `WithStateContext`).
+    pub fn outer_category(&self) -> &'static str {
         match self {
             CanoError::TaskExecution(_) => "task_execution",
             CanoError::Store(_) => "store",
@@ -934,7 +962,10 @@ mod tests {
             ],
             inner.clone(),
         );
-        assert_eq!(err.category(), "with_state_context");
+        // `category` unwraps the wrapper so external monitoring keeps matching
+        // the underlying kind; `outer_category` reads the wrapper itself.
+        assert_eq!(err.category(), "task_execution");
+        assert_eq!(err.outer_category(), "with_state_context");
         assert_eq!(err.message(), "connection refused");
         let shown = format!("{err}");
         assert!(shown.contains("state=Process"));
