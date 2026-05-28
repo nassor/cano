@@ -25,22 +25,23 @@ use tracing::{debug, info, info_span};
 
 /// Resolve the per-drain compensation deadline.
 ///
-/// When the user explicitly set [`with_compensation_timeout`](crate::workflow::Workflow::with_compensation_timeout)
-/// that value wins. Otherwise the engine derives a budget from the remaining total
-/// time: half of what's left, capped at 30s, with 30s as the floor when nothing is left.
+/// Precedence: the user-set [`with_compensation_timeout`](crate::workflow::Workflow::with_compensation_timeout)
+/// wins outright. Otherwise the budget is derived as `total_limit / 2`, capped at 30s.
+///
+/// `total_limit` is the workflow's [`with_total_timeout`](crate::workflow::Workflow::with_total_timeout)
+/// (not the remaining-after-trip budget, which is effectively zero at the moment a
+/// timeout fires). Scaling against the configured total keeps the compensation budget
+/// proportional to the user's intent: `with_total_timeout(100ms)` gets a 50 ms
+/// compensation budget by default, not a 30 s grace.
 pub(super) fn resolve_compensation_deadline(
-    remaining: std::time::Duration,
+    total_limit: std::time::Duration,
     override_: Option<std::time::Duration>,
 ) -> std::time::Duration {
     if let Some(d) = override_ {
         return d;
     }
     let cap = std::time::Duration::from_secs(30);
-    if remaining.is_zero() {
-        cap
-    } else {
-        (remaining / 2).min(cap)
-    }
+    (total_limit / 2).min(cap)
 }
 
 impl<TState, TResourceKey> Workflow<TState, TResourceKey>
@@ -78,10 +79,12 @@ where
     /// wall-clock deadline.
     ///
     /// When `comp_deadline` is `Some(d)`, each per-entry compensation future is wrapped in
-    /// [`tokio::time::timeout_at`]: if the deadline elapses, a
-    /// [`CanoError::Timeout`] mentioning "compensation deadline" is collected for that
-    /// entry and the drain continues to the next entry (which, with the deadline already
-    /// past, will time out immediately too — surfaced as one error per remaining entry).
+    /// [`tokio::time::timeout_at`]. Once the deadline elapses the drain stops short and
+    /// records a single `CanoError::Timeout` naming how many entries were skipped — it
+    /// does *not* iterate the remaining stack with a past deadline (which would produce
+    /// N noisy "exceeded compensation deadline" errors and drop each compensator's body
+    /// after a single poll).
+    ///
     /// When `comp_deadline` is `None`, behaviour is identical to the previous
     /// `run_compensations` — only the per-task `attempt_timeout` bounds individual
     /// compensators.
@@ -97,6 +100,21 @@ where
         }
         let mut errors = vec![original];
         while let Some(entry) = stack.pop() {
+            // Once the wall-clock deadline has passed, every remaining entry would only
+            // produce another "exceeded compensation deadline" error if we kept iterating.
+            // Surface a single summary error and stop — preserves the original failure
+            // plus an explicit signal that rollback ran out of time.
+            if let Some(d) = comp_deadline
+                && tokio::time::Instant::now() >= d
+            {
+                let remaining = stack.len() + 1; // +1 for the just-popped entry
+                errors.push(CanoError::timeout(format!(
+                    "compensation deadline elapsed; {remaining} entries left unprocessed"
+                )));
+                #[cfg(feature = "metrics")]
+                crate::metrics::compensation_run(false);
+                break;
+            }
             match self.compensators.get(&entry.task_id) {
                 None => errors.push(CanoError::workflow(format!(
                     "no compensator registered for task {:?} — cannot roll it back",
@@ -399,6 +417,21 @@ where
                 acc
             });
 
+        // Reconstruct the pre-crash transition path from `StateEntry` rows so a
+        // post-resume failure's `WithStateContext.path` reflects the full history.
+        // Excludes the resume point itself (it will be pushed again when the FSM
+        // re-enters it) and any state labels that no longer map to a registered
+        // state (e.g. workflow shape changed in a non-version-bumped way — rare
+        // but the path is best-effort anyway). Router states are not in `rows`
+        // because they aren't checkpointed; the rehydrated path therefore omits
+        // them. Documented limitation of the resume contract.
+        let prior_transitions: Vec<TState> = rows
+            .iter()
+            .filter(|r| r.kind == RowKind::StateEntry)
+            .filter(|r| r.sequence != resume_sequence)
+            .filter_map(|r| self.state_from_label(&r.state))
+            .collect();
+
         #[cfg(feature = "tracing")]
         info!(workflow_id = %workflow_id, resume_state = ?resume_state, last_sequence = last.sequence, compensation_entries = compensation_stack.len(), cursor_states = resume_cursors.len(), "Resuming workflow from checkpoint");
         notify_observers(&self.observers, |o| {
@@ -418,22 +451,28 @@ where
             Some(workflow_id),
             compensation_stack,
             resume_cursors,
+            prior_transitions,
             total_budget,
         );
-        let result = if let Some(timeout_duration) = self.workflow_timeout {
-            match tokio::time::timeout(timeout_duration, exec).await {
-                Ok(inner) => inner,
-                Err(_) => {
-                    #[cfg(feature = "metrics")]
-                    crate::metrics::workflow_run("timeout", _started.elapsed());
-                    self.resources
-                        .teardown_range(0..self.resources.lifecycle_len())
-                        .await;
-                    return Err(CanoError::workflow("Workflow timeout exceeded"));
+        // `with_total_timeout` strictly supersedes the legacy `with_timeout` here,
+        // for the same reason as `run_workflow`: the inner total-budget drain
+        // would be cancelled mid-flight if the outer `tokio::time::timeout`
+        // fired as well.
+        let result = match (self.workflow_timeout, total_budget) {
+            (Some(timeout_duration), None) => {
+                match tokio::time::timeout(timeout_duration, exec).await {
+                    Ok(inner) => inner,
+                    Err(_) => {
+                        #[cfg(feature = "metrics")]
+                        crate::metrics::workflow_run("timeout", _started.elapsed());
+                        self.resources
+                            .teardown_range(0..self.resources.lifecycle_len())
+                            .await;
+                        return Err(CanoError::workflow("Workflow timeout exceeded"));
+                    }
                 }
             }
-        } else {
-            exec.await
+            _ => exec.await,
         };
         #[cfg(feature = "metrics")]
         crate::metrics::workflow_run(
@@ -1811,10 +1850,13 @@ mod tests {
     }
 
     #[test]
-    fn resolve_compensation_deadline_handles_zero_remaining() {
+    fn resolve_compensation_deadline_zero_total_limit_yields_zero() {
+        // A pathological `with_total_timeout(0)` collapses the drain budget to
+        // zero — every compensator times out immediately. Callers must set
+        // `with_compensation_timeout` explicitly to opt back into a grace period.
         use crate::workflow::compensation::resolve_compensation_deadline;
         let d = resolve_compensation_deadline(Duration::from_secs(0), None);
-        assert_eq!(d, Duration::from_secs(30));
+        assert_eq!(d, Duration::from_secs(0));
     }
 
     #[tokio::test]
