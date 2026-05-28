@@ -1936,12 +1936,8 @@ mod tests {
             .orchestrate(TestState::Start)
             .await
             .expect_err("panic must surface as Err");
-        // The FSM wraps the failure with state context; the inner is the TaskExecution.
-        let inner = match &err {
-            CanoError::WithStateContext { source, .. } => source.as_ref(),
-            other => other,
-        };
-        match inner {
+        // The FSM wraps the failure with state context; `.inner()` peels one layer.
+        match err.inner() {
             CanoError::TaskExecution(msg) => {
                 assert!(msg.contains("panic"), "expected 'panic' in: {msg}");
                 assert!(msg.contains("boom"), "expected 'boom' in: {msg}");
@@ -2075,13 +2071,9 @@ mod tests {
             .orchestrate(TestState::Start)
             .await
             .expect_err("expected attempt timeout to exhaust retries");
-        // The FSM wraps the failure with state context; the inner is RetryExhausted.
-        let inner = match &err {
-            CanoError::WithStateContext { source, .. } => source.as_ref(),
-            other => other,
-        };
+        // The FSM wraps the failure with state context; `.inner()` peels one layer.
         assert!(
-            matches!(inner, CanoError::RetryExhausted { .. }),
+            matches!(err.inner(), CanoError::RetryExhausted { .. }),
             "got {err:?}"
         );
     }
@@ -2209,13 +2201,9 @@ mod tests {
             .orchestrate(TestState::Start)
             .await
             .expect_err("split result from stepped must error");
-        // The FSM wraps the failure with state context; the inner is a Workflow error.
-        let inner = match &err {
-            CanoError::WithStateContext { source, .. } => source.as_ref(),
-            other => other,
-        };
+        // The FSM wraps the failure with state context; `.inner()` peels one layer.
         assert!(
-            matches!(inner, CanoError::Workflow(_)),
+            matches!(err.inner(), CanoError::Workflow(_)),
             "expected Workflow error, got {err:?}"
         );
         assert!(err.to_string().contains("split"), "got: {err}");
@@ -2364,13 +2352,9 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
         let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
-        // The engine wraps the timeout with state context (matching existing pattern).
-        let inner = match &err {
-            CanoError::WithStateContext { source, .. } => source.as_ref(),
-            other => other,
-        };
+        // The engine wraps the timeout with state context; `.inner()` peels one layer.
         assert!(
-            matches!(inner, CanoError::WorkflowTimeout { .. }),
+            matches!(err.inner(), CanoError::WorkflowTimeout { .. }),
             "got: {err}"
         );
     }
@@ -2467,12 +2451,8 @@ mod tests {
 
         let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         // Clean rollback → original error surfaced, wrapped with state context.
-        let inner = match &err {
-            CanoError::WithStateContext { source, .. } => source.as_ref(),
-            other => other,
-        };
         assert!(
-            matches!(inner, CanoError::WorkflowTimeout { .. }),
+            matches!(err.inner(), CanoError::WorkflowTimeout { .. }),
             "got: {err}"
         );
         let log_entries = log.lock().unwrap().clone();

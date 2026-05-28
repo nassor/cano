@@ -271,12 +271,8 @@ where
     ///     .orchestrate(Step::Start)
     ///     .await
     ///     .expect_err("budget elapses before Done");
-    /// // The engine wraps task errors with state context; unwrap to get the inner timeout.
-    /// let inner = match &err {
-    ///     CanoError::WithStateContext { source, .. } => source.as_ref(),
-    ///     other => other,
-    /// };
-    /// assert!(matches!(inner, CanoError::WorkflowTimeout { .. }));
+    /// // The engine wraps task errors with state context; `.inner()` peels one layer.
+    /// assert!(matches!(err.inner(), CanoError::WorkflowTimeout { .. }));
     /// # Ok(())
     /// # }
     /// ```

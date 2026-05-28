@@ -218,13 +218,13 @@ pub enum CanoError {
     /// run also failed while rolling it back.
     ///
     /// `errors[0]` is the original failure that triggered compensation, **as wrapped
-    /// by the FSM in [`WithStateContext`](CanoError::WithStateContext)** — match on
-    /// `errors[0]`'s [`source`](std::error::Error::source) (or unwrap one layer via
-    /// `match errors[0] { CanoError::WithStateContext { source, .. } => &**source, other => other }`)
-    /// to inspect the underlying variant. `errors[1..]` are the compensation errors, in the
-    /// order they occurred (LIFO over the compensation stack). A clean rollback — every
-    /// `compensate` succeeded — does *not* produce this variant: the original error is
-    /// returned unchanged instead.
+    /// by the FSM in [`WithStateContext`](CanoError::WithStateContext)** — call
+    /// [`errors[0].inner()`](CanoError::inner) (or read
+    /// [`std::error::Error::source`]) to inspect the underlying variant.
+    /// `errors[1..]` are the compensation errors, in the order they occurred (LIFO
+    /// over the compensation stack). A clean rollback — every `compensate` succeeded
+    /// — does *not* produce this variant: the original error is returned unchanged
+    /// instead.
     CompensationFailed {
         /// The original failure (wrapped via `WithStateContext`) followed by every
         /// compensation error.
@@ -451,6 +451,38 @@ impl CanoError {
         match self {
             CanoError::WithStateContext { source, .. } => source.category(),
             other => other.outer_category(),
+        }
+    }
+
+    /// Unwrap one layer of [`CanoError::WithStateContext`] to inspect the
+    /// underlying failure, or return `self` if it's not wrapped.
+    ///
+    /// `orchestrate` and `resume_from` wrap every task error in
+    /// `WithStateContext` so external code can read `state` / `attempt` /
+    /// `transitions_so_far`. When you just want to pattern-match the
+    /// underlying variant, call `.inner()` first:
+    ///
+    /// ```
+    /// # use cano::CanoError;
+    /// let wrapped = CanoError::with_state_context(
+    ///     "Charge",
+    ///     1,
+    ///     vec!["Start".into(), "Charge".into()],
+    ///     CanoError::circuit_open("upstream"),
+    /// );
+    /// assert!(matches!(wrapped.inner(), CanoError::CircuitOpen(_)));
+    /// // Non-wrapped errors pass through unchanged.
+    /// let bare = CanoError::task_execution("boom");
+    /// assert!(matches!(bare.inner(), CanoError::TaskExecution(_)));
+    /// ```
+    ///
+    /// Unwraps exactly one layer. The [`with_state_context`](Self::with_state_context)
+    /// constructor refuses to double-wrap, so a chain of `WithStateContext`
+    /// can never occur — one unwrap is enough.
+    pub fn inner(&self) -> &CanoError {
+        match self {
+            CanoError::WithStateContext { source, .. } => source.as_ref(),
+            other => other,
         }
     }
 

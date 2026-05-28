@@ -788,12 +788,8 @@ mod tests {
             .with_checkpoint_store(store.clone());
         let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         // Errors raised inside `execute_workflow_from` are wrapped with state context;
-        // the inner error remains a checkpoint_store error.
-        let inner = match &err {
-            CanoError::WithStateContext { source, .. } => source.as_ref(),
-            other => other,
-        };
-        assert_eq!(inner.category(), "checkpoint_store");
+        // `.inner()` peels one layer back to the underlying checkpoint_store error.
+        assert_eq!(err.inner().category(), "checkpoint_store");
         assert!(err.message().contains("workflow id"));
     }
 
@@ -1055,11 +1051,7 @@ mod tests {
 
         let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         // Clean rollback → the original failure is surfaced, wrapped with state context.
-        let inner = match &err {
-            CanoError::WithStateContext { source, .. } => source.as_ref(),
-            other => other,
-        };
-        assert_eq!(inner.category(), "task_execution");
+        assert_eq!(err.inner().category(), "task_execution");
         assert_eq!(err.message(), "D forward failed");
         // A, B, C were compensated in reverse registration order. D failed forward, so it
         // never produced an output and is not on the stack.
@@ -1490,12 +1482,8 @@ mod tests {
                 Ok(other) => panic!("unexpected success state {other:?}"),
                 // The loser of the seq-0 race fails fast with a conflict, not corruption.
                 Err(e) => {
-                    let inner = match &e {
-                        CanoError::WithStateContext { source, .. } => source.as_ref(),
-                        other => other,
-                    };
                     assert_eq!(
-                        inner.category(),
+                        e.inner().category(),
                         "checkpoint_store",
                         "unexpected error: {e}"
                     );
@@ -1525,11 +1513,7 @@ mod tests {
             .orchestrate(TestState::Start)
             .await
             .unwrap_err();
-        let inner = match &err {
-            CanoError::WithStateContext { source, .. } => source.as_ref(),
-            other => other,
-        };
-        assert_eq!(inner.category(), "checkpoint_store");
+        assert_eq!(err.inner().category(), "checkpoint_store");
         assert!(err.message().contains("conflict"), "got: {err}");
         // The leftover log is intact — the run can still be resumed.
         assert_eq!(store.rows("run").len(), 2);
@@ -1590,11 +1574,7 @@ mod tests {
             CanoError::CompensationFailed { errors } => {
                 // [the append failure that ended the run (now wrapped with state context),
                 // then A's compensate failure].
-                let inner0 = match &errors[0] {
-                    CanoError::WithStateContext { source, .. } => source.as_ref(),
-                    other => other,
-                };
-                assert_eq!(inner0.category(), "checkpoint_store");
+                assert_eq!(errors[0].inner().category(), "checkpoint_store");
                 assert!(errors[1].message().contains("A compensate failed"));
             }
             other => panic!("expected CompensationFailed, got {other:?}"),
@@ -1975,12 +1955,8 @@ mod tests {
             "resume_from should not wait for the slow task: {elapsed:?}"
         );
 
-        let inner = match &err {
-            CanoError::WithStateContext { source, .. } => source.as_ref(),
-            other => other,
-        };
         assert!(
-            matches!(inner, CanoError::WorkflowTimeout { .. }),
+            matches!(err.inner(), CanoError::WorkflowTimeout { .. }),
             "got: {err}"
         );
 
@@ -2241,11 +2217,7 @@ mod tests {
             .with_checkpoint_store(store.clone())
             .with_workflow_id("nope");
         let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
-        let inner = match &err {
-            CanoError::WithStateContext { source, .. } => source.as_ref(),
-            other => other,
-        };
-        assert_eq!(inner.category(), "task_execution");
+        assert_eq!(err.inner().category(), "task_execution");
         // The Start checkpoint row is kept (empty stack ⇒ original error, no `clear`) —
         // so the run can still be resumed.
         assert_eq!(store.rows("nope").len(), 1);

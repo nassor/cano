@@ -157,11 +157,7 @@ async fn main() -> Result<(), CanoError> {
         let label = match &outcome {
             Ok(_) => "ok".to_string(),
             Err(e) => {
-                let inner = match e {
-                    CanoError::WithStateContext { source, .. } => source.as_ref(),
-                    other => other,
-                };
-                if matches!(inner, CanoError::CircuitOpen(_)) {
+                if matches!(e.inner(), CanoError::CircuitOpen(_)) {
                     "rejected (breaker open)".to_string()
                 } else {
                     format!("err: {e}")
