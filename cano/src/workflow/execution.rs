@@ -228,6 +228,35 @@ where
         #[cfg(feature = "tracing")]
         info!(initial_state = ?current_state, "Starting workflow execution");
 
+        // Optional absolute deadline shared by every in-flight task, bundled with
+        // the `(start, limit)` context needed to report a timeout. Loop-invariant
+        // (it derives only from `total_budget`), so it's resolved once here rather
+        // than rebuilt every iteration. When `total_budget` is `None` (the common
+        // path) every branch awaits its dispatch directly — same scheduling
+        // behavior as before. Carrying all three values together makes the
+        // "deadline implies budget" invariant structural so the branches below
+        // don't need an `.expect` to recover it.
+        //
+        // `start.checked_add(limit)` guards against `std::time::Instant + Duration`
+        // panicking on overflow (e.g. `with_total_timeout(Duration::MAX)`); on
+        // overflow we synthesize a far-future deadline so the `timeout_at` simply
+        // never fires, rather than aborting the orchestrate task with a panic.
+        // `u32::MAX` seconds (~136 years) is comfortably below the representable
+        // range of `tokio::time::Instant` on every supported platform.
+        let step_budget: Option<(
+            std::time::Instant,
+            std::time::Duration,
+            tokio::time::Instant,
+        )> = total_budget.map(|(start, limit)| {
+            let deadline = start
+                .checked_add(limit)
+                .map(tokio::time::Instant::from_std)
+                .unwrap_or_else(|| {
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(u32::MAX as u64)
+                });
+            (start, limit, deadline)
+        });
+
         loop {
             // The `Debug` label of the state being entered. Needed for observer
             // `on_state_enter`, checkpoint rows, and the `metrics` feature's
@@ -283,7 +312,6 @@ where
                                 compensation_stack,
                                 &current_state,
                                 &transitions_so_far,
-                                1,
                                 err,
                                 total_budget,
                             )
@@ -316,7 +344,6 @@ where
                             compensation_stack,
                             &current_state,
                             &transitions_so_far,
-                            1,
                             err,
                             total_budget,
                         )
@@ -348,7 +375,6 @@ where
                             compensation_stack,
                             &current_state,
                             &transitions_so_far,
-                            1,
                             err,
                             total_budget,
                         )
@@ -365,34 +391,6 @@ where
             let _state_label = state_label.as_deref().unwrap_or_default();
             #[cfg(feature = "metrics")]
             let _dispatch_started = std::time::Instant::now();
-
-            // Optional absolute deadline for the in-flight task on this iteration,
-            // bundled with the `(start, limit)` context needed to report a timeout.
-            // When `total_budget` is `None` (the common path) every branch awaits
-            // its dispatch directly — same scheduling behavior as before. Carrying
-            // all three values together makes the "deadline implies budget" invariant
-            // structural so the branches below don't need an `.expect` to recover it.
-            //
-            // `start.checked_add(limit)` guards against `std::time::Instant + Duration`
-            // panicking on overflow (e.g. `with_total_timeout(Duration::MAX)`); on
-            // overflow we synthesize a far-future deadline so the `timeout_at` simply
-            // never fires this iteration, rather than aborting the orchestrate task
-            // with a panic. `u32::MAX` seconds (~136 years) is comfortably below the
-            // representable range of `tokio::time::Instant` on every supported platform.
-            let step_budget: Option<(
-                std::time::Instant,
-                std::time::Duration,
-                tokio::time::Instant,
-            )> = total_budget.map(|(start, limit)| {
-                let deadline = start
-                    .checked_add(limit)
-                    .map(tokio::time::Instant::from_std)
-                    .unwrap_or_else(|| {
-                        tokio::time::Instant::now()
-                            + std::time::Duration::from_secs(u32::MAX as u64)
-                    });
-                (start, limit, deadline)
-            });
 
             // Dispatch by entry type. Any `Err(err)` triggers a compensation
             // drain after the error is wrapped with state context. The
@@ -502,7 +500,6 @@ where
                                             compensation_stack,
                                             &current_state,
                                             &transitions_so_far,
-                                            1,
                                             err,
                                             total_budget,
                                         )
@@ -565,21 +562,20 @@ where
             current_state = match step {
                 Ok(s) => s,
                 Err(e) => {
-                    let attempt = Self::attempts_from_error(&e);
                     // Route through `wrap_and_drain` so the wrap + bounded-vs-
-                    // unbounded decision live in one place. The bounded drain
-                    // bounds rollback time for *any* failure, not just the
-                    // engine-fired `WorkflowTimeout`: a hung task surfaced
-                    // as `RetryExhausted { source: Timeout }`, a circuit-open
-                    // burst, or a checkpoint-store error all benefit from
-                    // the same wall-clock cap.
+                    // unbounded decision live in one place (it derives the
+                    // attempt count from `e` itself). The bounded drain bounds
+                    // rollback time for *any* failure, not just the engine-fired
+                    // `WorkflowTimeout`: a hung task surfaced as
+                    // `RetryExhausted { source: Timeout }`, a circuit-open burst,
+                    // or a checkpoint-store error all benefit from the same
+                    // wall-clock cap.
                     return self
                         .wrap_and_drain(
                             workflow_id.as_deref(),
                             compensation_stack,
                             &current_state,
                             &transitions_so_far,
-                            attempt,
                             e,
                             total_budget,
                         )
@@ -657,7 +653,6 @@ where
         compensation_stack: Vec<CompensationEntry>,
         current_state: &TState,
         transitions_so_far: &[TState],
-        attempt: u32,
         err: CanoError,
         total_budget: Option<(std::time::Instant, std::time::Duration)>,
     ) -> Result<TState, CanoError> {
@@ -672,6 +667,14 @@ where
             .iter()
             .map(|s| format!("{s:?}"))
             .collect();
+        // Derive the attempt count from the error itself. Pre-dispatch failures
+        // (missing id/handler, checkpoint-append) are first-attempt by
+        // construction (`attempts_from_error` returns 1 for them); the
+        // post-dispatch arm's `err` carries the structural `RetryExhausted`
+        // count or the `CircuitOpen`/`WorkflowTimeout` short-circuit sentinel.
+        // `with_state_context` ignores this for already-wrapped or
+        // `CompensationFailed` errors, so it only takes effect on a fresh wrap.
+        let attempt = Self::attempts_from_error(&err);
         let wrapped =
             CanoError::with_state_context(format!("{current_state:?}"), attempt, path, err);
         match total_budget {
@@ -2670,7 +2673,6 @@ mod wrap_and_drain_tests {
                 Vec::new(),
                 &TestState::Start,
                 &[TestState::Start],
-                1,
                 CanoError::task_execution("boom"),
                 None,
             )
@@ -2707,7 +2709,6 @@ mod wrap_and_drain_tests {
                 Vec::new(),
                 &TestState::Start,
                 &[TestState::Start],
-                1,
                 CanoError::task_execution("boom-bounded"),
                 total_budget,
             )
@@ -2734,7 +2735,6 @@ mod wrap_and_drain_tests {
                 Vec::new(),
                 &TestState::Start,
                 &[TestState::Start],
-                1,
                 already,
                 None,
             )
@@ -2766,7 +2766,6 @@ mod wrap_and_drain_tests {
                 Vec::new(),
                 &TestState::Start,
                 &[TestState::Start],
-                7,
                 envelope,
                 None,
             )
@@ -2778,7 +2777,11 @@ mod wrap_and_drain_tests {
                 match &errors[0] {
                     CanoError::WithStateContext { state, attempt, .. } => {
                         assert_eq!(state, "Start");
-                        assert_eq!(*attempt, 7);
+                        // Derived from the envelope by `attempts_from_error`,
+                        // which returns 1 for a `CompensationFailed` (it doesn't
+                        // dig into `errors[0]`) — matching the production
+                        // post-dispatch arm, which passes the same derived value.
+                        assert_eq!(*attempt, 1);
                     }
                     other => panic!("errors[0] must be wrapped, got {other:?}"),
                 }
@@ -2806,7 +2809,6 @@ mod wrap_and_drain_tests {
                 stack,
                 &TestState::Start,
                 &[TestState::Start],
-                1,
                 CanoError::task_execution("trigger"),
                 None,
             )

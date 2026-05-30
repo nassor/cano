@@ -266,22 +266,17 @@ where
                 && tokio::time::Instant::now() >= d
             {
                 let remaining_count = stack.len() + 1; // +1 for the just-popped entry
-                #[cfg(feature = "metrics")]
-                crate::metrics::compensation_run(false);
-                // Preserve the popped entry first; the stack still holds the
-                // remaining entries (drained next).
-                let CompensationEntry {
+                // Push the just-popped entry back so a single drain turns it and
+                // every remaining entry — in unchanged LIFO order — into an
+                // `OrphanedCompensation`, one `compensation_run(false)` apiece.
+                stack.push(entry);
+                while let Some(CompensationEntry {
                     task_id,
                     output_blob,
-                } = entry;
-                errors.push(CanoError::orphaned_compensation(task_id, output_blob));
-                while let Some(remaining_entry) = stack.pop() {
+                }) = stack.pop()
+                {
                     #[cfg(feature = "metrics")]
                     crate::metrics::compensation_run(false);
-                    let CompensationEntry {
-                        task_id,
-                        output_blob,
-                    } = remaining_entry;
                     errors.push(CanoError::orphaned_compensation(task_id, output_blob));
                 }
                 errors.push(CanoError::timeout(format!(
@@ -614,6 +609,18 @@ where
         let start_sequence = last.sequence + 1;
         let resume_sequence = last.sequence;
 
+        // Resolve checkpoint state labels (the `Debug` rendering of each state)
+        // back to a `TState` in O(1). `from_rows` invokes the closure below once
+        // per `StateEntry` row; building this index once keeps resume O(states)
+        // instead of the O(rows × states) `format!` scan a per-row
+        // `state_from_label` would do.
+        let label_index: HashMap<String, TState> = self
+            .states
+            .keys()
+            .chain(self.exit_states.iter())
+            .map(|s| (format!("{s:?}"), s.clone()))
+            .collect();
+
         // Single-pass rehydration. See `RehydratedRun::from_rows` for the
         // walk semantics + F3/F4/F11 warning emission; the multi-pass
         // version this replaced did the same work in five separate filter
@@ -631,7 +638,7 @@ where
             self.workflow_version,
             &self.observers,
             &workflow_id,
-            |label| self.state_from_label(label),
+            |label| label_index.get(label).cloned(),
         );
 
         #[cfg(feature = "tracing")]
