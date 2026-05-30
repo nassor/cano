@@ -757,8 +757,9 @@ mod tests {
         let err = workflow.orchestrate(Step::Wait).await.unwrap_err();
         let elapsed = start.elapsed();
 
+        // The FSM wraps the failure with state context; `.inner()` peels one layer.
         assert!(
-            matches!(err, CanoError::Timeout(_)),
+            matches!(err.inner(), CanoError::Timeout(_)),
             "expected CanoError::Timeout, got: {err:?}"
         );
         // Should complete well within 500ms even with scheduling jitter

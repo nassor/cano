@@ -6,7 +6,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 
 use tokio::sync::{RwLock, mpsc, oneshot, watch};
-use tokio::task::JoinHandle;
+use tokio::task::{AbortHandle, JoinHandle};
 
 use crate::error::{CanoError, CanoResult};
 
@@ -37,14 +37,22 @@ where
     pub(super) command_tx: mpsc::Sender<SchedulerCommand>,
     /// Read-only flow info registry. Cheap clones (Arc) for `status` / `list`
     /// / `has_running_flows`. Built once at start time; never mutated.
-    pub(super) flows: Arc<HashMap<String, Arc<RwLock<FlowInfo>>>>,
-    pub(super) flow_order: Arc<Vec<String>>,
+    pub(super) flows: Arc<HashMap<Arc<str>, Arc<RwLock<FlowInfo>>>>,
+    pub(super) flow_order: Arc<Vec<Arc<str>>>,
     /// Final shutdown result published by the driver task. Receivers loop
     /// `changed().await` until the value transitions to `Some(_)`.
     pub(super) result_rx: watch::Receiver<Option<CanoResult<()>>>,
     /// Shared per-flow loop handles so `Drop` (last-clone fallback) and the
     /// driver task can reach them.
     pub(super) scheduler_tasks: Arc<RwLock<Vec<JoinHandle<()>>>>,
+    /// `AbortHandle` for the per-flow task the driver is currently awaiting
+    /// in its drain phase. `None` whenever the driver isn't between pop+await
+    /// of a `scheduler_tasks` handle. `Drop` reads this to abort a wedged
+    /// task that the driver already popped out of `scheduler_tasks` — without
+    /// it the popped handle is local to the driver, so the iteration in
+    /// `Drop` cannot reach it and aborting `driver_handle` only detaches the
+    /// underlying spawned task instead of aborting it.
+    pub(super) in_flight_drain: Arc<RwLock<Option<AbortHandle>>>,
     /// JoinHandle of the driver task. Wrapped in Arc so multiple clones can
     /// observe `is_finished()` and the last-clone Drop can `abort()`.
     pub(super) driver_handle: Arc<JoinHandle<()>>,
@@ -139,7 +147,7 @@ where
         let (response_tx, response_rx) = oneshot::channel();
         self.command_tx
             .try_send(SchedulerCommand::Trigger {
-                id: id.to_string(),
+                id: Arc::from(id),
                 response: response_tx,
             })
             .map_err(|e| match e {
@@ -185,7 +193,7 @@ where
         let (response_tx, response_rx) = oneshot::channel();
         self.command_tx
             .try_send(SchedulerCommand::Reset {
-                id: id.to_string(),
+                id: Arc::from(id),
                 response: response_tx,
             })
             .map_err(|e| match e {
@@ -281,6 +289,16 @@ where
             );
             #[cfg(not(feature = "tracing"))]
             let _ = n;
+        }
+        // Reach the popped-and-being-awaited handle the driver removed from
+        // `scheduler_tasks` before starting its `.await`. Without this, the
+        // popped JoinHandle is dropped (detached) when the driver future is
+        // cancelled by the abort above, and the underlying spawned task
+        // leaks.
+        if let Ok(slot) = self.in_flight_drain.try_write()
+            && let Some(abort) = slot.as_ref()
+        {
+            abort.abort();
         }
     }
 }
@@ -393,6 +411,61 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn panicking_workflow_does_not_strand_status_running() {
+        // A panic in a path the FSM doesn't catch (e.g. a user observer that
+        // panics) must not unwind out of the spawned task — that would skip
+        // `apply_outcome` and leave `Status::Running` set forever, blocking
+        // every subsequent `trigger` with `AlreadyRunning`. The catch_unwind
+        // inside `execute_reserved_flow` converts the panic into an `Err` so
+        // the status flips to a recoverable state and the BackoffPolicy
+        // applies.
+        use crate::observer::WorkflowObserver;
+        use std::sync::Arc;
+
+        struct PanickyObserver;
+        impl WorkflowObserver for PanickyObserver {
+            fn on_state_enter(&self, _state: &str) {
+                panic!("observer panic — must not strand Status::Running");
+            }
+        }
+
+        let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
+        let workflow = Workflow::bare()
+            .register(TestState::Start, TestTask::new())
+            .add_exit_state(TestState::Complete)
+            .with_observer(Arc::new(PanickyObserver));
+        scheduler
+            .manual("panicky", workflow, TestState::Start)
+            .unwrap();
+        let running = scheduler.start().await.unwrap();
+
+        // First trigger — the observer panics.
+        let _ = running.trigger("panicky").await;
+        // Wait for the spawned task to finish and apply_outcome to run.
+        sleep(Duration::from_millis(200)).await;
+
+        let st = running.status("panicky").await.unwrap();
+        assert!(
+            !matches!(st.status, Status::Running),
+            "Status::Running must not be left stranded after a panic — got {:?}",
+            st.status
+        );
+
+        // A second trigger must NOT be rejected with `AlreadyRunning`.
+        let second = running.trigger("panicky").await;
+        let err_msg = second
+            .err()
+            .map(|e| e.message().to_string())
+            .unwrap_or_default();
+        assert!(
+            !err_msg.contains("already running"),
+            "second trigger should not be blocked by stranded Running: {err_msg}"
+        );
+
+        running.stop().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_manual_trigger() {
         let timeout = Duration::from_secs(2);
         let result = tokio::time::timeout(timeout, async {
@@ -454,7 +527,7 @@ mod tests {
         let running = scheduler.start().await.unwrap();
         let status = running.status("test_task").await.expect("must exist");
 
-        assert_eq!(status.id, "test_task");
+        assert_eq!(&*status.id, "test_task");
         assert_eq!(status.status, Status::Idle);
         assert_eq!(status.run_count, 0);
         assert!(status.last_run.is_none());
@@ -484,10 +557,10 @@ mod tests {
         let running = scheduler.start().await.unwrap();
         let flows = running.list().await;
         assert_eq!(flows.len(), 3);
-        let ids: Vec<String> = flows.iter().map(|f| f.id.clone()).collect();
-        assert!(ids.contains(&"task1".to_string()));
-        assert!(ids.contains(&"task2".to_string()));
-        assert!(ids.contains(&"task3".to_string()));
+        let ids: Vec<&str> = flows.iter().map(|f| f.id.as_ref()).collect();
+        assert!(ids.contains(&"task1"));
+        assert!(ids.contains(&"task2"));
+        assert!(ids.contains(&"task3"));
 
         running.stop().await.unwrap();
     }
@@ -1455,6 +1528,100 @@ mod tests {
             );
 
             running.stop().await.unwrap();
+        })
+        .await;
+
+        assert!(result.is_ok(), "Test timed out");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn drop_aborts_wedged_handle_currently_being_awaited_by_driver() {
+        // Regression for F9: when the driver pops a JoinHandle from
+        // `scheduler_tasks` and awaits it, the popped handle no longer lives
+        // in the Vec. A `Drop` firing while the await is in flight previously
+        // aborted `driver_handle` (cancelling the driver future, which then
+        // dropped the popped JoinHandle — detaching the underlying task
+        // instead of aborting it). The wedged task leaked indefinitely.
+        //
+        // Now `RunningScheduler::in_flight_drain` holds the popped handle's
+        // `AbortHandle` for the duration of the await, so Drop can reach the
+        // wedged task. This test triggers a workflow whose task sleeps for
+        // far longer than the test's tolerance, stops the scheduler so the
+        // driver enters its drain phase, drops the last clone, and asserts
+        // that the workflow's completion counter never advances.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Clone)]
+        struct SlowTask {
+            completions: Arc<AtomicUsize>,
+        }
+        #[task]
+        impl Task<TestState> for SlowTask {
+            fn config(&self) -> crate::task::TaskConfig {
+                crate::task::TaskConfig::minimal()
+            }
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+                // Sleeps far longer than the test tolerance. If the abort
+                // doesn't reach this task, the counter eventually ticks up.
+                sleep(Duration::from_secs(30)).await;
+                self.completions.fetch_add(1, Ordering::SeqCst);
+                Ok(TaskResult::Single(TestState::Complete))
+            }
+        }
+
+        let timeout = Duration::from_secs(8);
+        let result = tokio::time::timeout(timeout, async {
+            let completions = Arc::new(AtomicUsize::new(0));
+            let mut scheduler: Scheduler<TestState> = Scheduler::new();
+            scheduler
+                .manual(
+                    "wedged",
+                    Workflow::bare()
+                        .register(
+                            TestState::Start,
+                            SlowTask {
+                                completions: Arc::clone(&completions),
+                            },
+                        )
+                        .add_exit_state(TestState::Complete)
+                        .add_exit_state(TestState::Error),
+                    TestState::Start,
+                )
+                .unwrap();
+
+            let running = scheduler.start().await.unwrap();
+            running.trigger("wedged").await.unwrap();
+            // Give the spawn time to land in scheduler_tasks.
+            sleep(Duration::from_millis(100)).await;
+
+            // Spawn stop() so the driver advances into its drain loop and
+            // pops the wedged Trigger handle. stop() will not return because
+            // the awaited handle is sleeping for 30s.
+            let running_for_stop = running.clone();
+            let stop_handle = tokio::spawn(async move { running_for_stop.stop().await });
+
+            // Let the driver actually enter the drain phase and pop the handle.
+            sleep(Duration::from_millis(200)).await;
+            assert!(
+                !stop_handle.is_finished(),
+                "stop() should still be parked while the wedged trigger handle is in flight"
+            );
+
+            // Drop every clone — the in_flight_drain slot's AbortHandle must
+            // be used to abort the popped, in-flight handle.
+            drop(stop_handle.abort_handle());
+            stop_handle.abort();
+            drop(running);
+
+            // Wait long enough that, if abort had failed, the slow task
+            // could have advanced. With the fix, the task is aborted before
+            // it can increment completions.
+            sleep(Duration::from_secs(2)).await;
+            assert_eq!(
+                completions.load(Ordering::SeqCst),
+                0,
+                "wedged spawn must have been aborted by Drop's in_flight_drain abort path"
+            );
         })
         .await;
 

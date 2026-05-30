@@ -188,6 +188,16 @@
 //! to `TaskConfig::minimal()` (no retries). Use `config().with_attempt_timeout(dur)` to cap
 //! total wall-clock time; registered with [`Workflow::register`] like any other task.
 //!
+//! ### Timeouts
+//!
+//! Three layered budgets bound a run. [`TaskConfig::with_attempt_timeout`](task::TaskConfig::with_attempt_timeout)
+//! caps each individual task attempt. [`Workflow::with_total_timeout`] sets a wall-clock
+//! budget for the entire [`orchestrate`](Workflow::orchestrate) / [`resume_from`](Workflow::resume_from)
+//! call; when it elapses the in-flight task is aborted, the saga compensation stack drains
+//! against its own bounded budget (configurable via [`Workflow::with_compensation_timeout`]),
+//! and the call returns [`CanoError::WorkflowTimeout`]. Contrast with [`Workflow::with_timeout`],
+//! a blunt outer `tokio::time::timeout` that offers no graceful compensation.
+//!
 //! ## Module Overview
 //!
 //! - [`mod@task`]: The [`Task`] trait — single `run()` / `run_bare()` method

@@ -153,8 +153,11 @@ impl CheckpointStore for RedbCheckpointStore {
                         workflow_version: 0,
                     },
                     Err(_) => {
+                        // Surface both workflow id and sequence so an operator
+                        // can locate the bad row directly via redb CLI or repair
+                        // tooling — the postcard error alone leaves no anchor.
                         return Err(CanoError::CheckpointStore(format!(
-                            "decode checkpoint row: {new_err}"
+                            "decode checkpoint row at workflow_id={workflow_id:?} sequence={sequence}: {new_err}"
                         )));
                     }
                 },
@@ -216,6 +219,42 @@ mod tests {
         assert!(store.load_run("run").await.unwrap().is_empty());
         // Clearing an unknown id is a no-op.
         store.clear("missing").await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn corrupt_row_decode_error_names_workflow_id_and_sequence() {
+        // A corrupt row's decode error must carry both the workflow id and
+        // the row sequence so an operator can locate it without having to
+        // iterate the redb file by hand.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ckpt.redb");
+        let store = RedbCheckpointStore::new(&path).unwrap();
+
+        // Append three valid rows.
+        for seq in 0u64..=2 {
+            store
+                .append("run", CheckpointRow::new(seq, format!("S{seq}"), "t"))
+                .await
+                .unwrap();
+        }
+
+        // Inject a garbage payload at sequence 1 by reaching into the redb
+        // table directly. The bytes are neither valid `StoredRow` nor valid
+        // `StoredRowV0` so both decode paths fail.
+        {
+            let tx = store.db.begin_write().unwrap();
+            {
+                let mut table = tx.open_table(CHECKPOINTS).unwrap();
+                let garbage: &[u8] = &[0xFFu8; 8];
+                table.insert(("run", 1u64), garbage).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        let err = store.load_run("run").await.unwrap_err();
+        let msg = err.message();
+        assert!(msg.contains("\"run\""), "missing workflow_id in {msg:?}");
+        assert!(msg.contains("sequence=1"), "missing sequence in {msg:?}");
     }
 
     #[tokio::test]

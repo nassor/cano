@@ -26,11 +26,13 @@
 //! | `Store` | Store operations fail | Check store state and keys |
 //! | `Workflow` | Workflow orchestration fails | Verify task registration and routing |
 //! | `Configuration` | Invalid task/workflow config | Check parameters and settings |
-//! | `RetryExhausted` | All retries exhausted | Increase retries or fix root cause |
+//! | `RetryExhausted` | All retries exhausted | Inspect `source` for the underlying cause; increase retries if transient |
 //! | `Timeout` | Per-attempt timeout reached | Increase `attempt_timeout` or speed up the task |
+//! | `WorkflowTimeout` | Workflow total budget exceeded (`Workflow::with_total_timeout`) | Increase the total timeout or speed up the workflow |
 //! | `CircuitOpen` | Circuit breaker rejected the call | Wait for the breaker's `reset_timeout` or fix the upstream dependency |
 //! | `CheckpointStore` | Checkpoint persistence failed | Check the recovery store backend (disk, permissions, encoding) |
 //! | `CompensationFailed` | A `compensate` run failed during rollback | Inspect the aggregated errors; the original failure is `errors[0]` |
+//! | `WithStateContext` | A task failed during `Workflow::orchestrate` / `resume_from` | Read `state`, `attempt`, and `transitions_so_far`; inspect `source` for the underlying cause |
 //! | `Generic` | General errors | Check the specific error message |
 //!
 //! ## Using Errors in Your Tasks
@@ -124,7 +126,14 @@
 /// Cano errors can be created from various sources including standard library
 /// errors, string slices, and owned strings. Use the appropriate constructor
 /// method or the `Into` trait for convenient conversion.
+///
+/// # Compatibility
+///
+/// Marked `#[non_exhaustive]`: external `match` arms over `CanoError` must
+/// include a wildcard so that future variants do not break downstream code at
+/// compile time.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum CanoError {
     /// Error during task execution
     ///
@@ -150,11 +159,19 @@ pub enum CanoError {
     /// conflicting settings, or constraint violations.
     Configuration(String),
 
-    /// All retry attempts have been exhausted
+    /// All retry attempts have been exhausted.
     ///
     /// This error is automatically generated when a task fails and
-    /// all configured retry attempts have been used up.
-    RetryExhausted(String),
+    /// all configured retry attempts have been used up. `source` carries
+    /// the final attempt's underlying error structurally so callers can
+    /// recover the bare cause via [`std::error::Error::source`].
+    RetryExhausted {
+        /// 1-based count of attempts made before giving up
+        /// (initial attempt + retries).
+        attempts: u32,
+        /// The error from the last attempt.
+        source: Box<CanoError>,
+    },
 
     /// A bounded operation exceeded its deadline.
     ///
@@ -165,6 +182,28 @@ pub enum CanoError {
     /// the loop wraps the final timeout error in
     /// [`CanoError::RetryExhausted`].
     Timeout(String),
+
+    /// A workflow's total wall-clock budget was exceeded.
+    ///
+    /// Emitted by [`Workflow::orchestrate`](crate::workflow::Workflow::orchestrate)
+    /// and [`resume_from`](crate::workflow::Workflow::resume_from) when the budget set
+    /// by [`with_total_timeout`](crate::workflow::Workflow::with_total_timeout) elapses
+    /// before the FSM reaches an exit state. The in-flight task is aborted at its next
+    /// await point, and the compensation stack is drained (against its own bounded
+    /// budget) before this error surfaces — except when compensation itself fails, in
+    /// which case [`CanoError::CompensationFailed`] is returned instead.
+    ///
+    /// Surfaced through [`CanoError::WithStateContext`] — like every other task error
+    /// from `orchestrate` / `resume_from` — so callers should unwrap one layer (or
+    /// match on `source`) to pattern-match this variant. A dirty rollback yields
+    /// [`CanoError::CompensationFailed`] instead, whose `errors[0]` carries the
+    /// wrapped timeout.
+    WorkflowTimeout {
+        /// Total wall-clock elapsed when the budget tripped.
+        elapsed: std::time::Duration,
+        /// The budget set via `with_total_timeout`.
+        limit: std::time::Duration,
+    },
 
     /// A call was rejected because the circuit breaker is open.
     ///
@@ -185,12 +224,17 @@ pub enum CanoError {
     /// A workflow failed and at least one [`compensate`](crate::saga::CompensatableTask::compensate)
     /// run also failed while rolling it back.
     ///
-    /// `errors[0]` is the original failure that triggered compensation; `errors[1..]`
-    /// are the compensation errors, in the order they occurred (LIFO over the
-    /// compensation stack). A clean rollback — every `compensate` succeeded — does *not*
-    /// produce this variant: the original error is returned unchanged instead.
+    /// `errors[0]` is the original failure that triggered compensation, **as wrapped
+    /// by the FSM in [`WithStateContext`](CanoError::WithStateContext)** — call
+    /// [`errors[0].inner()`](CanoError::inner) (or read
+    /// [`std::error::Error::source`]) to inspect the underlying variant.
+    /// `errors[1..]` are the compensation errors, in the order they occurred (LIFO
+    /// over the compensation stack). A clean rollback — every `compensate` succeeded
+    /// — does *not* produce this variant: the original error is returned unchanged
+    /// instead.
     CompensationFailed {
-        /// The original failure followed by every compensation error.
+        /// The original failure (wrapped via `WithStateContext`) followed by every
+        /// compensation error.
         errors: Vec<CanoError>,
     },
 
@@ -222,6 +266,68 @@ pub enum CanoError {
         /// The version configured on this workflow.
         expected: u32,
     },
+
+    /// A persisted compensation entry could not be rolled back because no
+    /// compensator is registered for its `task_id`.
+    ///
+    /// Emitted by the compensation drain when a rehydrated `CompensationEntry`
+    /// names a task that has been removed/renamed in the current workflow
+    /// definition (typically a refactor without a [`with_workflow_version`](crate::workflow::Workflow::with_workflow_version)
+    /// bump). Carries the `output_blob` the failed task persisted so an
+    /// operator can decode and manually undo the side effect — without this
+    /// variant the blob would be lost to a string-only error.
+    ///
+    /// Always appears inside [`CompensationFailed`](CanoError::CompensationFailed).
+    OrphanedCompensation {
+        /// The unknown task identifier (as recorded in the checkpoint log).
+        task_id: std::sync::Arc<str>,
+        /// The serialized output the task persisted; the operator can decode
+        /// this with the original task's `Output` type to recover the data
+        /// needed for a manual rollback.
+        output_blob: Vec<u8>,
+    },
+
+    /// A task failure annotated with the FSM state, attempt number, and
+    /// transition path that produced it.
+    ///
+    /// Wraps the original error (`source`) so callers can recover the bare
+    /// cause via `Error::source` while still surfacing where in the workflow
+    /// it occurred. Constructed via [`CanoError::with_state_context`], which
+    /// refuses to double-wrap an existing `WithStateContext` or a
+    /// `CompensationFailed`.
+    ///
+    /// ```
+    /// use cano::CanoError;
+    ///
+    /// let inner = CanoError::task_execution("connection refused");
+    /// let err = CanoError::with_state_context(
+    ///     "Process",
+    ///     2,
+    ///     vec!["Start".to_string(), "Fetch".to_string(), "Process".to_string()],
+    ///     inner,
+    /// );
+    ///
+    /// // Inspect the failure structurally.
+    /// match err {
+    ///     CanoError::WithStateContext { state, attempt, transitions_so_far, source } => {
+    ///         assert_eq!(state, "Process");
+    ///         assert_eq!(attempt, 2);
+    ///         assert_eq!(transitions_so_far.last().map(String::as_str), Some("Process"));
+    ///         assert!(matches!(*source, CanoError::TaskExecution(_)));
+    ///     }
+    ///     _ => unreachable!(),
+    /// }
+    /// ```
+    WithStateContext {
+        /// The FSM state whose task failed.
+        state: String,
+        /// The 1-based attempt number that produced this failure.
+        attempt: u32,
+        /// The states visited so far, in order, ending with `state`.
+        transitions_so_far: Vec<String>,
+        /// The underlying error that triggered this failure.
+        source: Box<CanoError>,
+    },
 }
 
 impl CanoError {
@@ -245,14 +351,23 @@ impl CanoError {
         CanoError::Configuration(msg.into())
     }
 
-    /// Create a new retry exhausted error
-    pub fn retry_exhausted<S: Into<String>>(msg: S) -> Self {
-        CanoError::RetryExhausted(msg.into())
+    /// Create a new retry-exhausted error from the attempt count and the
+    /// final attempt's underlying error.
+    pub fn retry_exhausted(attempts: u32, source: CanoError) -> Self {
+        CanoError::RetryExhausted {
+            attempts,
+            source: Box::new(source),
+        }
     }
 
     /// Create a new timeout error
     pub fn timeout<S: Into<String>>(msg: S) -> Self {
         CanoError::Timeout(msg.into())
+    }
+
+    /// Create a new workflow-total-timeout error from the elapsed and limit durations.
+    pub fn workflow_timeout(elapsed: std::time::Duration, limit: std::time::Duration) -> Self {
+        CanoError::WorkflowTimeout { elapsed, limit }
     }
 
     /// Create a new circuit-open error
@@ -267,8 +382,23 @@ impl CanoError {
 
     /// Create a new compensation-failed error from the original failure plus the
     /// compensation errors (the convention is `errors[0]` = original failure).
+    ///
+    /// Any nested `CompensationFailed` values in `errors` are flattened — when
+    /// the inline-compensate path in [`crate::saga`] returns a
+    /// `CompensationFailed` and the outer drain then aggregates more errors,
+    /// the result would otherwise be a doubly-nested `CompensationFailed`
+    /// whose `errors[0]` is itself a `CompensationFailed`. Flattening keeps
+    /// `errors[0]` semantically the original failure (possibly wrapped in
+    /// `WithStateContext`) and `errors[1..]` the per-compensation errors.
     pub fn compensation_failed(errors: Vec<CanoError>) -> Self {
-        CanoError::CompensationFailed { errors }
+        let mut flat = Vec::with_capacity(errors.len());
+        for e in errors {
+            match e {
+                CanoError::CompensationFailed { errors: inner } => flat.extend(inner),
+                other => flat.push(other),
+            }
+        }
+        CanoError::CompensationFailed { errors: flat }
     }
 
     /// Create a new generic error
@@ -297,6 +427,59 @@ impl CanoError {
         CanoError::WorkflowVersionMismatch { stored, expected }
     }
 
+    /// Create a new orphaned-compensation error.
+    pub fn orphaned_compensation(
+        task_id: impl Into<std::sync::Arc<str>>,
+        output_blob: Vec<u8>,
+    ) -> Self {
+        CanoError::OrphanedCompensation {
+            task_id: task_id.into(),
+            output_blob,
+        }
+    }
+
+    /// Annotate a task failure with the FSM state, attempt number, and
+    /// transition path that produced it.
+    ///
+    /// Short-circuits and special-cases:
+    ///
+    /// - `WithStateContext` is returned unchanged. A task that itself runs a
+    ///   nested workflow surfaces the *inner* state/path, not the outer; if
+    ///   you need both layers, inspect the inner failure via
+    ///   [`source`](std::error::Error::source) before re-raising.
+    /// - `CompensationFailed`: the outer aggregate is not re-wrapped (that
+    ///   would bury the per-rollback errors one layer deeper). Instead the
+    ///   *original failure* — `errors[0]`, the cause that triggered
+    ///   rollback — is wrapped, preserving the documented invariant that
+    ///   `errors[0]` is the FSM-annotated original failure. This keeps the
+    ///   inline-compensate path's `CompensationFailed` consistent with the
+    ///   drain's output: any user code matching `errors[0]` as
+    ///   `WithStateContext` continues to work whether rollback ran inline or
+    ///   via the drain.
+    pub fn with_state_context(
+        state: impl Into<String>,
+        attempt: u32,
+        transitions_so_far: Vec<String>,
+        source: CanoError,
+    ) -> Self {
+        match source {
+            CanoError::WithStateContext { .. } => source,
+            CanoError::CompensationFailed { mut errors } => {
+                if let Some(first) = errors.first_mut() {
+                    let owned = std::mem::replace(first, CanoError::Generic(String::new()));
+                    *first = Self::with_state_context(state, attempt, transitions_so_far, owned);
+                }
+                CanoError::CompensationFailed { errors }
+            }
+            other => CanoError::WithStateContext {
+                state: state.into(),
+                attempt,
+                transitions_so_far,
+                source: Box::new(other),
+            },
+        }
+    }
+
     /// Get the error message as a string slice
     pub fn message(&self) -> &str {
         match self {
@@ -304,8 +487,9 @@ impl CanoError {
             CanoError::Store(msg) => msg,
             CanoError::Workflow(msg) => msg,
             CanoError::Configuration(msg) => msg,
-            CanoError::RetryExhausted(msg) => msg,
+            CanoError::RetryExhausted { source, .. } => source.message(),
             CanoError::Timeout(msg) => msg,
+            CanoError::WorkflowTimeout { .. } => "workflow total timeout exceeded",
             CanoError::CircuitOpen(msg) => msg,
             CanoError::CheckpointStore(msg) => msg,
             CanoError::CompensationFailed { errors } => errors
@@ -318,18 +502,71 @@ impl CanoError {
             CanoError::WorkflowVersionMismatch { .. } => {
                 "workflow version mismatch (stored vs expected)"
             }
+            CanoError::OrphanedCompensation { .. } => {
+                "compensation entry has no registered compensator"
+            }
+            CanoError::WithStateContext { source, .. } => source.message(),
         }
     }
 
-    /// Get the error category as a string
+    /// Get the error category as a string.
+    ///
+    /// Unwraps `WithStateContext` (the FSM's uniform state-annotation wrapper)
+    /// so external code that branches on `category` — alerts, metrics, log
+    /// filters — keeps matching the underlying kind. Use [`outer_category`](Self::outer_category)
+    /// to read the wrapper itself.
     pub fn category(&self) -> &'static str {
+        match self {
+            CanoError::WithStateContext { source, .. } => source.category(),
+            other => other.outer_category(),
+        }
+    }
+
+    /// Unwrap one layer of [`CanoError::WithStateContext`] to inspect the
+    /// underlying failure, or return `self` if it's not wrapped.
+    ///
+    /// `orchestrate` and `resume_from` wrap every task error in
+    /// `WithStateContext` so external code can read `state` / `attempt` /
+    /// `transitions_so_far`. When you just want to pattern-match the
+    /// underlying variant, call `.inner()` first:
+    ///
+    /// ```
+    /// # use cano::CanoError;
+    /// let wrapped = CanoError::with_state_context(
+    ///     "Charge",
+    ///     1,
+    ///     vec!["Start".into(), "Charge".into()],
+    ///     CanoError::circuit_open("upstream"),
+    /// );
+    /// assert!(matches!(wrapped.inner(), CanoError::CircuitOpen(_)));
+    /// // Non-wrapped errors pass through unchanged.
+    /// let bare = CanoError::task_execution("boom");
+    /// assert!(matches!(bare.inner(), CanoError::TaskExecution(_)));
+    /// ```
+    ///
+    /// Unwraps exactly one layer. The [`with_state_context`](Self::with_state_context)
+    /// constructor refuses to double-wrap, so a chain of `WithStateContext`
+    /// can never occur — one unwrap is enough.
+    pub fn inner(&self) -> &CanoError {
+        match self {
+            CanoError::WithStateContext { source, .. } => source.as_ref(),
+            other => other,
+        }
+    }
+
+    /// Get the *outer* error category — the variant of `self` without
+    /// unwrapping `WithStateContext`. Use when you need to distinguish a raw
+    /// failure from one annotated with state context (the FSM wraps every
+    /// `orchestrate` / `resume_from` failure in `WithStateContext`).
+    pub fn outer_category(&self) -> &'static str {
         match self {
             CanoError::TaskExecution(_) => "task_execution",
             CanoError::Store(_) => "store",
             CanoError::Workflow(_) => "workflow",
             CanoError::Configuration(_) => "configuration",
-            CanoError::RetryExhausted(_) => "retry_exhausted",
+            CanoError::RetryExhausted { .. } => "retry_exhausted",
             CanoError::Timeout(_) => "timeout",
+            CanoError::WorkflowTimeout { .. } => "workflow_timeout",
             CanoError::CircuitOpen(_) => "circuit_open",
             CanoError::CheckpointStore(_) => "checkpoint_store",
             CanoError::CompensationFailed { .. } => "compensation_failed",
@@ -338,6 +575,8 @@ impl CanoError {
             CanoError::ResourceTypeMismatch(_) => "resource_type_mismatch",
             CanoError::ResourceDuplicateKey(_) => "resource_duplicate_key",
             CanoError::WorkflowVersionMismatch { .. } => "workflow_version_mismatch",
+            CanoError::OrphanedCompensation { .. } => "orphaned_compensation",
+            CanoError::WithStateContext { .. } => "with_state_context",
         }
     }
 }
@@ -349,8 +588,14 @@ impl std::fmt::Display for CanoError {
             CanoError::Store(msg) => write!(f, "Store error: {msg}"),
             CanoError::Workflow(msg) => write!(f, "Workflow error: {msg}"),
             CanoError::Configuration(msg) => write!(f, "Configuration error: {msg}"),
-            CanoError::RetryExhausted(msg) => write!(f, "Retry exhausted: {msg}"),
+            CanoError::RetryExhausted { attempts, source } => {
+                write!(f, "Retry exhausted after {attempts} attempt(s): {source}")
+            }
             CanoError::Timeout(msg) => write!(f, "Timeout error: {msg}"),
+            CanoError::WorkflowTimeout { elapsed, limit } => write!(
+                f,
+                "Workflow total timeout exceeded: elapsed={elapsed:?} limit={limit:?}"
+            ),
             CanoError::CircuitOpen(msg) => write!(f, "Circuit open: {msg}"),
             CanoError::CheckpointStore(msg) => write!(f, "Checkpoint store error: {msg}"),
             CanoError::CompensationFailed { errors } => {
@@ -372,11 +617,45 @@ impl std::fmt::Display for CanoError {
                 f,
                 "Workflow version mismatch: stored={stored}, expected={expected}"
             ),
+            CanoError::OrphanedCompensation {
+                task_id,
+                output_blob,
+            } => write!(
+                f,
+                "No compensator registered for task {task_id:?} — output_blob ({} bytes) was kept for manual recovery",
+                output_blob.len()
+            ),
+            CanoError::WithStateContext {
+                state,
+                attempt,
+                transitions_so_far,
+                source,
+            } => {
+                write!(f, "state={state} attempt={attempt} path=[")?;
+                for (i, s) in transitions_so_far.iter().enumerate() {
+                    if i == 0 {
+                        write!(f, "{s}")?;
+                    } else {
+                        write!(f, ", {s}")?;
+                    }
+                }
+                write!(f, "] caused by: {source}")
+            }
         }
     }
 }
 
-impl std::error::Error for CanoError {}
+impl std::error::Error for CanoError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            CanoError::WithStateContext { source, .. }
+            | CanoError::RetryExhausted { source, .. } => {
+                Some(source.as_ref() as &(dyn std::error::Error + 'static))
+            }
+            _ => None,
+        }
+    }
+}
 
 impl PartialEq for CanoError {
     fn eq(&self, other: &Self) -> bool {
@@ -385,8 +664,27 @@ impl PartialEq for CanoError {
             (CanoError::Store(a), CanoError::Store(b)) => a == b,
             (CanoError::Workflow(a), CanoError::Workflow(b)) => a == b,
             (CanoError::Configuration(a), CanoError::Configuration(b)) => a == b,
-            (CanoError::RetryExhausted(a), CanoError::RetryExhausted(b)) => a == b,
+            (
+                CanoError::RetryExhausted {
+                    attempts: a_attempts,
+                    source: a_source,
+                },
+                CanoError::RetryExhausted {
+                    attempts: b_attempts,
+                    source: b_source,
+                },
+            ) => a_attempts == b_attempts && a_source == b_source,
             (CanoError::Timeout(a), CanoError::Timeout(b)) => a == b,
+            (
+                CanoError::WorkflowTimeout {
+                    elapsed: e1,
+                    limit: l1,
+                },
+                CanoError::WorkflowTimeout {
+                    elapsed: e2,
+                    limit: l2,
+                },
+            ) => e1 == e2 && l1 == l2,
             (CanoError::CircuitOpen(a), CanoError::CircuitOpen(b)) => a == b,
             (CanoError::CheckpointStore(a), CanoError::CheckpointStore(b)) => a == b,
             (
@@ -407,6 +705,30 @@ impl PartialEq for CanoError {
                     expected: e2,
                 },
             ) => s1 == s2 && e1 == e2,
+            (
+                CanoError::OrphanedCompensation {
+                    task_id: t1,
+                    output_blob: b1,
+                },
+                CanoError::OrphanedCompensation {
+                    task_id: t2,
+                    output_blob: b2,
+                },
+            ) => t1 == t2 && b1 == b2,
+            (
+                CanoError::WithStateContext {
+                    state: s1,
+                    attempt: a1,
+                    transitions_so_far: t1,
+                    source: src1,
+                },
+                CanoError::WithStateContext {
+                    state: s2,
+                    attempt: a2,
+                    transitions_so_far: t2,
+                    source: src2,
+                },
+            ) => s1 == s2 && a1 == a2 && t1 == t2 && src1 == src2,
             _ => false,
         }
     }
@@ -744,5 +1066,151 @@ mod tests {
         assert_eq!(a, b);
         let c = CanoError::workflow_version_mismatch(1, 2);
         assert_ne!(a, c);
+    }
+
+    #[test]
+    fn test_with_state_context_constructor_category_and_message() {
+        let inner = CanoError::task_execution("connection refused");
+        let err = CanoError::with_state_context(
+            "Process",
+            2,
+            vec![
+                "Start".to_string(),
+                "Fetch".to_string(),
+                "Process".to_string(),
+            ],
+            inner.clone(),
+        );
+        // `category` unwraps the wrapper so external monitoring keeps matching
+        // the underlying kind; `outer_category` reads the wrapper itself.
+        assert_eq!(err.category(), "task_execution");
+        assert_eq!(err.outer_category(), "with_state_context");
+        assert_eq!(err.message(), "connection refused");
+        let shown = format!("{err}");
+        assert!(shown.contains("state=Process"));
+        assert!(shown.contains("attempt=2"));
+        assert!(shown.contains("path=[Start, Fetch, Process]"));
+    }
+
+    #[test]
+    fn test_with_state_context_wraps_errors_zero_through_compensation_failed() {
+        // F6: `with_state_context` does NOT re-wrap the outer CompensationFailed
+        // aggregate (that would bury the per-rollback errors one layer deeper)
+        // but DOES wrap `errors[0]` so the documented invariant — "errors[0]
+        // is the original failure as wrapped by the FSM in WithStateContext" —
+        // holds even when CompensationFailed arrives via the saga adapter's
+        // inline-compensate path (which builds it with a bare original_err).
+        let cf = CanoError::compensation_failed(vec![
+            CanoError::generic("x"),
+            CanoError::task_execution("comp failed"),
+        ]);
+        let wrapped = CanoError::with_state_context("S", 1, vec!["S".into()], cf);
+        match wrapped {
+            CanoError::CompensationFailed { errors } => {
+                assert_eq!(errors.len(), 2);
+                // errors[0] is now the wrapped original failure.
+                match &errors[0] {
+                    CanoError::WithStateContext {
+                        state,
+                        attempt,
+                        transitions_so_far,
+                        source,
+                    } => {
+                        assert_eq!(state, "S");
+                        assert_eq!(*attempt, 1);
+                        assert_eq!(transitions_so_far, &vec!["S".to_string()]);
+                        assert!(matches!(**source, CanoError::Generic(_)));
+                    }
+                    other => panic!("errors[0] must be WithStateContext, got {other:?}"),
+                }
+                // errors[1] is untouched — the per-rollback error stays as-is.
+                assert!(errors[1].message().contains("comp failed"));
+            }
+            other => panic!("expected CompensationFailed envelope, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_with_state_context_handles_empty_compensation_failed_envelope() {
+        // Edge case: an empty CompensationFailed envelope (no original failure
+        // to wrap). The wrap is a no-op rather than panicking.
+        let cf = CanoError::CompensationFailed { errors: vec![] };
+        let wrapped = CanoError::with_state_context("S", 1, vec!["S".into()], cf.clone());
+        assert_eq!(wrapped, cf);
+    }
+
+    #[test]
+    fn test_with_state_context_source_chain() {
+        use std::error::Error;
+        let inner = CanoError::task_execution("boom");
+        let err = CanoError::with_state_context("S", 1, vec!["S".to_string()], inner);
+        let src = err.source().expect("must expose inner via Error::source");
+        assert!(src.to_string().contains("boom"));
+    }
+
+    #[test]
+    fn test_retry_exhausted_constructor_category_and_message() {
+        let inner = CanoError::task_execution("connection refused");
+        let err = CanoError::retry_exhausted(3, inner.clone());
+        assert_eq!(err.category(), "retry_exhausted");
+        // message() delegates to the inner source.
+        assert_eq!(err.message(), "connection refused");
+        let shown = format!("{err}");
+        assert!(shown.contains("Retry exhausted after 3 attempt(s)"));
+        assert!(shown.contains("connection refused"));
+    }
+
+    #[test]
+    fn test_retry_exhausted_partial_eq() {
+        let a = CanoError::retry_exhausted(2, CanoError::task_execution("x"));
+        let b = CanoError::retry_exhausted(2, CanoError::task_execution("x"));
+        assert_eq!(a, b);
+
+        let c = CanoError::retry_exhausted(3, CanoError::task_execution("x"));
+        assert_ne!(a, c, "different attempts must not compare equal");
+
+        let d = CanoError::retry_exhausted(2, CanoError::task_execution("y"));
+        assert_ne!(a, d, "different sources must not compare equal");
+    }
+
+    #[test]
+    fn test_retry_exhausted_source_chain() {
+        use std::error::Error;
+        let err = CanoError::retry_exhausted(5, CanoError::task_execution("boom"));
+        let src = err.source().expect("must expose inner via Error::source");
+        assert!(src.to_string().contains("boom"));
+    }
+
+    #[test]
+    fn test_workflow_timeout_constructor_category_and_display() {
+        use std::time::Duration;
+        let err =
+            CanoError::workflow_timeout(Duration::from_millis(150), Duration::from_millis(100));
+        assert_eq!(err.category(), "workflow_timeout");
+        assert_eq!(err.message(), "workflow total timeout exceeded");
+        let shown = format!("{err}");
+        assert!(shown.contains("Workflow total timeout exceeded"));
+        assert!(shown.contains("150ms"));
+        assert!(shown.contains("100ms"));
+    }
+
+    #[test]
+    fn test_workflow_timeout_partial_eq() {
+        use std::time::Duration;
+        let a = CanoError::workflow_timeout(Duration::from_secs(1), Duration::from_secs(2));
+        let b = CanoError::workflow_timeout(Duration::from_secs(1), Duration::from_secs(2));
+        assert_eq!(a, b);
+
+        // Different `limit` must not compare equal.
+        let c = CanoError::workflow_timeout(Duration::from_secs(3), Duration::from_secs(2));
+        assert_ne!(a, c, "different limit must not compare equal");
+
+        // Different `elapsed` must not compare equal.
+        let d = CanoError::workflow_timeout(Duration::from_secs(1), Duration::from_secs(5));
+        assert_ne!(a, d, "different elapsed must not compare equal");
+
+        // Distinct from same-category string variant.
+        let attempt_timeout = CanoError::timeout("workflow total timeout exceeded");
+        assert_ne!(a, attempt_timeout);
     }
 }

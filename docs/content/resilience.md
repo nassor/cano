@@ -27,6 +27,7 @@ probes — lives in <a href="../recovery/">Recovery</a>, <a href="../saga/">Saga
 <ol>
 <li><a href="#retries">Retries</a></li>
 <li><a href="#timeouts">Per-Attempt Timeouts</a></li>
+<li><a href="#workflow-total-timeout">Workflow Total Timeout</a></li>
 <li><a href="#circuit-breaker">Circuit Breakers</a></li>
 <li class="toc-sub"><a href="#cb-state-machine">The state machine</a></li>
 <li class="toc-sub"><a href="#cb-policy"><code>CircuitPolicy</code></a></li>
@@ -101,10 +102,84 @@ impl CallTask {
 }
 ```
 
-<p>Distinct from the <em>workflow-wide</em> timeout (<code>Workflow::with_timeout</code>), which
-bounds the whole orchestration, not one attempt. The full <code>TaskConfig</code> /
+<p>Distinct from <code>Workflow::with_total_timeout</code> (the wall-clock budget for the entire
+orchestration — see below) and from the legacy <code>Workflow::with_timeout</code> (a blunt outer
+<code>tokio::time::timeout</code> with no graceful compensation). The full <code>TaskConfig</code> /
 <code>RetryMode</code> API — including how attempt timeouts compose with each retry mode — lives in
 <a href="../task/#config-retries">Tasks → Configuration &amp; Retries</a>.</p>
+<hr class="section-divider">
+
+<h2 id="workflow-total-timeout"><a href="#workflow-total-timeout" class="anchor-link" aria-hidden="true">#</a>Workflow Total Timeout</h2>
+<p>
+<code>Workflow::with_total_timeout(Duration)</code> sets a wall-clock budget for the entire
+<code>orchestrate</code> (or <a href="../recovery/"><code>resume_from</code></a>) call. When the
+budget elapses, the in-flight task is aborted at its next await point, the
+<a href="../saga/">saga compensation stack</a> drains against its own bounded budget, and the call
+returns <code>CanoError::WorkflowTimeout { elapsed, limit }</code> wrapped in
+<code>CanoError::WithStateContext</code> (or <code>CanoError::CompensationFailed</code> if any
+<code>compensate</code> also fails).
+</p>
+
+```rust
+let workflow = Workflow::bare()
+    .with_total_timeout(Duration::from_millis(200))
+    // Optional override; defaults to min(remaining_budget / 2, 30s).
+    .with_compensation_timeout(Duration::from_millis(50))
+    .register_with_compensation(Step::Reserve, Reserve)
+    .register_with_compensation(Step::Charge, Charge)
+    .register(Step::Ship, Ship)
+    .add_exit_state(Step::Done);
+```
+
+<p>
+The budget compounds with every other resilience primitive — retries, per-attempt timeouts, circuit
+breakers — because they all run <em>inside</em> the per-state dispatch the engine wraps in
+<code>tokio::time::timeout_at</code>. A task that retries forever doesn't outlive the total budget.
+</p>
+
+<h3 id="workflow-total-timeout-compensation"><a href="#workflow-total-timeout-compensation" class="anchor-link" aria-hidden="true">#</a>Compensation drain budget</h3>
+<p>
+When a total-timeout trip drains the <a href="../saga/">compensation stack</a>, each
+<code>compensate</code> call is wrapped in <code>tokio::time::timeout_at</code> against a derived
+deadline. The default is <strong><code>min(remaining_budget / 2, 30s)</code></strong> — half of
+whatever budget is left when the timeout fires, capped at 30 seconds (and 30s as the floor when
+nothing is left). Set <code>Workflow::with_compensation_timeout(Duration)</code> to override this
+explicitly. A <code>compensate</code> that exceeds the deadline is recorded as a timeout error and
+the drain continues — remaining entries error fast under the now-elapsed deadline rather than
+extending the rollback indefinitely.
+</p>
+
+<h3 id="workflow-total-timeout-observer"><a href="#workflow-total-timeout-observer" class="anchor-link" aria-hidden="true">#</a>Observer hook</h3>
+<p>
+A <code>WorkflowObserver</code> attached via <code>with_observer</code> receives one
+<code>on_workflow_timeout(elapsed, limit)</code> call when the budget fires, before the compensation
+drain runs. With the <a href="../tracing/"><code>tracing</code></a> feature,
+<code>TracingObserver</code> re-emits it as a <code>WARN</code>-level
+<code>"workflow total timeout exceeded"</code> event with <code>elapsed_ms</code> / <code>limit_ms</code>
+fields under the <code>cano::observer</code> target. See <a href="../observers/#events">Observers →
+Lifecycle Events</a> for the full hook reference.
+</p>
+
+<h3 id="workflow-total-timeout-vs"><a href="#workflow-total-timeout-vs" class="anchor-link" aria-hidden="true">#</a>The three timeout knobs</h3>
+<table class="styled-table">
+<thead><tr><th>API</th><th>Scope</th><th>On expiry</th><th>Compensation drain</th></tr></thead>
+<tbody>
+<tr><td><code>TaskConfig::with_attempt_timeout</code></td><td>One attempt of one task</td><td><code>CanoError::Timeout</code> — retried like any other failure; final timeout becomes <code>RetryExhausted</code></td><td>Triggered like any other terminal task error (unbounded)</td></tr>
+<tr><td><code>Workflow::with_total_timeout</code></td><td>The entire <code>orchestrate</code> / <code>resume_from</code> call</td><td>In-flight task aborted; <code>CanoError::WorkflowTimeout</code> (wrapped in <code>WithStateContext</code>)</td><td>Bounded by <code>with_compensation_timeout</code> or the default <code>min(remaining/2, 30s)</code></td></tr>
+<tr><td><code>Workflow::with_timeout</code> <em>(legacy)</em></td><td>The whole orchestration future</td><td><code>CanoError::Workflow("Workflow timeout exceeded")</code> — no graceful abort</td><td><strong>None</strong> — the future is dropped abruptly</td></tr>
+</tbody>
+</table>
+<p>
+Pick <code>with_total_timeout</code> for any new code that needs a workflow-wide budget. The legacy
+<code>with_timeout</code> remains for backward compatibility and composes naturally — if both are
+set, whichever fires first wins.
+</p>
+
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example workflow_total_timeout</code> — a 3-step saga where the
+shipping step overruns the budget; the timeout fires, the prior steps' compensations run in reverse,
+and the final error is the wrapped <code>WorkflowTimeout</code>.</p>
+</div>
 <hr class="section-divider">
 
 <h2 id="circuit-breaker"><a href="#circuit-breaker" class="anchor-link" aria-hidden="true">#</a>Circuit Breakers</h2>

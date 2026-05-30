@@ -49,10 +49,10 @@ where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
     TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
-    workflows: HashMap<String, FlowData<TState, TResourceKey>>,
+    workflows: HashMap<Arc<str>, FlowData<TState, TResourceKey>>,
     /// Registration order of workflow ids. Setup runs FIFO, teardown LIFO.
     /// Required because `HashMap` iteration order is undefined.
-    flow_order: Vec<String>,
+    flow_order: Vec<Arc<str>>,
 }
 
 impl<TState, TResourceKey> Scheduler<TState, TResourceKey>
@@ -166,8 +166,9 @@ where
             )));
         }
 
+        let id: Arc<str> = Arc::from(id);
         let info = Arc::new(RwLock::new(FlowInfo {
-            id: id.to_string(),
+            id: Arc::clone(&id),
             status: Status::Idle,
             run_count: 0,
             last_run: None,
@@ -176,7 +177,7 @@ where
         }));
 
         self.workflows.insert(
-            id.to_string(),
+            Arc::clone(&id),
             FlowData {
                 workflow: Arc::new(workflow),
                 initial_state,
@@ -185,7 +186,7 @@ where
                 policy: Arc::new(BackoffPolicy::default()),
             },
         );
-        self.flow_order.push(id.to_string());
+        self.flow_order.push(id);
 
         Ok(())
     }
@@ -294,12 +295,18 @@ where
         let stop_notify = Arc::new(Notify::new());
         let running = Arc::new(RwLock::new(true));
         let scheduler_tasks: Arc<RwLock<Vec<JoinHandle<()>>>> = Arc::new(RwLock::new(Vec::new()));
+        // See `RunningScheduler::in_flight_drain` and the driver's drain loop:
+        // a slot the driver fills with the `AbortHandle` of the per-flow task
+        // it is currently `.await`-ing, so the last-clone `Drop` can abort
+        // wedged tasks even when they have been popped out of `scheduler_tasks`.
+        let in_flight_drain: Arc<RwLock<Option<tokio::task::AbortHandle>>> =
+            Arc::new(RwLock::new(None));
 
         // Build a read-only flow-info registry for status / list / has_running_flows.
-        let mut flows_view: HashMap<String, Arc<RwLock<FlowInfo>>> =
+        let mut flows_view: HashMap<Arc<str>, Arc<RwLock<FlowInfo>>> =
             HashMap::with_capacity(workflows.len());
         for (id, fd) in &workflows {
-            flows_view.insert(id.clone(), Arc::clone(&fd.info));
+            flows_view.insert(Arc::clone(id), Arc::clone(&fd.info));
         }
         let flows_view = Arc::new(flows_view);
         let flow_order_view = Arc::new(flow_order.clone());
@@ -364,6 +371,7 @@ where
             Arc::clone(&running),
             Arc::clone(&stop_notify),
             Arc::clone(&scheduler_tasks),
+            Arc::clone(&in_flight_drain),
             result_tx,
         ));
 
@@ -373,6 +381,7 @@ where
             flow_order: flow_order_view,
             result_rx,
             scheduler_tasks,
+            in_flight_drain,
             driver_handle: Arc::new(driver_handle),
             liveness: Arc::new(()),
             _marker: std::marker::PhantomData,

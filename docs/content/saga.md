@@ -135,6 +135,11 @@ entry the engine finds the compensator by task name, deserializes the output, an
 remaining entries are still compensated.</li>
 <li>A compensatable task that <em>fails</em> its forward <code>run</code> produced no output, so it is
 not on the stack — there is nothing to undo for it.</li>
+<li>When the drain is triggered by a
+<a href="../resilience/#workflow-total-timeout"><code>Workflow::with_total_timeout</code></a> trip,
+each <code>compensate</code> is bounded by a derived deadline (<code>min(remaining_budget / 2, 30s)</code>
+by default, or the value set via <code>Workflow::with_compensation_timeout</code>). A
+<code>compensate</code> that exceeds the deadline becomes one recorded error and the drain continues.</li>
 </ul>
 <hr class="section-divider">
 

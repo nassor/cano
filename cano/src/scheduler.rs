@@ -46,11 +46,11 @@ use tokio::time::Duration;
 enum SchedulerCommand {
     Stop,
     Trigger {
-        id: String,
+        id: Arc<str>,
         response: oneshot::Sender<CanoResult<()>>,
     },
     Reset {
-        id: String,
+        id: Arc<str>,
         response: oneshot::Sender<CanoResult<()>>,
     },
 }
@@ -81,13 +81,13 @@ pub enum Status {
     Backoff {
         until: DateTime<Utc>,
         streak: u32,
-        last_error: String,
+        last_error: Arc<str>,
     },
     /// Flow has reached its [`BackoffPolicy::streak_limit`] and will not
     /// dispatch again until [`Scheduler::reset_flow`] is called.
     Tripped {
         streak: u32,
-        last_error: String,
+        last_error: Arc<str>,
     },
 }
 
@@ -98,7 +98,7 @@ pub enum Status {
 /// `..` rest patterns or to use the public-fields-with-default convention.
 #[derive(Debug, Clone)]
 pub struct FlowInfo {
-    pub id: String,
+    pub id: Arc<str>,
     pub status: Status,
     pub run_count: u64,
     pub last_run: Option<DateTime<Utc>>,
