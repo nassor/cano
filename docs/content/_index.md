@@ -98,6 +98,7 @@ the FSM dispatch hot path stays allocation-light whether or not you wire any of 
 <li>Retries — fixed, or exponential backoff with jitter</li>
 <li>Per-attempt timeouts and <a href="resilience/#workflow-total-timeout">workflow total timeout</a> with bounded compensation drain</li>
 <li><a href="resilience/#circuit-breaker">Circuit breaker</a> — short-circuit a failing dependency</li>
+<li><a href="resilience/#rate-limiter">Rate limiter</a> — token-bucket pacing for a rate-sensitive dependency</li>
 <li>Split <a href="split-join/#bulkhead">bulkhead</a> — cap concurrent parallel tasks</li>
 <li>Panic safety — a panicking task becomes an error, never unwinds the engine</li>
 <li><a href="scheduler/#backoff-and-trip">Scheduler backoff &amp; trip</a> for flaky scheduled flows</li>

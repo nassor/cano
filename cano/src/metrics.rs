@@ -12,11 +12,11 @@
 //!   circuit-open events, checkpoints, resumes), exactly as `TracingObserver` emits `tracing`
 //!   events for them.
 //! - Always-on direct instrumentation (the helpers in this module) for engine internals the
-//!   observer doesn't reach: workflow run outcome/duration + an active-workflows gauge,
-//!   circuit-breaker transitions/acquires/outcomes, per-state task durations, split-branch
-//!   results, scheduler flow runs/durations/backoff/trips + an active-flows gauge, the
-//!   poll/batch/stepped processing loops, recovery checkpoint-store operations, and saga
-//!   compensation drains.
+//!   observer doesn't reach: workflow run outcome/duration plus an active-workflows gauge,
+//!   circuit-breaker transitions/acquires/outcomes, rate-limiter acquires/throttles/waits,
+//!   per-state task durations, split-branch results, scheduler flow
+//!   runs/durations/backoff/trips plus an active-flows gauge, the poll/batch/stepped
+//!   processing loops, recovery checkpoint-store operations, and saga compensation drains.
 //!
 //! ## What gets measured
 //!
@@ -121,6 +121,9 @@ pub const CHECKPOINT_APPENDS_TOTAL: &str = "cano_checkpoint_appends_total";
 pub const CHECKPOINT_CLEARS_TOTAL: &str = "cano_checkpoint_clears_total";
 pub const COMPENSATIONS_RUN_TOTAL: &str = "cano_compensations_run_total";
 pub const COMPENSATION_DRAINS_TOTAL: &str = "cano_compensation_drains_total";
+pub const RATE_LIMITER_ACQUIRED_TOTAL: &str = "cano_rate_limiter_acquired_total";
+pub const RATE_LIMITER_THROTTLED_TOTAL: &str = "cano_rate_limiter_throttled_total";
+pub const RATE_LIMITER_WAIT_SECONDS: &str = "cano_rate_limiter_wait_seconds";
 
 #[cfg(feature = "scheduler")]
 pub const SCHEDULER_FLOW_RUNS_TOTAL: &str = "cano_scheduler_flow_runs_total";
@@ -278,6 +281,21 @@ pub fn describe() {
         COMPENSATION_DRAINS_TOTAL,
         Unit::Count,
         "Compensation-stack drains, by outcome (clean|partial)"
+    );
+    describe_counter!(
+        RATE_LIMITER_ACQUIRED_TOTAL,
+        Unit::Count,
+        "Tokens consumed from a RateLimiter"
+    );
+    describe_counter!(
+        RATE_LIMITER_THROTTLED_TOTAL,
+        Unit::Count,
+        "RateLimiter acquisitions that waited or were rejected, by result (waited|rejected)"
+    );
+    describe_histogram!(
+        RATE_LIMITER_WAIT_SECONDS,
+        Unit::Seconds,
+        "Wall-clock time RateLimiter::acquire blocked"
     );
 
     #[cfg(feature = "scheduler")]
@@ -453,6 +471,18 @@ pub(crate) fn compensation_run(ok: bool) {
 pub(crate) fn compensation_drain(clean: bool) {
     counter!(COMPENSATION_DRAINS_TOTAL, "outcome" => if clean { "clean" } else { "partial" })
         .increment(1);
+}
+
+// ----- rate limiter -----
+
+pub(crate) fn rate_limiter_acquired() {
+    counter!(RATE_LIMITER_ACQUIRED_TOTAL).increment(1);
+}
+pub(crate) fn rate_limiter_throttled(result: &'static str) {
+    counter!(RATE_LIMITER_THROTTLED_TOTAL, "result" => result).increment(1);
+}
+pub(crate) fn rate_limiter_wait(dur: Duration) {
+    histogram!(RATE_LIMITER_WAIT_SECONDS).record(dur.as_secs_f64());
 }
 
 // ----- scheduler -----

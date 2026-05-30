@@ -1,20 +1,20 @@
 +++
 title = "Resilience"
-description = "The resilience guide for Cano workflows: the full circuit breaker treatment plus retries, per-attempt timeouts, bulkheads, panic safety, and scheduler backoff — how each primitive works and how they compose."
+description = "The resilience guide for Cano workflows: the full circuit breaker treatment plus retries, per-attempt timeouts, rate limiting, bulkheads, panic safety, and scheduler backoff — how each primitive works and how they compose."
 template = "page.html"
 +++
 
 <div class="content-wrapper">
 <h1>Resilience</h1>
-<p class="subtitle">Recover from transient faults — retries, timeouts, circuit breakers, bulkheads, panic safety, scheduler backoff.</p>
+<p class="subtitle">Recover from transient faults — retries, timeouts, circuit breakers, rate limiting, bulkheads, panic safety, scheduler backoff.</p>
 
 <p>
 "Resilient" in Cano's tagline isn't a vibe — it's a set of concrete, composable primitives that
 sit on the FSM dispatch path. Every one of them is <strong>opt-in</strong>: a workflow that wires
 none of them up pays nothing, and the hot path stays allocation-light. This is the guide: the
-<a href="#circuit-breaker">circuit breaker</a> gets its full treatment here; retries, per-attempt
-timeouts, and bulkheads get an overview with a pointer to the API reference page that owns the
-builder methods.
+<a href="#circuit-breaker">circuit breaker</a> and <a href="#rate-limiter">rate limiter</a> get their
+full treatment here; retries, per-attempt timeouts, and bulkheads get an overview with a pointer to
+the API reference page that owns the builder methods.
 </p>
 <p>
 The <em>self-healing</em> half of the tagline — checkpoint + resume, sagas, observers, health
@@ -34,6 +34,9 @@ probes — lives in <a href="../recovery/">Recovery</a>, <a href="../saga/">Saga
 <li class="toc-sub"><a href="#cb-permits">Permits and the RAII API</a></li>
 <li class="toc-sub"><a href="#cb-via-config">Wiring: <code>with_circuit_breaker</code></a></li>
 <li class="toc-sub"><a href="#cb-manual">Driving it by hand</a></li>
+<li><a href="#rate-limiter">Rate Limiter</a></li>
+<li class="toc-sub"><a href="#rl-policy"><code>RateLimiterPolicy</code></a></li>
+<li class="toc-sub"><a href="#rl-acquire">Acquiring: <code>try_acquire</code> / <code>acquire</code></a></li>
 <li><a href="#bulkhead">Bulkheads (split concurrency)</a></li>
 <li><a href="#panic-safety">Panic Safety</a></li>
 <li><a href="#scheduler-backoff">Scheduler Backoff &amp; Trip</a></li>
@@ -371,6 +374,105 @@ interact. See <a href="../scheduler/#backoff-and-trip">Scheduler → Backoff &am
 open, then closes via <code>HalfOpen</code>).</p>
 <hr class="section-divider">
 
+<h2 id="rate-limiter"><a href="#rate-limiter" class="anchor-link" aria-hidden="true">#</a>Rate Limiter</h2>
+<p>
+A <a href="#circuit-breaker">circuit breaker</a> stops calls to a dependency that's <em>down</em>.
+A <code>RateLimiter</code> paces calls to a dependency that's <em>up but rate-sensitive</em> — a
+third-party API with a per-second quota, a database, an LLM endpoint billed per request. It smooths
+bursty traffic into a steady rate the downstream can absorb.
+</p>
+<p>
+It's a <strong>token bucket</strong>: a bucket holds fractional <code>tokens</code>; each acquisition
+spends one; tokens replenish at a fixed rate up to a capacity. Refill is <strong>lazy</strong> — there's
+no background task. Every acquire reads a single <code>Instant</code>, adds
+<code>elapsed × refill_per_sec</code> tokens (capped at capacity), then decides. A workflow that never
+builds a limiter pays nothing. The bucket starts <strong>full</strong>, so a burst of up to
+<code>capacity</code> calls is admitted instantly before sustained traffic settles to the refill rate.
+</p>
+<p>
+Like a breaker, a limiter is cheap to clone (it's an <code>Arc</code> inside) — <strong>share one
+<code>Arc&lt;RateLimiter&gt;</code> across every task that draws on the same quota</strong> so the budget
+is enforced globally, including across tasks running in parallel inside a
+<a href="../split-join/">split/join</a> state. Internally it's a synchronous
+<code>parking_lot::Mutex</code> with no awaits held across the critical section.
+</p>
+
+<h3 id="rl-policy"><a href="#rl-policy" class="anchor-link" aria-hidden="true">#</a><code>RateLimiterPolicy</code></h3>
+<p>
+Build a policy with <code>RateLimiterPolicy::per_second(n)</code> (or <code>::new(tokens, period)</code>
+for an arbitrary window) and tune it with the <code>with_max_tokens</code> / <code>with_burst</code>
+builders. Total bucket capacity is <code>max_tokens + burst</code>.
+</p>
+<table class="styled-table">
+<thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
+<tbody>
+<tr><td><code>max_tokens</code></td><td><code>u32</code></td><td>Steady-state bucket ceiling — and the size of the instantaneous burst a fresh limiter admits, since the bucket starts full. Defaults to <code>tokens</code> (one period's worth).</td></tr>
+<tr><td><code>tokens_per_period</code></td><td><code>u32</code></td><td>Tokens added per <code>refill_period</code>.</td></tr>
+<tr><td><code>refill_period</code></td><td><code>Duration</code></td><td>How long it takes to add <code>tokens_per_period</code> tokens. <code>per_second(n)</code> sets this to one second.</td></tr>
+<tr><td><code>burst</code></td><td><code>u32</code></td><td>Extra capacity above <code>max_tokens</code> for short spikes. Defaults to <code>0</code>.</td></tr>
+</tbody>
+</table>
+<p>
+<code>RateLimiter::new</code> <strong>panics</strong> on a misconfigured policy at construction:
+<code>max_tokens == 0</code> (a zero-capacity bucket could never admit a call) or a zero refill rate
+(<code>tokens_per_period == 0</code> or a zero <code>refill_period</code> — the bucket would never
+replenish). Both are programmer errors, caught before any task runs.
+</p>
+
+<h3 id="rl-acquire"><a href="#rl-acquire" class="anchor-link" aria-hidden="true">#</a>Acquiring: <code>try_acquire</code> / <code>acquire</code></h3>
+<ul>
+<li><code>try_acquire() -&gt; Option&lt;Permit&gt;</code> — non-blocking. <code>Some</code> if a token was
+available (and consumes it), <code>None</code> if the bucket is empty. Use it to <em>shed</em> load.</li>
+<li><code>acquire().await -&gt; Permit</code> — if the bucket is empty it computes exactly how long until
+the next token refills, <code>tokio::time::sleep</code>s that long, and retries. Use it to <em>pace</em>
+work.</li>
+</ul>
+<p>
+The returned <code>Permit</code> is a lightweight RAII marker for the call's scope. Unlike a
+<a href="#cb-permits">circuit-breaker permit</a> (which records a success/failure outcome) or a semaphore
+permit (which returns capacity on drop), a token-bucket permit's <strong>drop is a no-op</strong> — the
+token was already spent at acquisition and the bucket refills on the clock, not on release.
+</p>
+
+```rust
+use cano::prelude::*;
+use std::sync::Arc;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Step { Call, Done }
+
+#[derive(Clone)]
+struct CallUpstream { limiter: Arc<RateLimiter> }
+
+#[task(state = Step)]
+impl CallUpstream {
+    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+        // Park until the shared budget admits this call, then proceed.
+        let _permit = self.limiter.acquire().await;
+        // ... call the rate-sensitive dependency ...
+        Ok(TaskResult::Single(Step::Done))
+    }
+}
+
+// 20 req/s, shared across every task that constructs from this Arc.
+let limiter = Arc::new(RateLimiter::new(RateLimiterPolicy::per_second(20)));
+let workflow = Workflow::bare()
+    .register(Step::Call, CallUpstream { limiter: Arc::clone(&limiter) })
+    .add_exit_state(Step::Done);
+```
+
+<p>
+<code>RateLimiter</code> also implements <code>Resource</code> (no-op lifecycle), so instead of threading
+the <code>Arc</code> into each task you can register it once in <a href="../resources/">Resources</a> and
+look it up by key inside the task body — handy when several tasks share one quota.
+</p>
+
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example rate_limiter</code> — two spawned workers share one
+<code>5 req/s</code> limiter; the printed timestamps land at ~200ms intervals, making the pacing visible.</p>
+</div>
+<hr class="section-divider">
+
 <h2 id="bulkhead"><a href="#bulkhead" class="anchor-link" aria-hidden="true">#</a>Bulkheads (split concurrency)</h2>
 <p>
 A <a href="../split-join/">split/join</a> state runs its tasks in parallel — but "parallel" can mean
@@ -430,6 +532,7 @@ These stack cleanly. A typical "talk to a flaky external service" state:
 </p>
 <ul>
 <li><strong>Circuit breaker</strong> (shared across every task hitting that service) — bail fast when it's down.</li>
+<li><strong>Rate limiter</strong> (also shared) — stay under the service's quota when it's up.</li>
 <li><strong>Per-attempt timeout</strong> — don't hang on a slow call.</li>
 <li><strong>Retries</strong> with backoff — ride out transients.</li>
 <li>If the call <em>mutated</em> something, make it a <a href="../saga/">compensatable task</a> so a downstream failure can undo it.</li>

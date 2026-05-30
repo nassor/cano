@@ -46,7 +46,7 @@ tempfile = "3"
 wide = "1.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 chrono = { version = "0.4", features = ["serde"] }
-tokio = { version = "1.52.1", features = ["macros", "sync", "time", "rt-multi-thread", "signal"] }
+tokio = { version = "1.52.1", features = ["macros", "sync", "time", "rt-multi-thread", "signal", "test-util"] }
 metrics-util = { version = "0.20.3", features = ["debugging"] }
 metrics-tracing-context = "0.18.1"
 
@@ -172,6 +172,10 @@ name = "circuit_breaker"
 path = "examples/circuit_breaker.rs"
 
 [[example]]
+name = "rate_limiter"
+path = "examples/rate_limiter.rs"
+
+[[example]]
 name = "workflow_observer"
 path = "examples/workflow_observer.rs"
 
@@ -277,4 +281,8 @@ harness = false
 
 [[bench]]
 name = "circuit_performance"
+harness = false
+
+[[bench]]
+name = "rate_limiter_performance"
 harness = false

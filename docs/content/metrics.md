@@ -173,6 +173,14 @@ exporter's responsibility. Metric names follow <code>metrics</code>-crate unders
 </ul>
 </div>
 <div class="card">
+<h3 id="rate-limiter-metrics"><a href="#rate-limiter-metrics" class="anchor-link" aria-hidden="true">#</a>Rate Limiter</h3>
+<ul>
+<li><code>cano_rate_limiter_acquired_total</code> — counter; tokens consumed (via <code>try_acquire</code> or <code>acquire</code>)</li>
+<li><code>cano_rate_limiter_throttled_total{result}</code> — counter; <code>result</code> ∈ <code>waited</code>|<code>rejected</code></li>
+<li><code>cano_rate_limiter_wait_seconds</code> — histogram (seconds); wall-clock time <code>acquire</code> blocked</li>
+</ul>
+</div>
+<div class="card">
 <h3 id="processing-loops"><a href="#processing-loops" class="anchor-link" aria-hidden="true">#</a>Processing Loops</h3>
 <ul>
 <li><code>cano_poll_iterations_total{outcome}</code> — counter; <code>outcome</code> ∈ <code>ready</code>|<code>pending</code></li>
