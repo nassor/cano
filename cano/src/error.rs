@@ -126,7 +126,14 @@
 /// Cano errors can be created from various sources including standard library
 /// errors, string slices, and owned strings. Use the appropriate constructor
 /// method or the `Into` trait for convenient conversion.
+///
+/// # Compatibility
+///
+/// Marked `#[non_exhaustive]`: external `match` arms over `CanoError` must
+/// include a wildcard so that future variants do not break downstream code at
+/// compile time.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum CanoError {
     /// Error during task execution
     ///
@@ -260,6 +267,26 @@ pub enum CanoError {
         expected: u32,
     },
 
+    /// A persisted compensation entry could not be rolled back because no
+    /// compensator is registered for its `task_id`.
+    ///
+    /// Emitted by the compensation drain when a rehydrated `CompensationEntry`
+    /// names a task that has been removed/renamed in the current workflow
+    /// definition (typically a refactor without a [`with_workflow_version`](crate::workflow::Workflow::with_workflow_version)
+    /// bump). Carries the `output_blob` the failed task persisted so an
+    /// operator can decode and manually undo the side effect — without this
+    /// variant the blob would be lost to a string-only error.
+    ///
+    /// Always appears inside [`CompensationFailed`](CanoError::CompensationFailed).
+    OrphanedCompensation {
+        /// The unknown task identifier (as recorded in the checkpoint log).
+        task_id: std::sync::Arc<str>,
+        /// The serialized output the task persisted; the operator can decode
+        /// this with the original task's `Output` type to recover the data
+        /// needed for a manual rollback.
+        output_blob: Vec<u8>,
+    },
+
     /// A task failure annotated with the FSM state, attempt number, and
     /// transition path that produced it.
     ///
@@ -355,8 +382,23 @@ impl CanoError {
 
     /// Create a new compensation-failed error from the original failure plus the
     /// compensation errors (the convention is `errors[0]` = original failure).
+    ///
+    /// Any nested `CompensationFailed` values in `errors` are flattened — when
+    /// the inline-compensate path in [`crate::saga`] returns a
+    /// `CompensationFailed` and the outer drain then aggregates more errors,
+    /// the result would otherwise be a doubly-nested `CompensationFailed`
+    /// whose `errors[0]` is itself a `CompensationFailed`. Flattening keeps
+    /// `errors[0]` semantically the original failure (possibly wrapped in
+    /// `WithStateContext`) and `errors[1..]` the per-compensation errors.
     pub fn compensation_failed(errors: Vec<CanoError>) -> Self {
-        CanoError::CompensationFailed { errors }
+        let mut flat = Vec::with_capacity(errors.len());
+        for e in errors {
+            match e {
+                CanoError::CompensationFailed { errors: inner } => flat.extend(inner),
+                other => flat.push(other),
+            }
+        }
+        CanoError::CompensationFailed { errors: flat }
     }
 
     /// Create a new generic error
@@ -385,19 +427,35 @@ impl CanoError {
         CanoError::WorkflowVersionMismatch { stored, expected }
     }
 
+    /// Create a new orphaned-compensation error.
+    pub fn orphaned_compensation(
+        task_id: impl Into<std::sync::Arc<str>>,
+        output_blob: Vec<u8>,
+    ) -> Self {
+        CanoError::OrphanedCompensation {
+            task_id: task_id.into(),
+            output_blob,
+        }
+    }
+
     /// Annotate a task failure with the FSM state, attempt number, and
     /// transition path that produced it.
     ///
-    /// Short-circuits in two cases so the wrap doesn't fight the existing
-    /// structured context the source already carries:
+    /// Short-circuits and special-cases:
     ///
     /// - `WithStateContext` is returned unchanged. A task that itself runs a
     ///   nested workflow surfaces the *inner* state/path, not the outer; if
     ///   you need both layers, inspect the inner failure via
     ///   [`source`](std::error::Error::source) before re-raising.
-    /// - `CompensationFailed` is returned unchanged. Its `errors[0]` is
-    ///   already wrapped with state context by the FSM, so re-wrapping the
-    ///   aggregate would bury the per-rollback errors one layer deeper.
+    /// - `CompensationFailed`: the outer aggregate is not re-wrapped (that
+    ///   would bury the per-rollback errors one layer deeper). Instead the
+    ///   *original failure* — `errors[0]`, the cause that triggered
+    ///   rollback — is wrapped, preserving the documented invariant that
+    ///   `errors[0]` is the FSM-annotated original failure. This keeps the
+    ///   inline-compensate path's `CompensationFailed` consistent with the
+    ///   drain's output: any user code matching `errors[0]` as
+    ///   `WithStateContext` continues to work whether rollback ran inline or
+    ///   via the drain.
     pub fn with_state_context(
         state: impl Into<String>,
         attempt: u32,
@@ -405,7 +463,14 @@ impl CanoError {
         source: CanoError,
     ) -> Self {
         match source {
-            CanoError::WithStateContext { .. } | CanoError::CompensationFailed { .. } => source,
+            CanoError::WithStateContext { .. } => source,
+            CanoError::CompensationFailed { mut errors } => {
+                if let Some(first) = errors.first_mut() {
+                    let owned = std::mem::replace(first, CanoError::Generic(String::new()));
+                    *first = Self::with_state_context(state, attempt, transitions_so_far, owned);
+                }
+                CanoError::CompensationFailed { errors }
+            }
             other => CanoError::WithStateContext {
                 state: state.into(),
                 attempt,
@@ -436,6 +501,9 @@ impl CanoError {
             CanoError::ResourceDuplicateKey(msg) => msg,
             CanoError::WorkflowVersionMismatch { .. } => {
                 "workflow version mismatch (stored vs expected)"
+            }
+            CanoError::OrphanedCompensation { .. } => {
+                "compensation entry has no registered compensator"
             }
             CanoError::WithStateContext { source, .. } => source.message(),
         }
@@ -507,6 +575,7 @@ impl CanoError {
             CanoError::ResourceTypeMismatch(_) => "resource_type_mismatch",
             CanoError::ResourceDuplicateKey(_) => "resource_duplicate_key",
             CanoError::WorkflowVersionMismatch { .. } => "workflow_version_mismatch",
+            CanoError::OrphanedCompensation { .. } => "orphaned_compensation",
             CanoError::WithStateContext { .. } => "with_state_context",
         }
     }
@@ -547,6 +616,14 @@ impl std::fmt::Display for CanoError {
             CanoError::WorkflowVersionMismatch { stored, expected } => write!(
                 f,
                 "Workflow version mismatch: stored={stored}, expected={expected}"
+            ),
+            CanoError::OrphanedCompensation {
+                task_id,
+                output_blob,
+            } => write!(
+                f,
+                "No compensator registered for task {task_id:?} — output_blob ({} bytes) was kept for manual recovery",
+                output_blob.len()
             ),
             CanoError::WithStateContext {
                 state,
@@ -628,6 +705,16 @@ impl PartialEq for CanoError {
                     expected: e2,
                 },
             ) => s1 == s2 && e1 == e2,
+            (
+                CanoError::OrphanedCompensation {
+                    task_id: t1,
+                    output_blob: b1,
+                },
+                CanoError::OrphanedCompensation {
+                    task_id: t2,
+                    output_blob: b2,
+                },
+            ) => t1 == t2 && b1 == b2,
             (
                 CanoError::WithStateContext {
                     state: s1,
@@ -1006,10 +1093,50 @@ mod tests {
     }
 
     #[test]
-    fn test_with_state_context_does_not_wrap_compensation_failed() {
-        let cf = CanoError::compensation_failed(vec![CanoError::generic("x")]);
+    fn test_with_state_context_wraps_errors_zero_through_compensation_failed() {
+        // F6: `with_state_context` does NOT re-wrap the outer CompensationFailed
+        // aggregate (that would bury the per-rollback errors one layer deeper)
+        // but DOES wrap `errors[0]` so the documented invariant — "errors[0]
+        // is the original failure as wrapped by the FSM in WithStateContext" —
+        // holds even when CompensationFailed arrives via the saga adapter's
+        // inline-compensate path (which builds it with a bare original_err).
+        let cf = CanoError::compensation_failed(vec![
+            CanoError::generic("x"),
+            CanoError::task_execution("comp failed"),
+        ]);
+        let wrapped = CanoError::with_state_context("S", 1, vec!["S".into()], cf);
+        match wrapped {
+            CanoError::CompensationFailed { errors } => {
+                assert_eq!(errors.len(), 2);
+                // errors[0] is now the wrapped original failure.
+                match &errors[0] {
+                    CanoError::WithStateContext {
+                        state,
+                        attempt,
+                        transitions_so_far,
+                        source,
+                    } => {
+                        assert_eq!(state, "S");
+                        assert_eq!(*attempt, 1);
+                        assert_eq!(transitions_so_far, &vec!["S".to_string()]);
+                        assert!(matches!(**source, CanoError::Generic(_)));
+                    }
+                    other => panic!("errors[0] must be WithStateContext, got {other:?}"),
+                }
+                // errors[1] is untouched — the per-rollback error stays as-is.
+                assert!(errors[1].message().contains("comp failed"));
+            }
+            other => panic!("expected CompensationFailed envelope, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_with_state_context_handles_empty_compensation_failed_envelope() {
+        // Edge case: an empty CompensationFailed envelope (no original failure
+        // to wrap). The wrap is a no-op rather than panicking.
+        let cf = CanoError::CompensationFailed { errors: vec![] };
         let wrapped = CanoError::with_state_context("S", 1, vec!["S".into()], cf.clone());
-        assert_eq!(wrapped, cf, "must not re-wrap CompensationFailed");
+        assert_eq!(wrapped, cf);
     }
 
     #[test]

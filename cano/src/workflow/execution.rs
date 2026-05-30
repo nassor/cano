@@ -211,7 +211,8 @@ where
         // When `Some`, each per-iteration step future is wrapped in
         // `tokio::time::timeout_at(start + limit, ...)` and a trip surfaces as
         // `CanoError::WorkflowTimeout`, drained against a bounded compensation
-        // deadline. `None` is the zero-cost legacy path.
+        // deadline. `None` is the zero-cost path — dispatch is awaited directly
+        // with no `timeout_at` wrapper.
         total_budget: Option<(std::time::Instant, std::time::Duration)>,
     ) -> Result<TState, CanoError> {
         let mut current_state = initial_state;
@@ -276,14 +277,16 @@ where
                         let err = CanoError::checkpoint_store(
                             "checkpointing requires a workflow id (call with_workflow_id)",
                         );
-                        let wrapped = Self::wrap_with_state_context(
-                            &current_state,
-                            &transitions_so_far,
-                            1,
-                            err,
-                        );
                         return self
-                            .run_compensations(workflow_id.as_deref(), compensation_stack, wrapped)
+                            .wrap_and_drain(
+                                workflow_id.as_deref(),
+                                compensation_stack,
+                                &current_state,
+                                &transitions_so_far,
+                                1,
+                                err,
+                                total_budget,
+                            )
                             .await;
                     }
                 };
@@ -307,10 +310,16 @@ where
                 crate::metrics::checkpoint_append(append_result.is_ok());
                 if let Err(e) = append_result {
                     let err = CanoError::checkpoint_store(format!("append checkpoint: {e}"));
-                    let wrapped =
-                        Self::wrap_with_state_context(&current_state, &transitions_so_far, 1, err);
                     return self
-                        .run_compensations(workflow_id.as_deref(), compensation_stack, wrapped)
+                        .wrap_and_drain(
+                            workflow_id.as_deref(),
+                            compensation_stack,
+                            &current_state,
+                            &transitions_so_far,
+                            1,
+                            err,
+                            total_budget,
+                        )
                         .await;
                 }
                 notify_observers(&self.observers, |o| o.on_checkpoint(wf_id, sequence));
@@ -333,10 +342,16 @@ where
                         "No task registered for state: {:?}",
                         current_state
                     ));
-                    let wrapped =
-                        Self::wrap_with_state_context(&current_state, &transitions_so_far, 1, err);
                     return self
-                        .run_compensations(workflow_id.as_deref(), compensation_stack, wrapped)
+                        .wrap_and_drain(
+                            workflow_id.as_deref(),
+                            compensation_stack,
+                            &current_state,
+                            &transitions_so_far,
+                            1,
+                            err,
+                            total_budget,
+                        )
                         .await;
                 }
             };
@@ -379,58 +394,33 @@ where
                 (start, limit, deadline)
             });
 
-            // Closure used by every branch whose dispatch shape is `Result<T, CanoError>`.
-            // Hands off to `tokio::time::timeout_at` when a deadline is set; on timeout
-            // it fires the observer hook and produces a `WorkflowTimeout` error.
-            let observers_for_timeout = &self.observers;
-
             // Dispatch by entry type. Any `Err(err)` triggers a compensation
-            // drain after the error is wrapped with state context.
+            // drain after the error is wrapped with state context. The
+            // `step_budget` timeout wrapper and the paired
+            // `on_task_failure` / `on_workflow_timeout` observer fan-out
+            // live in `Self::dispatch_with_budget`; each branch supplies
+            // only the failure-name fan-out specific to its shape.
             let step: Result<TState, CanoError> = match state_entry.as_ref() {
                 StateEntry::Single { task, config } => {
                     let task_name = task.name();
                     let fut = self.execute_single_task(task.clone(), Arc::clone(config));
-                    if let Some((start, limit, deadline)) = step_budget {
-                        match tokio::time::timeout_at(deadline, fut).await {
-                            Ok(inner) => inner,
-                            Err(_) => {
-                                let elapsed = start.elapsed();
-                                let err = CanoError::workflow_timeout(elapsed, limit);
-                                // `execute_single_task` fired `on_task_start` inside the
-                                // dropped future; pair it with `on_task_failure` so observer
-                                // gauges (`active_tasks` etc.) remain balanced.
-                                notify_observers(observers_for_timeout, |o| {
-                                    o.on_task_failure(task_name.as_ref(), &err);
-                                    o.on_workflow_timeout(elapsed, limit);
-                                });
-                                Err(err)
-                            }
-                        }
-                    } else {
-                        fut.await
-                    }
+                    Self::dispatch_with_budget(step_budget, &self.observers, fut, |o, err| {
+                        // `execute_single_task` fired `on_task_start` inside the
+                        // dropped future; pair it with `on_task_failure` so observer
+                        // gauges (`active_tasks` etc.) remain balanced.
+                        o.on_task_failure(task_name.as_ref(), err);
+                    })
+                    .await
                 }
                 StateEntry::Router { task, config } => {
                     // Dispatched like Single; checkpoint write is skipped in the
                     // block above (is_router guard).
                     let task_name = task.name();
                     let fut = self.execute_single_task(task.clone(), Arc::clone(config));
-                    if let Some((start, limit, deadline)) = step_budget {
-                        match tokio::time::timeout_at(deadline, fut).await {
-                            Ok(inner) => inner,
-                            Err(_) => {
-                                let elapsed = start.elapsed();
-                                let err = CanoError::workflow_timeout(elapsed, limit);
-                                notify_observers(observers_for_timeout, |o| {
-                                    o.on_task_failure(task_name.as_ref(), &err);
-                                    o.on_workflow_timeout(elapsed, limit);
-                                });
-                                Err(err)
-                            }
-                        }
-                    } else {
-                        fut.await
-                    }
+                    Self::dispatch_with_budget(step_budget, &self.observers, fut, |o, err| {
+                        o.on_task_failure(task_name.as_ref(), err);
+                    })
+                    .await
                 }
                 StateEntry::Split {
                     tasks,
@@ -442,29 +432,28 @@ where
                         Arc::clone(configs),
                         join_config.clone(),
                     );
-                    if let Some((start, limit, deadline)) = step_budget {
-                        match tokio::time::timeout_at(deadline, fut).await {
-                            Ok(inner) => inner,
-                            Err(_) => {
-                                let elapsed = start.elapsed();
-                                let err = CanoError::workflow_timeout(elapsed, limit);
-                                // `execute_split_join` fires `on_task_start` per branch.
-                                // On outer cancellation those branches are dropped — fire
-                                // a synthetic per-branch `on_task_failure` so observer
-                                // gauges remain balanced.
-                                notify_observers(observers_for_timeout, |o| {
-                                    for (idx, t) in tasks.iter().enumerate() {
-                                        let id = format!("{}[{}]", t.name(), idx);
-                                        o.on_task_failure(&id, &err);
-                                    }
-                                    o.on_workflow_timeout(elapsed, limit);
-                                });
-                                Err(err)
-                            }
-                        }
+                    // Pre-format branch ids once (instead of per observer) — the
+                    // helper invokes `task_failure_fan_out` once per observer, so
+                    // formatting inside the closure would re-allocate every time.
+                    // `execute_split_join` fires `on_task_start` per branch; on
+                    // outer cancellation those branches are dropped, so we fire a
+                    // synthetic per-branch `on_task_failure` to keep observer
+                    // gauges balanced.
+                    let branch_ids: Vec<String> = if step_budget.is_some() {
+                        tasks
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, t)| format!("{}[{}]", t.name(), idx))
+                            .collect()
                     } else {
-                        fut.await
-                    }
+                        Vec::new()
+                    };
+                    Self::dispatch_with_budget(step_budget, &self.observers, fut, |o, err| {
+                        for id in &branch_ids {
+                            o.on_task_failure(id, err);
+                        }
+                    })
+                    .await
                 }
                 StateEntry::CompensatableSingle { task, config } => {
                     // Saga safety: do NOT wrap `execute_compensatable_task` in `timeout_at`.
@@ -507,17 +496,15 @@ where
                                         task_id: task_name,
                                         output_blob,
                                     });
-                                    let wrapped = Self::wrap_with_state_context(
-                                        &current_state,
-                                        &transitions_so_far,
-                                        1,
-                                        err,
-                                    );
                                     return self
-                                        .run_compensations(
+                                        .wrap_and_drain(
                                             workflow_id.as_deref(),
                                             compensation_stack,
-                                            wrapped,
+                                            &current_state,
+                                            &transitions_so_far,
+                                            1,
+                                            err,
+                                            total_budget,
                                         )
                                         .await;
                                 }
@@ -551,22 +538,10 @@ where
                         &mut sequence,
                         resume_cursor,
                     );
-                    if let Some((start, limit, deadline)) = step_budget {
-                        match tokio::time::timeout_at(deadline, fut).await {
-                            Ok(inner) => inner,
-                            Err(_) => {
-                                let elapsed = start.elapsed();
-                                let err = CanoError::workflow_timeout(elapsed, limit);
-                                notify_observers(observers_for_timeout, |o| {
-                                    o.on_task_failure(task_name.as_ref(), &err);
-                                    o.on_workflow_timeout(elapsed, limit);
-                                });
-                                Err(err)
-                            }
-                        }
-                    } else {
-                        fut.await
-                    }
+                    Self::dispatch_with_budget(step_budget, &self.observers, fut, |o, err| {
+                        o.on_task_failure(task_name.as_ref(), err);
+                    })
+                    .await
                 }
             };
 
@@ -591,71 +566,150 @@ where
                 Ok(s) => s,
                 Err(e) => {
                     let attempt = Self::attempts_from_error(&e);
-                    let wrapped = Self::wrap_with_state_context(
-                        &current_state,
-                        &transitions_so_far,
-                        attempt,
-                        e,
-                    );
-                    // Whenever a total budget is configured, drain compensations under a
-                    // bounded deadline regardless of the trip cause. `with_compensation_timeout`
-                    // bounds rollback time for *any* failure, not just the engine-fired
-                    // `WorkflowTimeout`: a hung task surfaced as `RetryExhausted { source: Timeout }`,
-                    // a circuit-open burst, or a checkpoint-store error all benefit from the
-                    // same wall-clock cap.
-                    if let Some((_, limit)) = total_budget {
-                        let comp_budget =
-                            resolve_compensation_deadline(limit, self.compensation_timeout);
-                        let comp_deadline = tokio::time::Instant::now() + comp_budget;
-                        return self
-                            .run_compensations_bounded(
-                                workflow_id.as_deref(),
-                                compensation_stack,
-                                wrapped,
-                                Some(comp_deadline),
-                            )
-                            .await;
-                    }
+                    // Route through `wrap_and_drain` so the wrap + bounded-vs-
+                    // unbounded decision live in one place. The bounded drain
+                    // bounds rollback time for *any* failure, not just the
+                    // engine-fired `WorkflowTimeout`: a hung task surfaced
+                    // as `RetryExhausted { source: Timeout }`, a circuit-open
+                    // burst, or a checkpoint-store error all benefit from
+                    // the same wall-clock cap.
                     return self
-                        .run_compensations(workflow_id.as_deref(), compensation_stack, wrapped)
+                        .wrap_and_drain(
+                            workflow_id.as_deref(),
+                            compensation_stack,
+                            &current_state,
+                            &transitions_so_far,
+                            attempt,
+                            e,
+                            total_budget,
+                        )
                         .await;
                 }
             };
         }
     }
 
-    /// Compute the attempt number that produced `err`.
+    /// Wrap a state-dispatch future in the per-iteration step-budget, or
+    /// pass it through unchanged when no total budget is active.
     ///
-    /// `RetryExhausted` carries the structural count. `CircuitOpen` returns 0
-    /// because the breaker short-circuits *before* any attempt body runs.
-    /// `WithStateContext` and the timeout/retry wrappers are unwrapped so a
-    /// nested cause still surfaces the truthful count rather than always 1.
-    /// Everything else means we stopped on the first attempt.
-    pub(super) fn attempts_from_error(err: &CanoError) -> u32 {
-        match err {
-            CanoError::RetryExhausted { attempts, .. } => *attempts,
-            CanoError::CircuitOpen(_) => 0,
-            CanoError::WithStateContext { source, .. } => Self::attempts_from_error(source),
-            _ => 1,
+    /// When the wrapped future trips the deadline, the engine synthesizes a
+    /// `WorkflowTimeout` error, fires `on_workflow_timeout` once per
+    /// registered observer, and lets the caller supply the
+    /// `on_task_failure` fan-out via `task_failure_fan_out` — single-task
+    /// arms fire one failure; the Split arm iterates the per-branch task
+    /// names so observer `active_tasks` gauges stay balanced (every
+    /// `on_task_start` already fired by the dropped inner future is paired
+    /// with a matching `on_task_failure`).
+    ///
+    /// `fut.await` is the zero-cost path when `step_budget` is `None`; no
+    /// observer plumbing runs in that case.
+    async fn dispatch_with_budget<T, F>(
+        step_budget: Option<(
+            std::time::Instant,
+            std::time::Duration,
+            tokio::time::Instant,
+        )>,
+        observers: &[Arc<dyn crate::observer::WorkflowObserver>],
+        fut: F,
+        task_failure_fan_out: impl Fn(&dyn crate::observer::WorkflowObserver, &CanoError),
+    ) -> Result<T, CanoError>
+    where
+        F: std::future::Future<Output = Result<T, CanoError>>,
+    {
+        let Some((start, limit, deadline)) = step_budget else {
+            return fut.await;
+        };
+        match tokio::time::timeout_at(deadline, fut).await {
+            Ok(inner) => inner,
+            Err(_) => {
+                let elapsed = start.elapsed();
+                let err = CanoError::workflow_timeout(elapsed, limit);
+                notify_observers(observers, |o| {
+                    task_failure_fan_out(o, &err);
+                    o.on_workflow_timeout(elapsed, limit);
+                });
+                Err(err)
+            }
         }
     }
 
-    /// Annotate a task failure with the FSM state, attempt number, and transition
-    /// path that produced it. Formats the path into `Vec<String>` here so the FSM
-    /// loop can keep its tracker as `Vec<TState>` and skip per-iteration String
-    /// allocations on the success path. The constructor short-circuits when
-    /// `err` is itself already a `WithStateContext` or a `CompensationFailed`.
-    fn wrap_with_state_context(
+    /// Wrap `err` with FSM state context and drain compensations under the
+    /// bounded vs unbounded variant chosen by `total_budget`. Every error
+    /// site in `execute_workflow_from` routes through this helper so two
+    /// invariants hold uniformly across pre-dispatch arms (missing workflow
+    /// id, checkpoint-append failure, missing handler, compensation-
+    /// completion append failure) and the post-dispatch arm:
+    ///
+    /// - **F1**: when `with_total_timeout` is set, the drain runs under the
+    ///   user-configured `with_compensation_timeout` (resolved from the
+    ///   total budget). Without a single entry point, pre-dispatch arms
+    ///   used to silently call the unbounded drain.
+    /// - **F6**: the original failure is wrapped in `WithStateContext`
+    ///   before reaching the drain, so any later `CompensationFailed`
+    ///   envelope's `errors[0]` carries the FSM state/path/attempt
+    ///   annotation. The wrap is idempotent for already-wrapped errors
+    ///   and recurses into `CompensationFailed.errors[0]` (handled by the
+    ///   `with_state_context` constructor).
+    #[allow(clippy::too_many_arguments)]
+    async fn wrap_and_drain(
+        &self,
+        workflow_id: Option<&str>,
+        compensation_stack: Vec<CompensationEntry>,
         current_state: &TState,
         transitions_so_far: &[TState],
         attempt: u32,
         err: CanoError,
-    ) -> CanoError {
+        total_budget: Option<(std::time::Instant, std::time::Duration)>,
+    ) -> Result<TState, CanoError> {
+        // Format the transition path into `Vec<String>` here so the FSM loop
+        // can keep its tracker as `Vec<TState>` and skip per-iteration String
+        // allocations on the success path. `CanoError::with_state_context`
+        // short-circuits when `err` is already a `WithStateContext` (preserving
+        // nested-workflow context) or a `CompensationFailed` (in which case
+        // it recurses into `errors[0]` so the F6 invariant still holds at
+        // every drain entry point).
         let path: Vec<String> = transitions_so_far
             .iter()
             .map(|s| format!("{s:?}"))
             .collect();
-        CanoError::with_state_context(format!("{current_state:?}"), attempt, path, err)
+        let wrapped =
+            CanoError::with_state_context(format!("{current_state:?}"), attempt, path, err);
+        match total_budget {
+            Some((_, limit)) => {
+                let comp_budget = resolve_compensation_deadline(limit, self.compensation_timeout);
+                let comp_deadline = tokio::time::Instant::now() + comp_budget;
+                self.run_compensations_bounded(
+                    workflow_id,
+                    compensation_stack,
+                    wrapped,
+                    Some(comp_deadline),
+                )
+                .await
+            }
+            None => {
+                self.run_compensations(workflow_id, compensation_stack, wrapped)
+                    .await
+            }
+        }
+    }
+
+    /// Compute the attempt number that produced `err`.
+    ///
+    /// `RetryExhausted` carries the structural count. `CircuitOpen` and
+    /// `WorkflowTimeout` return 0 because they short-circuit (or cancel) the
+    /// in-flight future *before* an attempt body runs to completion — surfacing
+    /// `attempt = 1` would be indistinguishable from "completed one full
+    /// attempt then failed", which misleads alerting that buckets on the
+    /// attempt count. `WithStateContext` is unwrapped so a nested cause still
+    /// surfaces the truthful count rather than always 1. Everything else means
+    /// we stopped on the first attempt.
+    pub(super) fn attempts_from_error(err: &CanoError) -> u32 {
+        match err {
+            CanoError::RetryExhausted { attempts, .. } => *attempts,
+            CanoError::CircuitOpen(_) | CanoError::WorkflowTimeout { .. } => 0,
+            CanoError::WithStateContext { source, .. } => Self::attempts_from_error(source),
+            _ => 1,
+        }
     }
 
     async fn execute_single_task(
@@ -680,11 +734,12 @@ where
             tracing::Span::none()
         };
 
-        // Wrap the retry-driving future in `catch_unwind` so a panic inside
-        // the task body becomes a `CanoError::TaskExecution` instead of
-        // unwinding through the workflow loop and aborting the runtime
-        // worker. Split tasks apply the same catch-unwind pattern inside each
-        // spawned task so their task index and panic payload are preserved.
+        // Wrap the retry-driving future in `catch_unwind` (via
+        // `catch_panic_to_error`) so a panic inside the task body becomes a
+        // `CanoError::TaskExecution` instead of unwinding through the
+        // workflow loop and aborting the runtime worker. Split tasks apply
+        // the same catch-unwind pattern inside each spawned task so their
+        // task index and panic payload are preserved.
         let run_future = async {
             run_with_retries(&config, || {
                 let task_clone = task.clone();
@@ -695,26 +750,12 @@ where
         };
 
         #[cfg(feature = "tracing")]
-        let unwind_result = {
+        let result = {
             let _enter = task_span.enter();
-            AssertUnwindSafe(run_future).catch_unwind().await
+            super::catch_panic_to_error(run_future, "Single task").await
         };
-
         #[cfg(not(feature = "tracing"))]
-        let unwind_result = AssertUnwindSafe(run_future).catch_unwind().await;
-
-        let result = match unwind_result {
-            Ok(inner) => inner,
-            Err(payload) => {
-                // Forward the inner trait object so `downcast_ref` inspects
-                // the actual panic payload type rather than the surrounding
-                // `Box<dyn Any>`.
-                let payload_str = panic_payload_message(&*payload);
-                #[cfg(feature = "tracing")]
-                tracing::error!(panic = %payload_str, "Single task panicked");
-                Err(CanoError::task_execution(format!("panic: {payload_str}")))
-            }
-        };
+        let result = super::catch_panic_to_error(run_future, "Single task").await;
 
         let outcome: Result<TState, CanoError> = match result {
             Ok(TaskResult::Single(next_state)) => {
@@ -786,15 +827,7 @@ where
                 })
                 .await
             };
-            let step_result = match AssertUnwindSafe(run_future).catch_unwind().await {
-                Ok(inner) => inner,
-                Err(payload) => {
-                    let payload_str = panic_payload_message(&*payload);
-                    #[cfg(feature = "tracing")]
-                    tracing::error!(panic = %payload_str, "Stepped task panicked");
-                    Err(CanoError::task_execution(format!("panic: {payload_str}")))
-                }
-            };
+            let step_result = super::catch_panic_to_error(run_future, "Stepped task").await;
 
             match step_result {
                 Err(e) => break Err(e),
@@ -2340,6 +2373,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workflow_timeout_reports_attempt_zero_not_one() {
+        // Regression: `attempts_from_error(WorkflowTimeout)` previously fell
+        // through the `_` arm to `1`, which was indistinguishable from "one
+        // full attempt completed and failed". The total-timeout drops the
+        // in-flight future *before* an attempt body returns — same as
+        // CircuitOpen — so the surfaced attempt count must be 0.
+        let workflow = Workflow::bare()
+            .with_total_timeout(Duration::from_millis(20))
+            .register(
+                TestState::Start,
+                SleepyTask {
+                    sleep_ms: 500,
+                    next: TestState::Complete,
+                },
+            )
+            .add_exit_state(TestState::Complete);
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        match err {
+            CanoError::WithStateContext {
+                attempt, source, ..
+            } => {
+                assert!(
+                    matches!(*source, CanoError::WorkflowTimeout { .. }),
+                    "expected wrapped WorkflowTimeout, got {source:?}"
+                );
+                assert_eq!(
+                    attempt, 0,
+                    "WorkflowTimeout fires before an attempt completes — attempt should be 0"
+                );
+            }
+            other => panic!("expected WithStateContext, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn total_timeout_returns_workflow_timeout_error() {
         let workflow = Workflow::bare()
             .with_total_timeout(Duration::from_millis(20))
@@ -2360,21 +2428,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn with_timeout_acts_as_floor_when_combined_with_with_total_timeout() {
+        // Regression for F5: previously, when both `with_timeout(d1)` and
+        // `with_total_timeout(d2)` were set, the legacy `with_timeout` was
+        // silently disabled (the total-timeout path won outright). Users who
+        // composed them expecting `with_timeout` to act as a hard upper bound
+        // would lose that guardrail. The engine now treats their min as the
+        // effective graceful budget, so `with_timeout=10ms` still bounds the
+        // run even when `with_total_timeout=60s` is configured.
+        let workflow = Workflow::bare()
+            .with_timeout(Duration::from_millis(10))
+            .with_total_timeout(Duration::from_secs(60))
+            .register(
+                TestState::Start,
+                SleepyTask {
+                    sleep_ms: 1_000,
+                    next: TestState::Complete,
+                },
+            )
+            .add_exit_state(TestState::Complete);
+        let started = std::time::Instant::now();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "with_timeout (10ms) must still bound the run when total_timeout is also set; took {elapsed:?}"
+        );
+        // The graceful path produces `WorkflowTimeout`; the legacy path produces
+        // `CanoError::Workflow("Workflow timeout exceeded")`. The composition
+        // takes the graceful path.
+        assert!(
+            matches!(err.inner(), CanoError::WorkflowTimeout { .. }),
+            "expected graceful WorkflowTimeout, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn with_timeout_alone_still_uses_legacy_blunt_timeout() {
+        // Sanity for F5: when only `with_timeout` is set the legacy path is
+        // unchanged — surface `CanoError::Workflow("Workflow timeout exceeded")`
+        // (the documented legacy shape) and run no compensation.
+        let workflow = Workflow::bare()
+            .with_timeout(Duration::from_millis(10))
+            .register(
+                TestState::Start,
+                SleepyTask {
+                    sleep_ms: 1_000,
+                    next: TestState::Complete,
+                },
+            )
+            .add_exit_state(TestState::Complete);
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        assert!(
+            matches!(err, CanoError::Workflow(ref m) if m.contains("Workflow timeout exceeded")),
+            "with_timeout alone must surface the legacy blunt-timeout shape, got: {err}"
+        );
+    }
+
+    #[tokio::test]
     async fn total_timeout_fires_on_workflow_timeout_observer_hook() {
         use crate::observer::WorkflowObserver;
-        use std::sync::Mutex;
 
-        #[derive(Default)]
-        struct Rec(Mutex<Vec<(Duration, Duration)>>);
+        struct Rec(Arc<Recorder<(Duration, Duration)>>);
         impl WorkflowObserver for Rec {
             fn on_workflow_timeout(&self, elapsed: Duration, limit: Duration) {
-                self.0.lock().unwrap().push((elapsed, limit));
+                self.0.record((elapsed, limit));
             }
         }
-        let rec = Arc::new(Rec::default());
+        let rec = Recorder::<(Duration, Duration)>::new();
         let workflow = Workflow::bare()
             .with_total_timeout(Duration::from_millis(20))
-            .with_observer(rec.clone())
+            .with_observer(Arc::new(Rec(rec.clone())))
             .register(
                 TestState::Start,
                 SleepyTask {
@@ -2384,7 +2508,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
         let _ = workflow.orchestrate(TestState::Start).await;
-        let events = rec.0.lock().unwrap().clone();
+        let events = rec.snapshot();
         assert_eq!(events.len(), 1, "hook should fire exactly once");
         let (elapsed, limit) = events[0];
         assert_eq!(limit, Duration::from_millis(20));
@@ -2517,5 +2641,428 @@ mod tests {
         assert_eq!(outcome, TestState::Complete);
         let log_entries = log.lock().unwrap().clone();
         assert_eq!(log_entries, vec!["ran".to_string()]);
+    }
+}
+
+/// Edge-case unit tests for the `wrap_and_drain` helper. The integration
+/// sentinels (`pre_dispatch_failure_honors_bounded_compensation_deadline`,
+/// `inline_compensate_failure_wraps_errors_0_in_with_state_context`,
+/// `compensations_run_in_reverse_on_terminal_failure`) cover the helper
+/// end-to-end through `execute_workflow_from`; this module pins down the
+/// boundary behaviour in isolation.
+#[cfg(test)]
+mod wrap_and_drain_tests {
+    use super::*;
+    use crate::saga::CompensationEntry;
+    use crate::workflow::test_support::TestState;
+
+    fn bare_workflow() -> Workflow<TestState> {
+        Workflow::<TestState>::bare()
+    }
+
+    #[tokio::test]
+    async fn empty_stack_unbounded_returns_wrapped_original() {
+        // No compensators to run, no total budget → just the wrapped error.
+        let w = bare_workflow();
+        let err = w
+            .wrap_and_drain(
+                None,
+                Vec::new(),
+                &TestState::Start,
+                &[TestState::Start],
+                1,
+                CanoError::task_execution("boom"),
+                None,
+            )
+            .await
+            .expect_err("empty stack with err returns err");
+        match err {
+            CanoError::WithStateContext {
+                state,
+                attempt,
+                source,
+                ..
+            } => {
+                assert_eq!(state, "Start");
+                assert_eq!(attempt, 1);
+                assert!(matches!(*source, CanoError::TaskExecution(_)));
+            }
+            other => panic!("expected WithStateContext, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_stack_bounded_still_returns_wrapped_original() {
+        // With a budget but no compensators on the stack, the deadline never
+        // matters — the helper short-circuits via `run_compensations_bounded`'s
+        // empty-stack guard and surfaces the wrapped original.
+        let w = bare_workflow();
+        let total_budget = Some((
+            std::time::Instant::now(),
+            std::time::Duration::from_millis(50),
+        ));
+        let err = w
+            .wrap_and_drain(
+                None,
+                Vec::new(),
+                &TestState::Start,
+                &[TestState::Start],
+                1,
+                CanoError::task_execution("boom-bounded"),
+                total_budget,
+            )
+            .await
+            .expect_err("empty stack returns the wrapped err");
+        assert!(matches!(err, CanoError::WithStateContext { .. }));
+    }
+
+    #[tokio::test]
+    async fn already_wrapped_with_state_context_is_idempotent() {
+        // F6 invariant: the constructor refuses to double-wrap, so an err
+        // that is *already* WithStateContext flows through unchanged. This
+        // matters when an inner workflow's error surfaces from a task.
+        let w = bare_workflow();
+        let already = CanoError::with_state_context(
+            "InnerState",
+            3,
+            vec!["InnerStart".to_string(), "InnerState".to_string()],
+            CanoError::task_execution("nested"),
+        );
+        let err = w
+            .wrap_and_drain(
+                None,
+                Vec::new(),
+                &TestState::Start,
+                &[TestState::Start],
+                1,
+                already,
+                None,
+            )
+            .await
+            .expect_err("already-wrapped err returned");
+        match err {
+            CanoError::WithStateContext { state, attempt, .. } => {
+                // Inner state/attempt preserved — outer wrap was a no-op.
+                assert_eq!(state, "InnerState");
+                assert_eq!(attempt, 3);
+            }
+            other => panic!("expected WithStateContext, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn compensation_failed_envelope_wraps_errors_zero() {
+        // F6 invariant: when the err is a CompensationFailed envelope, the
+        // constructor wraps `errors[0]` so downstream code matching on the
+        // first error still sees WithStateContext.
+        let w = bare_workflow();
+        let envelope = CanoError::compensation_failed(vec![
+            CanoError::task_execution("original cause"),
+            CanoError::task_execution("inline-compensate failure"),
+        ]);
+        let err = w
+            .wrap_and_drain(
+                None,
+                Vec::new(),
+                &TestState::Start,
+                &[TestState::Start],
+                7,
+                envelope,
+                None,
+            )
+            .await
+            .expect_err("envelope returned");
+        match err {
+            CanoError::CompensationFailed { errors } => {
+                assert_eq!(errors.len(), 2);
+                match &errors[0] {
+                    CanoError::WithStateContext { state, attempt, .. } => {
+                        assert_eq!(state, "Start");
+                        assert_eq!(*attempt, 7);
+                    }
+                    other => panic!("errors[0] must be wrapped, got {other:?}"),
+                }
+                // errors[1] must still be the inline-compensate error verbatim.
+                assert!(errors[1].message().contains("inline-compensate failure"));
+            }
+            other => panic!("expected CompensationFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn no_compensator_for_stack_entry_emits_orphaned_compensation() {
+        // A rehydrated stack entry whose `task_id` has no registered
+        // compensator must surface as `OrphanedCompensation` carrying the
+        // persisted blob — without this, the operator's manual-rollback
+        // path loses the data.
+        let w = bare_workflow();
+        let stack = vec![CompensationEntry {
+            task_id: Arc::from("UnknownTask"),
+            output_blob: b"forty-two".to_vec(),
+        }];
+        let err = w
+            .wrap_and_drain(
+                None,
+                stack,
+                &TestState::Start,
+                &[TestState::Start],
+                1,
+                CanoError::task_execution("trigger"),
+                None,
+            )
+            .await
+            .expect_err("orphan compensator surfaces error");
+        match err {
+            CanoError::CompensationFailed { errors } => {
+                let blob = errors.iter().find_map(|e| match e {
+                    CanoError::OrphanedCompensation {
+                        task_id,
+                        output_blob,
+                    } => Some((task_id.to_string(), output_blob.clone())),
+                    _ => None,
+                });
+                let (task_id, blob) = blob.expect("must include OrphanedCompensation");
+                assert_eq!(task_id, "UnknownTask");
+                assert_eq!(blob, b"forty-two");
+            }
+            other => panic!("expected CompensationFailed envelope, got {other:?}"),
+        }
+    }
+}
+
+/// Edge-case unit tests for the `dispatch_with_budget` helper. Each variant
+/// of `StateEntry` is already exercised end-to-end by the orchestrate-level
+/// tests above; these tests pin down the helper's behavior in isolation —
+/// what happens when there are no observers, when the future returns first,
+/// when the deadline is already past, etc.
+#[cfg(test)]
+mod dispatch_with_budget_tests {
+    use super::*;
+    use crate::observer::WorkflowObserver;
+    use crate::workflow::test_support::{Recorder, TestState};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// Captures every observer event so tests can assert exact fan-out shape.
+    /// Thin observer over a shared `Recorder<String>` (see `test_support`).
+    struct CapturingObserver(Arc<Recorder<String>>);
+    impl WorkflowObserver for CapturingObserver {
+        fn on_task_failure(&self, task_id: &str, _err: &CanoError) {
+            self.0.record(format!("task_failure:{task_id}"));
+        }
+        fn on_workflow_timeout(&self, _elapsed: Duration, limit: Duration) {
+            self.0
+                .record(format!("workflow_timeout:{}ms", limit.as_millis()));
+        }
+    }
+    impl CapturingObserver {
+        /// Wraps a fresh `Recorder` and returns both halves: the observer for
+        /// `Workflow::with_observer`, and the recorder for snapshotting.
+        fn new() -> (Self, Arc<Recorder<String>>) {
+            let rec = Recorder::new();
+            (Self(rec.clone()), rec)
+        }
+    }
+
+    fn budget_for(limit: Duration) -> Option<(std::time::Instant, Duration, tokio::time::Instant)> {
+        let start = std::time::Instant::now();
+        let deadline = tokio::time::Instant::now() + limit;
+        Some((start, limit, deadline))
+    }
+
+    #[tokio::test]
+    async fn no_budget_passes_future_result_through_unchanged() {
+        // When `step_budget` is None we are on the zero-cost path; the helper
+        // must NOT touch observers and must return the inner result verbatim.
+        let (observer, rec) = CapturingObserver::new();
+        let observer_dyn: Arc<dyn WorkflowObserver> = Arc::new(observer);
+        let observers = [observer_dyn];
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let cc = Arc::clone(&call_count);
+        let result = Workflow::<TestState>::dispatch_with_budget(
+            None,
+            &observers,
+            async { Ok::<TestState, CanoError>(TestState::Complete) },
+            |_o, _err| {
+                cc.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .await
+        .expect("no budget = pass-through");
+        assert_eq!(result, TestState::Complete);
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            0,
+            "fan-out closure must not run on the no-budget path"
+        );
+        assert!(rec.is_empty());
+    }
+
+    #[tokio::test]
+    async fn budget_with_timely_future_passes_through_without_observer_fanout() {
+        // The deadline is comfortably in the future; the inner future returns
+        // immediately. Helper returns the result; fan-out closure stays silent.
+        let (observer, rec) = CapturingObserver::new();
+        let observer_dyn: Arc<dyn WorkflowObserver> = Arc::new(observer);
+        let observers = [observer_dyn];
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let cc = Arc::clone(&call_count);
+        let result = Workflow::<TestState>::dispatch_with_budget(
+            budget_for(Duration::from_secs(60)),
+            &observers,
+            async { Ok::<TestState, CanoError>(TestState::Complete) },
+            |_o, _err| {
+                cc.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .await
+        .expect("timely future succeeds");
+        assert_eq!(result, TestState::Complete);
+        assert_eq!(call_count.load(Ordering::SeqCst), 0);
+        assert!(rec.is_empty());
+    }
+
+    #[tokio::test]
+    async fn budget_trip_synthesizes_workflow_timeout_and_fires_fan_out_once() {
+        // A deadline already in the past trips the wrapper immediately. The
+        // fan-out closure must run for each registered observer; the helper
+        // must always fire `on_workflow_timeout`. Result is WorkflowTimeout.
+        let (observer, rec) = CapturingObserver::new();
+        let observer_dyn: Arc<dyn WorkflowObserver> = Arc::new(observer);
+        let observers = [observer_dyn];
+
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let cc = Arc::clone(&call_count);
+        // Long-running future + already-expired deadline forces the timeout.
+        let err = Workflow::<TestState>::dispatch_with_budget(
+            Some((
+                std::time::Instant::now() - Duration::from_secs(1),
+                Duration::from_millis(50),
+                tokio::time::Instant::now() - Duration::from_millis(1),
+            )),
+            &observers,
+            async {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                Ok::<TestState, CanoError>(TestState::Complete)
+            },
+            |o, err| {
+                cc.fetch_add(1, Ordering::SeqCst);
+                o.on_task_failure("synthetic", err);
+            },
+        )
+        .await
+        .expect_err("expired deadline must trip");
+        assert!(
+            matches!(err, CanoError::WorkflowTimeout { .. }),
+            "got: {err}"
+        );
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            1,
+            "fan-out closure must fire exactly once (per registered observer)"
+        );
+        assert_eq!(
+            rec.snapshot(),
+            vec![
+                "task_failure:synthetic".to_string(),
+                "workflow_timeout:50ms".to_string(),
+            ],
+            "observer must see both events, in this order"
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_trip_with_empty_observer_slice_still_returns_workflow_timeout() {
+        // Empty observer slice: the fan-out closure is never called, but the
+        // helper still synthesizes the WorkflowTimeout error.
+        let observers: [Arc<dyn WorkflowObserver>; 0] = [];
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let cc = Arc::clone(&call_count);
+        let err = Workflow::<TestState>::dispatch_with_budget(
+            Some((
+                std::time::Instant::now() - Duration::from_secs(1),
+                Duration::from_millis(10),
+                tokio::time::Instant::now() - Duration::from_millis(1),
+            )),
+            &observers,
+            async {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                Ok::<TestState, CanoError>(TestState::Complete)
+            },
+            |_o, _err| {
+                cc.fetch_add(1, Ordering::SeqCst);
+            },
+        )
+        .await
+        .expect_err("must still time out");
+        assert!(matches!(err, CanoError::WorkflowTimeout { .. }));
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            0,
+            "fan-out closure never runs without observers"
+        );
+    }
+
+    #[tokio::test]
+    async fn budget_trip_fires_fan_out_once_per_observer() {
+        // Two observers: the fan-out closure must run once per observer, and
+        // each observer must see `on_workflow_timeout` exactly once.
+        let (a_obs, a_rec) = CapturingObserver::new();
+        let (b_obs, b_rec) = CapturingObserver::new();
+        let observers: [Arc<dyn WorkflowObserver>; 2] = [Arc::new(a_obs), Arc::new(b_obs)];
+        let call_count = Arc::new(AtomicUsize::new(0));
+        let cc = Arc::clone(&call_count);
+        let err = Workflow::<TestState>::dispatch_with_budget(
+            Some((
+                std::time::Instant::now() - Duration::from_secs(1),
+                Duration::from_millis(5),
+                tokio::time::Instant::now() - Duration::from_millis(1),
+            )),
+            &observers,
+            async {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                Ok::<TestState, CanoError>(TestState::Complete)
+            },
+            |o, err| {
+                cc.fetch_add(1, Ordering::SeqCst);
+                o.on_task_failure("multi", err);
+            },
+        )
+        .await
+        .expect_err("must time out");
+        assert!(matches!(err, CanoError::WorkflowTimeout { .. }));
+        assert_eq!(
+            call_count.load(Ordering::SeqCst),
+            2,
+            "fan-out closure runs once per observer"
+        );
+        // Each observer must see both events exactly once.
+        let expected = vec![
+            "task_failure:multi".to_string(),
+            "workflow_timeout:5ms".to_string(),
+        ];
+        assert_eq!(a_rec.snapshot(), expected);
+        assert_eq!(b_rec.snapshot(), expected);
+    }
+
+    #[tokio::test]
+    async fn budget_does_not_swallow_inner_future_errors() {
+        // When the inner future returns Err *before* the deadline, the helper
+        // must surface that error unchanged — NOT convert it to WorkflowTimeout.
+        let observers: [Arc<dyn WorkflowObserver>; 0] = [];
+        let err = Workflow::<TestState>::dispatch_with_budget(
+            budget_for(Duration::from_secs(60)),
+            &observers,
+            async { Err::<TestState, _>(CanoError::task_execution("custom inner err")) },
+            |_o, _err| {},
+        )
+        .await
+        .expect_err("inner future errored before deadline");
+        assert!(
+            matches!(err, CanoError::TaskExecution(ref m) if m == "custom inner err"),
+            "must propagate the inner err verbatim, got: {err}"
+        );
     }
 }

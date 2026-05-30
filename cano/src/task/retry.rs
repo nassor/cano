@@ -117,15 +117,40 @@ impl RetryMode {
                 jitter,
             } => {
                 if attempt < *max_retries {
+                    // Sanitize against bad inputs. The struct fields are `pub`
+                    // and the `ExponentialBackoff { .. }` variant can be
+                    // constructed directly with non-finite or non-positive
+                    // `multiplier`/`jitter`. Without this clamp the math chain
+                    // ends in `NaN as u64 = 0` (a zero-delay retry storm) or
+                    // similarly broken delays. A non-finite or non-positive
+                    // multiplier collapses backoff to "no growth": use 1.0 so
+                    // each attempt waits `base_delay`, capped by `max_delay`.
+                    let mult = if multiplier.is_finite() && *multiplier > 0.0 {
+                        *multiplier
+                    } else {
+                        1.0
+                    };
+                    let safe_jitter = if jitter.is_finite() {
+                        jitter.clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+
                     let base_ms = base_delay.as_millis() as f64;
-                    let exponential_delay = base_ms * multiplier.powi(attempt as i32);
+                    // Saturate the exponent before the i32 cast. Without this clamp
+                    // an `attempt` of `i32::MAX as usize + 1` wraps to a large
+                    // negative i32 and `mult.powi(NEG)` collapses to ~0, producing
+                    // a zero-delay retry storm against the failing dependency on
+                    // pathological `max_retries` values.
+                    let exponent = attempt.min(i32::MAX as usize) as i32;
+                    let exponential_delay = base_ms * mult.powi(exponent);
                     let capped_delay = exponential_delay.min(max_delay.as_millis() as f64);
 
                     // Add jitter: delay * (1 ± jitter * random_factor)
-                    let jitter_factor = if *jitter > 0.0 {
+                    let jitter_factor = if safe_jitter > 0.0 {
                         let mut rng = rand::rng();
                         let random_factor: f64 = rng.random_range(-1.0..=1.0);
-                        1.0 + (jitter * random_factor)
+                        1.0 + (safe_jitter * random_factor)
                     } else {
                         1.0
                     };
@@ -137,6 +162,19 @@ impl RetryMode {
                         u64::MAX
                     } else {
                         final_delay_f as u64
+                    };
+                    // Floor to at least 1 ms when there is a non-zero configured
+                    // backoff so a jitter draw of `-1.0` (legal endpoint of
+                    // `random_range(-1.0..=1.0)`) with `jitter == 1.0` can't
+                    // collapse the inter-attempt delay to `Duration::ZERO` — the
+                    // tokio sleep would then only yield, letting the retry loop
+                    // burst against the failing dependency. A pre-clamp `base_ms
+                    // == 0` (i.e. user actually wants zero-delay retries) still
+                    // yields `Duration::ZERO`.
+                    let final_delay = if base_ms > 0.0 {
+                        final_delay.max(1)
+                    } else {
+                        final_delay
                     };
                     Some(Duration::from_millis(final_delay))
                 } else {
@@ -228,6 +266,23 @@ impl TaskConfig {
     }
 
     /// Apply a per-attempt timeout. Each retry attempt gets a fresh deadline.
+    ///
+    /// # Cancellation safety
+    ///
+    /// When the timeout fires, the in-flight task body is **dropped at its
+    /// next await point** — i.e. `tokio::time::timeout` cancels it. Any
+    /// non-RAII external state the task started (an open DB transaction
+    /// without a `Drop` guard, an HTTP POST that already hit the wire, a
+    /// partially-written file) is left as-is. If the retry policy schedules
+    /// another attempt, that attempt may collide with the orphaned state.
+    ///
+    /// Tasks whose bodies are not cancellation-safe should either:
+    /// 1. Wrap external resources in a type whose `Drop` releases them
+    ///    cleanly, or
+    /// 2. Set `attempt_timeout = None` and rely on the task itself (or the
+    ///    workflow's [`with_total_timeout`](crate::workflow::Workflow::with_total_timeout))
+    ///    to bound runtime via a cooperative mechanism (e.g. a select! on a
+    ///    cancellation token the task body polls between operations).
     pub fn with_attempt_timeout(mut self, timeout: Duration) -> Self {
         self.attempt_timeout = Some(timeout);
         self
@@ -525,6 +580,85 @@ mod tests {
     }
 
     #[test]
+    fn test_retry_mode_exponential_sanitizes_nan_multiplier() {
+        // The `ExponentialBackoff` variant's fields are `pub`, so a user can
+        // construct it directly with a non-finite multiplier — bypassing the
+        // `exponential_custom` builder. `delay_for_attempt` must defend itself
+        // by treating any non-finite multiplier or jitter as a 1.0 / 0.0
+        // collapse so each attempt waits at most `base_delay`, capped at
+        // `max_delay`. Otherwise `NaN.powi(_) = NaN` chains through to
+        // `NaN as u64 = 0`, producing a zero-delay retry storm against the
+        // failing dependency.
+        let bad = RetryMode::ExponentialBackoff {
+            max_retries: 5,
+            base_delay: Duration::from_millis(100),
+            multiplier: f64::NAN,
+            max_delay: Duration::from_secs(30),
+            jitter: f64::NAN,
+        };
+        // Attempt 0 — base_delay * 1.0 = 100ms (multiplier collapsed to 1.0,
+        // jitter collapsed to 0.0 since NaN).
+        let d0 = bad.delay_for_attempt(0).expect("attempt within budget");
+        assert_eq!(
+            d0,
+            Duration::from_millis(100),
+            "NaN multiplier must NOT collapse to a 0-delay retry storm"
+        );
+        let d3 = bad.delay_for_attempt(3).expect("attempt within budget");
+        assert_eq!(
+            d3,
+            Duration::from_millis(100),
+            "every attempt with NaN multiplier should stay at base_delay"
+        );
+    }
+
+    #[test]
+    fn test_retry_mode_exponential_clamps_attempt_cast() {
+        // `attempt as i32` wraps for usize values above i32::MAX. With a
+        // multiplier > 1.0, the wrapped negative exponent makes `powi` collapse
+        // toward zero, and the resulting delay would round down to 0 — a
+        // zero-delay retry storm. The clamp keeps the schedule capped at
+        // `max_delay` regardless of how huge `attempt` is.
+        let mode = RetryMode::ExponentialBackoff {
+            max_retries: usize::MAX,
+            base_delay: Duration::from_millis(100),
+            multiplier: 2.0,
+            max_delay: Duration::from_secs(30),
+            jitter: 0.0,
+        };
+        let huge_attempt = (i32::MAX as usize) + 1;
+        let d = mode.delay_for_attempt(huge_attempt).expect("within budget");
+        // With multiplier=2.0 and any reasonable exponent (clamped to i32::MAX),
+        // the exponential overflows immediately and is capped at max_delay.
+        assert_eq!(
+            d,
+            Duration::from_secs(30),
+            "huge attempt counter must be clamped, not wrapped to a zero-delay storm"
+        );
+    }
+
+    #[test]
+    fn test_retry_mode_exponential_sanitizes_nonpositive_multiplier() {
+        // Direct construction with multiplier=0.0 or negative would also
+        // produce nonsensical schedules (0 * x = 0; negative powi oscillates).
+        for bad_mult in [0.0_f64, -1.0_f64, f64::NEG_INFINITY] {
+            let mode = RetryMode::ExponentialBackoff {
+                max_retries: 3,
+                base_delay: Duration::from_millis(100),
+                multiplier: bad_mult,
+                max_delay: Duration::from_secs(30),
+                jitter: 0.0,
+            };
+            let d = mode.delay_for_attempt(2).expect("within budget");
+            assert_eq!(
+                d,
+                Duration::from_millis(100),
+                "multiplier {bad_mult} must collapse to base_delay, not zero"
+            );
+        }
+    }
+
+    #[test]
     fn test_retry_mode_jitter_clamping() {
         // Test that jitter values outside [0, 1] are clamped
         let retry_mode1 = RetryMode::exponential_custom(
@@ -546,6 +680,54 @@ mod tests {
         // Both should work without panicking
         assert!(retry_mode1.delay_for_attempt(0).is_some());
         assert!(retry_mode2.delay_for_attempt(0).is_some());
+    }
+
+    #[test]
+    fn test_retry_mode_full_jitter_is_floored_above_zero() {
+        // Regression: with `jitter == 1.0`, `random_range(-1.0..=1.0)` admits the
+        // legal endpoint `-1.0`, which makes `jitter_factor = 1.0 + 1.0 * -1.0 = 0.0`.
+        // Before flooring, `final_delay = (capped_delay * 0.0) as u64 = 0`, so the
+        // retry sleep collapsed to `Duration::ZERO` and the loop bursted against
+        // the failing dependency. Sampling thousands of draws, we must never see
+        // a returned `Duration::ZERO` when `base_delay > 0`.
+        let mode = RetryMode::ExponentialBackoff {
+            max_retries: 1,
+            base_delay: Duration::from_millis(100),
+            multiplier: 1.0,
+            max_delay: Duration::from_secs(30),
+            jitter: 1.0,
+        };
+        // 4096 samples should hit unlucky low draws comfortably.
+        for _ in 0..4096 {
+            let d = mode
+                .delay_for_attempt(0)
+                .expect("attempt 0 within max_retries");
+            assert!(
+                d >= Duration::from_millis(1),
+                "100% jitter must NOT collapse delay to zero; got {d:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_retry_mode_zero_base_delay_stays_zero() {
+        // Counter-test: when the user explicitly chooses zero-delay retries
+        // (`base_delay = 0`), the floor must NOT inflate them to 1ms. Zero-delay
+        // is the user's documented choice; the floor only kicks in when the
+        // schedule would have been non-zero.
+        let mode = RetryMode::ExponentialBackoff {
+            max_retries: 1,
+            base_delay: Duration::ZERO,
+            multiplier: 2.0,
+            max_delay: Duration::from_secs(30),
+            jitter: 1.0,
+        };
+        let d = mode.delay_for_attempt(0).expect("within budget");
+        assert_eq!(
+            d,
+            Duration::ZERO,
+            "explicit base_delay=0 should still produce a zero delay"
+        );
     }
 
     #[test]

@@ -99,21 +99,95 @@ pub use join::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult};
 
 /// Invoke `f` for each observer in `observers`. Used at every workflow event site;
 /// a no-op when the list is empty (the common case — observers are opt-in).
+///
+/// Each dispatch is wrapped in `catch_unwind` so a panicking observer cannot
+/// abort the runtime worker. Observer panics are converted to a `tracing::error!`
+/// event (when the `tracing` feature is on) and, regardless of features, a one-line
+/// stderr notice so a panic isn't silent in a default-features build — observers
+/// are expected to be infallible, and surfacing the bug to the operator without
+/// coupling it to the workflow's result requires *some* channel.
 #[inline]
 fn notify_observers(observers: &[Arc<dyn WorkflowObserver>], f: impl Fn(&dyn WorkflowObserver)) {
     for observer in observers {
-        f(observer.as_ref());
+        let observer_ref = observer.as_ref();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(observer_ref)));
+        if let Err(payload) = result {
+            let msg = panic_payload_message(&*payload);
+            #[cfg(feature = "tracing")]
+            tracing::error!(panic = %msg, "workflow observer panicked");
+            // Even with `tracing` disabled the panic deserves a signal — a
+            // default-features build would otherwise drop it on the floor and
+            // mask test/regression observers that use `panic!` as an assertion.
+            // We rate-limit by emitting at most one message per process via an
+            // atomic flag so a panicky observer fired thousands of times can't
+            // flood stderr.
+            #[cfg(not(feature = "tracing"))]
+            observer_panic_notice(&msg);
+        }
+    }
+}
+
+#[cfg(not(feature = "tracing"))]
+fn observer_panic_notice(msg: &str) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static EMITTED: AtomicBool = AtomicBool::new(false);
+    // Compare-exchange so only the first panic prints; further panics are silent
+    // (avoids drowning stderr in a loop) but the operator still sees one line.
+    if EMITTED
+        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+        .is_ok()
+    {
+        eprintln!(
+            "cano: workflow observer panicked (further panics will be silent until process restart): {msg}"
+        );
     }
 }
 
 /// Best-effort extraction of a human-readable message from a panic payload.
-fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
+pub(crate) fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         (*s).to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {
         s.clone()
     } else {
         "<non-string panic payload>".to_string()
+    }
+}
+
+/// Drive `fut` under `catch_unwind`, converting a panic payload into a
+/// `CanoError::TaskExecution("panic: <msg>")`. Use when the caller is
+/// running user code (a task body, a compensate closure) and must not
+/// let an unhandled panic propagate to the runtime worker.
+///
+/// `panic_label` is used for the `tracing::error!` event (`"{label}
+/// panicked"`) when the `tracing` feature is enabled. Five call sites
+/// across `workflow/execution.rs` and `workflow/compensation.rs` share
+/// this shape; centralising it ensures the message format and panic-log
+/// event are uniform.
+///
+/// Callers that need a different return shape (split-task tuples, the
+/// drain's per-entry error list, the saga inline-compensate flattened
+/// envelope) inline their own `catch_unwind` — see the plan's "out of
+/// scope" notes for S2.
+pub(crate) async fn catch_panic_to_error<T, F>(
+    fut: F,
+    panic_label: &'static str,
+) -> Result<T, CanoError>
+where
+    F: std::future::Future<Output = Result<T, CanoError>>,
+{
+    use futures_util::FutureExt;
+    use std::panic::AssertUnwindSafe;
+    match AssertUnwindSafe(fut).catch_unwind().await {
+        Ok(inner) => inner,
+        Err(payload) => {
+            let msg = panic_payload_message(&*payload);
+            #[cfg(feature = "tracing")]
+            tracing::error!(panic = %msg, "{} panicked", panic_label);
+            #[cfg(not(feature = "tracing"))]
+            let _ = panic_label;
+            Err(CanoError::task_execution(format!("panic: {msg}")))
+        }
     }
 }
 
@@ -217,13 +291,14 @@ where
     /// call returns `CanoError::Workflow("Workflow timeout exceeded")` —
     /// compensation does **not** run.
     ///
-    /// **Superseded by [`with_total_timeout`](Self::with_total_timeout) when
-    /// both are set**: the total-timeout path takes over and this value is
-    /// ignored, because letting both wrappers race would drop the inner
-    /// compensation drain mid-flight and leave the checkpoint log inconsistent.
-    /// Prefer `with_total_timeout` for new code — it triggers graceful
-    /// compensation, fires `on_workflow_timeout`, and bounds rollback via
-    /// [`with_compensation_timeout`](Self::with_compensation_timeout).
+    /// When [`with_total_timeout`](Self::with_total_timeout) is also set, the
+    /// engine treats this value as a *floor* on the total budget: the
+    /// effective wall-clock cap is `min(with_timeout, with_total_timeout)`
+    /// and the graceful total-timeout path drives it (compensation runs
+    /// under [`with_compensation_timeout`](Self::with_compensation_timeout),
+    /// `on_workflow_timeout` fires). This preserves the "with_timeout is a
+    /// hard upper bound" intent while avoiding a race between two outer
+    /// timeouts that would drop the inner compensation drain mid-flight.
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.workflow_timeout = Some(timeout);
         self
@@ -583,11 +658,9 @@ where
     /// [`resume_from`](Self::resume_from) takes the id explicitly, so this builder is only
     /// needed for the forward (`orchestrate`) direction.
     ///
-    /// **Breaking change in this release:** the bound narrowed from
-    /// `impl Into<String>` to `impl Into<Arc<str>>`. `String`, `&str`, and
-    /// `Arc<str>` still call this directly. Generic wrappers parameterized on
-    /// `T: Into<String>` need to switch the bound to `T: Into<Arc<str>>`
-    /// (which any `String`/`&str`/`Arc<str>` callers already satisfy).
+    /// Accepts `impl Into<Arc<str>>` — `String`, `&str`, and `Arc<str>` all
+    /// satisfy this. Generic wrappers should bound their parameter on
+    /// `T: Into<Arc<str>>` to pass through cleanly.
     pub fn with_workflow_id(mut self, workflow_id: impl Into<Arc<str>>) -> Self {
         self.workflow_id = Some(workflow_id.into());
         self
@@ -853,34 +926,68 @@ where
     async fn run_workflow(&self, initial_state: TState) -> Result<TState, CanoError> {
         #[cfg(feature = "metrics")]
         let _active = crate::metrics::WorkflowActiveGuard::new();
-        #[cfg(feature = "metrics")]
-        let _started = std::time::Instant::now();
-
-        // Wall-clock budget for the entire FSM call when `with_total_timeout` is set.
-        // `None` keeps the previous zero-cost behavior — the FSM loop awaits dispatches
-        // directly with no `timeout_at` wrapper.
-        let total_budget = self.total_timeout.map(|d| (std::time::Instant::now(), d));
-
+        let started = std::time::Instant::now();
+        let total_budget = self.resolve_total_budget(started);
         let workflow_future = self.execute_workflow(initial_state, total_budget);
+        self.await_with_outer_timeout(workflow_future, total_budget, started)
+            .await
+    }
 
-        // When `with_total_timeout` is set it strictly supersedes the legacy
-        // `with_timeout`: the total-budget path handles cancellation gracefully
-        // (drains compensations under a bounded deadline, fires `on_workflow_timeout`).
-        // Letting the legacy outer `tokio::time::timeout` *also* fire would race the
-        // inner drain and drop it mid-flight — leaving the checkpoint log
-        // inconsistent. Skip the outer wrapper in that case.
+    /// Resolve the effective wall-clock budget for the entire FSM call.
+    ///
+    /// Precedence:
+    /// 1. Both `with_timeout` and `with_total_timeout` set → graceful
+    ///    total-timeout path with `min(...)` as the budget. Treating
+    ///    `with_timeout` as a floor preserves the user's intent that it is
+    ///    a hard upper bound, while avoiding a race between two outer
+    ///    timeouts that would drop the compensation drain mid-flight.
+    /// 2. Only total set → graceful total-timeout path.
+    /// 3. Only `with_timeout` set → legacy blunt `tokio::time::timeout`
+    ///    wrapper applied externally; the FSM loop runs unbudgeted.
+    /// 4. Neither → zero-cost path.
+    pub(crate) fn resolve_total_budget(
+        &self,
+        started: std::time::Instant,
+    ) -> Option<(std::time::Instant, Duration)> {
+        let effective = match (self.workflow_timeout, self.total_timeout) {
+            (Some(w), Some(t)) => Some(w.min(t)),
+            (_, Some(t)) => Some(t),
+            _ => None,
+        };
+        effective.map(|d| (started, d))
+    }
+
+    /// Apply the legacy `with_timeout` outer wrapper when (and only when) the
+    /// graceful total-timeout path is NOT also active. Emits the workflow-run
+    /// outcome metric exactly once per invocation — on the legacy-timeout
+    /// path the early return ensures `outcome="timeout"` is recorded
+    /// *without* a follow-up `outcome="failed"` for the same run; on the
+    /// non-timeout paths the post-match emission records `completed`/`failed`.
+    ///
+    /// Used by both `run_workflow` (forward direction) and
+    /// `execute_resume_inner` (resume direction) so the precedence rule
+    /// lives in one place.
+    pub(crate) async fn await_with_outer_timeout<F, T>(
+        &self,
+        fut: F,
+        total_budget: Option<(std::time::Instant, Duration)>,
+        #[allow(unused_variables)] started: std::time::Instant,
+    ) -> Result<T, CanoError>
+    where
+        F: std::future::Future<Output = Result<T, CanoError>>,
+    {
         let result = match (self.workflow_timeout, total_budget) {
             (Some(timeout_duration), None) => {
-                match tokio::time::timeout(timeout_duration, workflow_future).await {
+                match tokio::time::timeout(timeout_duration, fut).await {
                     Ok(inner) => inner,
                     Err(_) => {
                         #[cfg(feature = "metrics")]
-                        crate::metrics::workflow_run("timeout", _started.elapsed());
+                        crate::metrics::workflow_run("timeout", started.elapsed());
                         return Err(CanoError::workflow("Workflow timeout exceeded"));
                     }
                 }
             }
-            _ => workflow_future.await,
+            _ => fut.await,
         };
         #[cfg(feature = "metrics")]
         crate::metrics::workflow_run(
@@ -889,7 +996,7 @@ where
             } else {
                 "failed"
             },
-            _started.elapsed(),
+            started.elapsed(),
         );
         result
     }
@@ -1059,6 +1166,45 @@ mod metrics_tests {
             1
         );
         assert_eq!(gauge(&rows, "cano_workflow_active", &[]), 0.0);
+    }
+
+    #[test]
+    fn legacy_timeout_on_orchestrate_only_increments_timeout_counter() {
+        // Regression sentinel for F8: when `with_timeout` fires inside
+        // `run_workflow`, the early return guarantees only `outcome="timeout"`
+        // is incremented — not both `timeout` and `failed`. This test asserts
+        // the forward direction, which has always been correct; a sibling test
+        // in `compensation::tests` covers the resume direction (which used to
+        // double-count).
+        struct Slow;
+        #[crate::task]
+        impl Task<S> for Slow {
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+            async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                Ok(TaskResult::Single(S::Done))
+            }
+        }
+        let (res, rows) = run_with_recorder(|| async {
+            Workflow::bare()
+                .with_timeout(std::time::Duration::from_millis(20))
+                .register(S::Start, Slow)
+                .add_exit_state(S::Done)
+                .orchestrate(S::Start)
+                .await
+        });
+        assert!(res.is_err());
+        assert_eq!(
+            counter(&rows, "cano_workflow_runs_total", &[("outcome", "timeout")]),
+            1
+        );
+        assert_eq!(
+            counter_opt(&rows, "cano_workflow_runs_total", &[("outcome", "failed")]).unwrap_or(0),
+            0,
+            "legacy timeout must not double-count as both `timeout` and `failed`"
+        );
     }
 
     #[test]
@@ -1493,5 +1639,363 @@ mod tests {
             debug_str.contains("compensation_timeout"),
             "got: {debug_str}"
         );
+    }
+
+    #[tokio::test]
+    async fn orchestrate_survives_observer_panic_via_notify_observers_catch_unwind() {
+        // A panicking observer must NOT abort the orchestrate caller — the
+        // scheduler had its own catch_unwind, but direct `orchestrate` users
+        // relied on `notify_observers` being panic-safe. This test exercises
+        // the orchestrate path directly with an observer that panics on
+        // every state-enter call; the workflow should still complete.
+        use crate::observer::WorkflowObserver;
+
+        struct PanickyObserver;
+        impl WorkflowObserver for PanickyObserver {
+            fn on_state_enter(&self, _state: &str) {
+                panic!("observer panic — must not abort the workflow");
+            }
+        }
+
+        let result = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Complete))
+            .add_exit_state(TestState::Complete)
+            .with_observer(Arc::new(PanickyObserver))
+            .orchestrate(TestState::Start)
+            .await
+            .expect("orchestrate must complete despite observer panic");
+        assert_eq!(result, TestState::Complete);
+    }
+
+    #[tokio::test]
+    async fn repeated_observer_panics_do_not_block_workflow_progress() {
+        // Regression for F15: even with `tracing` disabled, the no-tracing
+        // fallback (one-shot stderr) must NEVER block, deadlock, or otherwise
+        // disrupt the FSM loop when the same observer panics many times.
+        // The atomic rate-limit means only the first panic actually prints;
+        // the remaining N-1 must still flow through the catch_unwind silently.
+        use crate::observer::WorkflowObserver;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountThenPanic(Arc<AtomicUsize>);
+        impl WorkflowObserver for CountThenPanic {
+            fn on_state_enter(&self, _state: &str) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                panic!("repeated panic — must not block the FSM loop");
+            }
+        }
+
+        let count = Arc::new(AtomicUsize::new(0));
+        let result = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Process))
+            .register(TestState::Process, SimpleTask::new(TestState::Complete))
+            .add_exit_state(TestState::Complete)
+            .with_observer(Arc::new(CountThenPanic(Arc::clone(&count))))
+            .orchestrate(TestState::Start)
+            .await
+            .expect("orchestrate must complete despite repeated observer panics");
+        assert_eq!(result, TestState::Complete);
+        // Three state entries (Start, Process, Complete) — the panic fires per
+        // entry; if any panic propagated, the FSM would not have completed.
+        assert_eq!(count.load(Ordering::SeqCst), 3);
+    }
+}
+
+/// Edge-case unit tests for `await_with_outer_timeout`. Integration-level
+/// coverage already pins down the metric-emission shape end-to-end
+/// (`legacy_timeout_on_orchestrate_only_increments_timeout_counter`,
+/// `legacy_timeout_on_resume_only_increments_timeout_counter`,
+/// `with_timeout_acts_as_floor_when_combined_with_with_total_timeout`,
+/// `with_timeout_alone_still_uses_legacy_blunt_timeout`); these tests pin
+/// down the helper's behavior in isolation across every
+/// `(workflow_timeout, total_budget)` permutation.
+#[cfg(test)]
+mod await_with_outer_timeout_tests {
+    use super::test_support::TestState;
+    use super::*;
+    use std::time::Duration;
+
+    fn workflow_with(
+        workflow_timeout: Option<Duration>,
+        total_timeout: Option<Duration>,
+    ) -> Workflow<TestState> {
+        let mut w = Workflow::<TestState>::bare();
+        if let Some(d) = workflow_timeout {
+            w = w.with_timeout(d);
+        }
+        if let Some(d) = total_timeout {
+            w = w.with_total_timeout(d);
+        }
+        w
+    }
+
+    #[tokio::test]
+    async fn neither_timeout_just_awaits_future() {
+        let w = workflow_with(None, None);
+        let started = std::time::Instant::now();
+        let out = w
+            .await_with_outer_timeout(
+                async { Ok::<TestState, CanoError>(TestState::Complete) },
+                None,
+                started,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out, TestState::Complete);
+    }
+
+    #[tokio::test]
+    async fn only_with_timeout_passes_through_when_future_is_fast() {
+        let w = workflow_with(Some(Duration::from_secs(60)), None);
+        let started = std::time::Instant::now();
+        let out = w
+            .await_with_outer_timeout(
+                async { Ok::<TestState, CanoError>(TestState::Complete) },
+                None,
+                started,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out, TestState::Complete);
+    }
+
+    #[tokio::test]
+    async fn only_with_timeout_fires_legacy_timeout_on_slow_future() {
+        // Slow future + small `with_timeout` and no total_budget → the legacy
+        // arm fires. Surfaces the documented `CanoError::Workflow("Workflow
+        // timeout exceeded")` and the helper returns early so the post-match
+        // emission does not also fire.
+        let w = workflow_with(Some(Duration::from_millis(10)), None);
+        let started = std::time::Instant::now();
+        let err = w
+            .await_with_outer_timeout(
+                async {
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                    Ok::<TestState, CanoError>(TestState::Complete)
+                },
+                None,
+                started,
+            )
+            .await
+            .expect_err("legacy timeout must fire");
+        assert!(
+            matches!(err, CanoError::Workflow(ref m) if m.contains("Workflow timeout exceeded")),
+            "expected legacy shape, got: {err}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(500),
+            "must bound to the legacy timeout, not the inner sleep"
+        );
+    }
+
+    #[tokio::test]
+    async fn only_total_budget_skips_legacy_path() {
+        // The helper's match has `(Some, None)` only — when total_budget is
+        // Some, the legacy arm is never taken. The slow future is allowed to
+        // run; here we stop it via a quick inner Ok so the test is fast.
+        let w = workflow_with(None, Some(Duration::from_millis(10)));
+        let total_budget = Some((std::time::Instant::now(), Duration::from_millis(10)));
+        let started = std::time::Instant::now();
+        let out = w
+            .await_with_outer_timeout(
+                async { Ok::<TestState, CanoError>(TestState::Complete) },
+                total_budget,
+                started,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out, TestState::Complete);
+    }
+
+    #[tokio::test]
+    async fn both_timeouts_set_skips_legacy_path() {
+        // Both timeouts: the graceful path drives. Legacy wrapper must NOT
+        // wrap, otherwise the inner total-budget drain could be cancelled
+        // mid-flight. Verify by using a slow inner future and a Some
+        // total_budget: the helper passes the future through without timing
+        // out (since legacy doesn't apply and we don't simulate the graceful
+        // path here — that's the FSM loop's job).
+        let w = workflow_with(
+            Some(Duration::from_millis(5)),
+            Some(Duration::from_secs(60)),
+        );
+        let total_budget = Some((std::time::Instant::now(), Duration::from_secs(60)));
+        let started = std::time::Instant::now();
+        let out = w
+            .await_with_outer_timeout(
+                async {
+                    // ~20ms — well beyond `with_timeout(5ms)` — to prove the
+                    // legacy wrapper isn't applied.
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                    Ok::<TestState, CanoError>(TestState::Complete)
+                },
+                total_budget,
+                started,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out, TestState::Complete);
+        assert!(
+            started.elapsed() >= Duration::from_millis(20),
+            "future must run to completion; legacy wrapper must NOT be applied"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_path_propagates_inner_errors_unchanged() {
+        // When the inner future returns Err before the deadline, the helper
+        // must surface that error unchanged — not convert it to a timeout.
+        let w = workflow_with(Some(Duration::from_secs(60)), None);
+        let started = std::time::Instant::now();
+        let err = w
+            .await_with_outer_timeout(
+                async { Err::<TestState, _>(CanoError::task_execution("inner boom")) },
+                None,
+                started,
+            )
+            .await
+            .expect_err("inner err must propagate");
+        assert!(
+            matches!(err, CanoError::TaskExecution(ref m) if m == "inner boom"),
+            "must propagate verbatim, got: {err}"
+        );
+    }
+}
+
+/// Edge-case unit tests for `resolve_total_budget`. Verifies the precedence
+/// rules separately from the integration-level
+/// `with_timeout_acts_as_floor_when_combined_with_with_total_timeout`.
+#[cfg(test)]
+mod resolve_total_budget_tests {
+    use super::test_support::TestState;
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn neither_set_returns_none() {
+        let w = Workflow::<TestState>::bare();
+        assert!(w.resolve_total_budget(std::time::Instant::now()).is_none());
+    }
+
+    #[test]
+    fn only_with_timeout_set_returns_none() {
+        let w = Workflow::<TestState>::bare().with_timeout(Duration::from_secs(1));
+        assert!(
+            w.resolve_total_budget(std::time::Instant::now()).is_none(),
+            "with_timeout alone goes through the legacy wrapper; FSM gets no budget"
+        );
+    }
+
+    #[test]
+    fn only_total_timeout_set_returns_total() {
+        let w = Workflow::<TestState>::bare().with_total_timeout(Duration::from_secs(7));
+        let now = std::time::Instant::now();
+        let (start, limit) = w.resolve_total_budget(now).unwrap();
+        assert_eq!(start, now);
+        assert_eq!(limit, Duration::from_secs(7));
+    }
+
+    #[test]
+    fn both_set_returns_min_via_with_timeout_as_floor() {
+        // F5: when both are configured the smaller bounds the FSM, so the
+        // legacy hard cap still applies (graceful path).
+        let w = Workflow::<TestState>::bare()
+            .with_timeout(Duration::from_millis(50))
+            .with_total_timeout(Duration::from_secs(60));
+        let now = std::time::Instant::now();
+        let (_, limit) = w.resolve_total_budget(now).unwrap();
+        assert_eq!(limit, Duration::from_millis(50));
+    }
+
+    #[test]
+    fn both_set_total_smaller_returns_total() {
+        // Symmetric case: total smaller than legacy.
+        let w = Workflow::<TestState>::bare()
+            .with_timeout(Duration::from_secs(60))
+            .with_total_timeout(Duration::from_millis(50));
+        let (_, limit) = w.resolve_total_budget(std::time::Instant::now()).unwrap();
+        assert_eq!(limit, Duration::from_millis(50));
+    }
+}
+
+/// Edge-case unit tests for `catch_panic_to_error`. The integration-level
+/// sentinels (every single/compensatable/stepped panic test) exercise the
+/// helper end-to-end through the task dispatch; this module pins down the
+/// helper's contract in isolation so a regression in panic-message
+/// extraction or error shape lands here first.
+#[cfg(test)]
+mod catch_panic_to_error_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn passes_through_ok_result_unchanged() {
+        let result =
+            catch_panic_to_error(async { Ok::<u32, CanoError>(42) }, "non-panicking").await;
+        assert_eq!(result.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn passes_through_err_result_unchanged() {
+        // A non-panicking future that returns `Err` must surface that error
+        // verbatim — NOT convert it to "panic: ...".
+        let result = catch_panic_to_error::<u32, _>(
+            async { Err(CanoError::task_execution("explicit failure")) },
+            "non-panicking",
+        )
+        .await;
+        match result {
+            Err(CanoError::TaskExecution(m)) => assert_eq!(m, "explicit failure"),
+            other => panic!("expected explicit TaskExecution err, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn str_literal_panic_payload_yields_panic_prefixed_task_execution_err() {
+        let result = catch_panic_to_error::<u32, _>(
+            async {
+                panic!("static literal");
+            },
+            "labelled",
+        )
+        .await;
+        match result {
+            Err(CanoError::TaskExecution(m)) => assert_eq!(m, "panic: static literal"),
+            other => panic!("expected TaskExecution(\"panic: ...\"), got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn formatted_string_panic_payload_preserves_message() {
+        let result = catch_panic_to_error::<u32, _>(
+            async {
+                let detail = 99;
+                panic!("formatted message {detail}");
+            },
+            "labelled",
+        )
+        .await;
+        match result {
+            Err(CanoError::TaskExecution(m)) => assert_eq!(m, "panic: formatted message 99"),
+            other => panic!("expected formatted TaskExecution, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn non_string_panic_payload_yields_fallback_message() {
+        // `panic_any` with a non-string payload exercises the
+        // `panic_payload_message` fallback ("<non-string panic payload>").
+        let result = catch_panic_to_error::<u32, _>(
+            async {
+                std::panic::panic_any(42i32);
+            },
+            "labelled",
+        )
+        .await;
+        match result {
+            Err(CanoError::TaskExecution(m)) => {
+                assert_eq!(m, "panic: <non-string panic payload>")
+            }
+            other => panic!("expected fallback TaskExecution, got: {other:?}"),
+        }
     }
 }

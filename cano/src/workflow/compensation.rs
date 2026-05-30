@@ -44,6 +44,159 @@ pub(super) fn resolve_compensation_deadline(
     (total_limit / 2).min(cap)
 }
 
+/// Single-pass rehydration of a checkpoint log into the four pieces of state
+/// `execute_workflow_from` needs to resume: the LIFO compensation stack, the
+/// per-state step cursors, the pre-crash transition path, and the cutoff
+/// sequence used to avoid double-counting the resume state in the path.
+///
+/// Replaces five separate filter+collect passes over `rows`; rows are
+/// touched once in the main walk and a second time only to apply the
+/// `resume_state_entry_cutoff` (which is only known after the walk completes,
+/// since the *highest* sequence row for `resume_label` is the cutoff).
+///
+/// Observer fan-outs and `tracing` warns are emitted **inline** so the
+/// behavior is identical to the previous multi-pass code:
+///
+/// - **F3**: mixed-version rows (older `workflow_version` than expected)
+///   emit a `tracing::warn!` per row — the version mismatch on `last` is
+///   already validated upstream by the caller, so the walk only warns.
+/// - **F4**: when no `StateEntry` row exists for `resume_label`, the cutoff
+///   falls back to `resume_sequence + 1` (with a tracing warn).
+/// - **F11**: `StateEntry` rows whose label doesn't resolve via
+///   `resolve_state` are dropped from `prior_transitions` and reported
+///   via `on_unknown_resume_state` on every observer.
+pub(super) struct RehydratedRun<TState> {
+    pub(super) compensation_stack: Vec<CompensationEntry>,
+    pub(super) resume_cursors: HashMap<String, Vec<u8>>,
+    pub(super) prior_transitions: Vec<TState>,
+    /// Highest-sequence `StateEntry` row whose `state == resume_label`, or
+    /// `resume_sequence + 1` when no such row exists (F4 fallback). Exposed
+    /// for tests; the caller doesn't need it for `execute_workflow_from`
+    /// since it's only used internally to filter `prior_transitions`.
+    #[allow(dead_code)]
+    pub(super) resume_state_entry_cutoff: u64,
+}
+
+impl<TState> RehydratedRun<TState>
+where
+    TState: Clone,
+{
+    /// Build a `RehydratedRun` from the ascending-by-sequence `rows` slice.
+    ///
+    /// `resolve_state` maps a stored state label (the `Debug` rendering of
+    /// `TState`) back to a `TState`; returns `None` when the label is no
+    /// longer registered on the current workflow (renamed/removed states).
+    ///
+    /// `observers` and `workflow_id` are threaded through so the F11
+    /// `on_unknown_resume_state` hook can fire inline; the caller does
+    /// not need a second pass.
+    pub(super) fn from_rows(
+        rows: &[crate::recovery::CheckpointRow],
+        resume_label: &str,
+        resume_sequence: u64,
+        expected_workflow_version: u32,
+        observers: &[Arc<dyn crate::observer::WorkflowObserver>],
+        workflow_id: &str,
+        mut resolve_state: impl FnMut(&str) -> Option<TState>,
+    ) -> Self {
+        // Anti-bind unused params on no-tracing builds so the per-row warn
+        // arm doesn't fail to compile.
+        #[cfg(not(feature = "tracing"))]
+        let _ = (expected_workflow_version, workflow_id);
+
+        let mut compensation_stack: Vec<CompensationEntry> = Vec::new();
+        let mut resume_cursors: HashMap<String, Vec<u8>> = HashMap::new();
+        // Buffer of (sequence, &state_label) for StateEntry rows. We defer
+        // the resolve_state call until after the walk so we know the final
+        // cutoff and can drop rows whose sequence >= cutoff without a second
+        // ascending walk over `rows`.
+        let mut state_entries: Vec<(u64, &str)> = Vec::new();
+        let mut resume_state_entry_cutoff: Option<u64> = None;
+
+        for r in rows {
+            #[cfg(feature = "tracing")]
+            if r.workflow_version != expected_workflow_version {
+                tracing::warn!(
+                    workflow_id = %workflow_id,
+                    sequence = r.sequence,
+                    stored_version = r.workflow_version,
+                    expected_version = expected_workflow_version,
+                    "checkpoint row stamps a workflow version older than the current one — keeping the row but flagging the mixed log"
+                );
+            }
+            match r.kind {
+                RowKind::StateEntry => {
+                    if r.state == resume_label {
+                        // `rows` is ascending — overwriting with each match
+                        // yields the highest-sequence row, which is the cutoff.
+                        resume_state_entry_cutoff = Some(r.sequence);
+                    }
+                    state_entries.push((r.sequence, r.state.as_str()));
+                }
+                RowKind::CompensationCompletion => {
+                    // Skip the resume point's own row: the resumed state
+                    // re-runs and re-pushes its compensation entry, so
+                    // keeping the persisted one too would compensate that
+                    // step twice on a later failure.
+                    if r.sequence != resume_sequence
+                        && let Some(blob) = r.output_blob.as_ref()
+                    {
+                        compensation_stack.push(CompensationEntry {
+                            task_id: Arc::from(r.task_id.as_str()),
+                            output_blob: blob.clone(),
+                        });
+                    }
+                }
+                RowKind::StepCursor => {
+                    // Last-write-wins per state label; `rows` ascending order
+                    // guarantees the final insert wins for each state.
+                    if let Some(blob) = r.output_blob.as_ref() {
+                        resume_cursors.insert(r.state.clone(), blob.clone());
+                    }
+                }
+            }
+        }
+
+        let cutoff = resume_state_entry_cutoff.unwrap_or_else(|| {
+            #[cfg(feature = "tracing")]
+            tracing::warn!(
+                workflow_id = %workflow_id,
+                resume_state = %resume_label,
+                "no StateEntry row found for resume state — using last.sequence + 1 as cutoff for the rehydrated path"
+            );
+            resume_sequence + 1
+        });
+
+        let mut prior_transitions: Vec<TState> = Vec::new();
+        for (seq, label) in state_entries {
+            if seq < cutoff {
+                match resolve_state(label) {
+                    Some(state) => prior_transitions.push(state),
+                    None => {
+                        #[cfg(feature = "tracing")]
+                        tracing::warn!(
+                            workflow_id = %workflow_id,
+                            sequence = seq,
+                            state = %label,
+                            "checkpoint row's state label is not registered on the current workflow — dropped from rehydrated path"
+                        );
+                        super::notify_observers(observers, |o| {
+                            o.on_unknown_resume_state(workflow_id, seq, label)
+                        });
+                    }
+                }
+            }
+        }
+
+        Self {
+            compensation_stack,
+            resume_cursors,
+            prior_transitions,
+            resume_state_entry_cutoff: cutoff,
+        }
+    }
+}
+
 impl<TState, TResourceKey> Workflow<TState, TResourceKey>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
@@ -102,24 +255,53 @@ where
         while let Some(entry) = stack.pop() {
             // Once the wall-clock deadline has passed, every remaining entry would only
             // produce another "exceeded compensation deadline" error if we kept iterating.
-            // Surface a single summary error and stop — preserves the original failure
-            // plus an explicit signal that rollback ran out of time.
+            // Preserve each remaining entry's `task_id` + `output_blob` as an
+            // `OrphanedCompensation` so an operator can decode the persisted output
+            // and manually undo the side effect. Surface a single summary timeout
+            // error so the overall failure is still clearly attributable to the
+            // budget. Without the per-entry preservation the bounded drain
+            // would silently drop blobs the new `OrphanedCompensation` variant
+            // was specifically introduced to keep.
             if let Some(d) = comp_deadline
                 && tokio::time::Instant::now() >= d
             {
-                let remaining = stack.len() + 1; // +1 for the just-popped entry
-                errors.push(CanoError::timeout(format!(
-                    "compensation deadline elapsed; {remaining} entries left unprocessed"
-                )));
+                let remaining_count = stack.len() + 1; // +1 for the just-popped entry
                 #[cfg(feature = "metrics")]
                 crate::metrics::compensation_run(false);
+                // Preserve the popped entry first; the stack still holds the
+                // remaining entries (drained next).
+                let CompensationEntry {
+                    task_id,
+                    output_blob,
+                } = entry;
+                errors.push(CanoError::orphaned_compensation(task_id, output_blob));
+                while let Some(remaining_entry) = stack.pop() {
+                    #[cfg(feature = "metrics")]
+                    crate::metrics::compensation_run(false);
+                    let CompensationEntry {
+                        task_id,
+                        output_blob,
+                    } = remaining_entry;
+                    errors.push(CanoError::orphaned_compensation(task_id, output_blob));
+                }
+                errors.push(CanoError::timeout(format!(
+                    "compensation deadline elapsed; {remaining_count} entries left unprocessed"
+                )));
                 break;
             }
-            match self.compensators.get(&entry.task_id) {
-                None => errors.push(CanoError::workflow(format!(
-                    "no compensator registered for task {:?} — cannot roll it back",
-                    entry.task_id
-                ))),
+            // Look up the compensator under a short-lived borrow of `entry.task_id`
+            // (the `Arc` clone is cheap and ends the borrow). The None arm can
+            // then destructure `entry` and move its blob into the orphan error
+            // rather than cloning a potentially-large Vec<u8>.
+            let compensator = self.compensators.get(&entry.task_id).cloned();
+            match compensator {
+                None => {
+                    let CompensationEntry {
+                        task_id,
+                        output_blob,
+                    } = entry;
+                    errors.push(CanoError::orphaned_compensation(task_id, output_blob));
+                }
                 Some(compensator) => {
                     #[cfg(feature = "tracing")]
                     debug!(task_id = %entry.task_id, "compensating");
@@ -202,6 +384,11 @@ where
     /// fully rolled back, shouldn't leave a recovery log behind — but a hiccup cleaning
     /// it up shouldn't turn the run's result into an error, so a `clear` failure is logged
     /// and swallowed. No-op when no store or no workflow id is in play.
+    ///
+    /// The `on_checkpoint_clear_failed` observer hook fires on failure so the silent
+    /// swallow is still observable through the user-supplied pipeline — without this
+    /// the stranded log would only show up later as a duplicate-sequence conflict on
+    /// a fresh run, or as duplicate compensation on a subsequent `resume_from`.
     pub(super) async fn clear_checkpoint_log(&self, workflow_id: Option<&str>) {
         let Some((store, wf_id)) = self.checkpoint_store.as_ref().zip(workflow_id) else {
             return;
@@ -209,9 +396,10 @@ where
         let clear_result = store.clear(wf_id).await;
         #[cfg(feature = "metrics")]
         crate::metrics::checkpoint_clear(clear_result.is_ok());
-        #[cfg(feature = "tracing")]
-        if let Err(e) = clear_result {
+        if let Err(e) = &clear_result {
+            #[cfg(feature = "tracing")]
             tracing::warn!(workflow_id = %wf_id, error = %e, "failed to clear checkpoint log");
+            notify_observers(&self.observers, |o| o.on_checkpoint_clear_failed(wf_id, e));
         }
         #[cfg(not(feature = "tracing"))]
         let _ = clear_result;
@@ -228,6 +416,24 @@ where
             notify_observers(slice, |o| o.on_task_start(task_name.as_ref()));
         }
         let config = Self::config_with_observers(&config, &observers, &task_name);
+        // Strip `attempt_timeout` before handing the config to
+        // `run_with_retries`. The compensatable adapter applies the original
+        // attempt_timeout *only* to the forward call (see
+        // `CompensatableAdapter::run`); leaving it on the retry-loop config
+        // would also wrap the inline-compensate path in `tokio::time::timeout`
+        // — dropping that future mid-await destroys the typed `output` value
+        // with no recovery path (the compensation entry was never persisted),
+        // leaving partial side effects with no automated rollback. Stripping
+        // here keeps the per-attempt bound on the forward call while letting
+        // inline compensate run to completion.
+        let config = if config.attempt_timeout.is_some() {
+            Arc::new(crate::task::TaskConfig {
+                attempt_timeout: None,
+                ..(*config).clone()
+            })
+        } else {
+            config
+        };
 
         #[cfg(feature = "tracing")]
         let task_span = if tracing::enabled!(tracing::Level::INFO) {
@@ -246,22 +452,13 @@ where
         };
 
         #[cfg(feature = "tracing")]
-        let unwind_result = {
+        let result: Result<(TaskResult<TState>, Vec<u8>), CanoError> = {
             let _enter = task_span.enter();
-            AssertUnwindSafe(run_future).catch_unwind().await
+            super::catch_panic_to_error(run_future, "Compensatable task").await
         };
         #[cfg(not(feature = "tracing"))]
-        let unwind_result = AssertUnwindSafe(run_future).catch_unwind().await;
-
-        let result: Result<(TaskResult<TState>, Vec<u8>), CanoError> = match unwind_result {
-            Ok(inner) => inner,
-            Err(payload) => {
-                let payload_str = panic_payload_message(&*payload);
-                #[cfg(feature = "tracing")]
-                tracing::error!(panic = %payload_str, "Compensatable task panicked");
-                Err(CanoError::task_execution(format!("panic: {payload_str}")))
-            }
-        };
+        let result: Result<(TaskResult<TState>, Vec<u8>), CanoError> =
+            super::catch_panic_to_error(run_future, "Compensatable task").await;
 
         let outcome: Result<(TState, Vec<u8>), CanoError> = match result {
             Ok((TaskResult::Single(next_state), blob)) => Ok((next_state, blob)),
@@ -349,14 +546,59 @@ where
             return Err(e.clone());
         }
 
-        let rows = store.load_run(&workflow_id).await.map_err(|e| {
+        // Set up resources before any rehydration work. If `setup_all` fails
+        // we'd otherwise have a fully-rebuilt compensation stack and a fired
+        // `on_resume` event with no way to use them — the rehydrated entries
+        // would be silently dropped. Doing setup first means a failure leaves
+        // the on-disk log unchanged, the observer pipeline un-notified, and
+        // the caller can retry `resume_from` after fixing their resources.
+        self.resources.setup_all().await?;
+
+        // Once setup_all succeeds, EVERY exit path from this function must
+        // run teardown — even the rehydration `?`/`return Err` early-returns
+        // between here and `execute_workflow_from`. Wrap the body so a single
+        // `teardown_range` call at the bottom handles every path uniformly.
+        let result: Result<TState, CanoError> = self.execute_resume_inner(workflow_id, store).await;
+        self.resources
+            .teardown_range(0..self.resources.lifecycle_len())
+            .await;
+        result
+    }
+
+    /// The body of `resume_from` between `setup_all` and the unconditional
+    /// teardown. Extracted so every `?`/`return Err` early-return is still
+    /// followed by `teardown_range` in the caller — without this, an error
+    /// path between `load_run` and `execute_workflow_from` (e.g. unknown
+    /// workflow_id, version mismatch, corrupt log) would leak the
+    /// freshly-set-up resources.
+    async fn execute_resume_inner(
+        &self,
+        workflow_id: Arc<str>,
+        store: Arc<dyn crate::recovery::CheckpointStore>,
+    ) -> Result<TState, CanoError> {
+        let mut rows = store.load_run(&workflow_id).await.map_err(|e| {
             CanoError::checkpoint_store(format!("load checkpoint run {workflow_id:?}: {e}"))
         })?;
-        let last = rows.iter().max_by_key(|r| r.sequence).ok_or_else(|| {
+        // Defense in depth against a backend that forgot to sort: the trait
+        // promises ascending-by-sequence and the rehydration logic below relies
+        // on that, but a custom backend (e.g. a Postgres impl that forgot
+        // `ORDER BY sequence`) can silently violate it. Sorting in the engine
+        // is O(N log N) on an already-sorted log so the overhead for compliant
+        // backends is negligible.
+        rows.sort_by_key(|r| r.sequence);
+        let last = rows.last().ok_or_else(|| {
             CanoError::checkpoint_store(format!(
                 "no checkpoint rows for workflow id {workflow_id:?}"
             ))
         })?;
+        // Validate the *last* row's version — the one that determines which
+        // workflow definition the resume continues against. Older rows in the
+        // log may legitimately stamp earlier versions when a workflow was
+        // bumped mid-run (e.g. the operator deployed a new version after the
+        // last checkpoint of a v0 run was written, then resumed under v1).
+        // Rejecting on a per-row scan would refuse exactly the migration
+        // scenario `workflow_version` was meant to support; a `tracing::warn!`
+        // for older mixed rows keeps the operator informed without aborting.
         if last.workflow_version != self.workflow_version {
             return Err(CanoError::workflow_version_mismatch(
                 last.workflow_version,
@@ -370,67 +612,27 @@ where
             ))
         })?;
         let start_sequence = last.sequence + 1;
-
-        // Rehydrate the compensation stack from CompensationCompletion rows. `rows` is
-        // ascending by sequence (the `load_run` contract), so the stack is in the right
-        // order for a LIFO drain. Rows with other kinds — StateEntry and StepCursor —
-        // are ignored; a StepCursor row also carries an output_blob but must not be
-        // mistaken for a compensation entry.
-        //
-        // Skip the resume point's own row: if the crash landed after a compensatable
-        // state's completion row but before the next state's entry row, that state is the
-        // resume point — it re-runs below and re-pushes its own compensation entry, so
-        // keeping the persisted one too would compensate that step twice on a later
-        // failure. Earlier compensatable states' rows are kept (their tasks don't re-run).
         let resume_sequence = last.sequence;
-        let compensation_stack: Vec<CompensationEntry> = rows
-            .iter()
-            .filter(|r| r.sequence != resume_sequence)
-            .filter(|r| r.kind == RowKind::CompensationCompletion)
-            .filter_map(|r| {
-                r.output_blob.as_ref().map(|blob| CompensationEntry {
-                    task_id: Arc::from(r.task_id.as_str()),
-                    output_blob: blob.clone(),
-                })
-            })
-            .collect();
 
-        // Collect the latest StepCursor row per state. `rows` is ascending by sequence,
-        // so a simple fold keeps the last (highest-sequence) cursor for each state label.
-        // The resume-sequence filter is intentionally NOT applied here: the StepCursor rows
-        // all belong to Stepped states, not to the resume point's own state entry, so no
-        // double-application risk. The cursor for the resumed state itself is included —
-        // the Stepped state re-runs, and passing its last persisted cursor lets it pick up
-        // exactly where the loop left off rather than restarting from None.
-        let resume_cursors: HashMap<String, Vec<u8>> = rows
-            .iter()
-            .filter(|r| r.kind == RowKind::StepCursor)
-            .filter_map(|r| {
-                r.output_blob
-                    .as_ref()
-                    .map(|blob| (r.state.clone(), blob.clone()))
-            })
-            .fold(HashMap::new(), |mut acc, (state, blob)| {
-                // Fold keeps the latest (highest-sequence) cursor per state because
-                // `rows` is in ascending sequence order.
-                acc.insert(state, blob);
-                acc
-            });
-
-        // Reconstruct the pre-crash transition path from `StateEntry` rows so a
-        // post-resume failure's `WithStateContext.path` reflects the full history.
-        // Excludes the resume point itself (it will be pushed again when the FSM
-        // re-enters it) and any state labels that no longer map to a registered
-        // state (e.g. workflow shape changed in a non-version-bumped way — rare
-        // but the path is best-effort anyway). Router states are not in `rows`
-        // because they aren't checkpointed; the rehydrated path therefore omits
-        // them. Documented limitation of the resume contract.
-        let prior_transitions: Vec<TState> = rows
-            .iter()
-            .filter(|r| r.kind == RowKind::StateEntry)
-            .filter(|r| r.sequence != resume_sequence)
-            .filter_map(|r| self.state_from_label(&r.state))
-            .collect();
+        // Single-pass rehydration. See `RehydratedRun::from_rows` for the
+        // walk semantics + F3/F4/F11 warning emission; the multi-pass
+        // version this replaced did the same work in five separate filter
+        // chains over `rows`.
+        let resume_label = last.state.clone();
+        let RehydratedRun {
+            compensation_stack,
+            resume_cursors,
+            prior_transitions,
+            resume_state_entry_cutoff: _,
+        } = RehydratedRun::<TState>::from_rows(
+            &rows,
+            &resume_label,
+            resume_sequence,
+            self.workflow_version,
+            &self.observers,
+            &workflow_id,
+            |label| self.state_from_label(label),
+        );
 
         #[cfg(feature = "tracing")]
         info!(workflow_id = %workflow_id, resume_state = ?resume_state, last_sequence = last.sequence, compensation_entries = compensation_stack.len(), cursor_states = resume_cursors.len(), "Resuming workflow from checkpoint");
@@ -438,13 +640,13 @@ where
             o.on_resume(&workflow_id, last.sequence)
         });
 
-        self.resources.setup_all().await?;
+        // Resources were set up at the top of `resume_from` so a setup
+        // failure is surfaced before any rehydration runs — we don't repeat
+        // the call here.
         #[cfg(feature = "metrics")]
         let _active = crate::metrics::WorkflowActiveGuard::new();
-        #[cfg(feature = "metrics")]
-        let _started = std::time::Instant::now();
-
-        let total_budget = self.total_timeout.map(|d| (std::time::Instant::now(), d));
+        let started = std::time::Instant::now();
+        let total_budget = self.resolve_total_budget(started);
         let exec = self.execute_workflow_from(
             resume_state,
             start_sequence,
@@ -454,39 +656,14 @@ where
             prior_transitions,
             total_budget,
         );
-        // `with_total_timeout` strictly supersedes the legacy `with_timeout` here,
-        // for the same reason as `run_workflow`: the inner total-budget drain
-        // would be cancelled mid-flight if the outer `tokio::time::timeout`
-        // fired as well.
-        let result = match (self.workflow_timeout, total_budget) {
-            (Some(timeout_duration), None) => {
-                match tokio::time::timeout(timeout_duration, exec).await {
-                    Ok(inner) => inner,
-                    Err(_) => {
-                        #[cfg(feature = "metrics")]
-                        crate::metrics::workflow_run("timeout", _started.elapsed());
-                        self.resources
-                            .teardown_range(0..self.resources.lifecycle_len())
-                            .await;
-                        return Err(CanoError::workflow("Workflow timeout exceeded"));
-                    }
-                }
-            }
-            _ => exec.await,
-        };
-        #[cfg(feature = "metrics")]
-        crate::metrics::workflow_run(
-            if result.is_ok() {
-                "completed"
-            } else {
-                "failed"
-            },
-            _started.elapsed(),
-        );
-        self.resources
-            .teardown_range(0..self.resources.lifecycle_len())
-            .await;
-        result
+        // Teardown happens in the outer `resume_from` after this function
+        // returns, so this branch only produces the error value and lets
+        // the caller clean up. `await_with_outer_timeout` owns the
+        // workflow_run metric emission for both timeout and
+        // completed/failed outcomes — see its docstring for the
+        // precedence rules between `with_timeout` and `with_total_timeout`.
+        self.await_with_outer_timeout(exec, total_budget, started)
+            .await
     }
 }
 
@@ -499,7 +676,7 @@ mod tests {
     use crate::saga;
     use crate::saga::CompensatableTask;
     use crate::task as task_mod;
-    use crate::task::Task;
+    use crate::task::{Task, TaskConfig};
     use crate::workflow::test_support::*;
     use crate::workflow::{JoinConfig, JoinStrategy};
     use cano_macros::task;
@@ -513,94 +690,24 @@ mod tests {
     use crate::recovery::{CheckpointRow, CheckpointStore};
     use std::sync::Mutex;
 
-    /// In-memory [`CheckpointStore`] test double. `live` is the real store state (`clear`
-    /// empties it); `audit` records every row ever appended, in order, and is *never*
-    /// cleared — so tests can inspect what was written even after a successful run cleared
-    /// the live log. (Linear scans; fine for the tiny test scenarios here, not for scale.)
-    #[derive(Default)]
-    struct MemCheckpoints {
-        live: Mutex<HashMap<String, Vec<CheckpointRow>>>,
-        audit: Mutex<Vec<(String, CheckpointRow)>>,
-    }
-
-    #[cano_macros::checkpoint_store]
-    impl CheckpointStore for MemCheckpoints {
-        async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
-            let mut live = self.live.lock().unwrap();
-            let rows = live.entry(workflow_id.to_string()).or_default();
-            if rows.iter().any(|r| r.sequence == row.sequence) {
-                return Err(CanoError::checkpoint_store(format!(
-                    "checkpoint conflict: {workflow_id:?} already has sequence {}",
-                    row.sequence
-                )));
-            }
-            self.audit
-                .lock()
-                .unwrap()
-                .push((workflow_id.to_string(), row.clone()));
-            rows.push(row);
-            Ok(())
-        }
-        async fn load_run(&self, workflow_id: &str) -> Result<Vec<CheckpointRow>, CanoError> {
-            Ok(self.rows(workflow_id))
-        }
-        async fn clear(&self, workflow_id: &str) -> Result<(), CanoError> {
-            self.live.lock().unwrap().remove(workflow_id);
-            Ok(())
-        }
-    }
-
-    impl MemCheckpoints {
-        /// Live rows for `workflow_id`, sorted by sequence (empty after a `clear`).
-        fn rows(&self, workflow_id: &str) -> Vec<CheckpointRow> {
-            let mut rows = self
-                .live
-                .lock()
-                .unwrap()
-                .get(workflow_id)
-                .cloned()
-                .unwrap_or_default();
-            rows.sort_by_key(|r| r.sequence);
-            rows
-        }
-        /// Every row ever appended for `workflow_id`, in append order — survives `clear`.
-        fn audit_rows(&self, workflow_id: &str) -> Vec<CheckpointRow> {
-            self.audit
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|(id, _)| id == workflow_id)
-                .map(|(_, r)| r.clone())
-                .collect()
-        }
-        fn audit_states(&self, workflow_id: &str) -> Vec<(u64, String)> {
-            self.audit_rows(workflow_id)
-                .into_iter()
-                .map(|r| (r.sequence, r.state))
-                .collect()
-        }
-    }
-
     /// Records `(event, workflow_id, sequence)` for `on_checkpoint` / `on_resume`.
-    #[derive(Default)]
-    struct CkptObserver(Mutex<Vec<(&'static str, String, u64)>>);
+    /// Thin observer over a shared `Recorder<E>` (see `test_support`).
+    struct CkptObserver(Arc<Recorder<(&'static str, String, u64)>>);
     impl WorkflowObserver for CkptObserver {
         fn on_checkpoint(&self, workflow_id: &str, sequence: u64) {
             self.0
-                .lock()
-                .unwrap()
-                .push(("checkpoint", workflow_id.to_string(), sequence));
+                .record(("checkpoint", workflow_id.to_string(), sequence));
         }
         fn on_resume(&self, workflow_id: &str, sequence: u64) {
-            self.0
-                .lock()
-                .unwrap()
-                .push(("resume", workflow_id.to_string(), sequence));
+            self.0.record(("resume", workflow_id.to_string(), sequence));
         }
     }
     impl CkptObserver {
-        fn events(&self) -> Vec<(&'static str, String, u64)> {
-            self.0.lock().unwrap().clone()
+        /// Convenience: wraps a fresh `Recorder` and returns both halves.
+        #[allow(clippy::type_complexity)] // Vec event-shape is the whole point of Recorder
+        fn new() -> (Self, Arc<Recorder<(&'static str, String, u64)>>) {
+            let rec = Recorder::new();
+            (Self(rec.clone()), rec)
         }
     }
 
@@ -672,13 +779,13 @@ mod tests {
 
         let start_task = SimpleTask::new(TestState::Process);
         let process_task = SimpleTask::new(TestState::Complete);
-        let observer = Arc::new(CkptObserver::default());
+        let (observer, rec) = CkptObserver::new();
         let workflow = Workflow::bare()
             .register(TestState::Start, start_task.clone())
             .register(TestState::Process, process_task.clone())
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone())
-            .with_observer(observer.clone());
+            .with_observer(Arc::new(observer));
 
         assert_eq!(
             workflow.resume_from("run-2").await.unwrap(),
@@ -706,7 +813,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            observer.events(),
+            rec.snapshot(),
             vec![
                 ("resume", "run-2".to_string(), 1),
                 ("checkpoint", "run-2".to_string(), 2),
@@ -847,17 +954,16 @@ mod tests {
 
         // Observe on_state_enter and on_checkpoint to verify router fires the
         // former but NOT the latter.
-        #[derive(Default)]
-        struct StateEnterObserver(Mutex<Vec<String>>);
+        struct StateEnterObserver(Arc<Recorder<String>>);
         impl WorkflowObserver for StateEnterObserver {
             fn on_state_enter(&self, state: &str) {
-                self.0.lock().unwrap().push(state.to_string());
+                self.0.record(state.to_string());
             }
         }
 
         let store = Arc::new(MemCheckpoints::default());
-        let observer = Arc::new(StateEnterObserver::default());
-        let ckpt_obs = Arc::new(CkptObserver::default());
+        let state_rec = Recorder::<String>::new();
+        let (ckpt_obs, ckpt_rec) = CkptObserver::new();
 
         // Route (router) → Process (single) → Complete (exit)
         let workflow = Workflow::bare()
@@ -866,8 +972,8 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("router-run")
-            .with_observer(observer.clone())
-            .with_observer(ckpt_obs.clone());
+            .with_observer(Arc::new(StateEnterObserver(state_rec.clone())))
+            .with_observer(Arc::new(ckpt_obs));
 
         assert_eq!(
             workflow.orchestrate(TestState::Start).await.unwrap(),
@@ -876,7 +982,7 @@ mod tests {
 
         // `on_state_enter` fires for ALL states (including the router).
         assert_eq!(
-            *observer.0.lock().unwrap(),
+            state_rec.snapshot(),
             vec!["Start", "Process", "Complete"],
             "on_state_enter fires for every state including the router"
         );
@@ -889,9 +995,8 @@ mod tests {
         );
 
         // `on_checkpoint` must not have fired for the Start/router state.
-        let ckpt_events = ckpt_obs.events();
         assert_eq!(
-            ckpt_events,
+            ckpt_rec.snapshot(),
             vec![
                 ("checkpoint", "router-run".to_string(), 0),
                 ("checkpoint", "router-run".to_string(), 1),
@@ -956,69 +1061,9 @@ mod tests {
 
     // ---- Saga / compensation ----
 
-    use crate::task::TaskConfig;
-
-    /// Shared, ordered log of `(task name, output value)` for every `compensate` call.
-    type CompLog = Arc<Mutex<Vec<(String, u32)>>>;
-
-    /// A compensatable test task. Its forward `run` returns `next_state` and `value`
-    /// (unless `fail_forward`); `compensate` records `(name, output)` onto `log` (and
-    /// errors if `fail_compensate`). No retries, so a forward failure surfaces immediately.
-    #[derive(Clone)]
-    struct CompTask {
-        name: &'static str,
-        value: u32,
-        next_state: TestState,
-        log: CompLog,
-        fail_forward: bool,
-        fail_compensate: bool,
-    }
-
-    impl CompTask {
-        fn ok(name: &'static str, value: u32, next_state: TestState, log: &CompLog) -> Self {
-            Self {
-                name,
-                value,
-                next_state,
-                log: log.clone(),
-                fail_forward: false,
-                fail_compensate: false,
-            }
-        }
-    }
-
-    #[saga::task]
-    impl CompensatableTask<TestState> for CompTask {
-        type Output = u32;
-        fn config(&self) -> TaskConfig {
-            TaskConfig::minimal()
-        }
-        fn name(&self) -> Cow<'static, str> {
-            Cow::Borrowed(self.name)
-        }
-        async fn run(&self, _res: &Resources) -> Result<(TaskResult<TestState>, u32), CanoError> {
-            if self.fail_forward {
-                return Err(CanoError::task_execution(format!(
-                    "{} forward failed",
-                    self.name
-                )));
-            }
-            Ok((TaskResult::Single(self.next_state.clone()), self.value))
-        }
-        async fn compensate(&self, _res: &Resources, output: u32) -> Result<(), CanoError> {
-            self.log
-                .lock()
-                .unwrap()
-                .push((self.name.to_string(), output));
-            if self.fail_compensate {
-                return Err(CanoError::generic(format!(
-                    "{} compensate failed",
-                    self.name
-                )));
-            }
-            Ok(())
-        }
-    }
+    // `CompLog` and `CompTask` (with `fail_forward` / `fail_compensate` flags)
+    // live in `workflow::test_support` so both the saga unit tests here and
+    // the metrics test mod can share them.
 
     #[tokio::test]
     async fn compensations_run_in_reverse_on_terminal_failure() {
@@ -1308,9 +1353,11 @@ mod tests {
         //  seq 1 — CompensationCompletion A  (kind = CompensationCompletion, output = 101)
         //  seq 2 — StateEntry for B          (kind = StateEntry,            no output_blob)
         //  seq 3 — CompensationCompletion B  (kind = CompensationCompletion, output = 202)
-        //  seq 4 — StepCursor for C          (kind = StepCursor,            cursor = [9,9])
+        //  seq 4 — StateEntry for C          (kind = StateEntry — the engine always writes
+        //                                     this before any other row for the state)
+        //  seq 5 — StepCursor for C          (kind = StepCursor,            cursor = [9,9])
         //
-        // The highest-sequence row (seq 4) is the resume point → C is the resume state.
+        // The highest-sequence row (seq 5) is the resume point → C is the resume state.
         // Rehydration must produce exactly [A=101, B=202] (in that order), not [A, B, StepCursor-C].
         store
             .append("mixed-run", CheckpointRow::new(0, "Start", "A"))
@@ -1336,8 +1383,12 @@ mod tests {
             )
             .await
             .unwrap();
+        store
+            .append("mixed-run", CheckpointRow::new(4, "Split", "C"))
+            .await
+            .unwrap();
         // StepCursor row for the Split state — has output_blob but is NOT a CompensationCompletion.
-        let cursor_row = CheckpointRow::new(4, "Split", "C").with_cursor(vec![9, 9]);
+        let cursor_row = CheckpointRow::new(5, "Split", "C").with_cursor(vec![9, 9]);
         assert_eq!(
             cursor_row.kind,
             RowKind::StepCursor,
@@ -1807,6 +1858,184 @@ mod tests {
         // deadline error. We only assert the deadline-error shape above.
     }
 
+    #[tokio::test]
+    async fn pre_dispatch_failure_honors_bounded_compensation_deadline() {
+        // Regression for F1: previously, pre-dispatch failure arms (missing
+        // workflow id, checkpoint append failure, missing handler,
+        // compensation-completion append failure) called the *unbounded*
+        // `run_compensations`, silently bypassing `with_compensation_timeout`
+        // even when `with_total_timeout` was set. A long-running compensator
+        // could blow past the user's configured wall-clock cap. Every
+        // drain entry point now routes through `drain_for_budget` and
+        // honors the bounded budget consistently.
+
+        // No-op compensator that sleeps long enough to *exceed* the
+        // bounded comp deadline. Without the fix this would block the
+        // whole drain; with the fix it is aborted by `tokio::time::timeout_at`.
+        #[derive(Clone)]
+        struct SlowCompensate {
+            log: CompLog,
+            name: &'static str,
+            value: u32,
+            next_state: TestState,
+        }
+        #[saga::task]
+        impl CompensatableTask<TestState> for SlowCompensate {
+            type Output = u32;
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+            fn name(&self) -> Cow<'static, str> {
+                Cow::Borrowed(self.name)
+            }
+            async fn run(
+                &self,
+                _res: &Resources,
+            ) -> Result<(TaskResult<TestState>, u32), CanoError> {
+                Ok((TaskResult::Single(self.next_state.clone()), self.value))
+            }
+            async fn compensate(&self, _res: &Resources, output: u32) -> Result<(), CanoError> {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                self.log
+                    .lock()
+                    .unwrap()
+                    .push((self.name.to_string(), output));
+                Ok(())
+            }
+        }
+
+        let log: CompLog = Arc::new(Mutex::new(Vec::new()));
+        // Build a workflow whose dispatch reaches `Process` and then finds
+        // no registered handler for it — triggering the pre-dispatch
+        // "no task registered" arm. Before the fix this called the
+        // unbounded drain.
+        let workflow = Workflow::bare()
+            .with_total_timeout(Duration::from_secs(10))
+            .with_compensation_timeout(Duration::from_millis(50))
+            .register_with_compensation(
+                TestState::Start,
+                SlowCompensate {
+                    log: log.clone(),
+                    name: "A",
+                    value: 1,
+                    next_state: TestState::Process,
+                },
+            )
+            // `Process` deliberately has no registered task — its dispatch
+            // hits the "no task registered" arm at execution.rs.
+            .add_exit_state(TestState::Complete);
+
+        let started = std::time::Instant::now();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        let elapsed = started.elapsed();
+
+        // With the bounded drain (50ms cap) the test finishes well under
+        // SlowCompensate's 1s sleep. Without the fix this would have taken
+        // ~1s as the unbounded drain awaits the compensator's full sleep.
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "bounded compensation timeout must bound the drain even on pre-dispatch failures; took {elapsed:?}"
+        );
+        // The surfaced error should carry the deadline summary among the
+        // collected compensation errors.
+        match err {
+            CanoError::CompensationFailed { errors } => {
+                assert!(
+                    errors
+                        .iter()
+                        .any(|e| e.message().contains("compensation deadline")
+                            || e.message().contains("exceeded compensation")),
+                    "expected a deadline-related error in the compensation failure, got: {errors:?}"
+                );
+            }
+            other => panic!("expected CompensationFailed, got: {other:?}"),
+        }
+        // SlowCompensate's compensate body was aborted before reaching the
+        // log push — proving the bounded drain dropped the future.
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "compensate body must have been aborted before completion: {:?}",
+            log.lock().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn run_compensations_bounded_preserves_blobs_when_deadline_already_elapsed() {
+        // Regression for F2: the pre-iteration deadline check used to drop the
+        // just-popped entry on the floor (`break` after a generic "N entries
+        // left unprocessed" string) — silently discarding the persisted
+        // `output_blob` operators need for manual rollback. The popped entry
+        // and every remaining one must now be preserved as
+        // `OrphanedCompensation` errors carrying the blob.
+        let log: CompLog = Arc::new(Mutex::new(Vec::new()));
+        let workflow = Workflow::bare()
+            .register_with_compensation(
+                TestState::Start,
+                CompTask::ok("A", 1, TestState::Process, &log),
+            )
+            .register_with_compensation(
+                TestState::Process,
+                CompTask::ok("B", 2, TestState::Complete, &log),
+            )
+            .add_exit_state(TestState::Complete);
+
+        let stack = vec![
+            CompensationEntry {
+                task_id: Arc::from("A"),
+                output_blob: serde_json::to_vec(&111u32).unwrap(),
+            },
+            CompensationEntry {
+                task_id: Arc::from("B"),
+                output_blob: serde_json::to_vec(&222u32).unwrap(),
+            },
+        ];
+        let original = CanoError::task_execution("forward boom");
+        // Deadline already in the past — the very first iteration trips it.
+        let already_elapsed = tokio::time::Instant::now() - Duration::from_millis(1);
+        let result = workflow
+            .run_compensations_bounded(None, stack, original, Some(already_elapsed))
+            .await;
+        let err = result.unwrap_err();
+        let errors = match err {
+            CanoError::CompensationFailed { errors } => errors,
+            other => panic!("expected CompensationFailed, got {other:?}"),
+        };
+        // errors[0] = original failure. The middle errors[1..n-1] must be
+        // OrphanedCompensation entries (one per stack entry, both preserving
+        // their blob). The final error is the timeout summary.
+        assert_eq!(errors[0].message(), "forward boom");
+        let blobs: Vec<(String, Vec<u8>)> = errors
+            .iter()
+            .filter_map(|e| match e {
+                CanoError::OrphanedCompensation {
+                    task_id,
+                    output_blob,
+                } => Some((task_id.to_string(), output_blob.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            blobs.len(),
+            2,
+            "both stack entries must be surfaced as OrphanedCompensation (got: {errors:?})"
+        );
+        // LIFO drain → B popped first, then A. Both blobs must carry the
+        // correct serialized payload so an operator can decode and manually
+        // undo the side effect.
+        let by_id: HashMap<String, Vec<u8>> = blobs.into_iter().collect();
+        assert_eq!(by_id["B"], serde_json::to_vec(&222u32).unwrap());
+        assert_eq!(by_id["A"], serde_json::to_vec(&111u32).unwrap());
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message().contains("compensation deadline")),
+            "summary timeout error must still be present: {errors:?}"
+        );
+        // No compensator should have actually run — deadline tripped on the
+        // first pop, both entries were preserved without running compensate.
+        assert!(log.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn resolve_compensation_deadline_uses_override_when_set() {
         use crate::workflow::compensation::resolve_compensation_deadline;
@@ -1929,18 +2158,17 @@ mod tests {
             }
         }
 
-        #[derive(Default)]
-        struct Rec(Mutex<Vec<(Duration, Duration)>>);
+        struct Rec(Arc<Recorder<(Duration, Duration)>>);
         impl WorkflowObserver for Rec {
             fn on_workflow_timeout(&self, elapsed: Duration, limit: Duration) {
-                self.0.lock().unwrap().push((elapsed, limit));
+                self.0.record((elapsed, limit));
             }
         }
-        let rec = Arc::new(Rec::default());
+        let rec = Recorder::<(Duration, Duration)>::new();
 
         let workflow = Workflow::bare()
             .with_total_timeout(Duration::from_millis(40))
-            .with_observer(rec.clone())
+            .with_observer(Arc::new(Rec(rec.clone())))
             .register(TestState::Start, SimpleTask::new(TestState::Process))
             .register(TestState::Process, SlowProcess)
             .add_exit_state(TestState::Complete)
@@ -1960,7 +2188,7 @@ mod tests {
             "got: {err}"
         );
 
-        let events = rec.0.lock().unwrap().clone();
+        let events = rec.snapshot();
         assert_eq!(events.len(), 1, "on_workflow_timeout should fire once");
         let (elapsed_hook, limit_hook) = events[0];
         assert_eq!(limit_hook, Duration::from_millis(40));
@@ -2559,7 +2787,9 @@ mod tests {
         let store = Arc::new(MemCheckpoints::default());
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
 
-        // Seed: A (compensatable, seq 0+1), cursor for a stepped state (seq 2), then crash.
+        // Seed: A (compensatable, seq 0+1), Process StateEntry (seq 2 — the engine
+        // always writes one before any other row for the state), cursor for the
+        // stepped state (seq 3), then crash.
         store
             .append("mixed-stepped", CheckpointRow::new(0, "Start", "A"))
             .await
@@ -2575,7 +2805,14 @@ mod tests {
         store
             .append(
                 "mixed-stepped",
-                CheckpointRow::new(2, "Process", "CountStepper")
+                CheckpointRow::new(2, "Process", "CountStepper"),
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "mixed-stepped",
+                CheckpointRow::new(3, "Process", "CountStepper")
                     .with_cursor(serde_json::to_vec(&1u32).unwrap()),
             )
             .await
@@ -2652,64 +2889,1607 @@ mod tests {
         let err = workflow.resume_from("ver-mismatch").await.unwrap_err();
         assert_eq!(err, CanoError::workflow_version_mismatch(1, 2));
     }
+
+    #[tokio::test]
+    async fn resume_from_falls_back_when_no_state_entry_for_resume_label() {
+        // Regression for F4: a strict `.ok_or_else(...)` requirement on a
+        // `StateEntry` row for the resume label refused to resume legitimate
+        // logs whose StateEntry was lost (corrupted backend, coalesced
+        // writes, older schema). The resume should still succeed when there
+        // are still rehydrate-able earlier rows; the rehydrated path is
+        // best-effort, so missing it is not a fatal corruption.
+        let store = Arc::new(MemCheckpoints::default());
+        // Only a single `StepCursor` row exists for the resume state — no
+        // leading `StateEntry`. Previously this configuration was rejected.
+        store
+            .append(
+                "wf-no-se",
+                CheckpointRow::new(0, "Start", "S")
+                    .with_cursor(b"cursor".to_vec())
+                    .with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+        let workflow = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Complete))
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone());
+        let out = workflow
+            .resume_from("wf-no-se")
+            .await
+            .expect("resume should fall back instead of refusing on missing StateEntry");
+        assert_eq!(out, TestState::Complete);
+    }
+
+    #[tokio::test]
+    async fn resume_from_accepts_mixed_version_log_when_last_row_matches() {
+        // Regression for F3: previously the per-row version check refused any
+        // mid-run version bump — exactly the scenario `with_workflow_version`
+        // was meant to support. A log with older v0 rows plus a newer v1 row
+        // at the tail must now resume cleanly; the only authoritative version
+        // is the latest one, since that determines which workflow definition
+        // continues. Older rows just inform the rehydrated path.
+        let store = Arc::new(MemCheckpoints::default());
+        // Older rows under workflow_version=0.
+        store
+            .append(
+                "mixed-ver",
+                CheckpointRow::new(0, "Start", "S").with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+        // Final row stamped with the new workflow_version=1 — this is what
+        // we resume from.
+        store
+            .append(
+                "mixed-ver",
+                CheckpointRow::new(1, "Process", "P").with_workflow_version(1),
+            )
+            .await
+            .unwrap();
+        let workflow = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Process))
+            .register(TestState::Process, SimpleTask::new(TestState::Complete))
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone())
+            .with_workflow_version(1);
+        let out = workflow
+            .resume_from("mixed-ver")
+            .await
+            .expect("mixed-version log with matching tail must resume cleanly");
+        assert_eq!(out, TestState::Complete);
+    }
+
+    // A backend that violates the `load_run` ascending-by-sequence contract.
+    // Used only to verify the engine's defensive sort.
+    #[derive(Default)]
+    struct UnsortedStore(MemCheckpoints);
+
+    #[cano_macros::checkpoint_store]
+    impl CheckpointStore for UnsortedStore {
+        async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
+            self.0.append(workflow_id, row).await
+        }
+        async fn load_run(&self, workflow_id: &str) -> Result<Vec<CheckpointRow>, CanoError> {
+            // Deliberately return rows in REVERSE sequence order.
+            let mut rows = self.0.load_run(workflow_id).await?;
+            rows.reverse();
+            Ok(rows)
+        }
+        async fn clear(&self, workflow_id: &str) -> Result<(), CanoError> {
+            self.0.clear(workflow_id).await
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_from_sorts_unsorted_load_run_results() {
+        // A backend that returns rows out of order must not corrupt the LIFO
+        // compensation drain. The trait contract requires ascending-by-sequence,
+        // but the engine sorts defensively in `resume_from` so a buggy custom
+        // store can't silently invert the rollback order.
+        let log: CompLog = Arc::new(Mutex::new(Vec::new()));
+        let store = Arc::new(UnsortedStore::default());
+        // Build a log with three compensatable completions, then a final
+        // StateEntry that fails the resumed task (forcing a drain).
+        store
+            .append(
+                "unsorted",
+                CheckpointRow::new(0, "Start", "A").with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "unsorted",
+                CheckpointRow::new(1, "Start", "A")
+                    .with_output(serde_json::to_vec(&1u32).unwrap())
+                    .with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "unsorted",
+                CheckpointRow::new(2, "Process", "B").with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "unsorted",
+                CheckpointRow::new(3, "Process", "B")
+                    .with_output(serde_json::to_vec(&2u32).unwrap())
+                    .with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "unsorted",
+                CheckpointRow::new(4, "Error", "FailFast").with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+
+        let workflow = Workflow::bare()
+            .register_with_compensation(
+                TestState::Start,
+                CompTask::ok("A", 1, TestState::Process, &log),
+            )
+            .register_with_compensation(
+                TestState::Process,
+                CompTask::ok("B", 2, TestState::Error, &log),
+            )
+            .register(TestState::Error, FailTask::new(true))
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone());
+
+        let _ = workflow.resume_from("unsorted").await.unwrap_err();
+        // LIFO drain: B compensates first (output 2), then A (output 1).
+        // Without the engine-side sort, the rehydrated stack would have been
+        // built in reverse and `A` would have compensated before `B`.
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![("B".to_string(), 2u32), ("A".to_string(), 1u32)],
+        );
+    }
+
+    #[tokio::test]
+    async fn compensation_attempt_timeout_drops_compensate_future_mid_await() {
+        // The compensation drain bounds each `compensate()` with
+        // `attempt_timeout` via `tokio::time::timeout`. When it fires the
+        // in-flight future is dropped — work past the await point does NOT
+        // run. The drain records the timeout and moves on; the timed-out
+        // compensator is NOT retried. This pins the documented cancellation
+        // contract on `CompensatableTask::compensate`.
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        #[derive(Clone)]
+        struct HangingCompensator {
+            began: Arc<AtomicBool>,
+            finished: Arc<AtomicBool>,
+        }
+        #[saga::task]
+        impl CompensatableTask<TestState> for HangingCompensator {
+            type Output = u32;
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal().with_attempt_timeout(Duration::from_millis(30))
+            }
+            fn name(&self) -> Cow<'static, str> {
+                Cow::Borrowed("HangingCompensator")
+            }
+            async fn run(
+                &self,
+                _res: &Resources,
+            ) -> Result<(TaskResult<TestState>, u32), CanoError> {
+                Ok((TaskResult::Single(TestState::Process), 1))
+            }
+            async fn compensate(&self, _res: &Resources, _o: u32) -> Result<(), CanoError> {
+                self.began.store(true, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                self.finished.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let began = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        let workflow = Workflow::bare()
+            .register_with_compensation(
+                TestState::Start,
+                HangingCompensator {
+                    began: began.clone(),
+                    finished: finished.clone(),
+                },
+            )
+            // A forward state that fails to trigger the drain.
+            .register(TestState::Process, FailTask::new(true))
+            .add_exit_state(TestState::Complete);
+
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        // The drain ran compensate (it started) but timed out before finishing.
+        assert!(began.load(Ordering::SeqCst), "compensate must have started");
+        assert!(
+            !finished.load(Ordering::SeqCst),
+            "compensate future MUST be dropped at attempt_timeout — finished must NOT be set"
+        );
+        // The drain surfaces a CompensationFailed with the compensator timeout in errors.
+        match err {
+            CanoError::CompensationFailed { errors } => {
+                let timeout_present = errors.iter().any(|e| {
+                    let msg = e.message();
+                    msg.contains("attempt_timeout") || msg.contains("compensation deadline")
+                });
+                assert!(timeout_present, "expected timeout error in: {errors:?}");
+            }
+            other => panic!("expected CompensationFailed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn attempt_timeout_drops_task_future_mid_await() {
+        // `tokio::time::timeout` cancels the in-flight task body. A task that
+        // begins side-effect work then yields gets its future dropped — the
+        // side effect's "after" handler does NOT run. This pins the
+        // documented cancellation contract on `with_attempt_timeout` so a
+        // regression that quietly switches to a cancellation-safe wrapper
+        // would be caught.
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        #[derive(Clone)]
+        struct YieldingTask {
+            started: Arc<AtomicBool>,
+            finished: Arc<AtomicBool>,
+        }
+        #[crate::task]
+        impl Task<TestState> for YieldingTask {
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal().with_attempt_timeout(Duration::from_millis(30))
+            }
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+                self.started.store(true, Ordering::SeqCst);
+                // Yield well past the attempt_timeout — the future is dropped
+                // here and the `finished` flip below never executes.
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                self.finished.store(true, Ordering::SeqCst);
+                Ok(TaskResult::Single(TestState::Complete))
+            }
+        }
+
+        let started = Arc::new(AtomicBool::new(false));
+        let finished = Arc::new(AtomicBool::new(false));
+        let workflow = Workflow::bare()
+            .register(
+                TestState::Start,
+                YieldingTask {
+                    started: started.clone(),
+                    finished: finished.clone(),
+                },
+            )
+            .add_exit_state(TestState::Complete);
+
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        assert!(
+            started.load(Ordering::SeqCst),
+            "task body must have started"
+        );
+        assert!(
+            !finished.load(Ordering::SeqCst),
+            "task future MUST be dropped mid-await — finished flag must NOT be set"
+        );
+        assert_eq!(err.inner().category(), "timeout");
+    }
+
+    #[tokio::test]
+    async fn compensatable_panic_after_commit_does_not_push_entry() {
+        // The saga safety rule says compensatable tasks must not commit side
+        // effects before returning `Ok((next, output))`. This pins what
+        // happens when the rule is violated — a panic mid-task surfaces as a
+        // failure but no compensation entry was ever pushed, so the side
+        // effect leaks. Future work that auto-recovers from mid-task panics
+        // must explicitly update this expectation.
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        #[derive(Clone)]
+        struct LeakyTask {
+            committed: Arc<AtomicBool>,
+            compensated: Arc<AtomicBool>,
+        }
+        #[saga::task]
+        impl CompensatableTask<TestState> for LeakyTask {
+            type Output = u32;
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+            fn name(&self) -> Cow<'static, str> {
+                Cow::Borrowed("LeakyTask")
+            }
+            async fn run(
+                &self,
+                _res: &Resources,
+            ) -> Result<(TaskResult<TestState>, u32), CanoError> {
+                // Simulate the contract violation: commit FIRST, panic SECOND.
+                self.committed.store(true, Ordering::SeqCst);
+                panic!("commit happened, never reached Ok");
+            }
+            async fn compensate(&self, _res: &Resources, _o: u32) -> Result<(), CanoError> {
+                self.compensated.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let committed = Arc::new(AtomicBool::new(false));
+        let compensated = Arc::new(AtomicBool::new(false));
+        let workflow = Workflow::bare()
+            .register_with_compensation(
+                TestState::Start,
+                LeakyTask {
+                    committed: committed.clone(),
+                    compensated: compensated.clone(),
+                },
+            )
+            .add_exit_state(TestState::Complete);
+
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        assert!(
+            committed.load(Ordering::SeqCst),
+            "commit must have happened"
+        );
+        // Documented behavior: the contract violation produces an uncompensated leak.
+        // The engine catches the panic and surfaces it, but does NOT call compensate.
+        assert!(
+            !compensated.load(Ordering::SeqCst),
+            "compensate must NOT run when commit happens before Ok((state, output)) returns — \
+             this pins the documented saga safety contract; a future fix that auto-compensates \
+             panic-mid-commit must explicitly update this test"
+        );
+        assert!(err.message().contains("panic"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn checkpoint_clear_failure_fires_observer_hook() {
+        // A `clear` failure on the success path is best-effort by design and
+        // does not turn a successful run into an error — but the failure must
+        // still be observable, otherwise a stranded log would later block a
+        // fresh run with a duplicate-sequence error. The
+        // `on_checkpoint_clear_failed` hook surfaces it through the standard
+        // observer pipeline.
+
+        // A store that succeeds on append but always errors on clear.
+        struct ClearFailsStore(MemCheckpoints);
+        #[cano_macros::checkpoint_store]
+        impl CheckpointStore for ClearFailsStore {
+            async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
+                self.0.append(workflow_id, row).await
+            }
+            async fn load_run(&self, workflow_id: &str) -> Result<Vec<CheckpointRow>, CanoError> {
+                self.0.load_run(workflow_id).await
+            }
+            async fn clear(&self, _workflow_id: &str) -> Result<(), CanoError> {
+                Err(CanoError::checkpoint_store("clear deliberately fails"))
+            }
+        }
+
+        struct ClearObserver(Arc<Recorder<(String, String)>>);
+        impl WorkflowObserver for ClearObserver {
+            fn on_checkpoint_clear_failed(&self, workflow_id: &str, error: &CanoError) {
+                self.0
+                    .record((workflow_id.to_string(), error.message().to_string()));
+            }
+        }
+
+        let store = Arc::new(ClearFailsStore(MemCheckpoints::default()));
+        let rec = Recorder::<(String, String)>::new();
+
+        let workflow = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Complete))
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone())
+            .with_workflow_id("clear-test")
+            .with_observer(Arc::new(ClearObserver(rec.clone())));
+
+        // Successful run that triggers the clear-on-success path.
+        workflow.orchestrate(TestState::Start).await.unwrap();
+
+        let calls = rec.snapshot();
+        assert_eq!(calls.len(), 1, "expected one clear-failure event");
+        assert_eq!(calls[0].0, "clear-test");
+        assert!(
+            calls[0].1.contains("clear deliberately fails"),
+            "got: {}",
+            calls[0].1
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_compensate_runs_to_completion_ignoring_attempt_timeout() {
+        // Regression for F7: previously the inline-compensate path applied the
+        // task's `attempt_timeout` to its compensate future. Because that
+        // future has already consumed the typed `output` value, dropping it
+        // mid-await destroyed `output` with no recovery path (the compensation
+        // entry was never persisted on this path — it runs before the FSM
+        // pushes anything onto the stack). The fix removes the timeout: the
+        // inline compensate runs to completion and the operator gets a
+        // coherent rollback, bounded by the workflow-level total timeout if
+        // they want a wall-clock cap.
+        use serde::{Deserialize, Serialize, Serializer};
+
+        #[derive(Debug, Deserialize)]
+        struct NeverSerialize;
+        impl Serialize for NeverSerialize {
+            fn serialize<S: Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("intentional"))
+            }
+        }
+
+        #[derive(Clone)]
+        struct CountingCompensate {
+            ran: Arc<std::sync::atomic::AtomicBool>,
+        }
+        #[saga::task]
+        impl CompensatableTask<TestState> for CountingCompensate {
+            type Output = NeverSerialize;
+            fn config(&self) -> TaskConfig {
+                // Configure a per-attempt timeout that USED to cancel inline
+                // compensate. The fix is that compensate ignores it.
+                TaskConfig::minimal().with_attempt_timeout(Duration::from_millis(30))
+            }
+            async fn run(
+                &self,
+                _res: &Resources,
+            ) -> Result<(TaskResult<TestState>, NeverSerialize), CanoError> {
+                Ok((TaskResult::Single(TestState::Complete), NeverSerialize))
+            }
+            async fn compensate(
+                &self,
+                _res: &Resources,
+                _o: NeverSerialize,
+            ) -> Result<(), CanoError> {
+                // Sleep well past the configured `attempt_timeout` to prove
+                // it isn't applied to the inline path. ~80ms keeps the test
+                // fast while exceeding the 30ms attempt_timeout 2x.
+                tokio::time::sleep(Duration::from_millis(80)).await;
+                self.ran.store(true, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let workflow = Workflow::bare()
+            .register_with_compensation(TestState::Start, CountingCompensate { ran: ran.clone() })
+            .add_exit_state(TestState::Complete);
+
+        let started = std::time::Instant::now();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        let elapsed = started.elapsed();
+        assert!(
+            ran.load(std::sync::atomic::Ordering::SeqCst),
+            "compensate must run to completion despite attempt_timeout"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(70),
+            "compensate slept ~80ms; orchestrate elapsed should reflect that, got {elapsed:?}"
+        );
+        // Surfaces the original serialize error (compensate succeeded). The
+        // pre-fix path would have surfaced `CompensationFailed` because the
+        // attempt_timeout fired before compensate finished.
+        assert!(
+            err.message().contains("serialize"),
+            "inline compensate ran cleanly; surfaced error should be the original serialize_err, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_compensate_catches_panic_and_preserves_original_error() {
+        // A panicking `compensate` called inline must not abort the workflow,
+        // and must NOT lose the serialize_err that explains why the inline
+        // path triggered.
+        use serde::{Deserialize, Serialize, Serializer};
+
+        #[derive(Debug, Deserialize)]
+        struct NeverSerialize;
+        impl Serialize for NeverSerialize {
+            fn serialize<S: Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("intentional"))
+            }
+        }
+
+        #[derive(Clone)]
+        struct PanickyCompensate;
+        #[saga::task]
+        impl CompensatableTask<TestState> for PanickyCompensate {
+            type Output = NeverSerialize;
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+            async fn run(
+                &self,
+                _res: &Resources,
+            ) -> Result<(TaskResult<TestState>, NeverSerialize), CanoError> {
+                Ok((TaskResult::Single(TestState::Complete), NeverSerialize))
+            }
+            async fn compensate(
+                &self,
+                _res: &Resources,
+                _o: NeverSerialize,
+            ) -> Result<(), CanoError> {
+                panic!("compensate boom");
+            }
+        }
+
+        let workflow = Workflow::bare()
+            .register_with_compensation(TestState::Start, PanickyCompensate)
+            .add_exit_state(TestState::Complete);
+
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        match err.inner() {
+            CanoError::CompensationFailed { errors } => {
+                assert!(
+                    errors.iter().any(|e| e.message().contains("serialize")),
+                    "serialize_err must be preserved: {errors:?}"
+                );
+                assert!(
+                    errors.iter().any(|e| e.message().contains("panic")),
+                    "panic must surface alongside serialize_err: {errors:?}"
+                );
+            }
+            other => panic!("expected CompensationFailed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn inline_compensate_failure_wraps_errors_0_in_with_state_context() {
+        // Regression for F6: when the saga adapter falls back to
+        // `run_inline_compensate` (Split return or non-serializable Output)
+        // and the inline compensate ALSO fails, the resulting
+        // `CompensationFailed` was previously surfaced with a bare
+        // `TaskExecution` at `errors[0]` — violating the documented
+        // invariant that "errors[0] is the original failure as wrapped by
+        // the FSM in WithStateContext". The constructor now wraps
+        // `errors[0]` so the invariant holds regardless of which path
+        // produced the aggregate.
+        use serde::{Deserialize, Serialize, Serializer};
+
+        #[derive(Debug, Deserialize)]
+        struct NeverSerialize;
+        impl Serialize for NeverSerialize {
+            fn serialize<S: Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("intentional"))
+            }
+        }
+
+        #[derive(Clone)]
+        struct InlineFailingCompensate;
+        #[saga::task]
+        impl CompensatableTask<TestState> for InlineFailingCompensate {
+            type Output = NeverSerialize;
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+            async fn run(
+                &self,
+                _res: &Resources,
+            ) -> Result<(TaskResult<TestState>, NeverSerialize), CanoError> {
+                Ok((TaskResult::Single(TestState::Complete), NeverSerialize))
+            }
+            async fn compensate(
+                &self,
+                _res: &Resources,
+                _o: NeverSerialize,
+            ) -> Result<(), CanoError> {
+                Err(CanoError::task_execution("compensate failed too"))
+            }
+        }
+
+        let workflow = Workflow::bare()
+            .register_with_compensation(TestState::Start, InlineFailingCompensate)
+            .add_exit_state(TestState::Complete);
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        let errors = match err {
+            CanoError::CompensationFailed { errors } => errors,
+            other => panic!("expected CompensationFailed, got: {other:?}"),
+        };
+        assert_eq!(errors.len(), 2, "got: {errors:?}");
+        match &errors[0] {
+            CanoError::WithStateContext {
+                state,
+                attempt: _,
+                transitions_so_far,
+                source,
+            } => {
+                assert_eq!(state, "Start");
+                assert!(transitions_so_far.contains(&"Start".to_string()));
+                assert!(
+                    source.message().contains("serialize"),
+                    "wrapped source must still surface the serialize error: {source:?}"
+                );
+            }
+            other => panic!(
+                "errors[0] must be WithStateContext per the documented invariant; got: {other:?}"
+            ),
+        }
+        // errors[1] is the inline-compensate failure — left bare, since the
+        // wrap only annotates the original failure that triggered rollback.
+        assert!(
+            errors[1].message().contains("compensate failed too"),
+            "errors[1] should still be the compensate failure: {:?}",
+            errors[1]
+        );
+    }
+
+    #[tokio::test]
+    async fn compensation_failed_constructor_flattens_nested() {
+        // The constructor flattens nested CompensationFailed so the drain
+        // never produces a `CompensationFailed { errors: [CompensationFailed { ... }, ...] }`.
+        let nested = CanoError::compensation_failed(vec![
+            CanoError::task_execution("a"),
+            CanoError::task_execution("b"),
+        ]);
+        let outer = CanoError::compensation_failed(vec![nested, CanoError::task_execution("c")]);
+        match outer {
+            CanoError::CompensationFailed { errors } => {
+                assert_eq!(errors.len(), 3);
+                assert_eq!(errors[0].message(), "a");
+                assert_eq!(errors[1].message(), "b");
+                assert_eq!(errors[2].message(), "c");
+            }
+            other => panic!("expected CompensationFailed, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn compensatable_split_return_triggers_inline_compensate() {
+        // A CompensatableTask returning Split is rejected by the adapter BEFORE
+        // serialize, and the side effect committed in `run` is rolled back via
+        // the inline-compensate path — mirroring the serialize-failure case.
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        type Effect = Arc<Mutex<Vec<&'static str>>>;
+
+        #[derive(Clone)]
+        struct LeakySplit {
+            log: Effect,
+            charged: Arc<AtomicBool>,
+        }
+        #[saga::task]
+        impl CompensatableTask<TestState> for LeakySplit {
+            type Output = u32;
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+            async fn run(
+                &self,
+                _res: &Resources,
+            ) -> Result<(TaskResult<TestState>, u32), CanoError> {
+                self.log.lock().unwrap().push("charged");
+                self.charged.store(true, Ordering::SeqCst);
+                // Misuse: a saga task must never return Split. Pre-fix the
+                // FSM rejected this *after* the run already committed, leaking
+                // the side effect. Now the adapter rejects it AND calls
+                // compensate inline.
+                Ok((TaskResult::Split(vec![TestState::Process]), 7))
+            }
+            async fn compensate(&self, _res: &Resources, _o: u32) -> Result<(), CanoError> {
+                self.log.lock().unwrap().push("refunded");
+                Ok(())
+            }
+        }
+
+        let log: Effect = Arc::new(Mutex::new(Vec::new()));
+        let charged = Arc::new(AtomicBool::new(false));
+        let workflow = Workflow::bare()
+            .register_with_compensation(
+                TestState::Start,
+                LeakySplit {
+                    log: log.clone(),
+                    charged: charged.clone(),
+                },
+            )
+            .add_exit_state(TestState::Complete);
+
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        assert!(charged.load(Ordering::SeqCst));
+        // The error mentions the split rejection.
+        assert!(err.message().contains("split"), "got: {err}");
+        // Crucially: compensate ran inline → side effect undone.
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["charged", "refunded"],
+            "Split-return must trigger inline compensate, not leak the side effect"
+        );
+    }
+
+    #[tokio::test]
+    async fn compensatable_serialize_failure_runs_inline_compensate() {
+        // When the adapter cannot serialize `Output` into a checkpoint blob,
+        // the forward `run` has already executed and any committed side effect
+        // is on the wire. The adapter therefore calls `compensate(output)`
+        // inline with the typed value before surfacing the failure, so the
+        // rollback still happens even when persistence isn't possible.
+        use serde::{Deserialize, Serialize, Serializer};
+
+        // A type whose Serialize impl ALWAYS errors. serde_json::to_vec
+        // therefore cannot persist a CompensatableTask whose Output is this.
+        #[derive(Debug, Deserialize)]
+        struct NeverSerialize;
+        impl Serialize for NeverSerialize {
+            fn serialize<S: Serializer>(&self, _ser: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("intentional serialize failure"))
+            }
+        }
+
+        type SideEffect = Arc<Mutex<Vec<&'static str>>>;
+
+        #[derive(Clone)]
+        struct LeakyCharge {
+            log: SideEffect,
+        }
+        #[saga::task]
+        impl CompensatableTask<TestState> for LeakyCharge {
+            type Output = NeverSerialize;
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+            fn name(&self) -> Cow<'static, str> {
+                Cow::Borrowed("LeakyCharge")
+            }
+            async fn run(
+                &self,
+                _res: &Resources,
+            ) -> Result<(TaskResult<TestState>, NeverSerialize), CanoError> {
+                // Simulated commit of an external side effect.
+                self.log.lock().unwrap().push("charged");
+                Ok((TaskResult::Single(TestState::Complete), NeverSerialize))
+            }
+            async fn compensate(
+                &self,
+                _res: &Resources,
+                _output: NeverSerialize,
+            ) -> Result<(), CanoError> {
+                self.log.lock().unwrap().push("refunded");
+                Ok(())
+            }
+        }
+
+        let log: SideEffect = Arc::new(Mutex::new(Vec::new()));
+        let workflow = Workflow::bare()
+            .register_with_compensation(TestState::Start, LeakyCharge { log: log.clone() })
+            .add_exit_state(TestState::Complete);
+
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        // The serialize error is what surfaces (wrapped with state context).
+        assert!(err.message().contains("serialize"), "got: {err}");
+
+        // Crucial: compensate ran inline — the side effect is undone even
+        // though it could not be persisted for crash-recovery rollback.
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec!["charged", "refunded"],
+            "compensate must run inline when serialize fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_from_setup_failure_leaves_checkpoint_log_untouched() {
+        // `setup_all` runs before any rehydration work, so a setup failure
+        // surfaces the resource error without firing `on_resume` and without
+        // silently dropping the rehydratable compensation stack.
+        use crate::resource::{Resource, Resources};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct FailingResource {
+            triggered: Arc<AtomicBool>,
+        }
+        #[crate::resource]
+        impl Resource for FailingResource {
+            async fn setup(&self) -> Result<(), CanoError> {
+                self.triggered.store(true, Ordering::SeqCst);
+                Err(CanoError::generic("db unavailable"))
+            }
+        }
+
+        let log: CompLog = Arc::new(Mutex::new(Vec::new()));
+        let store = Arc::new(MemCheckpoints::default());
+        // Pre-existing CompCompletion row so there's something to rehydrate.
+        store
+            .append(
+                "f3",
+                CheckpointRow::new(0, "Start", "A").with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "f3",
+                CheckpointRow::new(1, "Start", "A")
+                    .with_output(serde_json::to_vec(&1u32).unwrap())
+                    .with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "f3",
+                CheckpointRow::new(2, "Process", "B").with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+        let rows_before = store.audit_rows("f3").len();
+
+        let triggered = Arc::new(AtomicBool::new(false));
+        let resources = Resources::new().insert(
+            "db",
+            FailingResource {
+                triggered: triggered.clone(),
+            },
+        );
+
+        // Observer that records every on_resume call.
+        struct OnResumeRec(Arc<Recorder<u64>>);
+        impl WorkflowObserver for OnResumeRec {
+            fn on_resume(&self, _id: &str, sequence: u64) {
+                self.0.record(sequence);
+            }
+        }
+        let rec = Recorder::<u64>::new();
+
+        let workflow = Workflow::new(resources)
+            .register_with_compensation(
+                TestState::Start,
+                CompTask::ok("A", 1, TestState::Process, &log),
+            )
+            .register(TestState::Process, FailTask::new(true))
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone())
+            .with_observer(Arc::new(OnResumeRec(rec.clone())));
+
+        let err = workflow.resume_from("f3").await.unwrap_err();
+        // Setup ran and failed.
+        assert!(triggered.load(Ordering::SeqCst));
+        // The resource error surfaces (not wrapped in WithStateContext, not
+        // mistaken for a CompensationFailed).
+        assert!(err.message().contains("db unavailable"), "got: {err}");
+        // The checkpoint log is unchanged — no new rows appended.
+        assert_eq!(
+            store.audit_rows("f3").len(),
+            rows_before,
+            "checkpoint log must be untouched on setup failure"
+        );
+        // on_resume must NOT have fired — the resume didn't actually start.
+        assert!(
+            rec.is_empty(),
+            "on_resume must not fire when setup_all fails"
+        );
+    }
+
+    #[tokio::test]
+    async fn orphan_compensator_surfaces_structured_error_with_blob() {
+        // A missing compensator must surface as the structured
+        // `OrphanedCompensation { task_id, output_blob }` variant so operators
+        // can match on it and decode the blob for manual recovery — a bare
+        // string error would lose the data needed to undo the side effect.
+        let store = Arc::new(MemCheckpoints::default());
+        // Build a log: CompCompletion for a renamed task `ghost_v1`, then a
+        // StateEntry for the resume point whose task fails forward.
+        let blob = serde_json::to_vec(&99u32).unwrap();
+        store
+            .append(
+                "orphan",
+                CheckpointRow::new(0, "Start", "ghost_v1").with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "orphan",
+                CheckpointRow::new(1, "Start", "ghost_v1")
+                    .with_output(blob.clone())
+                    .with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+        // The resume row: a StateEntry for `Process` whose task always fails.
+        store
+            .append(
+                "orphan",
+                CheckpointRow::new(2, "Process", "FailTask").with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+
+        // Workflow with no `ghost_v1` compensator — only `Process` which fails
+        // forward, triggering a drain over the orphan ghost entry.
+        let workflow = Workflow::bare()
+            .register(TestState::Process, FailTask::new(true))
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone());
+
+        let err = workflow.resume_from("orphan").await.unwrap_err();
+        // The drain produced two errors (original + orphan) → CompensationFailed.
+        let inner = match &err {
+            CanoError::CompensationFailed { errors } => errors.clone(),
+            other => panic!("expected CompensationFailed, got: {other:?}"),
+        };
+        assert!(inner.len() >= 2, "expected at least 2 errors: {inner:?}");
+        // The second error must be the structured orphan variant, with the
+        // blob intact for the operator.
+        match &inner[1] {
+            CanoError::OrphanedCompensation {
+                task_id,
+                output_blob,
+            } => {
+                assert_eq!(task_id.as_ref(), "ghost_v1");
+                assert_eq!(output_blob, &blob);
+                // Round-trip decode to confirm the operator can recover.
+                let decoded: u32 = serde_json::from_slice(output_blob).unwrap();
+                assert_eq!(decoded, 99);
+            }
+            other => panic!("expected OrphanedCompensation, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_from_does_not_duplicate_resume_state_in_path() {
+        // The resume state must appear exactly once in `transitions_so_far`
+        // even when the crash row is a `CompensationCompletion` (or
+        // `StepCursor`): its own `StateEntry` lives at an earlier sequence
+        // than the crash row, so a naive `sequence != resume_sequence` filter
+        // would keep it AND the FSM would re-push it when the state re-runs.
+        let log: CompLog = Arc::new(Mutex::new(Vec::new()));
+        let store = Arc::new(MemCheckpoints::default());
+        store
+            .append(
+                "f9",
+                CheckpointRow::new(0, "Start", "A").with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "f9",
+                CheckpointRow::new(1, "Start", "A")
+                    .with_output(serde_json::to_vec(&1u32).unwrap())
+                    .with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "f9",
+                CheckpointRow::new(2, "Process", "B").with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+        // Highest sequence is a CompCompletion row whose `state` matches the
+        // seq-2 StateEntry — this is the case that exercises the duplicate path.
+        store
+            .append(
+                "f9",
+                CheckpointRow::new(3, "Process", "B")
+                    .with_output(serde_json::to_vec(&2u32).unwrap())
+                    .with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+
+        let workflow = Workflow::bare()
+            .register_with_compensation(
+                TestState::Start,
+                CompTask::ok("A", 1, TestState::Process, &log),
+            )
+            .register_with_compensation(
+                TestState::Process,
+                CompTask::ok("B", 2, TestState::Error, &log),
+            )
+            .register(TestState::Error, FailTask::new(true))
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone());
+
+        let err = workflow.resume_from("f9").await.unwrap_err();
+        // The drain ran two compensators (clean rollback) so the surfaced
+        // error is just the original wrapped failure.
+        let ctx = match &err {
+            CanoError::WithStateContext {
+                transitions_so_far,
+                state,
+                ..
+            } => (state.clone(), transitions_so_far.clone()),
+            other => panic!("expected WithStateContext, got: {other:?}"),
+        };
+        assert_eq!(ctx.0, "Error");
+        // Expect [Start, Process, Error] — Process must appear exactly once
+        // even though the rehydrated log contains both its StateEntry and a
+        // CompensationCompletion at a higher sequence.
+        assert_eq!(
+            ctx.1,
+            vec![
+                "Start".to_string(),
+                "Process".to_string(),
+                "Error".to_string()
+            ],
+            "resume state must appear exactly once in transitions_so_far"
+        );
+    }
+
+    #[tokio::test]
+    async fn unknown_state_label_in_log_fires_observer_hook_during_resume() {
+        // Regression for F11: previously `prior_transitions` rehydration used
+        // `filter_map(state_from_label)` which silently dropped any row whose
+        // label was no longer registered on the workflow (typical after a
+        // rename without a `with_workflow_version` bump). Operators couldn't
+        // see the gap. Now the engine fires `on_unknown_resume_state` per
+        // unrecognized row so observers/metrics can surface the drift.
+        struct RecordObs(Arc<Recorder<(String, u64, String)>>);
+        impl WorkflowObserver for RecordObs {
+            fn on_unknown_resume_state(
+                &self,
+                workflow_id: &str,
+                sequence: u64,
+                unknown_state_label: &str,
+            ) {
+                self.0.record((
+                    workflow_id.to_string(),
+                    sequence,
+                    unknown_state_label.to_string(),
+                ));
+            }
+        }
+
+        let store = Arc::new(MemCheckpoints::default());
+        // Pre-populate the log with a StateEntry referencing a state ("Charge")
+        // the current workflow no longer registers, plus a registered state
+        // ("Start") whose label IS valid. The resume must drop the Charge row
+        // from the rehydrated path AND fire the observer hook for it.
+        store
+            .append(
+                "f-rename",
+                CheckpointRow::new(0, "Start", "S").with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "f-rename",
+                CheckpointRow::new(1, "Charge", "C").with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+        // Resume row — the workflow re-enters this state. `Process` is the
+        // resume label and is registered (it'll re-run and fail).
+        store
+            .append(
+                "f-rename",
+                CheckpointRow::new(2, "Process", "P").with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+
+        let rec = Recorder::<(String, u64, String)>::new();
+        let workflow = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Process))
+            .register(TestState::Process, FailTask::new(true))
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone())
+            .with_observer(Arc::new(RecordObs(rec.clone())));
+
+        // Resume succeeds (label dropped from path; gap surfaced via observer).
+        let _ = workflow.resume_from("f-rename").await;
+        let recorded = rec.snapshot();
+        assert_eq!(
+            recorded.len(),
+            1,
+            "exactly one unknown-state row should have fired the hook"
+        );
+        assert_eq!(recorded[0].0, "f-rename");
+        assert_eq!(recorded[0].1, 1);
+        assert_eq!(recorded[0].2, "Charge");
+    }
+
+    #[tokio::test]
+    async fn resume_from_runs_teardown_on_every_post_setup_error_path() {
+        // After setup_all succeeds, every early-return between rehydration
+        // and execute_workflow_from must still run teardown. Without the
+        // inner-fn refactor, a load_run failure or no-rows error leaked the
+        // setup. Verify by counting setup/teardown calls.
+        use crate::resource::{Resource, Resources};
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        #[derive(Default)]
+        struct CountingResource {
+            setups: Arc<AtomicU32>,
+            teardowns: Arc<AtomicU32>,
+        }
+        #[crate::resource]
+        impl Resource for CountingResource {
+            async fn setup(&self) -> Result<(), CanoError> {
+                self.setups.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn teardown(&self) -> Result<(), CanoError> {
+                self.teardowns.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        // Build a workflow with the counting resource attached, no checkpoint
+        // store rows for the chosen id — `load_run` returns Ok(vec![]) and the
+        // empty-rows check fails post-setup.
+        let setups = Arc::new(AtomicU32::new(0));
+        let teardowns = Arc::new(AtomicU32::new(0));
+        let resources = Resources::new().insert(
+            "counter",
+            CountingResource {
+                setups: setups.clone(),
+                teardowns: teardowns.clone(),
+            },
+        );
+        let store = Arc::new(MemCheckpoints::default());
+        let workflow = Workflow::new(resources)
+            .register(TestState::Start, SimpleTask::new(TestState::Complete))
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone());
+
+        // Case 1: no rows for the id — `load_run` returns empty.
+        let err = workflow.resume_from("never-existed").await.unwrap_err();
+        assert!(err.message().contains("no checkpoint rows"), "got: {err}");
+        assert_eq!(setups.load(Ordering::SeqCst), 1, "setup must have run");
+        assert_eq!(
+            teardowns.load(Ordering::SeqCst),
+            1,
+            "teardown must run on empty-rows error path"
+        );
+
+        // Case 2: version mismatch — every-row version check rejects.
+        store
+            .append(
+                "ver-mismatch",
+                CheckpointRow::new(0, "Start", "x").with_workflow_version(42),
+            )
+            .await
+            .unwrap();
+        let err = workflow.resume_from("ver-mismatch").await.unwrap_err();
+        assert!(matches!(err, CanoError::WorkflowVersionMismatch { .. }));
+        assert_eq!(setups.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            teardowns.load(Ordering::SeqCst),
+            2,
+            "teardown must run on version-mismatch error path"
+        );
+
+        // Case 3: state label doesn't map.
+        store
+            .append(
+                "bad-label",
+                CheckpointRow::new(0, "Unknown", "x").with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+        let err = workflow.resume_from("bad-label").await.unwrap_err();
+        assert!(err.message().contains("is not a registered or exit state"));
+        assert_eq!(setups.load(Ordering::SeqCst), 3);
+        assert_eq!(
+            teardowns.load(Ordering::SeqCst),
+            3,
+            "teardown must run on unknown-state error path"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_from_falls_back_when_missing_resume_state_entry() {
+        // F4 follow-up: previously `resume_from` *rejected* logs whose resume
+        // row was a `CompensationCompletion`/`StepCursor` without a preceding
+        // `StateEntry` for the same label (a backend that batched/coalesced
+        // writes, or an older log written before the engine wrote
+        // `StateEntry` rows for every non-router state). The engine now falls
+        // back to `last.sequence + 1` as cutoff and lets the resume succeed
+        // — losing the prior_transitions row is acceptable; refusing to
+        // resume recoverable work is not.
+        let store = Arc::new(MemCheckpoints::default());
+        store
+            .append(
+                "missing-entry",
+                CheckpointRow::new(0, "Start", "A").with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+        // Resume row is a CompensationCompletion for `Process` with NO
+        // StateEntry for `Process`. The pre-fix code refused to resume; the
+        // post-fix code resumes (the absent prior `Process` row is just a
+        // best-effort gap in the rehydrated path).
+        store
+            .append(
+                "missing-entry",
+                CheckpointRow::new(1, "Process", "B")
+                    .with_output(serde_json::to_vec(&42u32).unwrap())
+                    .with_workflow_version(0),
+            )
+            .await
+            .unwrap();
+
+        let workflow = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Process))
+            .register(TestState::Process, SimpleTask::new(TestState::Complete))
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone());
+
+        let out = workflow
+            .resume_from("missing-entry")
+            .await
+            .expect("resume should fall back rather than refuse on missing StateEntry");
+        assert_eq!(out, TestState::Complete);
+    }
+
+    #[tokio::test]
+    async fn resume_from_accepts_mixed_version_log_with_matching_tail() {
+        // F3 follow-up: only the last row's `workflow_version` is
+        // authoritative — that determines which workflow definition the
+        // resume continues against. Older rows in a mixed-version log are
+        // kept (with a tracing warning) so a mid-run version bump can resume
+        // cleanly. Rejecting on a per-row scan refused exactly the migration
+        // path `workflow_version` was meant to support.
+        let store = Arc::new(MemCheckpoints::default());
+        store
+            .append(
+                "mixed-ver",
+                CheckpointRow::new(0, "Start", "A").with_workflow_version(1), // older version
+            )
+            .await
+            .unwrap();
+        store
+            .append(
+                "mixed-ver",
+                CheckpointRow::new(1, "Process", "B").with_workflow_version(2), // bumped after
+            )
+            .await
+            .unwrap();
+
+        let workflow = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Process))
+            .register(TestState::Process, SimpleTask::new(TestState::Complete))
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone())
+            .with_workflow_version(2);
+
+        let out = workflow
+            .resume_from("mixed-ver")
+            .await
+            .expect("post-F3, mixed-version log with matching tail must resume");
+        assert_eq!(out, TestState::Complete);
+    }
+}
+
+/// Edge-case unit tests for `RehydratedRun::from_rows`. Integration sentinels
+/// (`resume_from_does_not_duplicate_resume_state_in_path`,
+/// `resume_from_falls_back_when_missing_resume_state_entry`,
+/// `resume_from_accepts_mixed_version_log_with_matching_tail`,
+/// `unknown_state_label_in_log_fires_observer_hook_during_resume`,
+/// `double_compensate_on_resume_is_avoided`) cover the builder end-to-end
+/// through `execute_resume_inner`; this module pins down the boundary
+/// behavior in isolation.
+#[cfg(test)]
+mod rehydrated_run_tests {
+    use super::*;
+    use crate::observer::WorkflowObserver;
+    use crate::recovery::CheckpointRow;
+    use crate::workflow::test_support::{Recorder, TestState};
+
+    /// Resolver that matches stored labels back to `TestState`. Returns None
+    /// for any label not in this table — used to exercise the F11 fan-out.
+    fn resolve_test_state(label: &str) -> Option<TestState> {
+        match label {
+            "Start" => Some(TestState::Start),
+            "Process" => Some(TestState::Process),
+            "Split" => Some(TestState::Split),
+            "Join" => Some(TestState::Join),
+            "Complete" => Some(TestState::Complete),
+            "Error" => Some(TestState::Error),
+            _ => None,
+        }
+    }
+
+    /// Captures `on_unknown_resume_state` events for assertion. Thin observer
+    /// over a shared `Recorder<E>` (see `test_support`).
+    struct UnknownStateRecorder(Arc<Recorder<(String, u64, String)>>);
+    impl WorkflowObserver for UnknownStateRecorder {
+        fn on_unknown_resume_state(
+            &self,
+            workflow_id: &str,
+            sequence: u64,
+            unknown_state_label: &str,
+        ) {
+            self.0.record((
+                workflow_id.to_string(),
+                sequence,
+                unknown_state_label.to_string(),
+            ));
+        }
+    }
+
+    fn no_observers() -> [Arc<dyn WorkflowObserver>; 0] {
+        []
+    }
+
+    #[test]
+    fn empty_rows_yields_default_struct() {
+        // Caller errors before reaching the builder when `rows` is empty
+        // (`last.ok_or_else` fires first), but the builder itself must not
+        // panic if called with an empty slice and must produce default state.
+        let rh = RehydratedRun::<TestState>::from_rows(
+            &[],
+            "Start",
+            0,
+            0,
+            &no_observers(),
+            "wf",
+            resolve_test_state,
+        );
+        assert!(rh.compensation_stack.is_empty());
+        assert!(rh.resume_cursors.is_empty());
+        assert!(rh.prior_transitions.is_empty());
+        // F4 fallback: resume_sequence + 1 when no StateEntry rows exist.
+        assert_eq!(rh.resume_state_entry_cutoff, 1);
+    }
+
+    #[test]
+    fn single_state_entry_matching_resume_label_has_empty_prior_transitions() {
+        // The cutoff equals that row's sequence; nothing else is in the
+        // log, so prior_transitions is empty.
+        let rows = vec![CheckpointRow::new(5, "Start", "TaskA").with_workflow_version(0)];
+        let rh = RehydratedRun::<TestState>::from_rows(
+            &rows,
+            "Start",
+            5,
+            0,
+            &no_observers(),
+            "wf",
+            resolve_test_state,
+        );
+        assert_eq!(rh.resume_state_entry_cutoff, 5);
+        assert!(rh.prior_transitions.is_empty());
+        assert!(rh.compensation_stack.is_empty());
+        assert!(rh.resume_cursors.is_empty());
+    }
+
+    #[test]
+    fn missing_state_entry_falls_back_to_resume_sequence_plus_one() {
+        // F4: when the resume label has no StateEntry row, cutoff falls back
+        // to `resume_sequence + 1` so all earlier rows count as "pre-crash".
+        let rows = vec![
+            CheckpointRow::new(0, "Start", "A").with_workflow_version(0),
+            // Resume row is a StepCursor for `Process` with NO preceding
+            // StateEntry for `Process`.
+            CheckpointRow::new(1, "Process", "B")
+                .with_cursor(b"cursor".to_vec())
+                .with_workflow_version(0),
+        ];
+        let rh = RehydratedRun::<TestState>::from_rows(
+            &rows,
+            "Process",
+            1,
+            0,
+            &no_observers(),
+            "wf",
+            resolve_test_state,
+        );
+        assert_eq!(rh.resume_state_entry_cutoff, 2);
+        // The Start StateEntry survives (sequence 0 < cutoff 2).
+        assert_eq!(rh.prior_transitions, vec![TestState::Start]);
+        // The Process step cursor was rehydrated.
+        assert_eq!(rh.resume_cursors.get("Process"), Some(&b"cursor".to_vec()));
+    }
+
+    #[test]
+    fn mixed_version_rows_pass_through_when_caller_already_validated_last() {
+        // F3: per-row workflow_version is logged but not enforced — that's
+        // the caller's responsibility (it validates `last.workflow_version`
+        // before invoking the builder). Older rows survive.
+        let rows = vec![
+            CheckpointRow::new(0, "Start", "A").with_workflow_version(0), // older
+            CheckpointRow::new(1, "Process", "B").with_workflow_version(1), // matches
+        ];
+        let rh = RehydratedRun::<TestState>::from_rows(
+            &rows,
+            "Process",
+            1,
+            1,
+            &no_observers(),
+            "wf",
+            resolve_test_state,
+        );
+        assert_eq!(rh.resume_state_entry_cutoff, 1);
+        assert_eq!(rh.prior_transitions, vec![TestState::Start]);
+    }
+
+    #[test]
+    fn unknown_state_label_fires_observer_and_drops_row() {
+        // F11: a label that doesn't resolve (e.g. renamed state) is dropped
+        // from prior_transitions and the observer hook fires per drop.
+        let rows = vec![
+            CheckpointRow::new(0, "Start", "A").with_workflow_version(0),
+            // "Charge" no longer maps to any current state.
+            CheckpointRow::new(1, "Charge", "B").with_workflow_version(0),
+            CheckpointRow::new(2, "Process", "C").with_workflow_version(0),
+        ];
+        let recorder = Recorder::<(String, u64, String)>::new();
+        let observer_dyn: Arc<dyn WorkflowObserver> =
+            Arc::new(UnknownStateRecorder(recorder.clone()));
+        let observers = [observer_dyn];
+        let rh = RehydratedRun::<TestState>::from_rows(
+            &rows,
+            "Process",
+            2,
+            0,
+            &observers,
+            "wf-rename",
+            resolve_test_state,
+        );
+        assert_eq!(rh.resume_state_entry_cutoff, 2);
+        // Only Start made it (Charge dropped, Process is the resume state).
+        assert_eq!(rh.prior_transitions, vec![TestState::Start]);
+        let events = recorder.snapshot();
+        assert_eq!(events.len(), 1, "Charge row must fire the hook once");
+        assert_eq!(
+            events[0],
+            ("wf-rename".to_string(), 1, "Charge".to_string())
+        );
+    }
+
+    #[test]
+    fn multiple_step_cursors_for_same_state_keep_highest_sequence() {
+        // The fold uses last-write-wins; ascending order guarantees the
+        // highest-sequence cursor for each state survives.
+        let rows = vec![
+            CheckpointRow::new(0, "Start", "S")
+                .with_cursor(b"old".to_vec())
+                .with_workflow_version(0),
+            CheckpointRow::new(1, "Start", "S")
+                .with_cursor(b"newer".to_vec())
+                .with_workflow_version(0),
+            CheckpointRow::new(2, "Start", "S")
+                .with_cursor(b"newest".to_vec())
+                .with_workflow_version(0),
+        ];
+        let rh = RehydratedRun::<TestState>::from_rows(
+            &rows,
+            "Start",
+            2,
+            0,
+            &no_observers(),
+            "wf",
+            resolve_test_state,
+        );
+        assert_eq!(rh.resume_cursors.get("Start"), Some(&b"newest".to_vec()));
+    }
+
+    #[test]
+    fn compensation_at_resume_sequence_is_excluded() {
+        // Pairs with `double_compensate_on_resume_is_avoided` — the resume
+        // row itself, when a CompensationCompletion, must NOT make it into
+        // the rehydrated compensation_stack (the resumed task re-runs and
+        // re-pushes its own entry, so keeping the persisted one would
+        // double-compensate later).
+        let rows = vec![
+            CheckpointRow::new(0, "Start", "A").with_workflow_version(0),
+            CheckpointRow::new(1, "Start", "A")
+                .with_output(serde_json::to_vec(&1u32).unwrap())
+                .with_workflow_version(0),
+            CheckpointRow::new(2, "Process", "B").with_workflow_version(0),
+            // This is the resume row at sequence 3 — must be excluded.
+            CheckpointRow::new(3, "Process", "B")
+                .with_output(serde_json::to_vec(&2u32).unwrap())
+                .with_workflow_version(0),
+        ];
+        let rh = RehydratedRun::<TestState>::from_rows(
+            &rows,
+            "Process",
+            3,
+            0,
+            &no_observers(),
+            "wf",
+            resolve_test_state,
+        );
+        // Only Start's comp completion at sequence 1 must be on the stack;
+        // Process's at sequence 3 (== resume_sequence) is excluded.
+        assert_eq!(rh.compensation_stack.len(), 1);
+        assert_eq!(&*rh.compensation_stack[0].task_id, "A");
+        // Path cutoff = highest Process StateEntry = sequence 2; prior
+        // transitions are Start (sequence 0). Sequence 2 itself (the
+        // Process StateEntry) sits AT the cutoff so is excluded too.
+        assert_eq!(rh.resume_state_entry_cutoff, 2);
+        assert_eq!(rh.prior_transitions, vec![TestState::Start]);
+    }
+
+    #[test]
+    fn perf_smoke_ten_thousand_rows_finishes_quickly() {
+        // Sanity check that the single-pass builder scales linearly.
+        let mut rows = Vec::with_capacity(10_000);
+        for i in 0..10_000u64 {
+            // Alternate state labels so we exercise multiple branches.
+            let label = if i % 2 == 0 { "Start" } else { "Process" };
+            rows.push(CheckpointRow::new(i, label, "T").with_workflow_version(0));
+        }
+        let started = std::time::Instant::now();
+        let rh = RehydratedRun::<TestState>::from_rows(
+            &rows,
+            "Process",
+            9_999,
+            0,
+            &no_observers(),
+            "wf",
+            resolve_test_state,
+        );
+        let elapsed = started.elapsed();
+        // Cutoff = the highest Process StateEntry = sequence 9999.
+        assert_eq!(rh.resume_state_entry_cutoff, 9_999);
+        // prior_transitions = every row at seq < 9999 → 9999 entries.
+        assert_eq!(rh.prior_transitions.len(), 9_999);
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "10k-row rehydration should be sub-50ms even in a debug build, took {elapsed:?}"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "metrics"))]
 mod metrics_tests {
     use crate::metrics::test_support::*;
     use crate::prelude::*;
-    use crate::recovery::{CheckpointRow, CheckpointStore};
-    use crate::saga;
-    use crate::saga::CompensatableTask;
+    use crate::recovery::CheckpointRow;
     use crate::task::TaskConfig;
-    use crate::workflow::test_support::{SimpleTask, TestState};
-    use std::collections::HashMap;
+    use crate::workflow::test_support::{CompLog, CompTask, MemCheckpoints, SimpleTask, TestState};
     use std::sync::{Arc, Mutex};
 
-    // ---- In-memory CheckpointStore for recovery tests ----
-
-    #[derive(Default)]
-    struct MemCheckpoints {
-        live: Mutex<HashMap<String, Vec<CheckpointRow>>>,
-        audit: Mutex<Vec<(String, CheckpointRow)>>,
-    }
-
-    #[cano_macros::checkpoint_store]
-    impl CheckpointStore for MemCheckpoints {
-        async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
-            let mut live = self.live.lock().unwrap();
-            let rows = live.entry(workflow_id.to_string()).or_default();
-            if rows.iter().any(|r| r.sequence == row.sequence) {
-                return Err(CanoError::checkpoint_store(format!(
-                    "checkpoint conflict: {workflow_id:?} already has sequence {}",
-                    row.sequence
-                )));
-            }
-            self.audit
-                .lock()
-                .unwrap()
-                .push((workflow_id.to_string(), row.clone()));
-            rows.push(row);
-            Ok(())
-        }
-        async fn load_run(&self, workflow_id: &str) -> Result<Vec<CheckpointRow>, CanoError> {
-            let mut rows = self
-                .live
-                .lock()
-                .unwrap()
-                .get(workflow_id)
-                .cloned()
-                .unwrap_or_default();
-            rows.sort_by_key(|r| r.sequence);
-            Ok(rows)
-        }
-        async fn clear(&self, workflow_id: &str) -> Result<(), CanoError> {
-            self.live.lock().unwrap().remove(workflow_id);
-            Ok(())
-        }
-    }
-
     // ---- Recovery: checkpoint append + clear counters ----
+
+    #[test]
+    fn legacy_timeout_on_resume_only_increments_timeout_counter() {
+        // Regression for F8: previously `execute_resume_inner`'s legacy
+        // `with_timeout` arm recorded `outcome="timeout"` and then fell
+        // through to the unconditional `workflow_run("timeout"|"failed")`
+        // emission at the bottom of the function — double-counting the same
+        // invocation. `run_workflow` in the orchestrate direction already
+        // used `return Err(...)` to avoid this; the resume path now matches.
+        struct Slow;
+        #[crate::task]
+        impl Task<TestState> for Slow {
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                Ok(TaskResult::Single(TestState::Complete))
+            }
+        }
+
+        let (res, rows) = run_with_recorder(|| async {
+            let store = Arc::new(MemCheckpoints::default());
+            // Pre-populate so resume_from has something to rehydrate.
+            store
+                .append(
+                    "wf-legacy-timeout",
+                    CheckpointRow::new(0, "Start", "S").with_workflow_version(0),
+                )
+                .await
+                .unwrap();
+            let workflow = Workflow::bare()
+                .with_checkpoint_store(store.clone())
+                .with_timeout(std::time::Duration::from_millis(20))
+                .register(TestState::Start, Slow)
+                .add_exit_state(TestState::Complete);
+            workflow.resume_from("wf-legacy-timeout").await
+        });
+        assert!(res.is_err());
+        assert_eq!(
+            counter(&rows, "cano_workflow_runs_total", &[("outcome", "timeout")]),
+            1,
+            "exactly one `outcome=timeout` row should be recorded"
+        );
+        assert_eq!(
+            counter_opt(&rows, "cano_workflow_runs_total", &[("outcome", "failed")]).unwrap_or(0),
+            0,
+            "resume timeout must not also be counted as `outcome=failed`"
+        );
+    }
 
     #[test]
     fn checkpoint_append_and_clear_counters_on_successful_run() {
@@ -2739,29 +4519,10 @@ mod metrics_tests {
 
     // ---- Saga: compensation run + drain counters ----
 
-    type CompLog = Arc<Mutex<Vec<(String, u32)>>>;
-
-    #[derive(Clone)]
-    struct CompTask {
-        value: u32,
-        next_state: TestState,
-        log: CompLog,
-    }
-
-    #[saga::task]
-    impl CompensatableTask<TestState> for CompTask {
-        type Output = u32;
-        fn config(&self) -> TaskConfig {
-            TaskConfig::minimal()
-        }
-        async fn run(&self, _res: &Resources) -> Result<(TaskResult<TestState>, u32), CanoError> {
-            Ok((TaskResult::Single(self.next_state.clone()), self.value))
-        }
-        async fn compensate(&self, _res: &Resources, output: u32) -> Result<(), CanoError> {
-            self.log.lock().unwrap().push(("comp".to_string(), output));
-            Ok(())
-        }
-    }
+    // `CompLog` + `CompTask` live in `workflow::test_support` and are imported
+    // above. Pre-consolidation this module defined its own simpler `CompTask`
+    // (no `name` / `fail_*` fields); now it uses the shared fixture with
+    // `name = "comp"` to preserve the prior log entries.
 
     struct AlwaysFailTask;
 
@@ -2786,11 +4547,7 @@ mod metrics_tests {
             let workflow = Workflow::bare()
                 .register_with_compensation(
                     TestState::Start,
-                    CompTask {
-                        value: 42,
-                        next_state: TestState::Process,
-                        log: log.clone(),
-                    },
+                    CompTask::ok("comp", 42, TestState::Process, &log),
                 )
                 .register(TestState::Process, AlwaysFailTask)
                 .add_exit_state(TestState::Complete);

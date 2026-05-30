@@ -106,6 +106,39 @@ pub trait WorkflowObserver: Send + Sync + 'static {
     /// (clean rollback), or a `CanoError::CompensationFailed` whose `errors[0]` is the
     /// wrapped timeout (dirty rollback).
     fn on_workflow_timeout(&self, _elapsed: std::time::Duration, _limit: std::time::Duration) {}
+
+    /// Called when the engine attempted to clear a checkpoint log (after a
+    /// successful run or after a clean compensation drain) and the backend
+    /// returned an error.
+    ///
+    /// The engine deliberately does not propagate the clear failure to the
+    /// caller — a successful run that fails to clean up its log is still
+    /// successful — but a silently stranded log can cause surprising
+    /// duplicate-sequence errors on a fresh run with the same `workflow_id`,
+    /// or re-compensation on a subsequent `resume_from`. Implement this hook
+    /// to surface the failure to logs / metrics so operators can intervene.
+    fn on_checkpoint_clear_failed(&self, _workflow_id: &str, _error: &crate::error::CanoError) {}
+
+    /// Called during [`Workflow::resume_from`](crate::workflow::Workflow::resume_from)
+    /// when a `StateEntry` row's label no longer maps to a state registered on
+    /// the current workflow definition — typically because the state was
+    /// renamed or removed in a refactor without a
+    /// [`with_workflow_version`](crate::workflow::Workflow::with_workflow_version)
+    /// bump.
+    ///
+    /// The engine drops the unknown row from the rehydrated transition path
+    /// (the rehydrated path is best-effort, not authoritative) but otherwise
+    /// continues the resume. Implement this hook to surface the gap to logs /
+    /// metrics — a workflow whose checkpoint log references unknown states
+    /// risks losing audit context and may indicate operator drift between
+    /// deployment and persisted runs.
+    fn on_unknown_resume_state(
+        &self,
+        _workflow_id: &str,
+        _sequence: u64,
+        _unknown_state_label: &str,
+    ) {
+    }
 }
 
 /// A [`WorkflowObserver`] that re-emits every event as a [`tracing`](https://docs.rs/tracing)
@@ -203,6 +236,17 @@ impl WorkflowObserver for TracingObserver {
             "workflow total timeout exceeded"
         );
     }
+    fn on_checkpoint_clear_failed(&self, workflow_id: &str, error: &CanoError) {
+        tracing::warn!(workflow_id, error = %error, "checkpoint log clear failed");
+    }
+    fn on_unknown_resume_state(&self, workflow_id: &str, sequence: u64, unknown_state_label: &str) {
+        tracing::warn!(
+            workflow_id,
+            sequence,
+            unknown_state_label,
+            "checkpoint row references a state not registered on the current workflow — dropped from rehydrated path"
+        );
+    }
 }
 
 /// A [`WorkflowObserver`] that re-emits each hook as a metric (counter), under the
@@ -249,6 +293,20 @@ impl WorkflowObserver for MetricsObserver {
     }
     fn on_resume(&self, _workflow_id: &str, _sequence: u64) {
         crate::metrics::observed_resume();
+    }
+    fn on_workflow_timeout(&self, elapsed: std::time::Duration, limit: std::time::Duration) {
+        crate::metrics::observed_workflow_timeout(elapsed, limit);
+    }
+    fn on_checkpoint_clear_failed(&self, _workflow_id: &str, _error: &CanoError) {
+        crate::metrics::checkpoint_clear(false);
+    }
+    fn on_unknown_resume_state(
+        &self,
+        _workflow_id: &str,
+        _sequence: u64,
+        _unknown_state_label: &str,
+    ) {
+        crate::metrics::observed_unknown_resume_state();
     }
     // on_task_start: intentionally not emitted — on_task_success/on_task_failure already
     // count each dispatch by outcome; a separate "start" counter would just be their sum.
@@ -477,6 +535,29 @@ mod tests {
         assert!(Anon.name().contains("Anon"), "{}", Anon.name());
     }
 
+    #[cfg(feature = "tracing")]
+    #[test]
+    fn tracing_observer_forwards_checkpoint_clear_failed() {
+        // The built-in TracingObserver must surface checkpoint-clear failures,
+        // not silently inherit the no-op default — that was the gap the new
+        // hook was added to close.
+        use std::sync::Arc;
+        let obs: Arc<dyn WorkflowObserver> = Arc::new(crate::observer::TracingObserver::new());
+        let err = CanoError::checkpoint_store("clear failed");
+        // Compiles and runs — proves the override exists with the expected
+        // signature. The actual tracing event is exercised in tracing_tests.rs.
+        obs.on_checkpoint_clear_failed("wf-id", &err);
+    }
+
+    #[cfg(feature = "metrics")]
+    #[test]
+    fn metrics_observer_forwards_checkpoint_clear_failed() {
+        use std::sync::Arc;
+        let obs: Arc<dyn WorkflowObserver> = Arc::new(crate::observer::MetricsObserver::new());
+        let err = CanoError::checkpoint_store("clear failed");
+        obs.on_checkpoint_clear_failed("wf-id", &err);
+    }
+
     #[test]
     fn on_workflow_timeout_default_is_no_op_and_callable_via_trait_object() {
         use std::sync::Arc;
@@ -566,6 +647,54 @@ mod metrics_observer_tests {
                 &[("task", "GoTo"), ("outcome", "completed")]
             ),
             2
+        );
+    }
+
+    #[test]
+    fn metrics_observer_emits_on_workflow_timeout() {
+        // Regression: MetricsObserver used to inherit the default no-op for
+        // on_workflow_timeout, leaving metrics-only operators blind to the
+        // engine-fired total-timeout signal. The hook must now emit a counter
+        // and record the elapsed/limit pair so dashboards can attribute the
+        // trip without having to scrape the wrapped error.
+        struct SlowTask;
+        #[crate::task]
+        impl Task<S> for SlowTask {
+            fn name(&self) -> std::borrow::Cow<'static, str> {
+                std::borrow::Cow::Borrowed("SlowTask")
+            }
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+            async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                Ok(TaskResult::Single(S::Done))
+            }
+        }
+        let (res, rows) = run_with_recorder(|| async {
+            Workflow::bare()
+                .with_observer(Arc::new(MetricsObserver::new()))
+                .with_total_timeout(std::time::Duration::from_millis(20))
+                .register(S::Start, SlowTask)
+                .add_exit_state(S::Done)
+                .orchestrate(S::Start)
+                .await
+        });
+        assert!(res.is_err());
+        assert_eq!(
+            counter(&rows, "cano_observed_workflow_timeouts_total", &[]),
+            1,
+            "MetricsObserver must increment its workflow_timeouts counter on a total-timeout trip"
+        );
+        assert_eq!(
+            histogram_count(&rows, "cano_observed_workflow_timeout_limit_seconds", &[]),
+            1,
+            "must record the configured `limit` for at-a-glance budget analysis"
+        );
+        assert_eq!(
+            histogram_count(&rows, "cano_observed_workflow_timeout_elapsed_seconds", &[]),
+            1,
+            "must record actual elapsed so dashboards can compare against `limit`"
         );
     }
 

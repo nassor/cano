@@ -295,6 +295,12 @@ where
         let stop_notify = Arc::new(Notify::new());
         let running = Arc::new(RwLock::new(true));
         let scheduler_tasks: Arc<RwLock<Vec<JoinHandle<()>>>> = Arc::new(RwLock::new(Vec::new()));
+        // See `RunningScheduler::in_flight_drain` and the driver's drain loop:
+        // a slot the driver fills with the `AbortHandle` of the per-flow task
+        // it is currently `.await`-ing, so the last-clone `Drop` can abort
+        // wedged tasks even when they have been popped out of `scheduler_tasks`.
+        let in_flight_drain: Arc<RwLock<Option<tokio::task::AbortHandle>>> =
+            Arc::new(RwLock::new(None));
 
         // Build a read-only flow-info registry for status / list / has_running_flows.
         let mut flows_view: HashMap<Arc<str>, Arc<RwLock<FlowInfo>>> =
@@ -365,6 +371,7 @@ where
             Arc::clone(&running),
             Arc::clone(&stop_notify),
             Arc::clone(&scheduler_tasks),
+            Arc::clone(&in_flight_drain),
             result_tx,
         ));
 
@@ -374,6 +381,7 @@ where
             flow_order: flow_order_view,
             result_rx,
             scheduler_tasks,
+            in_flight_drain,
             driver_handle: Arc::new(driver_handle),
             liveness: Arc::new(()),
             _marker: std::marker::PhantomData,

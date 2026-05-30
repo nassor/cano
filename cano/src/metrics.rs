@@ -95,6 +95,12 @@ pub const TASK_RETRIES_TOTAL: &str = "cano_task_retries_total";
 pub const CIRCUIT_OPEN_EVENTS_TOTAL: &str = "cano_circuit_open_events_total";
 pub const CHECKPOINTS_OBSERVED_TOTAL: &str = "cano_checkpoints_observed_total";
 pub const RESUMES_TOTAL: &str = "cano_resumes_total";
+pub const OBSERVED_WORKFLOW_TIMEOUTS_TOTAL: &str = "cano_observed_workflow_timeouts_total";
+pub const OBSERVED_WORKFLOW_TIMEOUT_LIMIT_SECONDS: &str =
+    "cano_observed_workflow_timeout_limit_seconds";
+pub const OBSERVED_WORKFLOW_TIMEOUT_ELAPSED_SECONDS: &str =
+    "cano_observed_workflow_timeout_elapsed_seconds";
+pub const OBSERVED_UNKNOWN_RESUME_STATES_TOTAL: &str = "cano_observed_unknown_resume_states_total";
 
 // Always-on direct instrumentation:
 pub const WORKFLOW_RUNS_TOTAL: &str = "cano_workflow_runs_total";
@@ -161,6 +167,26 @@ pub fn describe() {
         RESUMES_TOTAL,
         Unit::Count,
         "Workflow resumes from a checkpoint store (emitted by MetricsObserver)"
+    );
+    describe_counter!(
+        OBSERVED_WORKFLOW_TIMEOUTS_TOTAL,
+        Unit::Count,
+        "Workflow total-timeout trips (emitted by MetricsObserver via on_workflow_timeout)"
+    );
+    describe_histogram!(
+        OBSERVED_WORKFLOW_TIMEOUT_LIMIT_SECONDS,
+        Unit::Seconds,
+        "Configured `with_total_timeout` budget when the trip fired (emitted by MetricsObserver)"
+    );
+    describe_histogram!(
+        OBSERVED_WORKFLOW_TIMEOUT_ELAPSED_SECONDS,
+        Unit::Seconds,
+        "Actual wall-clock elapsed at trip time (emitted by MetricsObserver)"
+    );
+    describe_counter!(
+        OBSERVED_UNKNOWN_RESUME_STATES_TOTAL,
+        Unit::Count,
+        "Checkpoint rows whose state label is not registered on the current workflow (emitted by MetricsObserver during resume_from)"
     );
 
     describe_counter!(
@@ -336,6 +362,14 @@ pub(crate) fn observed_checkpoint() {
 }
 pub(crate) fn observed_resume() {
     counter!(RESUMES_TOTAL).increment(1);
+}
+pub(crate) fn observed_workflow_timeout(elapsed: Duration, limit: Duration) {
+    counter!(OBSERVED_WORKFLOW_TIMEOUTS_TOTAL).increment(1);
+    histogram!(OBSERVED_WORKFLOW_TIMEOUT_LIMIT_SECONDS).record(limit.as_secs_f64());
+    histogram!(OBSERVED_WORKFLOW_TIMEOUT_ELAPSED_SECONDS).record(elapsed.as_secs_f64());
+}
+pub(crate) fn observed_unknown_resume_state() {
+    counter!(OBSERVED_UNKNOWN_RESUME_STATES_TOTAL).increment(1);
 }
 
 // ----- workflow run -----
