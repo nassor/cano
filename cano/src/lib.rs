@@ -215,7 +215,7 @@
 //!   for the full list with help text and units
 //! - [`recovery`]: [`CheckpointStore`] / [`CheckpointRow`] — append-only checkpoint log for crash recovery (and `RedbCheckpointStore`, behind the `recovery` feature)
 //! - [`saga`]: [`CompensatableTask`] — pair a forward step with a compensating action; failures roll back via [`Workflow::register_with_compensation`]
-//! - [`rate_limit`]: [`RateLimiter`] — token-bucket throttle for outbound calls; cheap to clone, share one across every task that draws on the same quota
+//! - [`rate_limit`]: [`RateLimiter`] (token bucket) and [`WindowedRateLimiter`] (fixed window) throttles, both implementing [`Meter`] so they compose into a [`MultiRateLimiter`] that enforces several weighted tiers (e.g. a 5h + 7d + per-model limit) at once
 //! - [`store`]: [`MemoryStore`] — a typed in-memory store that implements [`Resource`]
 //! - [`error`]: [`CanoError`] variants and the [`CanoResult`] alias
 //!
@@ -246,7 +246,10 @@ pub mod scheduler;
 pub use circuit::{CircuitBreaker, CircuitPolicy, CircuitState, Permit as CircuitPermit};
 pub use error::{CanoError, CanoResult};
 pub use observer::WorkflowObserver;
-pub use rate_limit::{Permit as RateLimiterPermit, RateLimiter, RateLimiterPolicy};
+pub use rate_limit::{
+    Meter, MeterStatus, MultiPermit, MultiRateLimiter, Permit as RateLimiterPermit, RateLimiter,
+    RateLimiterPolicy, Reservation, Tier, WindowPermit, WindowPolicy, WindowedRateLimiter,
+};
 pub use recovery::{CheckpointRow, CheckpointStore, RowKind};
 pub use resource::{HealthStatus, Resource, Resources};
 pub use saga::{CompensatableTask, ErasedCompensatable};
@@ -332,10 +335,12 @@ pub mod prelude {
     pub use crate::{
         BatchTask, CanoError, CanoResult, CheckpointRow, CheckpointStore, CircuitBreaker,
         CircuitPermit, CircuitPolicy, CircuitState, CompensatableTask, HealthStatus, JoinConfig,
-        JoinStrategy, MemoryStore, PollErrorPolicy, PollOutcome, PollTask, RateLimiter,
-        RateLimiterPermit, RateLimiterPolicy, Resource, Resources, RetryMode, RouterTask, RowKind,
-        SplitResult, SplitTaskResult, StateEntry, StepOutcome, SteppedTask, Task, TaskConfig,
-        TaskObject, TaskResult, Workflow, WorkflowObserver, run_stepped,
+        JoinStrategy, MemoryStore, Meter, MeterStatus, MultiPermit, MultiRateLimiter,
+        PollErrorPolicy, PollOutcome, PollTask, RateLimiter, RateLimiterPermit, RateLimiterPolicy,
+        Reservation, Resource, Resources, RetryMode, RouterTask, RowKind, SplitResult,
+        SplitTaskResult, StateEntry, StepOutcome, SteppedTask, Task, TaskConfig, TaskObject,
+        TaskResult, Tier, WindowPermit, WindowPolicy, WindowedRateLimiter, Workflow,
+        WorkflowObserver, run_stepped,
     };
 
     #[cfg(feature = "scheduler")]

@@ -48,7 +48,9 @@ async fn main() {
         let _ = h.await;
     }
 
-    // Sanity: 10 calls at 5/sec (after the single starting token) ≈ 9 × 200ms ≈ 1.8s.
+    // The bucket starts with 1 token (max_tokens = 1): that token admits the first call at
+    // t≈0, and the other 9 calls are paced one per 200ms refill (5 tokens/sec), so the run
+    // lasts ~9 × 200ms ≈ 1.8s. 1500ms is a conservative lower bound that won't flake.
     let elapsed = start.elapsed();
     println!(
         "\n10 calls completed in {:.2}s under a 5 req/s cap.",
@@ -56,6 +58,6 @@ async fn main() {
     );
     assert!(
         elapsed >= Duration::from_millis(1500),
-        "rate limiter should have paced the run to ~2s, took {elapsed:?}"
+        "rate limiter should have paced the run to ~1.8s, took {elapsed:?}"
     );
 }

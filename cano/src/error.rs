@@ -213,6 +213,18 @@ pub enum CanoError {
     /// dependency is unhealthy, and immediate retries would only add load.
     CircuitOpen(String),
 
+    /// A call was rejected because a rate-limit tier lacked capacity.
+    ///
+    /// Returned by [`crate::rate_limit::MultiRateLimiter::try_acquire`] when one of its tiers
+    /// could not admit the request. `tier` names the blocking tier and `retry_after` is how long
+    /// until that tier would admit it (a token bucket's refill time, or a fixed window's reset).
+    RateLimited {
+        /// The name of the tier that lacked capacity.
+        tier: String,
+        /// Time until the blocking tier would admit the request.
+        retry_after: std::time::Duration,
+    },
+
     /// A checkpoint store operation failed.
     ///
     /// Emitted by [`crate::recovery::CheckpointStore`] implementations (including the
@@ -375,6 +387,14 @@ impl CanoError {
         CanoError::CircuitOpen(msg.into())
     }
 
+    /// Create a new rate-limited error from the blocking tier and its retry delay.
+    pub fn rate_limited<S: Into<String>>(tier: S, retry_after: std::time::Duration) -> Self {
+        CanoError::RateLimited {
+            tier: tier.into(),
+            retry_after,
+        }
+    }
+
     /// Create a new checkpoint-store error
     pub fn checkpoint_store<S: Into<String>>(msg: S) -> Self {
         CanoError::CheckpointStore(msg.into())
@@ -491,6 +511,7 @@ impl CanoError {
             CanoError::Timeout(msg) => msg,
             CanoError::WorkflowTimeout { .. } => "workflow total timeout exceeded",
             CanoError::CircuitOpen(msg) => msg,
+            CanoError::RateLimited { .. } => "rate limited",
             CanoError::CheckpointStore(msg) => msg,
             CanoError::CompensationFailed { errors } => errors
                 .first()
@@ -568,6 +589,7 @@ impl CanoError {
             CanoError::Timeout(_) => "timeout",
             CanoError::WorkflowTimeout { .. } => "workflow_timeout",
             CanoError::CircuitOpen(_) => "circuit_open",
+            CanoError::RateLimited { .. } => "rate_limited",
             CanoError::CheckpointStore(_) => "checkpoint_store",
             CanoError::CompensationFailed { .. } => "compensation_failed",
             CanoError::Generic(_) => "generic",
@@ -597,6 +619,12 @@ impl std::fmt::Display for CanoError {
                 "Workflow total timeout exceeded: elapsed={elapsed:?} limit={limit:?}"
             ),
             CanoError::CircuitOpen(msg) => write!(f, "Circuit open: {msg}"),
+            CanoError::RateLimited { tier, retry_after } => {
+                write!(
+                    f,
+                    "Rate limited by tier `{tier}`: retry after {retry_after:?}"
+                )
+            }
             CanoError::CheckpointStore(msg) => write!(f, "Checkpoint store error: {msg}"),
             CanoError::CompensationFailed { errors } => {
                 write!(f, "Compensation failed ({} error(s))", errors.len())?;
@@ -686,6 +714,16 @@ impl PartialEq for CanoError {
                 },
             ) => e1 == e2 && l1 == l2,
             (CanoError::CircuitOpen(a), CanoError::CircuitOpen(b)) => a == b,
+            (
+                CanoError::RateLimited {
+                    tier: t1,
+                    retry_after: r1,
+                },
+                CanoError::RateLimited {
+                    tier: t2,
+                    retry_after: r2,
+                },
+            ) => t1 == t2 && r1 == r2,
             (CanoError::CheckpointStore(a), CanoError::CheckpointStore(b)) => a == b,
             (
                 CanoError::CompensationFailed { errors: a },

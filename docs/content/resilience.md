@@ -37,6 +37,9 @@ probes — lives in <a href="../recovery/">Recovery</a>, <a href="../saga/">Saga
 <li><a href="#rate-limiter">Rate Limiter</a></li>
 <li class="toc-sub"><a href="#rl-policy"><code>RateLimiterPolicy</code></a></li>
 <li class="toc-sub"><a href="#rl-acquire">Acquiring: <code>try_acquire</code> / <code>acquire</code></a></li>
+<li class="toc-sub"><a href="#rl-windowed">Token bucket vs fixed window</a></li>
+<li class="toc-sub"><a href="#rl-weighted">Weighted cost</a></li>
+<li class="toc-sub"><a href="#rl-multi">Multi-level limiting</a></li>
 <li><a href="#bulkhead">Bulkheads (split concurrency)</a></li>
 <li><a href="#panic-safety">Panic Safety</a></li>
 <li><a href="#scheduler-backoff">Scheduler Backoff &amp; Trip</a></li>
@@ -467,9 +470,98 @@ the <code>Arc</code> into each task you can register it once in <a href="../reso
 look it up by key inside the task body — handy when several tasks share one quota.
 </p>
 
+<h3 id="rl-windowed"><a href="#rl-windowed" class="anchor-link" aria-hidden="true">#</a>Token bucket vs fixed window</h3>
+<p>
+The token bucket is a faithful <strong>governor</strong> — it keeps you under a long-run rate and
+smooths bursts — but it is not a faithful <strong>model</strong> of a "resets-at-a-boundary" quota
+like Claude Code's "N per 5 hours, resets at 14:00." It drips capacity back continuously and has no
+reset instant to display. When you need that shape, use <code>WindowedRateLimiter</code>: a
+fixed-window counter that admits the full quota at once, resets as a <em>step</em> at the boundary,
+and exposes <code>used()</code> / <code>remaining()</code> / <code>resets_at()</code>. It resets
+lazily (no background task) and, like the bucket, is cheap to clone and implements
+<code>Resource</code>.
+</p>
+<table class="styled-table">
+<thead><tr><th></th><th><code>RateLimiter</code> (token bucket)</th><th><code>WindowedRateLimiter</code> (fixed window)</th></tr></thead>
+<tbody>
+<tr><td>Replenishment</td><td>continuous drip at the refill rate</td><td>step reset at the boundary</td></tr>
+<tr><td>After exhaustion</td><td>one more unit every <code>period/quota</code></td><td>zero until the reset, then the full quota</td></tr>
+<tr><td><code>resets_at</code></td><td>none (boundary-less)</td><td>a displayable instant</td></tr>
+<tr><td>Best for</td><td>pacing outbound load under a rate</td><td>mirroring a quota with a reset time</td></tr>
+</tbody>
+</table>
+
+<h3 id="rl-weighted"><a href="#rl-weighted" class="anchor-link" aria-hidden="true">#</a>Weighted cost</h3>
+<p>
+Both limiters meter <strong>weighted units</strong>: <code>try_acquire_n(cost)</code> /
+<code>acquire_n(cost)</code> consume <code>cost</code> units instead of one (the no-argument
+<code>try_acquire</code> / <code>acquire</code> are <code>_n(1)</code>). A request-count limit uses
+<code>cost = 1</code>; a usage/token budget uses the call's cost (e.g. <code>1500</code> tokens).
+<code>tokens_available()</code> / <code>time_until(cost)</code> expose the live state for
+observability and retry-after.
+</p>
+
+<h3 id="rl-multi"><a href="#rl-multi" class="anchor-link" aria-hidden="true">#</a>Multi-level limiting (several tiers at once)</h3>
+<p>
+Claude-Code-style limits stack: a 5-hour cap <em>and</em> a weekly cap <em>and</em> a separate
+weekly cap for one model. <code>MultiRateLimiter</code> enforces them together — a request is admitted
+only if <strong>every</strong> applicable tier has room. Each tier is any <code>Meter</code> (a
+<code>RateLimiter</code> or a <code>WindowedRateLimiter</code>, mixed freely) with its own
+<code>cost</code>, so a request-count tier and a token-budget tier can share one gate.
+</p>
+<p>
+The acquisition is <strong>atomic with no leak</strong>: it reserves each tier in turn, and if any
+tier rejects it drops the reservations gathered so far — <em>refunding</em> their units — so a
+partially-passing attempt never burns budget on the tiers that admitted it. (This is why a
+<code>Reservation</code>'s drop refunds, unlike a committed <code>Permit</code>.) At most one tier's
+lock is held at a time, so there is no deadlock. On rejection it reports <strong>which</strong> tier
+blocked and the retry-after, as <code>CanoError::RateLimited { tier, retry_after }</code>.
+</p>
+
+```rust
+use cano::prelude::*;
+use std::sync::Arc;
+use std::time::Duration;
+
+let five_hour: Arc<dyn Meter> =
+    Arc::new(WindowedRateLimiter::new(WindowPolicy::per_hours(500, 5)));
+let weekly: Arc<dyn Meter> =
+    Arc::new(WindowedRateLimiter::new(WindowPolicy::per_days(5_000, 7)));
+let opus_weekly: Arc<dyn Meter> =
+    Arc::new(WindowedRateLimiter::new(WindowPolicy::per_days(200, 7)));
+// A usage/token budget metered in tokens, smoothed by a bucket.
+let tokens: Arc<dyn Meter> = Arc::new(RateLimiter::new(
+    RateLimiterPolicy::new(1_000_000, Duration::from_secs(60)).with_max_tokens(1_000_000),
+));
+
+let limiter = MultiRateLimiter::new()
+    .with_tier("5h", five_hour, 1)
+    .with_tier("weekly", weekly, 1)
+    .with_tier("opus_weekly", opus_weekly, 1)
+    .with_tier("tokens", tokens, 1500); // this call costs 1500 tokens
+
+// Shed-load: which tier blocked, and for how long?
+match limiter.try_acquire() {
+    Ok(_permit) => { /* all tiers had room; proceed */ }
+    Err(CanoError::RateLimited { tier, retry_after }) => {
+        eprintln!("blocked by `{tier}`, retry after {retry_after:?}");
+    }
+    Err(_) => unreachable!(),
+}
+```
+
+<p>
+For a per-request subset — e.g. a non-Opus request that should skip the model-scoped tier — use
+<code>try_acquire_for(&amp;["5h", "weekly", "tokens"])</code> (or the async
+<code>acquire_for</code>). A tier with <code>cost = 0</code> is inert (never blocks, never debited),
+another way to disable one conditionally.
+</p>
+
 <div class="callout callout-tip">
-<p>Runnable example: <code>cargo run --example rate_limiter</code> — two spawned workers share one
-<code>5 req/s</code> limiter; the printed timestamps land at ~200ms intervals, making the pacing visible.</p>
+<p>Runnable examples: <code>cargo run --example rate_limiter</code> — two spawned workers share one
+<code>5 req/s</code> bucket (timestamps land at ~200ms intervals). <code>cargo run --example
+rate_limiter_multi</code> — a 5h + weekly + per-model + token-budget gate showing shed-load,
+the blocking-tier report, zero-leak on rejection, per-request tier selection, and async parking.</p>
 </div>
 <hr class="section-divider">
 

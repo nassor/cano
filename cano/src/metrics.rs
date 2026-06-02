@@ -13,7 +13,8 @@
 //!   events for them.
 //! - Always-on direct instrumentation (the helpers in this module) for engine internals the
 //!   observer doesn't reach: workflow run outcome/duration plus an active-workflows gauge,
-//!   circuit-breaker transitions/acquires/outcomes, rate-limiter acquires/throttles/waits,
+//!   circuit-breaker transitions/acquires/outcomes, rate-limiter acquires/throttles/waits/tokens
+//!   and multi-rate-limiter throttles,
 //!   per-state task durations, split-branch results, scheduler flow
 //!   runs/durations/backoff/trips plus an active-flows gauge, the poll/batch/stepped
 //!   processing loops, recovery checkpoint-store operations, and saga compensation drains.
@@ -124,6 +125,8 @@ pub const COMPENSATION_DRAINS_TOTAL: &str = "cano_compensation_drains_total";
 pub const RATE_LIMITER_ACQUIRED_TOTAL: &str = "cano_rate_limiter_acquired_total";
 pub const RATE_LIMITER_THROTTLED_TOTAL: &str = "cano_rate_limiter_throttled_total";
 pub const RATE_LIMITER_WAIT_SECONDS: &str = "cano_rate_limiter_wait_seconds";
+pub const RATE_LIMITER_TOKENS_CONSUMED_TOTAL: &str = "cano_rate_limiter_tokens_consumed_total";
+pub const MULTI_RATE_LIMITER_THROTTLED_TOTAL: &str = "cano_multi_rate_limiter_throttled_total";
 
 #[cfg(feature = "scheduler")]
 pub const SCHEDULER_FLOW_RUNS_TOTAL: &str = "cano_scheduler_flow_runs_total";
@@ -296,6 +299,16 @@ pub fn describe() {
         RATE_LIMITER_WAIT_SECONDS,
         Unit::Seconds,
         "Wall-clock time RateLimiter::acquire blocked"
+    );
+    describe_counter!(
+        RATE_LIMITER_TOKENS_CONSUMED_TOTAL,
+        Unit::Count,
+        "Weighted units consumed from a RateLimiter (sum of acquire costs)"
+    );
+    describe_counter!(
+        MULTI_RATE_LIMITER_THROTTLED_TOTAL,
+        Unit::Count,
+        "MultiRateLimiter acquisitions rejected, by the tier that blocked them"
     );
 
     #[cfg(feature = "scheduler")]
@@ -484,6 +497,14 @@ pub(crate) fn rate_limiter_throttled(result: &'static str) {
 pub(crate) fn rate_limiter_wait(dur: Duration) {
     histogram!(RATE_LIMITER_WAIT_SECONDS).record(dur.as_secs_f64());
 }
+pub(crate) fn rate_limiter_tokens_consumed(n: u64) {
+    if n > 0 {
+        counter!(RATE_LIMITER_TOKENS_CONSUMED_TOTAL).increment(n);
+    }
+}
+pub(crate) fn multi_rate_limiter_throttled(tier: &'static str) {
+    counter!(MULTI_RATE_LIMITER_THROTTLED_TOTAL, "tier" => tier).increment(1);
+}
 
 // ----- scheduler -----
 
@@ -588,6 +609,18 @@ pub(crate) mod test_support {
     ) -> usize {
         match find(rows, name, labels) {
             Some(DebugValue::Histogram(v)) => v.len(),
+            other => panic!("expected histogram `{name}` {labels:?}, found {other:?}"),
+        }
+    }
+    /// Like [`histogram_count`] but returns `None` when the metric was never recorded.
+    pub(crate) fn histogram_count_opt(
+        rows: &[SnapshotRow],
+        name: &str,
+        labels: &[(&str, &str)],
+    ) -> Option<usize> {
+        match find(rows, name, labels) {
+            Some(DebugValue::Histogram(v)) => Some(v.len()),
+            None => None,
             other => panic!("expected histogram `{name}` {labels:?}, found {other:?}"),
         }
     }
