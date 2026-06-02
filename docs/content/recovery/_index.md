@@ -1,7 +1,7 @@
 +++
 title = "Crash Recovery"
 description = "Checkpoint a Cano workflow's FSM progress and resume a crashed run from where it left off."
-template = "page.html"
+template = "section.html"
 +++
 
 <div class="content-wrapper">

@@ -1,7 +1,7 @@
 +++
 title = "BatchTask"
 description = "BatchTask in Cano - fan out over data items with bounded concurrency and per-item retry, then re-join in one state."
-template = "page.html"
+template = "section.html"
 +++
 
 <div class="content-wrapper">

@@ -9,8 +9,8 @@ homepage.workspace = true
 repository.workspace = true
 authors.workspace = true
 readme = "../README.md"
-keywords = ["ai", "async", "workflow", "data-processing", "scheduler"]
-categories = ["finance", "development-tools", "concurrency", "asynchronous", "science"]
+keywords = ["framework", "async", "workflow", "data-processing", "ai"]
+categories = ["development-tools", "concurrency", "asynchronous"]
 
 [dependencies]
 cano-macros = { version = "0.13", path = "../cano-macros" }

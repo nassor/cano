@@ -1,7 +1,7 @@
 +++
 title = "Metrics"
 description = "Optional metrics-crate counters, histograms, and gauges for Cano workflows via the metrics feature."
-template = "page.html"
+template = "section.html"
 +++
 
 <div class="content-wrapper">

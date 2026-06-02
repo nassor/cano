@@ -21,6 +21,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-rust.min.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-toml.min.js"></script>
     {% endblock scripts_head %}
+    <script src="{{ get_url(path='swup.umd.js') }}" defer></script>
     <script src="{{ get_url(path='script.js') }}" defer></script>
 </head>
 <body>
@@ -38,41 +39,69 @@
         <details class="nav-section" id="nav-concepts" open>
             <summary class="nav-section-label">Concepts</summary>
             <ul class="nav-links">
-                <li><a href="{{ get_url(path='@/task.md') }}">Tasks</a></li>
                 <li>
-                    <a href="{{ get_url(path='@/resources.md') }}">Resources</a>
+                    <a href="{{ get_url(path='@/task/_index.md') }}">Tasks</a>
                     <ul class="nav-links nav-sublinks">
-                        <li><a href="{{ get_url(path='@/store.md') }}">MemoryStore</a></li>
+                        <li><a href="{{ get_url(path='@/task/configuration.md') }}">Configuration</a></li>
                     </ul>
                 </li>
-                <li><a href="{{ get_url(path='@/workflows.md') }}">Workflows</a></li>
-                <li><a href="{{ get_url(path='@/scheduler.md') }}">Scheduler</a></li>
+                <li>
+                    <a href="{{ get_url(path='@/resources/_index.md') }}">Resources</a>
+                    <ul class="nav-links nav-sublinks">
+                        <li><a href="{{ get_url(path='@/resources/lifecycle-and-concurrency.md') }}">Lifecycle &amp; Concurrency</a></li>
+                        <li><a href="{{ get_url(path='@/store/_index.md') }}">MemoryStore</a></li>
+                    </ul>
+                </li>
+                <li>
+                    <a href="{{ get_url(path='@/workflows/_index.md') }}">Workflows</a>
+                    <ul class="nav-links nav-sublinks">
+                        <li><a href="{{ get_url(path='@/workflows/validation-and-errors.md') }}">Validation &amp; Errors</a></li>
+                    </ul>
+                </li>
+                <li>
+                    <a href="{{ get_url(path='@/scheduler/_index.md') }}">Scheduler</a>
+                    <ul class="nav-links nav-sublinks">
+                        <li><a href="{{ get_url(path='@/scheduler/backoff-and-trip.md') }}">Backoff &amp; Trip</a></li>
+                    </ul>
+                </li>
             </ul>
         </details>
         <details class="nav-section" id="nav-processing-model">
             <summary class="nav-section-label">Processing Models</summary>
             <ul class="nav-links">
-                <li><a href="{{ get_url(path='@/router-task.md') }}">RouterTask</a></li>
-                <li><a href="{{ get_url(path='@/poll-task.md') }}">PollTask</a></li>
-                <li><a href="{{ get_url(path='@/batch-task.md') }}">BatchTask</a></li>
-                <li><a href="{{ get_url(path='@/stepped-task.md') }}">SteppedTask</a></li>
+                <li><a href="{{ get_url(path='@/router-task/_index.md') }}">RouterTask</a></li>
+                <li><a href="{{ get_url(path='@/poll-task/_index.md') }}">PollTask</a></li>
+                <li><a href="{{ get_url(path='@/batch-task/_index.md') }}">BatchTask</a></li>
+                <li><a href="{{ get_url(path='@/stepped-task/_index.md') }}">SteppedTask</a></li>
             </ul>
         </details>
         <details class="nav-section" id="nav-advanced-workflows">
             <summary class="nav-section-label">Advanced Workflows</summary>
             <ul class="nav-links">
-                <li><a href="{{ get_url(path='@/split-join.md') }}">Split &amp; Join</a></li>
-                <li><a href="{{ get_url(path='@/resilience.md') }}">Resilience</a></li>
-                <li><a href="{{ get_url(path='@/recovery.md') }}">Recovery</a></li>
-                <li><a href="{{ get_url(path='@/saga.md') }}">Saga</a></li>
+                <li>
+                    <a href="{{ get_url(path='@/split-join/_index.md') }}">Split &amp; Join</a>
+                    <ul class="nav-links nav-sublinks">
+                        <li><a href="{{ get_url(path='@/split-join/join-strategies.md') }}">Join Strategies</a></li>
+                        <li><a href="{{ get_url(path='@/split-join/parallel-patterns.md') }}">Parallel Patterns</a></li>
+                    </ul>
+                </li>
+                <li>
+                    <a href="{{ get_url(path='@/resilience/_index.md') }}">Resilience</a>
+                    <ul class="nav-links nav-sublinks">
+                        <li><a href="{{ get_url(path='@/resilience/circuit-breakers.md') }}">Circuit Breakers</a></li>
+                        <li><a href="{{ get_url(path='@/resilience/rate-limiting.md') }}">Rate Limiting</a></li>
+                    </ul>
+                </li>
+                <li><a href="{{ get_url(path='@/recovery/_index.md') }}">Recovery</a></li>
+                <li><a href="{{ get_url(path='@/saga/_index.md') }}">Saga</a></li>
             </ul>
         </details>
         <details class="nav-section" id="nav-observability">
             <summary class="nav-section-label">Observability</summary>
             <ul class="nav-links">
-                <li><a href="{{ get_url(path='@/tracing.md') }}">Tracing</a></li>
-                <li><a href="{{ get_url(path='@/metrics.md') }}">Metrics</a></li>
-                <li><a href="{{ get_url(path='@/observers.md') }}">Observers</a></li>
+                <li><a href="{{ get_url(path='@/tracing/_index.md') }}">Tracing</a></li>
+                <li><a href="{{ get_url(path='@/metrics/_index.md') }}">Metrics</a></li>
+                <li><a href="{{ get_url(path='@/observers/_index.md') }}">Observers</a></li>
             </ul>
         </details>
         <div class="sidebar-footer">
@@ -84,8 +113,46 @@
             </div>
         </div>
     </nav>
+    <script>
+        /* Pre-paint: paint the sidebar in its final state so it never visibly jumps
+           on first load / hard refresh. Runs synchronously (parser-blocking) after
+           the nav is parsed and styles.css has resolved layout. Only SETS state —
+           the toggle-writer listener lives in script.js. Mirror of script.js's
+           setActiveLinks(); keep the two in sync. */
+        (function () {
+            var nav = document.querySelector('.sidebar');
+            if (!nav) return;
+            var norm = function (p) { return p.replace(/\/+$/, '') || '/'; };
+            var here = norm(location.pathname);
+            try {
+                var secs = nav.querySelectorAll('details.nav-section');
+                for (var i = 0; i < secs.length; i++) {
+                    var s = secs[i], v = null;
+                    try { v = localStorage.getItem('nav-section:' + s.id); } catch (e) {}
+                    if (v === 'open') s.open = true;
+                    else if (v === 'closed') s.open = false;
+                }
+                var links = nav.querySelectorAll('.nav-links a');
+                for (var j = 0; j < links.length; j++) {
+                    var a = links[j];
+                    if (norm(new URL(a.href, location.origin).pathname) !== here) continue;
+                    a.classList.add('active');
+                    a.setAttribute('aria-current', 'page');
+                    var el = a.parentElement;
+                    while (el) {
+                        if (el.tagName === 'DETAILS') {
+                            var st = null;
+                            try { st = localStorage.getItem('nav-section:' + el.id); } catch (e) {}
+                            if (st !== 'closed') el.open = true;
+                        }
+                        el = el.parentElement;
+                    }
+                }
+            } catch (e) {}
+        })();
+    </script>
 
-    <main class="main-content">
+    <main id="swup" class="main-content transition-main">
         {% block content %}{% endblock content %}
     </main>
 </body>

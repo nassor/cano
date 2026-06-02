@@ -1,7 +1,7 @@
 +++
 title = "Observers & Health Probes"
 description = "Subscribe to Cano workflow lifecycle and failure events, and report on the health of a workflow's resources."
-template = "page.html"
+template = "section.html"
 +++
 
 <div class="content-wrapper">
@@ -122,7 +122,7 @@ just failed — the retry that follows is attempt <code>attempt + 1</code>.</p>
 </div>
 <div class="card">
 <h3 id="on-circuit-open"><a href="#on-circuit-open" class="anchor-link" aria-hidden="true">#</a><code>on_circuit_open(task_id: &amp;str)</code></h3>
-<p>Fired when a <a href="../resilience/#circuit-breaker"><code>CircuitBreaker</code></a> attached via
+<p>Fired when a <a href="../resilience/circuit-breakers/"><code>CircuitBreaker</code></a> attached via
 <code>TaskConfig::with_circuit_breaker</code> rejects a call because it is open. Followed by
 an <code>on_task_failure</code> carrying a <code>CanoError::CircuitOpen</code>. <code>on_retry</code>
 and <code>on_circuit_open</code> are your bridge to the <a href="../resilience/">Resilience</a>

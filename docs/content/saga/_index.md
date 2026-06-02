@@ -1,7 +1,7 @@
 +++
 title = "Saga / Compensation"
 description = "Pair a Cano workflow step with a compensating action; if a later step fails, roll back the work already done."
-template = "page.html"
+template = "section.html"
 +++
 
 <div class="content-wrapper">
