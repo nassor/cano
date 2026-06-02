@@ -355,4 +355,152 @@ mod tests {
             .await
             .unwrap();
     }
+
+    // ----- edge cases: serialization round-trip (rows persist and reload across processes) -----
+
+    #[test]
+    fn checkpoint_row_json_roundtrip_preserves_all_fields() {
+        // Crash recovery persists each row and reloads it (possibly in another process); a broken
+        // serde derive would silently corrupt resume. Cover every RowKind + blob/version combo.
+        let rows = [
+            CheckpointRow::new(0, "Start", "t0"), // StateEntry, no blob, version 0
+            CheckpointRow::new(1, "Pay", "charge").with_output(vec![1, 2, 3]), // CompensationCompletion
+            CheckpointRow::new(2, "Step", "stepper").with_cursor(vec![]), // StepCursor, empty blob
+            CheckpointRow::new(3, "Start", "t0").with_workflow_version(99), // versioned StateEntry
+        ];
+        for row in rows {
+            let bytes = serde_json::to_vec(&row).expect("serialize");
+            let back: CheckpointRow = serde_json::from_slice(&bytes).expect("deserialize");
+            assert_eq!(back, row, "JSON round-trip must preserve every field");
+        }
+    }
+
+    #[cfg(feature = "recovery")]
+    #[test]
+    fn checkpoint_row_postcard_roundtrip_preserves_all_fields() {
+        // postcard is the on-disk format the `RedbCheckpointStore` uses; validate the row types
+        // survive it directly (a binary format with stricter expectations than JSON).
+        let rows = [
+            CheckpointRow::new(0, "Start", "t0"),
+            CheckpointRow::new(1, "Pay", "charge").with_output(vec![1, 2, 3]),
+            CheckpointRow::new(2, "Step", "stepper").with_cursor(vec![9, 8]),
+            CheckpointRow::new(3, "Start", "t0").with_workflow_version(99),
+        ];
+        for row in rows {
+            let bytes = postcard::to_stdvec(&row).expect("serialize");
+            let back: CheckpointRow = postcard::from_bytes(&bytes).expect("deserialize");
+            assert_eq!(back, row, "postcard round-trip must preserve every field");
+        }
+    }
+
+    // ----- edge cases: RowKind / CheckpointRow builder semantics -----
+
+    #[test]
+    fn rowkind_default_is_state_entry() {
+        assert_eq!(RowKind::default(), RowKind::StateEntry);
+    }
+
+    #[test]
+    fn with_output_then_with_workflow_version_is_order_independent() {
+        let a = CheckpointRow::new(0, "S", "t")
+            .with_output(vec![7])
+            .with_workflow_version(5);
+        let b = CheckpointRow::new(0, "S", "t")
+            .with_workflow_version(5)
+            .with_output(vec![7]);
+        assert_eq!(a, b);
+        assert_eq!(a.kind, RowKind::CompensationCompletion);
+        assert_eq!(a.workflow_version, 5);
+        assert_eq!(a.output_blob.as_deref(), Some(&[7u8][..]));
+    }
+
+    #[test]
+    fn last_blob_builder_wins() {
+        // The blob/kind builders overwrite: whichever of with_output / with_cursor runs last sets
+        // both the blob and the kind.
+        let cursor_wins = CheckpointRow::new(0, "S", "t")
+            .with_output(vec![1])
+            .with_cursor(vec![2]);
+        assert_eq!(cursor_wins.kind, RowKind::StepCursor);
+        assert_eq!(cursor_wins.output_blob.as_deref(), Some(&[2u8][..]));
+
+        let output_wins = CheckpointRow::new(0, "S", "t")
+            .with_cursor(vec![1])
+            .with_output(vec![2]);
+        assert_eq!(output_wins.kind, RowKind::CompensationCompletion);
+        assert_eq!(output_wins.output_blob.as_deref(), Some(&[2u8][..]));
+    }
+
+    #[test]
+    fn with_output_empty_blob_is_some_not_none() {
+        // An empty payload is still a present blob (Some(vec![])), distinct from a plain
+        // state-entry row's None — and the kind flips to CompensationCompletion.
+        let row = CheckpointRow::new(0, "S", "t").with_output(vec![]);
+        assert_eq!(row.output_blob, Some(vec![]));
+        assert_eq!(row.kind, RowKind::CompensationCompletion);
+    }
+
+    // ----- edge cases: CheckpointStore contract -----
+
+    #[tokio::test]
+    async fn load_run_returns_rows_sorted_even_when_appended_out_of_order() {
+        let store = InMemoryStore::default();
+        for seq in [2u64, 0, 1] {
+            store
+                .append("run", CheckpointRow::new(seq, "S", "t"))
+                .await
+                .unwrap();
+        }
+        let rows = store.load_run("run").await.unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.sequence).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "load_run must return rows sorted ascending by sequence"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_isolates_by_workflow_id() {
+        let store = InMemoryStore::default();
+        store
+            .append("a", CheckpointRow::new(0, "S", "t"))
+            .await
+            .unwrap();
+        store
+            .append("b", CheckpointRow::new(0, "S", "t"))
+            .await
+            .unwrap();
+        store.clear("a").await.unwrap();
+        assert!(store.load_run("a").await.unwrap().is_empty());
+        assert_eq!(
+            store.load_run("b").await.unwrap().len(),
+            1,
+            "clearing one id must not affect another"
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_store_accepts_appends_from_many_tasks() {
+        // A single store shared as `Arc<dyn CheckpointStore>` across tasks: every distinct sequence
+        // lands, and load_run returns them sorted (the contract concurrent callers rely on).
+        let store: std::sync::Arc<dyn CheckpointStore> =
+            std::sync::Arc::new(InMemoryStore::default());
+        let mut handles = Vec::new();
+        for seq in 0..20u64 {
+            let s = std::sync::Arc::clone(&store);
+            handles.push(tokio::spawn(async move {
+                s.append("run", CheckpointRow::new(seq, "S", "t"))
+                    .await
+                    .unwrap();
+            }));
+        }
+        for h in handles {
+            h.await.unwrap();
+        }
+        let rows = store.load_run("run").await.unwrap();
+        assert_eq!(
+            rows.iter().map(|r| r.sequence).collect::<Vec<_>>(),
+            (0..20).collect::<Vec<_>>()
+        );
+    }
 }
