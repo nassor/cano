@@ -23,7 +23,7 @@
 //!
 //! ```toml
 //! [dependencies]
-//! cano = { version = "0.13", features = ["scheduler"] }
+//! cano = { version = "0.14", features = ["scheduler"] }
 //! ```
 
 mod backoff;

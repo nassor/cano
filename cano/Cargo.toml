@@ -13,7 +13,7 @@ keywords = ["framework", "async", "workflow", "data-processing", "ai"]
 categories = ["development-tools", "concurrency", "asynchronous"]
 
 [dependencies]
-cano-macros = { version = "0.13", path = "../cano-macros" }
+cano-macros = { version = "0.14", path = "../cano-macros" }
 tokio = { version = "1.52.1", features = ["macros", "sync", "time", "rt-multi-thread"] }
 rand = "0.10"
 chrono = { version = "0.4", features = ["serde"], optional = true }
