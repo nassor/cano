@@ -1,25 +1,31 @@
-//! # Book Preposition Analysis Example: Project Gutenberg Book Analysis
+//! # Book Preposition Analysis Example
 //!
 //! This example demonstrates a sophisticated book analysis workflow that:
-//! 1. **BookDownloaderTask**: Downloads 12 popular books from Project Gutenberg in parallel
+//! 1. **BookDownloaderTask**: Fetches 12 books from a bundled sample corpus in parallel
 //! 2. **PrepositionTask**: Analyzes each book to count unique prepositions
 //! 3. **BookRankingByPrepositionTask**: Ranks books by their preposition diversity
 //!
 //! The workflow showcases parallel processing, text analysis, and book analysis patterns
 //! using the Cano framework with Workflow orchestration.
 //!
-//! ## Execution Modes
+//! The text comes from an offline, deterministic generator ([`book_corpus`]) instead of
+//! the network, so the example is reproducible and CI never depends on a website. One
+//! title is deliberately absent from the corpus to exercise the partial-failure path.
 //!
-//! - **Default**: Workflow orchestration with real downloads
-//!   ```bash
-//!   cargo run --example workflow_book_prepositions
-//!   ```
+//! ## Execution
+//!
+//! ```bash
+//! cargo run --example workflow_book_prepositions
+//! ```
 
 use cano::error::CanoError;
 use cano::prelude::*;
 use futures_util::future::join_all;
 use std::collections::HashSet;
 use tokio::time::{Duration, timeout};
+
+#[path = "shared/book_corpus.rs"]
+mod book_corpus;
 
 /// Result type for workflow control
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -36,8 +42,6 @@ enum BookPrepositionAction {
 struct Book {
     id: u32,
     title: String,
-    #[allow(dead_code)]
-    url: String,
     content: String,
 }
 
@@ -130,7 +134,7 @@ const PREPOSITIONS: &[&str] = &[
     "without",
 ];
 
-/// Task 1: Downloads books from Project Gutenberg in parallel
+/// Task 1: Fetches books from the bundled sample corpus in parallel
 struct BookDownloaderTask;
 
 impl BookDownloaderTask {
@@ -138,94 +142,43 @@ impl BookDownloaderTask {
         Self
     }
 
-    /// List of popular Project Gutenberg books with their plain text URLs
-    fn get_book_list() -> Vec<(u32, String, String)> {
+    /// List of books to analyze (id, title). Text is supplied by [`book_corpus`].
+    fn get_book_list() -> Vec<(u32, String)> {
         vec![
-            (
-                1342,
-                "Pride and Prejudice by Jane Austen".to_string(),
-                "https://www.gutenberg.org/files/1342/1342-0.txt".to_string(),
-            ),
+            (1342, "Pride and Prejudice by Jane Austen".to_string()),
             (
                 11,
                 "Alice's Adventures in Wonderland by Lewis Carroll".to_string(),
-                "https://www.gutenberg.org/files/11/11-0.txt".to_string(),
             ),
             (
                 84,
                 "Frankenstein by Mary Wollstonecraft Shelley".to_string(),
-                "https://www.gutenberg.org/files/84/84-0.txt".to_string(),
             ),
             (
                 1661,
                 "The Adventures of Sherlock Holmes by Arthur Conan Doyle".to_string(),
-                "https://www.gutenberg.org/files/1661/1661-0.txt".to_string(),
             ),
-            (
-                2701,
-                "Moby Dick by Herman Melville".to_string(),
-                "https://www.gutenberg.org/files/2701/2701-0.txt".to_string(),
-            ),
-            (
-                1080,
-                "A Modest Proposal by Jonathan Swift".to_string(),
-                "https://www.gutenberg.org/files/1080/1080-0.txt".to_string(),
-            ),
-            (
-                46,
-                "A Christmas Carol by Charles Dickens".to_string(),
-                "https://www.gutenberg.org/files/46/46-0.txt".to_string(),
-            ),
-            (
-                1513,
-                "Romeo and Juliet by William Shakespeare".to_string(),
-                "https://www.gutenberg.org/files/1513/1513-0.txt".to_string(),
-            ),
-            (
-                174,
-                "The Picture of Dorian Gray by Oscar Wilde".to_string(),
-                "https://www.gutenberg.org/files/174/174-0.txt".to_string(),
-            ),
-            (
-                345,
-                "Dracula by Bram Stoker".to_string(),
-                "https://www.gutenberg.org/files/345/345-0.txt".to_string(),
-            ),
+            (2701, "Moby Dick by Herman Melville".to_string()),
+            (1080, "A Modest Proposal by Jonathan Swift".to_string()),
+            (46, "A Christmas Carol by Charles Dickens".to_string()),
+            (1513, "Romeo and Juliet by William Shakespeare".to_string()),
+            (174, "The Picture of Dorian Gray by Oscar Wilde".to_string()),
+            (345, "Dracula by Bram Stoker".to_string()),
             (
                 76,
                 "Adventures of Huckleberry Finn by Mark Twain".to_string(),
-                "https://www.gutenberg.org/files/76/76-0.txt".to_string(),
             ),
-            (
-                1260,
-                "Jane Eyre by Charlotte Brontë".to_string(),
-                "https://www.gutenberg.org/files/1260/1260-0.txt".to_string(),
-            ),
+            (1260, "Jane Eyre by Charlotte Brontë".to_string()),
         ]
     }
 
-    /// Download a single book with error handling and timeout
-    async fn download_book(id: u32, title: String, url: String) -> Result<Book, String> {
-        println!("Downloading: {title}");
+    /// Fetch a single book from the bundled corpus, with error handling and timeout.
+    async fn download_book(id: u32, title: String) -> Result<Book, String> {
+        println!("Fetching: {title}");
 
-        let client = reqwest::Client::new();
-
-        // Set a 30-second timeout for each download
+        // Set a 30-second timeout for each fetch.
         let download_future = async {
-            let response = client
-                .get(&url)
-                .send()
-                .await
-                .map_err(|e| format!("Failed to fetch {url}: {e}"))?;
-
-            if !response.status().is_success() {
-                return Err(format!("HTTP error for {title}: {}", response.status()));
-            }
-
-            let content = response
-                .text()
-                .await
-                .map_err(|e| format!("Failed to read content for {title}: {e}"))?;
+            let content = book_corpus::fetch_book(id, &title).await?;
 
             if content.len() < 1000 {
                 return Err(format!(
@@ -233,19 +186,18 @@ impl BookDownloaderTask {
                 ));
             }
 
-            println!("Downloaded: {title} ({} chars)", content.len());
+            println!("Fetched: {title} ({} chars)", content.len());
 
             Ok(Book {
                 id,
                 title: title.clone(),
-                url,
                 content,
             })
         };
 
         match timeout(Duration::from_secs(30), download_future).await {
             Ok(result) => result,
-            Err(_) => Err(format!("Timeout downloading {title}")),
+            Err(_) => Err(format!("Timeout fetching {title}")),
         }
     }
 }
@@ -258,14 +210,14 @@ impl BookDownloaderTask {
 
     async fn run(&self, res: &Resources) -> Result<TaskResult<BookPrepositionAction>, CanoError> {
         let book_list = Self::get_book_list();
-        println!("Prepared {} books for download", book_list.len());
+        println!("Prepared {} books for fetching", book_list.len());
 
-        println!("Starting parallel download of {} books...", book_list.len());
+        println!("Starting parallel fetch of {} books...", book_list.len());
 
-        // Create download futures for all books
+        // Create fetch futures for all books
         let download_futures: Vec<_> = book_list
             .into_iter()
-            .map(|(id, title, url)| Self::download_book(id, title, url))
+            .map(|(id, title)| Self::download_book(id, title))
             .collect();
 
         // Execute all downloads in parallel
@@ -602,7 +554,7 @@ async fn run_workflow() -> Result<(), CanoError> {
 
 #[tokio::main]
 async fn main() {
-    println!("Project Gutenberg Book Preposition Analysis");
+    println!("Book Preposition Analysis");
     println!("=========================================");
 
     match run_workflow().await {
@@ -625,9 +577,11 @@ mod tests {
         let book_list = BookDownloaderTask::get_book_list();
 
         assert_eq!(book_list.len(), 12);
-        assert!(book_list.iter().all(|(id, title, url)| {
-            *id > 0 && !title.is_empty() && url.starts_with("https://www.gutenberg.org/")
-        }));
+        assert!(
+            book_list
+                .iter()
+                .all(|(id, title)| { *id > 0 && !title.is_empty() })
+        );
     }
 
     #[tokio::test]
@@ -635,7 +589,6 @@ mod tests {
         let book = Book {
             id: 1,
             title: "Test Book".to_string(),
-            url: "http://example.com".to_string(),
             content:
                 "The cat sat on the mat with great care. It was under the table, near the door."
                     .to_string(),
@@ -665,13 +618,11 @@ mod tests {
             Book {
                 id: 1,
                 title: "Book One".to_string(),
-                url: "http://example.com/1".to_string(),
                 content: "The quick brown fox jumps over the lazy dog near the fence.".to_string(),
             },
             Book {
                 id: 2,
                 title: "Book Two".to_string(),
-                url: "http://example.com/2".to_string(),
                 content: "Under the bright sky, birds fly above the trees with grace.".to_string(),
             },
         ];
@@ -772,18 +723,13 @@ mod tests {
         assert_eq!(book_list.len(), 12);
 
         // Verify each book has valid data
-        for (id, title, url) in &book_list {
+        for (id, title) in &book_list {
             assert!(*id > 0);
             assert!(!title.is_empty());
-            assert!(url.starts_with("https://www.gutenberg.org/"));
-            assert!(url.ends_with(".txt"));
         }
 
         // Verify we have some expected classics
-        let titles: Vec<String> = book_list
-            .iter()
-            .map(|(_, title, _)| title.clone())
-            .collect();
+        let titles: Vec<String> = book_list.iter().map(|(_, title)| title.clone()).collect();
         let titles_str = titles.join(" ");
 
         assert!(titles_str.contains("Pride and Prejudice"));
