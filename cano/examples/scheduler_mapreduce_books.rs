@@ -29,6 +29,11 @@
 //!     └── Join: Batch summary
 //! ```
 //!
+//! Book text comes from an offline, deterministic generator ([`book_corpus`]) rather than
+//! the network, so the example is reproducible and CI never depends on a website. One book
+//! (in Batch-B) is deliberately absent from the corpus, which drives the analyze-phase
+//! `Percentage(0.75)` join to demonstrate partial-results tolerance.
+//!
 //! ## Execution
 //!
 //! ```bash
@@ -42,6 +47,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, timeout};
+
+#[path = "shared/book_corpus.rs"]
+mod book_corpus;
 
 /// Workflow states
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -117,8 +125,8 @@ const PREPOSITIONS: &[&str] = &[
     "up", "with", "within",
 ];
 
-/// Book metadata (id, title, url)
-type BookMetadata = (u32, String, String);
+/// Book metadata (id, title). Text is supplied by [`book_corpus`].
+type BookMetadata = (u32, String);
 
 /// Get all books divided into batches
 fn get_book_batches() -> Vec<(String, Vec<BookMetadata>)> {
@@ -126,115 +134,59 @@ fn get_book_batches() -> Vec<(String, Vec<BookMetadata>)> {
         (
             "Batch-A-Classics".to_string(),
             vec![
-                (
-                    1342,
-                    "Pride and Prejudice by Jane Austen".to_string(),
-                    "https://www.gutenberg.org/files/1342/1342-0.txt".to_string(),
-                ),
+                (1342, "Pride and Prejudice by Jane Austen".to_string()),
                 (
                     11,
                     "Alice's Adventures in Wonderland by Lewis Carroll".to_string(),
-                    "https://www.gutenberg.org/files/11/11-0.txt".to_string(),
                 ),
                 (
                     84,
                     "Frankenstein by Mary Wollstonecraft Shelley".to_string(),
-                    "https://www.gutenberg.org/files/84/84-0.txt".to_string(),
                 ),
                 (
                     1661,
                     "The Adventures of Sherlock Holmes by Arthur Conan Doyle".to_string(),
-                    "https://www.gutenberg.org/files/1661/1661-0.txt".to_string(),
                 ),
             ],
         ),
         (
             "Batch-B-Adventure".to_string(),
             vec![
-                (
-                    2701,
-                    "Moby Dick by Herman Melville".to_string(),
-                    "https://www.gutenberg.org/files/2701/2701-0.txt".to_string(),
-                ),
+                (2701, "Moby Dick by Herman Melville".to_string()),
                 (
                     76,
                     "Adventures of Huckleberry Finn by Mark Twain".to_string(),
-                    "https://www.gutenberg.org/files/76/76-0.txt".to_string(),
                 ),
-                (
-                    345,
-                    "Dracula by Bram Stoker".to_string(),
-                    "https://www.gutenberg.org/files/345/345-0.txt".to_string(),
-                ),
-                (
-                    174,
-                    "The Picture of Dorian Gray by Oscar Wilde".to_string(),
-                    "https://www.gutenberg.org/files/174/174-0.txt".to_string(),
-                ),
+                (345, "Dracula by Bram Stoker".to_string()),
+                (174, "The Picture of Dorian Gray by Oscar Wilde".to_string()),
             ],
         ),
         (
             "Batch-C-Romance".to_string(),
             vec![
-                (
-                    1260,
-                    "Jane Eyre by Charlotte Brontë".to_string(),
-                    "https://www.gutenberg.org/files/1260/1260-0.txt".to_string(),
-                ),
-                (
-                    1513,
-                    "Romeo and Juliet by William Shakespeare".to_string(),
-                    "https://www.gutenberg.org/files/1513/1513-0.txt".to_string(),
-                ),
-                (
-                    46,
-                    "A Christmas Carol by Charles Dickens".to_string(),
-                    "https://www.gutenberg.org/files/46/46-0.txt".to_string(),
-                ),
-                (
-                    1080,
-                    "A Modest Proposal by Jonathan Swift".to_string(),
-                    "https://www.gutenberg.org/files/1080/1080-0.txt".to_string(),
-                ),
+                (1260, "Jane Eyre by Charlotte Brontë".to_string()),
+                (1513, "Romeo and Juliet by William Shakespeare".to_string()),
+                (46, "A Christmas Carol by Charles Dickens".to_string()),
+                (1080, "A Modest Proposal by Jonathan Swift".to_string()),
             ],
         ),
     ]
 }
 
-/// Download a single book
-async fn download_book(
-    id: u32,
-    title: String,
-    url: String,
-    batch_name: String,
-) -> Result<Book, String> {
-    println!("  📥 [{batch_name}] Downloading: {title}");
-
-    let client = reqwest::Client::new();
+/// Fetch a single book from the bundled corpus
+async fn download_book(id: u32, title: String, batch_name: String) -> Result<Book, String> {
+    println!("  📥 [{batch_name}] Fetching: {title}");
 
     let download_future = async {
-        let response = client
-            .get(&url)
-            .send()
-            .await
-            .map_err(|e| format!("Failed to fetch {url}: {e}"))?;
-
-        if !response.status().is_success() {
-            return Err(format!("HTTP error for {title}: {}", response.status()));
-        }
-
-        let content = response
-            .text()
-            .await
-            .map_err(|e| format!("Failed to read content for {title}: {e}"))?;
+        let content = book_corpus::fetch_book(id, &title).await?;
 
         if content.len() < 1000 {
             return Err(format!("Content too short for {title}"));
         }
 
         println!(
-            "  ✅ [{batch_name}] Downloaded: {title} ({} KB)",
-            content.len() / 1024
+            "  ✅ [{batch_name}] Fetched: {title} ({} chars)",
+            content.len()
         );
 
         Ok(Book {
@@ -247,7 +199,7 @@ async fn download_book(
 
     timeout(Duration::from_secs(30), download_future)
         .await
-        .map_err(|_| format!("Timeout downloading {title}"))?
+        .map_err(|_| format!("Timeout fetching {title}"))?
 }
 
 /// Analyze prepositions in a book
@@ -304,12 +256,11 @@ impl InitBatchTask {
     }
 }
 
-/// Task: Download a single book (used in split)
+/// Task: Fetch a single book (used in split)
 #[derive(Clone)]
 struct DownloadTask {
     book_id: u32,
     title: String,
-    url: String,
     batch_name: String,
 }
 
@@ -317,20 +268,19 @@ struct DownloadTask {
 impl DownloadTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
-        match download_book(
-            self.book_id,
-            self.title.clone(),
-            self.url.clone(),
-            self.batch_name.clone(),
-        )
-        .await
-        {
+        match download_book(self.book_id, self.title.clone(), self.batch_name.clone()).await {
             Ok(book) => {
                 // Store individual book
                 store.put(&format!("book_{}", self.book_id), book)?;
                 Ok(TaskResult::Single(BookAnalysisState::AnalyzeBatch))
             }
-            Err(e) => Err(CanoError::task_execution(format!("Download failed: {e}"))),
+            // The bundled corpus deliberately omits one book. Skip it (rather than failing
+            // the `All` download join) so the absent book surfaces at the analyze phase,
+            // where the `Percentage(0.75)` join demonstrates partial-results tolerance.
+            Err(e) => {
+                println!("  ⚠️  [{}] Skipping unavailable book: {e}", self.batch_name);
+                Ok(TaskResult::Single(BookAnalysisState::AnalyzeBatch))
+            }
         }
     }
 }
@@ -380,7 +330,7 @@ impl SummarizeBatchTask {
 
         // Collect all analyses
         let mut analyses = Vec::new();
-        for (book_id, _, _) in &books {
+        for (book_id, _) in &books {
             if let Ok(analysis) = store.get::<BookAnalysis>(&format!("analysis_{}", book_id)) {
                 analyses.push(analysis);
             }
@@ -443,10 +393,9 @@ fn create_batch_workflow(
             BookAnalysisState::DownloadBatch,
             books
                 .iter()
-                .map(|(id, title, url)| DownloadTask {
+                .map(|(id, title)| DownloadTask {
                     book_id: *id,
                     title: title.clone(),
-                    url: url.clone(),
                     batch_name: batch_name.clone(),
                 })
                 .collect::<Vec<_>>(),
@@ -458,7 +407,7 @@ fn create_batch_workflow(
             BookAnalysisState::AnalyzeBatch,
             books
                 .iter()
-                .map(|(id, _, _)| AnalyzeTask { book_id: *id })
+                .map(|(id, _)| AnalyzeTask { book_id: *id })
                 .collect::<Vec<_>>(),
             JoinConfig::new(
                 JoinStrategy::Percentage(0.75), // Proceed if 75% complete

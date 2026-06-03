@@ -2,11 +2,14 @@
 //! # Book Preposition Analysis Example
 //!
 //! This example demonstrates a book analysis system that:
-//! 1. Downloads popular books from Project Gutenberg
+//! 1. Fetches books from a bundled sample corpus
 //! 2. Analyzes preposition usage in each book
 //! 3. Ranks books by preposition diversity
 //!
 //! For parallel processing, see the workflow examples that demonstrate split/join patterns.
+//!
+//! The text comes from an offline, deterministic generator ([`book_corpus`]) instead of the
+//! network, so the example is reproducible and CI never depends on a website.
 //!
 //! ## Execution
 //!
@@ -19,6 +22,9 @@ use cano::prelude::*;
 use std::collections::HashSet;
 use std::time::Duration;
 use tokio::time::timeout;
+
+#[path = "shared/book_corpus.rs"]
+mod book_corpus;
 
 /// Workflow state management
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -67,42 +73,18 @@ const PREPOSITIONS: &[&str] = &[
 struct BookDownloadTask {
     book_id: u32,
     title: String,
-    url: String,
 }
 
 impl BookDownloadTask {
-    fn new(book_id: u32, title: String, url: String) -> Self {
-        Self {
-            book_id,
-            title,
-            url,
-        }
+    fn new(book_id: u32, title: String) -> Self {
+        Self { book_id, title }
     }
 
     async fn download_book(&self) -> Result<Book, String> {
-        println!("Downloading: {}", self.title);
-
-        let client = reqwest::Client::new();
+        println!("Fetching: {}", self.title);
 
         let download_future = async {
-            let response = client
-                .get(&self.url)
-                .send()
-                .await
-                .map_err(|e| format!("Failed to fetch {}: {}", self.url, e))?;
-
-            if !response.status().is_success() {
-                return Err(format!(
-                    "HTTP error for {}: {}",
-                    self.title,
-                    response.status()
-                ));
-            }
-
-            let content = response
-                .text()
-                .await
-                .map_err(|e| format!("Failed to read content for {}: {}", self.title, e))?;
+            let content = book_corpus::fetch_book(self.book_id, &self.title).await?;
 
             if content.len() < 1000 {
                 return Err(format!(
@@ -111,7 +93,7 @@ impl BookDownloadTask {
                 ));
             }
 
-            println!("Downloaded: {} ({} chars)", self.title, content.len());
+            println!("Fetched: {} ({} chars)", self.title, content.len());
 
             Ok(Book {
                 id: self.book_id,
@@ -122,7 +104,7 @@ impl BookDownloadTask {
 
         match timeout(Duration::from_secs(30), download_future).await {
             Ok(result) => result,
-            Err(_) => Err(format!("Timeout downloading {}", self.title)),
+            Err(_) => Err(format!("Timeout fetching {}", self.title)),
         }
     }
 }
@@ -280,18 +262,14 @@ async fn main() -> CanoResult<()> {
 
     let store = MemoryStore::new();
 
-    // Download a few sample books
-    println!("Downloading books from Project Gutenberg...\n");
+    // Fetch a few sample books
+    println!("Fetching books from the bundled sample corpus...\n");
 
     // Book 1: Pride and Prejudice
     let workflow1 = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(
             WorkflowPhase::Download,
-            BookDownloadTask::new(
-                1342,
-                "Pride and Prejudice by Jane Austen".to_string(),
-                "https://www.gutenberg.org/files/1342/1342-0.txt".to_string(),
-            ),
+            BookDownloadTask::new(1342, "Pride and Prejudice by Jane Austen".to_string()),
         )
         .add_exit_states(vec![WorkflowPhase::Analyze, WorkflowPhase::Complete]);
 
@@ -301,11 +279,7 @@ async fn main() -> CanoResult<()> {
     let workflow2 = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(
             WorkflowPhase::Download,
-            BookDownloadTask::new(
-                11,
-                "Alice's Adventures in Wonderland".to_string(),
-                "https://www.gutenberg.org/files/11/11-0.txt".to_string(),
-            ),
+            BookDownloadTask::new(11, "Alice's Adventures in Wonderland".to_string()),
         )
         .add_exit_states(vec![WorkflowPhase::Analyze, WorkflowPhase::Complete]);
 
@@ -315,11 +289,7 @@ async fn main() -> CanoResult<()> {
     let workflow3 = Workflow::new(Resources::new().insert("store", store.clone()))
         .register(
             WorkflowPhase::Download,
-            BookDownloadTask::new(
-                46,
-                "A Christmas Carol by Charles Dickens".to_string(),
-                "https://www.gutenberg.org/files/46/46-0.txt".to_string(),
-            ),
+            BookDownloadTask::new(46, "A Christmas Carol by Charles Dickens".to_string()),
         )
         .add_exit_states(vec![WorkflowPhase::Analyze, WorkflowPhase::Complete]);
 
