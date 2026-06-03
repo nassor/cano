@@ -316,16 +316,19 @@ impl ShipOrder {
     }
 }
 
-let workflow = Workflow::bare()
-    .register_with_compensation(Step::Reserve, ReserveInventory)
-    .register(Step::Validate, ValidateOrder)              // plain — no compensation
-    .register_with_compensation(Step::Charge, ChargeCard)
-    .register(Step::Ship, ShipOrder)                      // plain — and it fails
-    .add_exit_state(Step::Done);
+#[tokio::main]
+async fn main() {
+    let workflow = Workflow::bare()
+        .register_with_compensation(Step::Reserve, ReserveInventory)
+        .register(Step::Validate, ValidateOrder)              // plain — no compensation
+        .register_with_compensation(Step::Charge, ChargeCard)
+        .register(Step::Ship, ShipOrder)                      // plain — and it fails
+        .add_exit_state(Step::Done);
 
-match workflow.orchestrate(Step::Reserve).await {
-    Ok(state) => println!("completed at {state:?}"),
-    Err(error) => println!("failed, rolled back: {error}"), // "courier unavailable" — the original error
+    match workflow.orchestrate(Step::Reserve).await {
+        Ok(state) => println!("completed at {state:?}"),
+        Err(error) => println!("failed, rolled back: {error}"), // "courier unavailable" — the original error
+    }
 }
 ```
 </div>
