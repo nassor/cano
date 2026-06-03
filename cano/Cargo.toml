@@ -31,8 +31,9 @@ metrics = { version = "0.24.5", optional = true }
 scheduler = ["dep:chrono", "dep:cron", "tokio/signal"]
 tracing = ["dep:tracing"]
 recovery = ["dep:redb", "dep:postcard"]
-all = ["scheduler", "tracing", "recovery", "metrics"]
 metrics = ["dep:metrics"]
+testing = []
+all = ["scheduler", "tracing", "recovery", "metrics", "testing"]
 
 [dev-dependencies]
 axum = "0.8.9"
@@ -262,6 +263,11 @@ path = "examples/store_custom_backend.rs"
 [[example]]
 name = "resources_advanced"
 path = "examples/resources_advanced.rs"
+
+[[example]]
+name = "testing_helpers"
+path = "examples/testing_helpers.rs"
+required-features = ["testing"]
 
 [[bench]]
 name = "workflow_performance"

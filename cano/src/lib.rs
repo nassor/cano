@@ -217,6 +217,11 @@
 //! - [`saga`]: [`CompensatableTask`] — pair a forward step with a compensating action; failures roll back via [`Workflow::register_with_compensation`]
 //! - [`rate_limit`]: [`RateLimiter`] (token bucket) and [`WindowedRateLimiter`] (fixed window) throttles, both implementing [`Meter`] so they compose into a [`MultiRateLimiter`] that enforces several weighted tiers (e.g. a 5h + 7d + per-model limit) at once
 //! - [`store`]: [`MemoryStore`] — a typed in-memory store that implements [`Resource`]
+//! - `testing` (requires `testing` feature): batteries-included test fixtures —
+//!   a `RecordingObserver`, a public `InMemoryCheckpointStore`, a `TestResources`
+//!   builder, a `panic_on_attempt` task factory and an `assert_compensation_ran`
+//!   saga helper. Import explicitly with `use cano::testing::*;` — it is deliberately
+//!   **not** in the [`prelude`] so production code never picks it up by accident.
 //! - [`error`]: [`CanoError`] variants and the [`CanoResult`] alias
 //!
 //! ## Getting Started
@@ -241,6 +246,9 @@ pub mod metrics;
 
 #[cfg(feature = "scheduler")]
 pub mod scheduler;
+
+#[cfg(feature = "testing")]
+pub mod testing;
 
 // Core public API - simplified imports
 pub use circuit::{CircuitBreaker, CircuitPolicy, CircuitState, Permit as CircuitPermit};

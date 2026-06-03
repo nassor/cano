@@ -440,7 +440,6 @@ p {
     color: var(--text-muted);
     line-height: 1.6;
     margin-bottom: var(--space-8);
-    max-width: 56ch;
 }
 
 strong {

@@ -92,7 +92,7 @@ mod compensation;
 mod execution;
 mod join;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 pub use execution::StateEntry;
 pub use join::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult};
