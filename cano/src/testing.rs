@@ -187,6 +187,63 @@ impl RecordingObserver {
         let actual_refs: Vec<&str> = actual.iter().map(String::as_str).collect();
         assert_eq!(actual_refs.as_slice(), expected);
     }
+
+    /// Assert that every state in `expected` was entered at least once during the
+    /// workflow run this observer recorded. Returns `Err` listing the missing
+    /// states (in the order they appear in `expected`, deduplicated) when one or
+    /// more were never entered; `Ok(())` when all were visited.
+    ///
+    /// Unlike [`assert_path`](Self::assert_path) this returns a `Result` instead of
+    /// panicking, so the caller can inspect the missing labels — `?`-propagate, or
+    /// `.expect(..)` / `.unwrap_err()` in a test.
+    ///
+    /// The comparison is string-based on the `Debug` rendering of each state,
+    /// matching what [`WorkflowObserver::on_state_enter`](crate::observer::WorkflowObserver::on_state_enter)
+    /// received from the engine. `TState` therefore only needs `Debug`.
+    pub fn assert_all_states_entered<TState: std::fmt::Debug>(
+        &self,
+        expected: &[TState],
+    ) -> Result<(), Vec<String>> {
+        let entered: std::collections::HashSet<String> =
+            self.states_entered().into_iter().collect();
+
+        let mut missing: Vec<String> = Vec::new();
+        let mut seen_in_input: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for state in expected {
+            let label = format!("{state:?}");
+            if seen_in_input.insert(label.clone()) && !entered.contains(&label) {
+                missing.push(label);
+            }
+        }
+
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(missing)
+        }
+    }
+
+    /// Assert that every state with a registered handler in `workflow` was
+    /// entered at least once during the run this observer recorded. Catches dead
+    /// states — handlers that exist in the registration map but are never routed
+    /// to.
+    ///
+    /// Exit states added via [`add_exit_state`](crate::workflow::Workflow::add_exit_state)
+    /// *without* a handler are not required (they are not part of
+    /// [`Workflow::registered_states`](crate::workflow::Workflow::registered_states)).
+    /// Returns `Err` with the missing state labels, like
+    /// [`assert_all_states_entered`](Self::assert_all_states_entered).
+    pub fn assert_registered_states_entered<TState, TResourceKey>(
+        &self,
+        workflow: &crate::workflow::Workflow<TState, TResourceKey>,
+    ) -> Result<(), Vec<String>>
+    where
+        TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
+        TResourceKey: std::hash::Hash + Eq + Send + Sync + 'static,
+    {
+        let registered: Vec<TState> = workflow.registered_states().cloned().collect();
+        self.assert_all_states_entered(&registered)
+    }
 }
 
 impl WorkflowObserver for RecordingObserver {
@@ -459,6 +516,9 @@ mod tests {
     enum S {
         Start,
         Done,
+        A,
+        B,
+        C,
     }
 
     struct OkTask;
@@ -469,6 +529,16 @@ mod tests {
         }
         fn name(&self) -> Cow<'static, str> {
             "OkTask".into()
+        }
+    }
+
+    /// Transitions unconditionally to a supplied next state.
+    #[derive(Clone)]
+    struct Go(S);
+    #[task]
+    impl Task<S> for Go {
+        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+            Ok(TaskResult::Single(self.0.clone()))
         }
     }
 
@@ -654,5 +724,74 @@ mod tests {
     fn assert_compensation_ran_mismatch_panics() {
         let ran = vec!["reserve".to_string()];
         assert_compensation_ran(&ran, &["charge", "reserve"]);
+    }
+
+    #[tokio::test]
+    async fn assert_all_states_entered_passes_when_all_visited() {
+        let observer = Arc::new(RecordingObserver::new());
+        let wf = Workflow::bare()
+            .register(S::A, Go(S::B))
+            .register(S::B, Go(S::Done))
+            .add_exit_state(S::Done)
+            .with_observer(observer.clone());
+        wf.orchestrate(S::A).await.unwrap();
+        observer
+            .assert_all_states_entered(&[S::A, S::B, S::Done])
+            .expect("all states visited");
+    }
+
+    #[tokio::test]
+    async fn assert_all_states_entered_returns_missing_in_input_order() {
+        let observer = Arc::new(RecordingObserver::new());
+        let wf = Workflow::bare()
+            .register(S::A, Go(S::Done))
+            .add_exit_state(S::Done)
+            .with_observer(observer.clone());
+        wf.orchestrate(S::A).await.unwrap();
+        let missing = observer
+            .assert_all_states_entered(&[S::A, S::B, S::C, S::Done])
+            .unwrap_err();
+        assert_eq!(missing, vec!["B".to_string(), "C".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn assert_all_states_entered_handles_duplicates_in_input() {
+        let observer = Arc::new(RecordingObserver::new());
+        let wf = Workflow::bare()
+            .register(S::A, Go(S::Done))
+            .add_exit_state(S::Done)
+            .with_observer(observer.clone());
+        wf.orchestrate(S::A).await.unwrap();
+        let missing = observer
+            .assert_all_states_entered(&[S::A, S::A, S::B])
+            .unwrap_err();
+        assert_eq!(missing, vec!["B".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn assert_registered_states_entered_passes_for_full_path() {
+        let observer = Arc::new(RecordingObserver::new());
+        let wf = Workflow::bare()
+            .register(S::A, Go(S::B))
+            .register(S::B, Go(S::Done))
+            .add_exit_state(S::Done)
+            .with_observer(observer.clone());
+        wf.orchestrate(S::A).await.unwrap();
+        observer
+            .assert_registered_states_entered(&wf)
+            .expect("all registered states visited");
+    }
+
+    #[tokio::test]
+    async fn assert_registered_states_entered_reports_dead_state() {
+        let observer = Arc::new(RecordingObserver::new());
+        let wf = Workflow::bare()
+            .register(S::A, Go(S::Done))
+            .register(S::C, Go(S::Done)) // never routed to
+            .add_exit_state(S::Done)
+            .with_observer(observer.clone());
+        wf.orchestrate(S::A).await.unwrap();
+        let missing = observer.assert_registered_states_entered(&wf).unwrap_err();
+        assert!(missing.contains(&"C".to_string()), "missing={missing:?}");
     }
 }

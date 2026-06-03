@@ -78,21 +78,21 @@ impl Task<S> for OkTask {
     }
 }
 
-# #[tokio::main]
-# async fn main() {
-let observer = Arc::new(RecordingObserver::new());
-let wf = Workflow::bare()
-    .register(S::Start, OkTask)
-    .add_exit_state(S::Done)
-    .with_observer(observer.clone());
+#[tokio::test]
+async fn recording_observer_captures_the_path() {
+    let observer = Arc::new(RecordingObserver::new());
+    let wf = Workflow::bare()
+        .register(S::Start, OkTask)
+        .add_exit_state(S::Done)
+        .with_observer(observer.clone());
 
-assert_eq!(wf.orchestrate(S::Start).await.unwrap(), S::Done);
+    assert_eq!(wf.orchestrate(S::Start).await.unwrap(), S::Done);
 
-// Assert the whole path, or inspect events directly.
-observer.assert_path(&["Start", "Done"]);
-observer.assert_completed_with("Done");
-assert!(observer.events().iter().any(|e| matches!(e, RecordedEvent::TaskSucceeded { .. })));
-# }
+    // Assert the whole path, or inspect events directly.
+    observer.assert_path(&["Start", "Done"]);
+    observer.assert_completed_with("Done");
+    assert!(observer.events().iter().any(|e| matches!(e, RecordedEvent::TaskSucceeded { .. })));
+}
 ```
 
 <p>
@@ -101,6 +101,58 @@ assert!(observer.events().iter().any(|e| matches!(e, RecordedEvent::TaskSucceede
 <code>CircuitOpen</code>, <code>Checkpoint</code>, <code>Resume</code>). It is
 <code>#[non_exhaustive]</code> — match with a wildcard arm.
 </p>
+
+<h3 id="state-coverage">State-coverage assertions</h3>
+
+<p>
+Two helpers turn the recorded <code>on_state_enter</code> events into CI guardrails that catch
+<strong>dead states</strong> (a state you registered but nothing ever routes to) and routing
+regressions. Both return <code>Result&lt;(), Vec&lt;String&gt;&gt;</code> — <code>Ok(())</code>
+when every expected state was entered, or <code>Err</code> with the missing state labels (in
+input order, deduplicated). Unlike <code>assert_path</code>, they return rather than panic, so
+you can inspect the gap (<code>?</code>-propagate, <code>.expect(..)</code>, or
+<code>.unwrap_err()</code>).
+</p>
+
+<ul>
+<li><code>assert_all_states_entered(&amp;[..])</code> — check an explicit list of states (compared by their <code>Debug</code> rendering).</li>
+<li><code>assert_registered_states_entered(&amp;workflow)</code> — check <em>every state the workflow registered a handler for</em> (via <a href="../workflows/"><code>Workflow::registered_states</code></a>). Exit-only states added with <code>add_exit_state</code> and no handler are not required.</li>
+</ul>
+
+```rust
+use cano::prelude::*;
+use cano::testing::RecordingObserver;
+use std::sync::Arc;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum S { Start, Worker, Done }
+
+#[derive(Clone)]
+struct Go(S);
+#[task]
+impl Task<S> for Go {
+    async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+        Ok(TaskResult::Single(self.0.clone()))
+    }
+}
+
+#[tokio::test]
+async fn every_registered_state_is_reached() {
+    let observer = Arc::new(RecordingObserver::new());
+    let wf = Workflow::bare()
+        .register(S::Start, Go(S::Worker))
+        .register(S::Worker, Go(S::Done))
+        .add_exit_state(S::Done)
+        .with_observer(observer.clone());
+    wf.orchestrate(S::Start).await.unwrap();
+
+    // Every registered handler was actually reached — no dead states.
+    observer.assert_registered_states_entered(&wf).expect("no dead states");
+
+    // Or assert an explicit set; Err lists what was never entered.
+    observer.assert_all_states_entered(&[S::Start, S::Worker, S::Done]).unwrap();
+}
+```
 
 <h2 id="in-memory-store">InMemoryCheckpointStore</h2>
 
@@ -118,18 +170,27 @@ use cano::prelude::*;
 use cano::testing::*;
 use std::sync::Arc;
 
-# #[derive(Clone, Debug, PartialEq, Eq, Hash)] enum S { Start, Done }
-# struct Go; #[task] impl Task<S> for Go { async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> { Ok(TaskResult::Single(S::Done)) } }
-# #[tokio::main]
-# async fn main() {
-let store = Arc::new(InMemoryCheckpointStore::new());
-let wf = Workflow::bare()
-    .register(S::Start, Go)
-    .add_exit_state(S::Done)
-    .with_checkpoint_store(store.clone())
-    .with_workflow_id("run-1");
-assert_eq!(wf.orchestrate(S::Start).await.unwrap(), S::Done);
-# }
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum S { Start, Done }
+
+struct Go;
+#[task]
+impl Task<S> for Go {
+    async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+        Ok(TaskResult::Single(S::Done))
+    }
+}
+
+#[tokio::test]
+async fn checkpoints_run_in_memory() {
+    let store = Arc::new(InMemoryCheckpointStore::new());
+    let wf = Workflow::bare()
+        .register(S::Start, Go)
+        .add_exit_state(S::Done)
+        .with_checkpoint_store(store.clone())
+        .with_workflow_id("run-1");
+    assert_eq!(wf.orchestrate(S::Start).await.unwrap(), S::Done);
+}
 ```
 
 <h2 id="test-resources">TestResources</h2>
@@ -170,16 +231,18 @@ only with <code>panics == 0</code>.
 use cano::prelude::*;
 use cano::testing::panic_on_attempt;
 
-# #[derive(Clone, Debug, PartialEq, Eq, Hash)] enum S { Start, Done }
-# #[tokio::main]
-# async fn main() {
-let wf = Workflow::bare()
-    .register(S::Start, panic_on_attempt(1, S::Done))
-    .add_exit_state(S::Done);
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum S { Start, Done }
 
-let err = wf.orchestrate(S::Start).await.unwrap_err();
-assert!(err.to_string().contains("panic"));
-# }
+#[tokio::test]
+async fn panicking_task_fails_fast() {
+    let wf = Workflow::bare()
+        .register(S::Start, panic_on_attempt(1, S::Done))
+        .add_exit_state(S::Done);
+
+    let err = wf.orchestrate(S::Start).await.unwrap_err();
+    assert!(err.to_string().contains("panic"));
+}
 ```
 
 <h2 id="assert-compensation">assert_compensation_ran</h2>
