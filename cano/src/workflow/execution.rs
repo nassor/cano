@@ -2490,18 +2490,10 @@ mod tests {
 
     #[tokio::test]
     async fn total_timeout_fires_on_workflow_timeout_observer_hook() {
-        use crate::observer::WorkflowObserver;
-
-        struct Rec(Arc<Recorder<(Duration, Duration)>>);
-        impl WorkflowObserver for Rec {
-            fn on_workflow_timeout(&self, elapsed: Duration, limit: Duration) {
-                self.0.record((elapsed, limit));
-            }
-        }
-        let rec = Recorder::<(Duration, Duration)>::new();
+        let (obs, rec) = EventLog::new();
         let workflow = Workflow::bare()
             .with_total_timeout(Duration::from_millis(20))
-            .with_observer(Arc::new(Rec(rec.clone())))
+            .with_observer(Arc::new(obs))
             .register(
                 TestState::Start,
                 SleepyTask {
@@ -2511,7 +2503,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
         let _ = workflow.orchestrate(TestState::Start).await;
-        let events = rec.snapshot();
+        let events = rec.timeouts();
         assert_eq!(events.len(), 1, "hook should fire exactly once");
         let (elapsed, limit) = events[0];
         assert_eq!(limit, Duration::from_millis(20));
@@ -2841,30 +2833,9 @@ mod wrap_and_drain_tests {
 mod dispatch_with_budget_tests {
     use super::*;
     use crate::observer::WorkflowObserver;
-    use crate::workflow::test_support::{Recorder, TestState};
+    use crate::workflow::test_support::{EventLog, TestState};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
-
-    /// Captures every observer event so tests can assert exact fan-out shape.
-    /// Thin observer over a shared `Recorder<String>` (see `test_support`).
-    struct CapturingObserver(Arc<Recorder<String>>);
-    impl WorkflowObserver for CapturingObserver {
-        fn on_task_failure(&self, task_id: &str, _err: &CanoError) {
-            self.0.record(format!("task_failure:{task_id}"));
-        }
-        fn on_workflow_timeout(&self, _elapsed: Duration, limit: Duration) {
-            self.0
-                .record(format!("workflow_timeout:{}ms", limit.as_millis()));
-        }
-    }
-    impl CapturingObserver {
-        /// Wraps a fresh `Recorder` and returns both halves: the observer for
-        /// `Workflow::with_observer`, and the recorder for snapshotting.
-        fn new() -> (Self, Arc<Recorder<String>>) {
-            let rec = Recorder::new();
-            (Self(rec.clone()), rec)
-        }
-    }
 
     fn budget_for(limit: Duration) -> Option<(std::time::Instant, Duration, tokio::time::Instant)> {
         let start = std::time::Instant::now();
@@ -2876,7 +2847,7 @@ mod dispatch_with_budget_tests {
     async fn no_budget_passes_future_result_through_unchanged() {
         // When `step_budget` is None we are on the zero-cost path; the helper
         // must NOT touch observers and must return the inner result verbatim.
-        let (observer, rec) = CapturingObserver::new();
+        let (observer, rec) = EventLog::new();
         let observer_dyn: Arc<dyn WorkflowObserver> = Arc::new(observer);
         let observers = [observer_dyn];
 
@@ -2905,7 +2876,7 @@ mod dispatch_with_budget_tests {
     async fn budget_with_timely_future_passes_through_without_observer_fanout() {
         // The deadline is comfortably in the future; the inner future returns
         // immediately. Helper returns the result; fan-out closure stays silent.
-        let (observer, rec) = CapturingObserver::new();
+        let (observer, rec) = EventLog::new();
         let observer_dyn: Arc<dyn WorkflowObserver> = Arc::new(observer);
         let observers = [observer_dyn];
 
@@ -2931,7 +2902,7 @@ mod dispatch_with_budget_tests {
         // A deadline already in the past trips the wrapper immediately. The
         // fan-out closure must run for each registered observer; the helper
         // must always fire `on_workflow_timeout`. Result is WorkflowTimeout.
-        let (observer, rec) = CapturingObserver::new();
+        let (observer, rec) = EventLog::new();
         let observer_dyn: Arc<dyn WorkflowObserver> = Arc::new(observer);
         let observers = [observer_dyn];
 
@@ -2966,7 +2937,7 @@ mod dispatch_with_budget_tests {
             "fan-out closure must fire exactly once (per registered observer)"
         );
         assert_eq!(
-            rec.snapshot(),
+            rec.labels(),
             vec![
                 "task_failure:synthetic".to_string(),
                 "workflow_timeout:50ms".to_string(),
@@ -3011,8 +2982,8 @@ mod dispatch_with_budget_tests {
     async fn budget_trip_fires_fan_out_once_per_observer() {
         // Two observers: the fan-out closure must run once per observer, and
         // each observer must see `on_workflow_timeout` exactly once.
-        let (a_obs, a_rec) = CapturingObserver::new();
-        let (b_obs, b_rec) = CapturingObserver::new();
+        let (a_obs, a_rec) = EventLog::new();
+        let (b_obs, b_rec) = EventLog::new();
         let observers: [Arc<dyn WorkflowObserver>; 2] = [Arc::new(a_obs), Arc::new(b_obs)];
         let call_count = Arc::new(AtomicUsize::new(0));
         let cc = Arc::clone(&call_count);
@@ -3045,8 +3016,8 @@ mod dispatch_with_budget_tests {
             "task_failure:multi".to_string(),
             "workflow_timeout:5ms".to_string(),
         ];
-        assert_eq!(a_rec.snapshot(), expected);
-        assert_eq!(b_rec.snapshot(), expected);
+        assert_eq!(a_rec.labels(), expected);
+        assert_eq!(b_rec.labels(), expected);
     }
 
     #[tokio::test]

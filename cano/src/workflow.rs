@@ -92,7 +92,7 @@ mod compensation;
 mod execution;
 mod join;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 pub use execution::StateEntry;
 pub use join::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult};
@@ -576,6 +576,19 @@ where
             }
         }
         self
+    }
+
+    /// Iterate over every state that has a registered handler — every key in the
+    /// internal state map populated by [`register`](Self::register),
+    /// [`register_router`](Self::register_router),
+    /// [`register_split`](Self::register_split),
+    /// [`register_with_compensation`](Self::register_with_compensation), and
+    /// [`register_stepped`](Self::register_stepped). **Exit-only states** added via
+    /// [`add_exit_state`](Self::add_exit_state) without a handler are *not* yielded.
+    ///
+    /// Iteration order is unspecified (backing storage is a `HashMap`).
+    pub fn registered_states(&self) -> impl Iterator<Item = &TState> {
+        self.states.keys()
     }
 
     /// Register a [`WorkflowObserver`] to receive lifecycle and failure events.
@@ -1573,6 +1586,39 @@ mod tests {
             .unwrap();
 
         assert_eq!(result, TestState::Complete);
+    }
+
+    #[test]
+    fn registered_states_returns_all_registered_keys() {
+        use crate::task::{RouterTask, TaskConfig};
+
+        struct GoRoute;
+        #[task::router]
+        impl RouterTask<TestState> for GoRoute {
+            fn config(&self) -> TaskConfig {
+                TaskConfig::minimal()
+            }
+            async fn route(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
+                Ok(TaskResult::Single(TestState::Process))
+            }
+        }
+
+        let wf = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Process))
+            .register_router(TestState::Process, GoRoute)
+            .register_split(
+                TestState::Split,
+                vec![SimpleTask::new(TestState::Join)],
+                JoinConfig::new(JoinStrategy::All, TestState::Join),
+            )
+            .add_exit_state(TestState::Complete);
+
+        let mut registered: Vec<TestState> = wf.registered_states().cloned().collect();
+        registered.sort_by_key(|s| format!("{s:?}"));
+        assert_eq!(
+            registered,
+            vec![TestState::Process, TestState::Split, TestState::Start]
+        );
     }
 
     #[test]

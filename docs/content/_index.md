@@ -132,13 +132,14 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 
 <p>
 Cano ships with <strong>no features enabled by default</strong>. <code>features = ["all"]</code> turns
-on all four optional features at once:
+on all five optional features at once:
 </p>
 <ul>
 <li><code>scheduler</code> — the <a href="scheduler/"><code>Scheduler</code></a> (cron + interval + manual triggers)</li>
 <li><code>tracing</code> — <a href="tracing/"><code>tracing</code>-crate spans</a> and the <code>TracingObserver</code></li>
 <li><code>recovery</code> — <a href="recovery/"><code>RedbCheckpointStore</code></a>, the embedded ACID checkpoint store (the <code>CheckpointStore</code> trait itself is always available)</li>
 <li><code>metrics</code> — <a href="metrics/"><code>metrics</code>-crate counters / histograms / gauges</a> and the <code>MetricsObserver</code></li>
+<li><code>testing</code> — <a href="testing/">batteries-included test fixtures</a> (recording observer, in-memory checkpoint store, resources builder); usually a <code>[dev-dependencies]</code> feature</li>
 </ul>
 <p>
 Pick only what you need — e.g. <code>features = ["recovery"]</code>, or omit <code>features</code>

@@ -12,10 +12,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use cano_macros::task;
 
 use crate::error::CanoError;
+use crate::observer::WorkflowObserver;
 use crate::recovery::{CheckpointRow, CheckpointStore};
 use crate::resource::Resources;
 use crate::store::MemoryStore;
@@ -229,6 +231,242 @@ impl<E: Clone + Send + Sync + 'static> Recorder<E> {
     }
     pub(crate) fn is_empty(&self) -> bool {
         self.events.lock().unwrap().is_empty()
+    }
+}
+
+/// One captured [`WorkflowObserver`] event, one variant per hook. Recorded in
+/// arrival order by [`EventLog`] so tests can assert both *what* fired and the
+/// *order* it fired in. Replaces the per-test-module bespoke observers that each
+/// recorded a different bespoke tuple/string shape.
+#[allow(dead_code)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TestEvent {
+    StateEnter(String),
+    TaskStart(String),
+    TaskSuccess(String),
+    TaskFailure {
+        task: String,
+        error: String,
+    },
+    Retry {
+        task: String,
+        attempt: u32,
+    },
+    CircuitOpen(String),
+    Checkpoint {
+        workflow_id: String,
+        sequence: u64,
+    },
+    Resume {
+        workflow_id: String,
+        sequence: u64,
+    },
+    WorkflowTimeout {
+        elapsed: Duration,
+        limit: Duration,
+    },
+    CheckpointClearFailed {
+        workflow_id: String,
+        error: String,
+    },
+    UnknownResumeState {
+        workflow_id: String,
+        sequence: u64,
+        label: String,
+    },
+}
+
+/// A [`WorkflowObserver`] that records *every* hook into a shared
+/// [`Recorder<TestEvent>`]. Construct with [`EventLog::new`], hand the `EventLog`
+/// to [`Workflow::with_observer`](crate::workflow::Workflow::with_observer), and
+/// snapshot/inspect via the returned `Recorder` handle (typed accessors like
+/// [`Recorder::<TestEvent>::checkpoints`] and the ordered [`Recorder::<TestEvent>::labels`]).
+pub(crate) struct EventLog(Arc<Recorder<TestEvent>>);
+
+#[allow(dead_code)]
+impl EventLog {
+    /// Wraps a fresh `Recorder` and returns both halves: the observer for
+    /// `Workflow::with_observer`, and the recorder for snapshotting — mirroring
+    /// the `*Observer::new()` convention the bespoke observers used.
+    pub(crate) fn new() -> (Self, Arc<Recorder<TestEvent>>) {
+        let rec = Recorder::new();
+        (Self(rec.clone()), rec)
+    }
+}
+
+impl WorkflowObserver for EventLog {
+    fn on_state_enter(&self, state: &str) {
+        self.0.record(TestEvent::StateEnter(state.to_string()));
+    }
+    fn on_task_start(&self, task_id: &str) {
+        self.0.record(TestEvent::TaskStart(task_id.to_string()));
+    }
+    fn on_task_success(&self, task_id: &str) {
+        self.0.record(TestEvent::TaskSuccess(task_id.to_string()));
+    }
+    fn on_task_failure(&self, task_id: &str, err: &CanoError) {
+        self.0.record(TestEvent::TaskFailure {
+            task: task_id.to_string(),
+            error: err.to_string(),
+        });
+    }
+    fn on_retry(&self, task_id: &str, attempt: u32) {
+        self.0.record(TestEvent::Retry {
+            task: task_id.to_string(),
+            attempt,
+        });
+    }
+    fn on_circuit_open(&self, task_id: &str) {
+        self.0.record(TestEvent::CircuitOpen(task_id.to_string()));
+    }
+    fn on_checkpoint(&self, workflow_id: &str, sequence: u64) {
+        self.0.record(TestEvent::Checkpoint {
+            workflow_id: workflow_id.to_string(),
+            sequence,
+        });
+    }
+    fn on_resume(&self, workflow_id: &str, sequence: u64) {
+        self.0.record(TestEvent::Resume {
+            workflow_id: workflow_id.to_string(),
+            sequence,
+        });
+    }
+    fn on_workflow_timeout(&self, elapsed: Duration, limit: Duration) {
+        self.0.record(TestEvent::WorkflowTimeout { elapsed, limit });
+    }
+    fn on_checkpoint_clear_failed(&self, workflow_id: &str, error: &CanoError) {
+        self.0.record(TestEvent::CheckpointClearFailed {
+            workflow_id: workflow_id.to_string(),
+            error: error.to_string(),
+        });
+    }
+    fn on_unknown_resume_state(&self, workflow_id: &str, sequence: u64, unknown_state_label: &str) {
+        self.0.record(TestEvent::UnknownResumeState {
+            workflow_id: workflow_id.to_string(),
+            sequence,
+            label: unknown_state_label.to_string(),
+        });
+    }
+}
+
+/// Typed projections over a recorded [`TestEvent`] stream. Each returns the
+/// fields the relevant tests assert on, in arrival order; tests that need a
+/// different shape can still `snapshot()` and match variants directly.
+#[allow(dead_code)]
+impl Recorder<TestEvent> {
+    /// Short `"kind:arg"` rendering of each event, in order — for cross-hook
+    /// ordering assertions (e.g. state-enter before task-start before success).
+    pub(crate) fn labels(&self) -> Vec<String> {
+        self.snapshot()
+            .into_iter()
+            .map(|e| match e {
+                TestEvent::StateEnter(s) => format!("state_enter:{s}"),
+                TestEvent::TaskStart(t) => format!("task_start:{t}"),
+                TestEvent::TaskSuccess(t) => format!("task_success:{t}"),
+                TestEvent::TaskFailure { task, .. } => format!("task_failure:{task}"),
+                TestEvent::Retry { task, attempt } => format!("retry:{task}:{attempt}"),
+                TestEvent::CircuitOpen(t) => format!("circuit_open:{t}"),
+                TestEvent::Checkpoint {
+                    workflow_id,
+                    sequence,
+                } => format!("checkpoint:{workflow_id}:{sequence}"),
+                TestEvent::Resume {
+                    workflow_id,
+                    sequence,
+                } => format!("resume:{workflow_id}:{sequence}"),
+                TestEvent::WorkflowTimeout { limit, .. } => {
+                    format!("workflow_timeout:{}ms", limit.as_millis())
+                }
+                TestEvent::CheckpointClearFailed { workflow_id, .. } => {
+                    format!("checkpoint_clear_failed:{workflow_id}")
+                }
+                TestEvent::UnknownResumeState { label, .. } => {
+                    format!("unknown_resume_state:{label}")
+                }
+            })
+            .collect()
+    }
+    /// State labels passed to `on_state_enter`, in order.
+    pub(crate) fn state_enters(&self) -> Vec<String> {
+        self.snapshot()
+            .into_iter()
+            .filter_map(|e| match e {
+                TestEvent::StateEnter(s) => Some(s),
+                _ => None,
+            })
+            .collect()
+    }
+    /// `(task, attempt)` for each `on_retry`, in order.
+    pub(crate) fn retries(&self) -> Vec<(String, u32)> {
+        self.snapshot()
+            .into_iter()
+            .filter_map(|e| match e {
+                TestEvent::Retry { task, attempt } => Some((task, attempt)),
+                _ => None,
+            })
+            .collect()
+    }
+    /// `(workflow_id, sequence)` for each `on_checkpoint`, in order.
+    pub(crate) fn checkpoints(&self) -> Vec<(String, u64)> {
+        self.snapshot()
+            .into_iter()
+            .filter_map(|e| match e {
+                TestEvent::Checkpoint {
+                    workflow_id,
+                    sequence,
+                } => Some((workflow_id, sequence)),
+                _ => None,
+            })
+            .collect()
+    }
+    /// `(workflow_id, sequence)` for each `on_resume`, in order.
+    pub(crate) fn resumes(&self) -> Vec<(String, u64)> {
+        self.snapshot()
+            .into_iter()
+            .filter_map(|e| match e {
+                TestEvent::Resume {
+                    workflow_id,
+                    sequence,
+                } => Some((workflow_id, sequence)),
+                _ => None,
+            })
+            .collect()
+    }
+    /// `(elapsed, limit)` for each `on_workflow_timeout`, in order.
+    pub(crate) fn timeouts(&self) -> Vec<(Duration, Duration)> {
+        self.snapshot()
+            .into_iter()
+            .filter_map(|e| match e {
+                TestEvent::WorkflowTimeout { elapsed, limit } => Some((elapsed, limit)),
+                _ => None,
+            })
+            .collect()
+    }
+    /// `(workflow_id, error)` for each `on_checkpoint_clear_failed`, in order.
+    pub(crate) fn clear_failures(&self) -> Vec<(String, String)> {
+        self.snapshot()
+            .into_iter()
+            .filter_map(|e| match e {
+                TestEvent::CheckpointClearFailed { workflow_id, error } => {
+                    Some((workflow_id, error))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+    /// `(workflow_id, sequence, label)` for each `on_unknown_resume_state`, in order.
+    pub(crate) fn unknown_states(&self) -> Vec<(String, u64, String)> {
+        self.snapshot()
+            .into_iter()
+            .filter_map(|e| match e {
+                TestEvent::UnknownResumeState {
+                    workflow_id,
+                    sequence,
+                    label,
+                } => Some((workflow_id, sequence, label)),
+                _ => None,
+            })
+            .collect()
     }
 }
 

@@ -678,7 +678,6 @@ where
 mod tests {
     use super::*;
     use crate::PollErrorPolicy;
-    use crate::observer::WorkflowObserver;
     use crate::resource::Resources;
     use crate::saga;
     use crate::saga::CompensatableTask;
@@ -696,27 +695,6 @@ mod tests {
 
     use crate::recovery::{CheckpointRow, CheckpointStore};
     use std::sync::Mutex;
-
-    /// Records `(event, workflow_id, sequence)` for `on_checkpoint` / `on_resume`.
-    /// Thin observer over a shared `Recorder<E>` (see `test_support`).
-    struct CkptObserver(Arc<Recorder<(&'static str, String, u64)>>);
-    impl WorkflowObserver for CkptObserver {
-        fn on_checkpoint(&self, workflow_id: &str, sequence: u64) {
-            self.0
-                .record(("checkpoint", workflow_id.to_string(), sequence));
-        }
-        fn on_resume(&self, workflow_id: &str, sequence: u64) {
-            self.0.record(("resume", workflow_id.to_string(), sequence));
-        }
-    }
-    impl CkptObserver {
-        /// Convenience: wraps a fresh `Recorder` and returns both halves.
-        #[allow(clippy::type_complexity)] // Vec event-shape is the whole point of Recorder
-        fn new() -> (Self, Arc<Recorder<(&'static str, String, u64)>>) {
-            let rec = Recorder::new();
-            (Self(rec.clone()), rec)
-        }
-    }
 
     #[tokio::test]
     async fn checkpoint_row_written_for_each_state_entered() {
@@ -786,7 +764,7 @@ mod tests {
 
         let start_task = SimpleTask::new(TestState::Process);
         let process_task = SimpleTask::new(TestState::Complete);
-        let (observer, rec) = CkptObserver::new();
+        let (observer, rec) = EventLog::new();
         let workflow = Workflow::bare()
             .register(TestState::Start, start_task.clone())
             .register(TestState::Process, process_task.clone())
@@ -819,13 +797,10 @@ mod tests {
                 (3, "Complete".to_string()),
             ]
         );
+        assert_eq!(rec.resumes(), vec![("run-2".to_string(), 1)]);
         assert_eq!(
-            rec.snapshot(),
-            vec![
-                ("resume", "run-2".to_string(), 1),
-                ("checkpoint", "run-2".to_string(), 2),
-                ("checkpoint", "run-2".to_string(), 3),
-            ]
+            rec.checkpoints(),
+            vec![("run-2".to_string(), 2), ("run-2".to_string(), 3)]
         );
     }
 
@@ -944,7 +919,6 @@ mod tests {
     async fn router_state_produces_no_checkpoint_row_and_sequences_are_dense() {
         // Note: inside the `cano` crate the inherent `#[task::router(state = S)]` form emits
         // `::cano::RouterTask<...>` paths that don't resolve. Use the trait-impl form instead.
-        use crate::observer::WorkflowObserver;
         use crate::task::{RouterTask, TaskConfig};
 
         struct RouteToWork;
@@ -959,18 +933,10 @@ mod tests {
             }
         }
 
-        // Observe on_state_enter and on_checkpoint to verify router fires the
-        // former but NOT the latter.
-        struct StateEnterObserver(Arc<Recorder<String>>);
-        impl WorkflowObserver for StateEnterObserver {
-            fn on_state_enter(&self, state: &str) {
-                self.0.record(state.to_string());
-            }
-        }
-
         let store = Arc::new(MemCheckpoints::default());
-        let state_rec = Recorder::<String>::new();
-        let (ckpt_obs, ckpt_rec) = CkptObserver::new();
+        // One `EventLog` observes both on_state_enter and on_checkpoint, to verify the
+        // router fires the former but NOT the latter.
+        let (obs, rec) = EventLog::new();
 
         // Route (router) → Process (single) → Complete (exit)
         let workflow = Workflow::bare()
@@ -979,8 +945,7 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("router-run")
-            .with_observer(Arc::new(StateEnterObserver(state_rec.clone())))
-            .with_observer(Arc::new(ckpt_obs));
+            .with_observer(Arc::new(obs));
 
         assert_eq!(
             workflow.orchestrate(TestState::Start).await.unwrap(),
@@ -989,7 +954,7 @@ mod tests {
 
         // `on_state_enter` fires for ALL states (including the router).
         assert_eq!(
-            state_rec.snapshot(),
+            rec.state_enters(),
             vec!["Start", "Process", "Complete"],
             "on_state_enter fires for every state including the router"
         );
@@ -1003,11 +968,8 @@ mod tests {
 
         // `on_checkpoint` must not have fired for the Start/router state.
         assert_eq!(
-            ckpt_rec.snapshot(),
-            vec![
-                ("checkpoint", "router-run".to_string(), 0),
-                ("checkpoint", "router-run".to_string(), 1),
-            ],
+            rec.checkpoints(),
+            vec![("router-run".to_string(), 0), ("router-run".to_string(), 1)],
             "on_checkpoint fires only for non-router states"
         );
     }
@@ -2165,17 +2127,11 @@ mod tests {
             }
         }
 
-        struct Rec(Arc<Recorder<(Duration, Duration)>>);
-        impl WorkflowObserver for Rec {
-            fn on_workflow_timeout(&self, elapsed: Duration, limit: Duration) {
-                self.0.record((elapsed, limit));
-            }
-        }
-        let rec = Recorder::<(Duration, Duration)>::new();
+        let (obs, rec) = EventLog::new();
 
         let workflow = Workflow::bare()
             .with_total_timeout(Duration::from_millis(40))
-            .with_observer(Arc::new(Rec(rec.clone())))
+            .with_observer(Arc::new(obs))
             .register(TestState::Start, SimpleTask::new(TestState::Process))
             .register(TestState::Process, SlowProcess)
             .add_exit_state(TestState::Complete)
@@ -2195,7 +2151,7 @@ mod tests {
             "got: {err}"
         );
 
-        let events = rec.snapshot();
+        let events = rec.timeouts();
         assert_eq!(events.len(), 1, "on_workflow_timeout should fire once");
         let (elapsed_hook, limit_hook) = events[0];
         assert_eq!(limit_hook, Duration::from_millis(40));
@@ -3277,28 +3233,20 @@ mod tests {
             }
         }
 
-        struct ClearObserver(Arc<Recorder<(String, String)>>);
-        impl WorkflowObserver for ClearObserver {
-            fn on_checkpoint_clear_failed(&self, workflow_id: &str, error: &CanoError) {
-                self.0
-                    .record((workflow_id.to_string(), error.message().to_string()));
-            }
-        }
-
         let store = Arc::new(ClearFailsStore(MemCheckpoints::default()));
-        let rec = Recorder::<(String, String)>::new();
+        let (obs, rec) = EventLog::new();
 
         let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("clear-test")
-            .with_observer(Arc::new(ClearObserver(rec.clone())));
+            .with_observer(Arc::new(obs));
 
         // Successful run that triggers the clear-on-success path.
         workflow.orchestrate(TestState::Start).await.unwrap();
 
-        let calls = rec.snapshot();
+        let calls = rec.clear_failures();
         assert_eq!(calls.len(), 1, "expected one clear-failure event");
         assert_eq!(calls[0].0, "clear-test");
         assert!(
@@ -3732,13 +3680,7 @@ mod tests {
         );
 
         // Observer that records every on_resume call.
-        struct OnResumeRec(Arc<Recorder<u64>>);
-        impl WorkflowObserver for OnResumeRec {
-            fn on_resume(&self, _id: &str, sequence: u64) {
-                self.0.record(sequence);
-            }
-        }
-        let rec = Recorder::<u64>::new();
+        let (obs, rec) = EventLog::new();
 
         let workflow = Workflow::new(resources)
             .register_with_compensation(
@@ -3748,7 +3690,7 @@ mod tests {
             .register(TestState::Process, FailTask::new(true))
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone())
-            .with_observer(Arc::new(OnResumeRec(rec.clone())));
+            .with_observer(Arc::new(obs));
 
         let err = workflow.resume_from("f3").await.unwrap_err();
         // Setup ran and failed.
@@ -3764,7 +3706,7 @@ mod tests {
         );
         // on_resume must NOT have fired — the resume didn't actually start.
         assert!(
-            rec.is_empty(),
+            rec.resumes().is_empty(),
             "on_resume must not fire when setup_all fails"
         );
     }
@@ -3926,22 +3868,6 @@ mod tests {
         // rename without a `with_workflow_version` bump). Operators couldn't
         // see the gap. Now the engine fires `on_unknown_resume_state` per
         // unrecognized row so observers/metrics can surface the drift.
-        struct RecordObs(Arc<Recorder<(String, u64, String)>>);
-        impl WorkflowObserver for RecordObs {
-            fn on_unknown_resume_state(
-                &self,
-                workflow_id: &str,
-                sequence: u64,
-                unknown_state_label: &str,
-            ) {
-                self.0.record((
-                    workflow_id.to_string(),
-                    sequence,
-                    unknown_state_label.to_string(),
-                ));
-            }
-        }
-
         let store = Arc::new(MemCheckpoints::default());
         // Pre-populate the log with a StateEntry referencing a state ("Charge")
         // the current workflow no longer registers, plus a registered state
@@ -3971,17 +3897,17 @@ mod tests {
             .await
             .unwrap();
 
-        let rec = Recorder::<(String, u64, String)>::new();
+        let (obs, rec) = EventLog::new();
         let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Process))
             .register(TestState::Process, FailTask::new(true))
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone())
-            .with_observer(Arc::new(RecordObs(rec.clone())));
+            .with_observer(Arc::new(obs));
 
         // Resume succeeds (label dropped from path; gap surfaced via observer).
         let _ = workflow.resume_from("f-rename").await;
-        let recorded = rec.snapshot();
+        let recorded = rec.unknown_states();
         assert_eq!(
             recorded.len(),
             1,
@@ -4178,7 +4104,7 @@ mod rehydrated_run_tests {
     use super::*;
     use crate::observer::WorkflowObserver;
     use crate::recovery::CheckpointRow;
-    use crate::workflow::test_support::{Recorder, TestState};
+    use crate::workflow::test_support::{EventLog, TestState};
 
     /// Resolver that matches stored labels back to `TestState`. Returns None
     /// for any label not in this table — used to exercise the F11 fan-out.
@@ -4191,24 +4117,6 @@ mod rehydrated_run_tests {
             "Complete" => Some(TestState::Complete),
             "Error" => Some(TestState::Error),
             _ => None,
-        }
-    }
-
-    /// Captures `on_unknown_resume_state` events for assertion. Thin observer
-    /// over a shared `Recorder<E>` (see `test_support`).
-    struct UnknownStateRecorder(Arc<Recorder<(String, u64, String)>>);
-    impl WorkflowObserver for UnknownStateRecorder {
-        fn on_unknown_resume_state(
-            &self,
-            workflow_id: &str,
-            sequence: u64,
-            unknown_state_label: &str,
-        ) {
-            self.0.record((
-                workflow_id.to_string(),
-                sequence,
-                unknown_state_label.to_string(),
-            ));
         }
     }
 
@@ -4317,9 +4225,8 @@ mod rehydrated_run_tests {
             CheckpointRow::new(1, "Charge", "B").with_workflow_version(0),
             CheckpointRow::new(2, "Process", "C").with_workflow_version(0),
         ];
-        let recorder = Recorder::<(String, u64, String)>::new();
-        let observer_dyn: Arc<dyn WorkflowObserver> =
-            Arc::new(UnknownStateRecorder(recorder.clone()));
+        let (obs, recorder) = EventLog::new();
+        let observer_dyn: Arc<dyn WorkflowObserver> = Arc::new(obs);
         let observers = [observer_dyn];
         let rh = RehydratedRun::<TestState>::from_rows(
             &rows,
@@ -4333,7 +4240,7 @@ mod rehydrated_run_tests {
         assert_eq!(rh.resume_state_entry_cutoff, 2);
         // Only Start made it (Charge dropped, Process is the resume state).
         assert_eq!(rh.prior_transitions, vec![TestState::Start]);
-        let events = recorder.snapshot();
+        let events = recorder.unknown_states();
         assert_eq!(events.len(), 1, "Charge row must fire the hook once");
         assert_eq!(
             events[0],

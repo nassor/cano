@@ -77,15 +77,19 @@ impl WorkflowObserver for TaskCounter {
     }
 }
 
-let counter = Arc::new(TaskCounter::default());
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    let counter = Arc::new(TaskCounter::default());
 
-let workflow = Workflow::bare()
-    .register(Step::Start, DoWork)
-    .add_exit_state(Step::Done)
-    .with_observer(counter.clone());
+    let workflow = Workflow::bare()
+        .register(Step::Start, DoWork)
+        .add_exit_state(Step::Done)
+        .with_observer(counter.clone());
 
-workflow.orchestrate(Step::Start).await?;
-assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+    workflow.orchestrate(Step::Start).await?;
+    assert_eq!(counter.0.load(Ordering::Relaxed), 1);
+    Ok(())
+}
 ```
 <hr class="section-divider">
 
@@ -213,9 +217,12 @@ impl WorkflowObserver for ChannelObserver {
     }
 }
 
-let (tx, _rx) = channel();
-let observer: std::sync::Arc<dyn WorkflowObserver> =
-    std::sync::Arc::new(ChannelObserver { tx });
+fn main() {
+    let (tx, _rx) = channel();
+    let observer: std::sync::Arc<dyn WorkflowObserver> =
+        std::sync::Arc::new(ChannelObserver { tx });
+    let _ = observer;
+}
 ```
 <hr class="section-divider">
 
@@ -246,10 +253,16 @@ impl DoWork {
     }
 }
 
-Workflow::bare()
-    .register(Step::Start, DoWork)
-    .add_exit_state(Step::Done)
-    .with_observer(Arc::new(TracingObserver::new()))
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    let workflow = Workflow::bare()
+        .register(Step::Start, DoWork)
+        .add_exit_state(Step::Done)
+        .with_observer(Arc::new(TracingObserver::new()));
+
+    workflow.orchestrate(Step::Start).await?;
+    Ok(())
+}
 ```
 
 <p>It emits <strong>events, not spans</strong> — it does not reproduce the nested span tree the
@@ -322,17 +335,20 @@ checks sequentially.
 use cano::prelude::*;
 
 // PrimaryDb and ReadReplica are Resource impls (see ReadReplica above).
-let resources: Resources = Resources::new()
-    .insert("db", PrimaryDb)
-    .insert("replica", ReadReplica);
+#[tokio::main]
+async fn main() {
+    let resources: Resources = Resources::new()
+        .insert("db", PrimaryDb)
+        .insert("replica", ReadReplica);
 
-for (key, status) in resources.check_all_health().await {
-    println!("{key}: {status:?}");
-}
+    for (key, status) in resources.check_all_health().await {
+        println!("{key}: {status:?}");
+    }
 
-match resources.aggregate_health().await {
-    HealthStatus::Healthy => println!("all good"),
-    other => println!("attention needed: {other:?}"),
+    match resources.aggregate_health().await {
+        HealthStatus::Healthy => println!("all good"),
+        other => println!("attention needed: {other:?}"),
+    }
 }
 ```
 
@@ -395,14 +411,18 @@ impl FlakyLoad {
     }
 }
 
-let observer = Arc::new(PrintingObserver::default());
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    let observer = Arc::new(PrintingObserver::default());
 
-let workflow = Workflow::bare()
-    .register(Step::Load, FlakyLoad { remaining_failures: Arc::new(AtomicUsize::new(2)) })
-    .add_exit_state(Step::Done)
-    .with_observer(observer.clone());
+    let workflow = Workflow::bare()
+        .register(Step::Load, FlakyLoad { remaining_failures: Arc::new(AtomicUsize::new(2)) })
+        .add_exit_state(Step::Done)
+        .with_observer(observer.clone());
 
-workflow.orchestrate(Step::Load).await?;
-assert_eq!(observer.failures.load(Ordering::Relaxed), 0);
+    workflow.orchestrate(Step::Load).await?;
+    assert_eq!(observer.failures.load(Ordering::Relaxed), 0);
+    Ok(())
+}
 ```
 </div>

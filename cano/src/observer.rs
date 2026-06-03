@@ -315,45 +315,10 @@ impl WorkflowObserver for MetricsObserver {
 #[cfg(test)]
 mod tests {
     use crate::prelude::*;
+    use crate::workflow::test_support::EventLog;
     use std::borrow::Cow;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use std::time::Duration;
-
-    /// Test observer that appends a stringified record of every event it receives.
-    #[derive(Default)]
-    struct RecordingObserver {
-        events: Mutex<Vec<String>>,
-    }
-
-    impl RecordingObserver {
-        fn events(&self) -> Vec<String> {
-            self.events.lock().unwrap().clone()
-        }
-        fn record(&self, event: String) {
-            self.events.lock().unwrap().push(event);
-        }
-    }
-
-    impl WorkflowObserver for RecordingObserver {
-        fn on_state_enter(&self, state: &str) {
-            self.record(format!("state_enter:{state}"));
-        }
-        fn on_task_start(&self, task_id: &str) {
-            self.record(format!("task_start:{task_id}"));
-        }
-        fn on_task_success(&self, task_id: &str) {
-            self.record(format!("task_success:{task_id}"));
-        }
-        fn on_task_failure(&self, task_id: &str, _err: &CanoError) {
-            self.record(format!("task_failure:{task_id}"));
-        }
-        fn on_retry(&self, task_id: &str, attempt: u32) {
-            self.record(format!("retry:{task_id}:{attempt}"));
-        }
-        fn on_circuit_open(&self, task_id: &str) {
-            self.record(format!("circuit_open:{task_id}"));
-        }
-    }
 
     #[derive(Clone, Debug, PartialEq, Eq, Hash)]
     enum S {
@@ -411,15 +376,15 @@ mod tests {
 
     #[tokio::test]
     async fn observer_fires_on_success_path() {
-        let observer = Arc::new(RecordingObserver::default());
+        let (obs, rec) = EventLog::new();
         let workflow = Workflow::bare()
             .register(S::Start, OkTask)
             .add_exit_state(S::Done)
-            .with_observer(observer.clone());
+            .with_observer(Arc::new(obs));
 
         assert_eq!(workflow.orchestrate(S::Start).await.unwrap(), S::Done);
 
-        let events = observer.events();
+        let events = rec.labels();
         assert!(
             events.contains(&"state_enter:Start".to_string()),
             "{events:?}"
@@ -444,15 +409,15 @@ mod tests {
 
     #[tokio::test]
     async fn observer_fires_on_retry_and_failure() {
-        let observer = Arc::new(RecordingObserver::default());
+        let (obs, rec) = EventLog::new();
         let workflow = Workflow::bare()
             .register(S::Start, FailTask)
             .add_exit_state(S::Done)
-            .with_observer(observer.clone());
+            .with_observer(Arc::new(obs));
 
         assert!(workflow.orchestrate(S::Start).await.is_err());
 
-        let events = observer.events();
+        let events = rec.labels();
         assert!(
             events.contains(&"task_start:FailTask".to_string()),
             "{events:?}"
@@ -487,7 +452,7 @@ mod tests {
         let permit = breaker.try_acquire().expect("closed breaker admits");
         breaker.record_failure(permit);
 
-        let observer = Arc::new(RecordingObserver::default());
+        let (obs, rec) = EventLog::new();
         let workflow = Workflow::bare()
             .register(
                 S::Start,
@@ -496,13 +461,13 @@ mod tests {
                 },
             )
             .add_exit_state(S::Done)
-            .with_observer(observer.clone());
+            .with_observer(Arc::new(obs));
 
         let err = workflow.orchestrate(S::Start).await.unwrap_err();
         // The FSM wraps the failure with state context; the inner is CircuitOpen.
         assert!(matches!(err.inner(), CanoError::CircuitOpen(_)), "{err}");
 
-        let events = observer.events();
+        let events = rec.labels();
         assert!(
             events.contains(&"circuit_open:CircuitTask".to_string()),
             "{events:?}"
@@ -571,21 +536,12 @@ mod tests {
 
     #[test]
     fn on_workflow_timeout_can_be_overridden_to_record_event() {
-        use std::sync::{Arc, Mutex};
-        use std::time::Duration;
-        #[derive(Default)]
-        struct Recorder(Mutex<Vec<(Duration, Duration)>>);
-        impl WorkflowObserver for Recorder {
-            fn on_workflow_timeout(&self, elapsed: Duration, limit: Duration) {
-                self.0.lock().unwrap().push((elapsed, limit));
-            }
-        }
-        let obs = Arc::new(Recorder::default());
-        let dyn_obs: Arc<dyn WorkflowObserver> = obs.clone();
+        // `EventLog` is itself a custom override — proves the hook can be observed.
+        let (obs, rec) = EventLog::new();
+        let dyn_obs: Arc<dyn WorkflowObserver> = Arc::new(obs);
         dyn_obs.on_workflow_timeout(Duration::from_millis(150), Duration::from_millis(100));
-        let events = obs.0.lock().unwrap().clone();
         assert_eq!(
-            events,
+            rec.timeouts(),
             vec![(Duration::from_millis(150), Duration::from_millis(100))]
         );
     }

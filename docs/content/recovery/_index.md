@@ -74,16 +74,20 @@ impl WorkTask {
     }
 }
 
-let checkpoint_store = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    let checkpoint_store = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
 
-let workflow = Workflow::bare()
-    .register(Step::Start, StartTask)
-    .register(Step::Work, WorkTask)
-    .add_exit_state(Step::Done)
-    .with_checkpoint_store(checkpoint_store)
-    .with_workflow_id("run-42");
+    let workflow = Workflow::bare()
+        .register(Step::Start, StartTask)
+        .register(Step::Work, WorkTask)
+        .add_exit_state(Step::Done)
+        .with_checkpoint_store(checkpoint_store)
+        .with_workflow_id("run-42");
 
-workflow.orchestrate(Step::Start).await?;
+    workflow.orchestrate(Step::Start).await?;
+    Ok(())
+}
 ```
 <hr class="section-divider">
 
@@ -161,16 +165,20 @@ use cano::prelude::*;
 use cano::RedbCheckpointStore;
 use std::sync::Arc;
 
-let checkpoint_store = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
-let workflow = Workflow::bare()
-    .register(Step::Start, StartTask)
-    .register(Step::Work, WorkTask)
-    .add_exit_state(Step::Done)
-    .with_checkpoint_store(checkpoint_store);
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    let checkpoint_store = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
+    let workflow = Workflow::bare()
+        .register(Step::Start, StartTask)
+        .register(Step::Work, WorkTask)
+        .add_exit_state(Step::Done)
+        .with_checkpoint_store(checkpoint_store);
 
-// Some earlier process crashed mid-run; pick up where it left off.
-let final_state = workflow.resume_from("run-42").await?;
-assert_eq!(final_state, Step::Done);
+    // Some earlier process crashed mid-run; pick up where it left off.
+    let final_state = workflow.resume_from("run-42").await?;
+    assert_eq!(final_state, Step::Done);
+    Ok(())
+}
 ```
 
 <p>
@@ -414,27 +422,31 @@ impl FinalizeTask {
     }
 }
 
-let checkpoint_store = Arc::new(RedbCheckpointStore::new("recovery.redb")?);
-let resources = Resources::new().insert("crash", CrashOnce::default());
-let workflow = Workflow::new(resources)
-    .register(Step::Start, StartTask)
-    .register(Step::Process, ProcessTask)
-    .register(Step::Finalize, FinalizeTask)
-    .add_exit_state(Step::Done)
-    .with_checkpoint_store(checkpoint_store.clone())
-    .with_workflow_id("demo-run");
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    let checkpoint_store = Arc::new(RedbCheckpointStore::new("recovery.redb")?);
+    let resources = Resources::new().insert("crash", CrashOnce::default());
+    let workflow = Workflow::new(resources)
+        .register(Step::Start, StartTask)
+        .register(Step::Process, ProcessTask)
+        .register(Step::Finalize, FinalizeTask)
+        .add_exit_state(Step::Done)
+        .with_checkpoint_store(checkpoint_store.clone())
+        .with_workflow_id("demo-run");
 
-// Run 1: crashes inside ProcessTask. The Start and Process rows are already durable.
-let _ = workflow.orchestrate(Step::Start).await;
+    // Run 1: crashes inside ProcessTask. The Start and Process rows are already durable.
+    let _ = workflow.orchestrate(Step::Start).await;
 
-// Run 2: resume — re-runs ProcessTask (now it succeeds) and finishes at Done.
-let final_state = workflow.resume_from("demo-run").await?;
-assert_eq!(final_state, Step::Done);
+    // Run 2: resume — re-runs ProcessTask (now it succeeds) and finishes at Done.
+    let final_state = workflow.resume_from("demo-run").await?;
+    assert_eq!(final_state, Step::Done);
 
-// The append-only log: Start, Process (crash), Process (re-run), Finalize, Done —
-// all RowKind::StateEntry here, since this workflow has no compensatable or stepped states.
-for row in checkpoint_store.load_run("demo-run").await? {
-    println!("#{} {:?} {}  {}", row.sequence, row.kind, row.state, row.task_id);
+    // The append-only log: Start, Process (crash), Process (re-run), Finalize, Done —
+    // all RowKind::StateEntry here, since this workflow has no compensatable or stepped states.
+    for row in checkpoint_store.load_run("demo-run").await? {
+        println!("#{} {:?} {}  {}", row.sequence, row.kind, row.state, row.task_id);
+    }
+    Ok(())
 }
 ```
 </div>
