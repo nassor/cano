@@ -1,7 +1,7 @@
 +++
 title = "MemoryStore"
 description = "MemoryStore in Cano - the default thread-safe, in-memory shared state for passing data between workflow stages."
-template = "page.html"
+template = "section.html"
 +++
 
 <div class="content-wrapper">

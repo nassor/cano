@@ -1,7 +1,7 @@
 +++
 title = "Tracing"
 description = "Comprehensive observability for Cano workflows via the optional tracing feature."
-template = "page.html"
+template = "section.html"
 +++
 
 <div class="content-wrapper">

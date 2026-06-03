@@ -1,7 +1,7 @@
 +++
 title = "RouterTask"
 description = "RouterTask in Cano - side-effect-free branching that leaves no recovery footprint."
-template = "page.html"
+template = "section.html"
 +++
 
 <div class="content-wrapper">

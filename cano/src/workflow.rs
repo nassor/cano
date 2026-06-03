@@ -1699,6 +1699,189 @@ mod tests {
         // entry; if any panic propagated, the FSM would not have completed.
         assert_eq!(count.load(Ordering::SeqCst), 3);
     }
+
+    // ------------------------------------------------------------------
+    // Edge cases: exit-state handling, runtime transition errors, builder semantics
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn orchestrate_with_exit_state_as_initial_returns_immediately() {
+        // The exit-state check precedes the handler lookup, so starting *at* an exit state
+        // returns it without running any task.
+        let start = SimpleTask::new(TestState::Complete);
+        let wf = Workflow::bare()
+            .register(TestState::Start, start.clone())
+            .add_exit_state(TestState::Complete);
+        let result = wf.orchestrate(TestState::Complete).await.unwrap();
+        assert_eq!(result, TestState::Complete);
+        assert_eq!(
+            start.count(),
+            0,
+            "no handler runs when the initial state is an exit state"
+        );
+    }
+
+    #[tokio::test]
+    async fn exit_state_takes_precedence_over_registered_handler() {
+        // `Process` is BOTH a registered handler AND an exit state. Reaching it must exit
+        // (the exit check at line ~357 runs before the handler lookup) — its task never runs.
+        let process = SimpleTask::new(TestState::Start); // would loop back to Start if it ran
+        let wf = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Process))
+            .register(TestState::Process, process.clone())
+            .add_exit_state(TestState::Process);
+        let result = wf.orchestrate(TestState::Start).await.unwrap();
+        assert_eq!(result, TestState::Process);
+        assert_eq!(
+            process.count(),
+            0,
+            "an exit state short-circuits before its handler runs"
+        );
+    }
+
+    #[tokio::test]
+    async fn transition_to_unregistered_state_errors_at_runtime() {
+        // The workflow validates fine (has handlers + an exit state), but Start routes to
+        // Process, which has no handler and isn't an exit state -> runtime "No task registered".
+        let wf = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Process))
+            .add_exit_state(TestState::Complete);
+        let err = wf.orchestrate(TestState::Start).await.unwrap_err();
+        assert!(err.to_string().contains("No task registered"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn orchestrate_from_unknown_initial_state_errors() {
+        // Distinct from the empty-workflow case: the workflow is valid, but the *initial* state
+        // is neither a registered handler nor an exit state -> validate_initial_state error.
+        let wf = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Complete))
+            .add_exit_state(TestState::Complete);
+        let err = wf.orchestrate(TestState::Process).await.unwrap_err();
+        assert_eq!(err.category(), "configuration");
+        assert!(
+            err.to_string()
+                .contains("neither registered nor an exit state"),
+            "got: {err}"
+        );
+    }
+
+    struct ReturnsSplit;
+    #[task_macro]
+    impl Task<TestState> for ReturnsSplit {
+        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            Ok(TaskResult::Split(vec![TestState::Complete]))
+        }
+    }
+
+    #[tokio::test]
+    async fn single_task_returning_split_errors() {
+        // A non-split state whose task returns TaskResult::Split is a misuse -> clear error.
+        let wf = Workflow::bare()
+            .register(TestState::Start, ReturnsSplit)
+            .add_exit_state(TestState::Complete);
+        let err = wf.orchestrate(TestState::Start).await.unwrap_err();
+        assert!(err.to_string().contains("use register_split"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn register_replaces_a_prior_handler_for_the_same_state() {
+        let first = SimpleTask::new(TestState::Process); // would route to an unregistered state
+        let wf = Workflow::bare()
+            .register(TestState::Start, first.clone())
+            .register(TestState::Start, SimpleTask::new(TestState::Complete)) // replaces `first`
+            .add_exit_state(TestState::Complete);
+        let result = wf.orchestrate(TestState::Start).await.unwrap();
+        assert_eq!(result, TestState::Complete); // the second handler ran
+        assert_eq!(first.count(), 0, "the replaced handler must not run");
+    }
+
+    struct LoopUntil {
+        limit: u32,
+        count: Arc<std::sync::atomic::AtomicU32>,
+    }
+    #[task_macro]
+    impl Task<TestState> for LoopUntil {
+        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            use std::sync::atomic::Ordering;
+            let n = self.count.fetch_add(1, Ordering::SeqCst) + 1;
+            if n >= self.limit {
+                Ok(TaskResult::Single(TestState::Complete))
+            } else {
+                Ok(TaskResult::Single(TestState::Start)) // self-loop
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn self_looping_state_runs_until_it_routes_to_exit() {
+        // A state whose task returns its own state re-runs each iteration until it routes to an
+        // exit state — the FSM loop handles cycles, terminating only on an exit state.
+        let count = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let wf = Workflow::bare()
+            .register(
+                TestState::Start,
+                LoopUntil {
+                    limit: 5,
+                    count: Arc::clone(&count),
+                },
+            )
+            .add_exit_state(TestState::Complete);
+        let result = wf.orchestrate(TestState::Start).await.unwrap();
+        assert_eq!(result, TestState::Complete);
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 5);
+    }
+
+    #[tokio::test]
+    async fn empty_split_joins_to_its_join_state() {
+        // A split with zero branches: the All-join is vacuously satisfied, so the engine
+        // transitions straight to the join_state. A timeout guard turns a hang regression into a
+        // failure instead of stalling the suite.
+        let wf = Workflow::bare()
+            .register_split(
+                TestState::Start,
+                Vec::<SimpleTask>::new(),
+                JoinConfig::new(JoinStrategy::All, TestState::Complete),
+            )
+            .add_exit_state(TestState::Complete);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            wf.orchestrate(TestState::Start),
+        )
+        .await
+        .expect("orchestrate of an empty split must not hang");
+        assert_eq!(result.unwrap(), TestState::Complete);
+    }
+
+    #[test]
+    fn add_exit_state_and_add_exit_states_deduplicate() {
+        let wf = Workflow::<TestState>::bare()
+            .add_exit_state(TestState::Complete)
+            .add_exit_state(TestState::Complete) // duplicate ignored
+            .add_exit_states(vec![
+                TestState::Complete, // duplicate ignored
+                TestState::Error,
+                TestState::Error, // duplicate ignored
+            ]);
+        assert_eq!(wf.exit_states.len(), 2);
+        assert!(wf.exit_states.contains(&TestState::Complete));
+        assert!(wf.exit_states.contains(&TestState::Error));
+    }
+
+    #[test]
+    fn workflow_id_and_version_are_stored_defaulted_and_cloned() {
+        let wf = Workflow::<TestState>::bare();
+        assert_eq!(wf.workflow_version, 0); // default
+        assert!(wf.workflow_id.is_none());
+
+        let wf = wf.with_workflow_id("run-42").with_workflow_version(7);
+        assert_eq!(wf.workflow_version, 7);
+        assert_eq!(wf.workflow_id.as_deref(), Some("run-42"));
+
+        let cloned = wf.clone();
+        assert_eq!(cloned.workflow_version, 7);
+        assert_eq!(cloned.workflow_id.as_deref(), Some("run-42"));
+    }
 }
 
 /// Edge-case unit tests for `await_with_outer_timeout`. Integration-level

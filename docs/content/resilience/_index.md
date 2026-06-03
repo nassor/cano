@@ -1,20 +1,20 @@
 +++
 title = "Resilience"
-description = "The resilience guide for Cano workflows: the full circuit breaker treatment plus retries, per-attempt timeouts, bulkheads, panic safety, and scheduler backoff — how each primitive works and how they compose."
-template = "page.html"
+description = "The resilience guide for Cano workflows: the full circuit breaker treatment plus retries, per-attempt timeouts, rate limiting, bulkheads, panic safety, and scheduler backoff — how each primitive works and how they compose."
+template = "section.html"
 +++
 
 <div class="content-wrapper">
 <h1>Resilience</h1>
-<p class="subtitle">Recover from transient faults — retries, timeouts, circuit breakers, bulkheads, panic safety, scheduler backoff.</p>
+<p class="subtitle">Recover from transient faults — retries, timeouts, circuit breakers, rate limiting, bulkheads, panic safety, scheduler backoff.</p>
 
 <p>
 "Resilient" in Cano's tagline isn't a vibe — it's a set of concrete, composable primitives that
 sit on the FSM dispatch path. Every one of them is <strong>opt-in</strong>: a workflow that wires
 none of them up pays nothing, and the hot path stays allocation-light. This is the guide: the
-<a href="#circuit-breaker">circuit breaker</a> gets its full treatment here; retries, per-attempt
-timeouts, and bulkheads get an overview with a pointer to the API reference page that owns the
-builder methods.
+<a href="circuit-breakers/">circuit breaker</a> and <a href="rate-limiting/">rate limiter</a> get their
+full treatment here; retries, per-attempt timeouts, and bulkheads get an overview with a pointer to
+the API reference page that owns the builder methods.
 </p>
 <p>
 The <em>self-healing</em> half of the tagline — checkpoint + resume, sagas, observers, health
@@ -28,12 +28,10 @@ probes — lives in <a href="../recovery/">Recovery</a>, <a href="../saga/">Saga
 <li><a href="#retries">Retries</a></li>
 <li><a href="#timeouts">Per-Attempt Timeouts</a></li>
 <li><a href="#workflow-total-timeout">Workflow Total Timeout</a></li>
-<li><a href="#circuit-breaker">Circuit Breakers</a></li>
-<li class="toc-sub"><a href="#cb-state-machine">The state machine</a></li>
-<li class="toc-sub"><a href="#cb-policy"><code>CircuitPolicy</code></a></li>
-<li class="toc-sub"><a href="#cb-permits">Permits and the RAII API</a></li>
-<li class="toc-sub"><a href="#cb-via-config">Wiring: <code>with_circuit_breaker</code></a></li>
-<li class="toc-sub"><a href="#cb-manual">Driving it by hand</a></li>
+<li class="toc-sub"><a href="#workflow-total-timeout-compensation">Compensation drain budget</a></li>
+<li class="toc-sub"><a href="#workflow-total-timeout-observer">Observer hook</a></li>
+<li class="toc-sub"><a href="#workflow-total-timeout-vs">The three timeout knobs</a></li>
+<li><a href="#cb-rl-guides">Circuit Breakers &amp; Rate Limiting</a></li>
 <li><a href="#bulkhead">Bulkheads (split concurrency)</a></li>
 <li><a href="#panic-safety">Panic Safety</a></li>
 <li><a href="#scheduler-backoff">Scheduler Backoff &amp; Trip</a></li>
@@ -44,7 +42,7 @@ probes — lives in <a href="../recovery/">Recovery</a>, <a href="../saga/">Saga
 
 <h2 id="retries"><a href="#retries" class="anchor-link" aria-hidden="true">#</a>Retries</h2>
 <p>
-A task's <code>config()</code> returns a <a href="../task/#config-retries"><code>TaskConfig</code></a>
+A task's <code>config()</code> returns a <a href="../task/configuration/"><code>TaskConfig</code></a>
 whose <code>retry_mode</code> drives the workflow dispatcher's retry loop. The default is
 exponential backoff with jitter (3 retries, 100ms base, 2.0× multiplier, 30s cap, 0.1 jitter);
 <code>RetryMode</code> also has <code>None</code> and <code>Fixed(count, delay)</code>. On exhaustion
@@ -74,7 +72,7 @@ impl FetchTask {
 }
 ```
 
-<p>See <a href="../task/#config-retries">Tasks → Configuration &amp; Retries</a> for the full
+<p>See <a href="../task/configuration/">Tasks → Configuration &amp; Retries</a> for the full
 <code>RetryMode</code> / <code>TaskConfig</code> reference.</p>
 <hr class="section-divider">
 
@@ -106,7 +104,7 @@ impl CallTask {
 orchestration — see below) and from the legacy <code>Workflow::with_timeout</code> (a blunt outer
 <code>tokio::time::timeout</code> with no graceful compensation). The full <code>TaskConfig</code> /
 <code>RetryMode</code> API — including how attempt timeouts compose with each retry mode — lives in
-<a href="../task/#config-retries">Tasks → Configuration &amp; Retries</a>.</p>
+<a href="../task/configuration/">Tasks → Configuration &amp; Retries</a>.</p>
 <hr class="section-divider">
 
 <h2 id="workflow-total-timeout"><a href="#workflow-total-timeout" class="anchor-link" aria-hidden="true">#</a>Workflow Total Timeout</h2>
@@ -182,193 +180,12 @@ and the final error is the wrapped <code>WorkflowTimeout</code>.</p>
 </div>
 <hr class="section-divider">
 
-<h2 id="circuit-breaker"><a href="#circuit-breaker" class="anchor-link" aria-hidden="true">#</a>Circuit Breakers</h2>
-<p>
-Retries help with <em>transient</em> faults; a <code>CircuitBreaker</code> helps when a dependency
-is <em>down</em> — it stops hammering it. Once it has seen <code>failure_threshold</code> consecutive
-failures the breaker <strong>opens</strong>: every subsequent call short-circuits with
-<code>CanoError::CircuitOpen</code> <em>without invoking the task body</em> and without consuming a
-retry attempt, so the unhealthy dependency gets a break to recover.
-</p>
-<p>
-A breaker is cheap to clone (it's an <code>Arc</code> inside) — <strong>share one
-<code>Arc&lt;CircuitBreaker&gt;</code> across every task that hits the same dependency</strong> so a
-trip from any caller protects every caller, including tasks running in parallel inside a
-<a href="../split-join/">split/join</a> state. Internally it's a synchronous
-<code>std::sync::Mutex</code> with no awaits held across the critical section, so concurrent
-acquires from split tasks are safe.
-</p>
-
-<h3 id="cb-state-machine"><a href="#cb-state-machine" class="anchor-link" aria-hidden="true">#</a>The state machine</h3>
-<div class="diagram-frame">
-<p class="diagram-label">CircuitBreaker state machine</p>
-<div class="mermaid">
-stateDiagram-v2
-    [*] --> Closed
-    Closed --> Open: failure_threshold consecutive failures
-    Open --> HalfOpen: reset_timeout elapsed (lazy, on next acquire)
-    HalfOpen --> Closed: half_open_max_calls consecutive successes
-    HalfOpen --> Open: any failure (fresh cool-down)
-</div>
-</div>
-<p>
-The state is <code>Closed → Open { until } → HalfOpen → Closed</code>:
-</p>
+<h2 id="cb-rl-guides"><a href="#cb-rl-guides" class="anchor-link" aria-hidden="true">#</a>Circuit Breakers &amp; Rate Limiting</h2>
+<p>Two of the most-used resilience primitives have their own dedicated pages:</p>
 <ul>
-<li><strong><code>Closed</code></strong> — calls flow through; consecutive failures count toward
-<code>failure_threshold</code>. A success resets the counter.</li>
-<li><strong><code>Open { until }</code></strong> — every <code>try_acquire</code> returns
-<code>CanoError::CircuitOpen</code> until the clock passes <code>until</code>
-(<code>= when_it_opened + reset_timeout</code>).</li>
-<li><strong><code>HalfOpen</code></strong> — entered <em>lazily</em>: there is no background task; the
-first <code>try_acquire</code> after <code>until</code> performs the <code>Open → HalfOpen</code>
-transition. It admits up to <code>half_open_max_calls</code> trial calls; that many
-<em>consecutive</em> successes close the breaker, and <em>any</em> failure re-opens it with a fresh
-cool-down.</li>
+<li><a href="circuit-breakers/">Circuit Breakers</a> — stop calling a dependency that is down, before the retry loop even runs.</li>
+<li><a href="rate-limiting/">Rate Limiting</a> — pace or shed calls to a rate-sensitive dependency, including multi-tier limits.</li>
 </ul>
-
-<h3 id="cb-policy"><a href="#cb-policy" class="anchor-link" aria-hidden="true">#</a><code>CircuitPolicy</code></h3>
-<p>
-A breaker is constructed from a <code>CircuitPolicy { failure_threshold, reset_timeout,
-half_open_max_calls }</code>:
-</p>
-<table class="styled-table">
-<thead><tr><th>Field</th><th>Type</th><th>Meaning</th></tr></thead>
-<tbody>
-<tr><td><code>failure_threshold</code></td><td><code>u32</code></td><td>Consecutive failures in <code>Closed</code> that trip the breaker to <code>Open</code>.</td></tr>
-<tr><td><code>reset_timeout</code></td><td><code>Duration</code></td><td>How long the breaker stays <code>Open</code> before the next acquire is allowed to probe (<code>Open → HalfOpen</code>).</td></tr>
-<tr><td><code>half_open_max_calls</code></td><td><code>u32</code></td><td>Does double duty: the cap on concurrent trial calls admitted in <code>HalfOpen</code>, <em>and</em> the number of consecutive successes needed to close. So <code>half_open_max_calls &gt; 1</code> means "admit up to N concurrent probes, and close only after N of them all succeed."</td></tr>
-</tbody>
-</table>
-<p>
-<code>CircuitBreaker::new</code> <strong>panics</strong> on a misconfigured policy at construction:
-<code>half_open_max_calls == 0</code> would deadlock the breaker permanently in <code>HalfOpen</code>
-(no probe could ever be admitted), and values approaching <code>u32::MAX</code> would either
-saturate the success counter before reaching the threshold or take effectively forever to close.
-Both are programmer errors, caught before any task runs.
-</p>
-
-<h3 id="cb-permits"><a href="#cb-permits" class="anchor-link" aria-hidden="true">#</a>Permits and the RAII API</h3>
-<p>
-The breaker's primitive operations are:
-</p>
-<ul>
-<li><code>try_acquire() -&gt; Result&lt;Permit, CanoError&gt;</code> — <code>Err(CanoError::CircuitOpen)</code>
-when the breaker is <code>Open</code> (or when <code>HalfOpen</code> has already handed out its
-<code>half_open_max_calls</code> trial permits).</li>
-<li><code>record_success(permit)</code> — the call succeeded.</li>
-<li><code>record_failure(permit)</code> — the call failed.</li>
-</ul>
-<p>
-A <code>Permit</code> that is <strong>dropped without being consumed</strong> counts as a
-<strong>failure</strong> — so an early return, a <code>?</code> bail-out, or a panic doesn't leave
-the breaker believing the call succeeded. That's the panic-safety guarantee for the manual path.
-</p>
-<p>
-Permits also carry an <em>epoch</em> tag — a counter the breaker bumps on every state transition
-(<code>Closed → Open</code>, <code>Open → HalfOpen</code>, <code>HalfOpen → Open</code>,
-<code>HalfOpen → Closed</code>). When a permit is consumed (success, failure, or RAII drop) the
-breaker compares the permit's epoch against the current one and <strong>silently discards stale
-outcomes</strong>. This means a slow caller whose call straddles a state-machine session — e.g. a
-request that started in <code>Closed</code> and only returned after the breaker tripped, cooled
-down, and entered a fresh <code>HalfOpen</code> probe — cannot accidentally close the breaker on the
-strength of a result that was never meant to count as a probe.
-</p>
-
-<h3 id="cb-via-config"><a href="#cb-via-config" class="anchor-link" aria-hidden="true">#</a>Wiring it in: <code>TaskConfig::with_circuit_breaker</code></h3>
-<p>
-The common path — attach the breaker to a task's config and the workflow's retry loop does the rest.
-It consults the breaker before each attempt, records the outcome after the task body, and an open
-breaker short-circuits the <em>whole</em> retry loop: the <code>CircuitOpen</code> error is returned
-<strong>raw, never wrapped in <code>RetryExhausted</code></strong>. A per-attempt
-<a href="#timeouts">timeout</a> firing is recorded as a circuit failure too, so the breaker also
-guards against slow upstreams.
-</p>
-
-```rust
-use cano::prelude::*;
-use std::sync::Arc;
-use std::time::Duration;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum Step { Call, Done }
-
-#[derive(Clone)]
-struct CallUpstream { breaker: Arc<CircuitBreaker> }
-
-#[task(state = Step)]
-impl CallUpstream {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::new()
-            .with_fixed_retry(2, Duration::from_millis(50))
-            .with_circuit_breaker(Arc::clone(&self.breaker))
-    }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-        // ... call the dependency; an Err here counts against the breaker ...
-        Ok(TaskResult::Single(Step::Done))
-    }
-}
-
-let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
-    failure_threshold: 3,
-    reset_timeout: Duration::from_secs(5),
-    half_open_max_calls: 1,
-}));
-let workflow = Workflow::bare()
-    .register(Step::Call, CallUpstream { breaker: Arc::clone(&breaker) })
-    .add_exit_state(Step::Done);
-```
-
-<div class="callout callout-warning">
-<span class="callout-label">Recovery needs a fresh call</span>
-<p>
-A breaker that trips <em>mid-loop</em> ends that retry loop immediately — even when the remaining
-retry attempts (with their backoff) could outlast the breaker's <code>reset_timeout</code>. Recovery
-is the <em>next</em> dispatch of that state, after the cool-down; the loop will not silently re-probe
-the breaker on its own. Retrying against an open breaker would only pile load onto the dependency the
-breaker is already protecting.
-</p>
-</div>
-
-<h3 id="cb-manual"><a href="#cb-manual" class="anchor-link" aria-hidden="true">#</a>Driving it by hand: <code>try_acquire</code> / <code>record_*</code></h3>
-<p>
-When wiring it through <code>TaskConfig</code> is awkward — e.g. you guard several distinct calls in
-one task body, or the breaker is shared with non-task code — register the breaker as a
-<a href="../resources/">resource</a> (it implements <code>Resource</code> with no-op lifecycle), look
-it up by key inside the task, and drive the RAII API directly:
-</p>
-
-```rust
-let permit = breaker.try_acquire()?;        // Err(CanoError::CircuitOpen) when open
-match do_the_call().await {
-    Ok(v)  => { breaker.record_success(permit); Ok(v) }
-    Err(e) => { breaker.record_failure(permit); Err(e) }
-}
-```
-
-<p>
-The trade-off: this path <strong>bypasses both</strong> the retry-loop short-circuit (you decide
-whether <code>CircuitOpen</code> aborts or retries) <strong>and</strong> the before-call /
-after-call ordering guarantee the <code>with_circuit_breaker</code> integration gives you for free.
-So prefer <a href="#cb-via-config"><code>TaskConfig::with_circuit_breaker</code></a> whenever a task
-maps one-to-one to one guarded call; reach for the manual path only when it genuinely doesn't.
-</p>
-
-<div class="callout callout-info">
-<span class="callout-label">Different layer</span>
-<p>
-The scheduler's flow-level <a href="../scheduler/#backoff-and-trip"><code>Status::Tripped</code></a>
-(a scheduled flow that stops firing after a streak of failed runs) is a <em>separate</em> mechanism
-from this task-level <code>CanoError::CircuitOpen</code> — they live at different layers and don't
-interact. See <a href="../scheduler/#backoff-and-trip">Scheduler → Backoff &amp; Trip State</a>.
-</p>
-</div>
-
-<p>Runnable demos: <code>cargo run --example circuit_breaker</code> (the
-<code>TaskConfig::with_circuit_breaker</code> integration path) and
-<code>cargo run --example circuit_breaker_manual</code> (the manual <code>try_acquire</code> /
-<code>record_*</code> path shown above — breaker opens after a failure streak, rejects calls while
-open, then closes via <code>HalfOpen</code>).</p>
 <hr class="section-divider">
 
 <h2 id="bulkhead"><a href="#bulkhead" class="anchor-link" aria-hidden="true">#</a>Bulkheads (split concurrency)</h2>
@@ -419,7 +236,7 @@ flow-level layer: a per-flow <code>BackoffPolicy</code> stretches the gap betwee
 runs and can <strong>trip</strong> a flow that keeps failing so it stops firing until
 <code>RunningScheduler::reset_flow(id)</code> clears it — surfaced as
 <code>Status::Backoff { … }</code> / <code>Status::Tripped { … }</code>. That's documented on its
-own page: <a href="../scheduler/#backoff-and-trip">Scheduler → Backoff &amp; Trip State</a> (runnable
+own page: <a href="../scheduler/backoff-and-trip/">Scheduler → Backoff &amp; Trip State</a> (runnable
 demo: <code>cargo run --example scheduler_backoff --features scheduler</code>).
 </p>
 <hr class="section-divider">
@@ -430,6 +247,7 @@ These stack cleanly. A typical "talk to a flaky external service" state:
 </p>
 <ul>
 <li><strong>Circuit breaker</strong> (shared across every task hitting that service) — bail fast when it's down.</li>
+<li><strong>Rate limiter</strong> (also shared) — stay under the service's quota when it's up.</li>
 <li><strong>Per-attempt timeout</strong> — don't hang on a slow call.</li>
 <li><strong>Retries</strong> with backoff — ride out transients.</li>
 <li>If the call <em>mutated</em> something, make it a <a href="../saga/">compensatable task</a> so a downstream failure can undo it.</li>

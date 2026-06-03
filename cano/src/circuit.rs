@@ -734,6 +734,195 @@ mod tests {
         }
         assert!(matches!(breaker.state(), CircuitState::Open { .. }));
     }
+
+    // ----- edge cases -----
+
+    #[test]
+    fn policy_accessor_returns_configuration() {
+        let breaker = Arc::new(CircuitBreaker::new(fast_policy()));
+        assert_eq!(breaker.policy().failure_threshold, 3);
+        assert_eq!(breaker.policy().half_open_max_calls, 2);
+    }
+
+    #[test]
+    fn default_policy_trips_after_five_failures() {
+        // Default: failure_threshold 5, reset_timeout 30s, half_open_max_calls 1.
+        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy::default()));
+        assert_eq!(breaker.state(), CircuitState::Closed);
+        for _ in 0..5 {
+            let p = breaker.try_acquire().unwrap();
+            breaker.record_failure(p);
+        }
+        assert!(matches!(breaker.state(), CircuitState::Open { .. }));
+    }
+
+    #[test]
+    fn closed_failures_below_threshold_do_not_trip() {
+        let breaker = Arc::new(CircuitBreaker::new(fast_policy())); // threshold 3
+        for _ in 0..2 {
+            let p = breaker.try_acquire().unwrap();
+            breaker.record_failure(p);
+        }
+        assert_eq!(breaker.state(), CircuitState::Closed); // 2 < 3
+    }
+
+    #[tokio::test]
+    async fn dropped_half_open_trial_permit_reopens() {
+        // An unconsumed trial permit dropped during HalfOpen is treated as a failure -> reopen
+        // (the RAII failure path, exercised in HalfOpen rather than Closed).
+        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+            failure_threshold: 1,
+            reset_timeout: Duration::from_millis(20),
+            half_open_max_calls: 1,
+        }));
+        let p = breaker.try_acquire().unwrap();
+        breaker.record_failure(p);
+        assert!(matches!(breaker.state(), CircuitState::Open { .. }));
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        {
+            let _trial = breaker.try_acquire().unwrap();
+            assert_eq!(breaker.state(), CircuitState::HalfOpen);
+            // `_trial` drops here unconsumed -> recorded as a failure -> reopen.
+        }
+        assert!(matches!(breaker.state(), CircuitState::Open { .. }));
+    }
+
+    #[tokio::test]
+    async fn consuming_a_half_open_trial_frees_a_slot() {
+        // max_calls = 3: fill all three trial slots, the fourth is rejected; consuming one
+        // (success) decrements the in-flight count so a fresh trial is admitted into the slot.
+        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+            failure_threshold: 1,
+            reset_timeout: Duration::from_millis(20),
+            half_open_max_calls: 3,
+        }));
+        let p = breaker.try_acquire().unwrap();
+        breaker.record_failure(p);
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        let p1 = breaker.try_acquire().unwrap(); // promotes to HalfOpen, slot 1
+        let p2 = breaker.try_acquire().unwrap(); // slot 2
+        let p3 = breaker.try_acquire().unwrap(); // slot 3 (full)
+        assert_eq!(breaker.state(), CircuitState::HalfOpen);
+        assert_eq!(
+            breaker.try_acquire().unwrap_err().category(),
+            "circuit_open" // fourth rejected — slots exhausted
+        );
+
+        breaker.record_success(p1); // frees a slot; successes 1 of 3 -> still HalfOpen
+        assert_eq!(breaker.state(), CircuitState::HalfOpen);
+        let p4 = breaker
+            .try_acquire()
+            .expect("a slot freed by the consumed trial admits a fresh probe");
+
+        // Close it out: the third success crosses the threshold.
+        breaker.record_success(p2);
+        breaker.record_success(p3);
+        assert_eq!(breaker.state(), CircuitState::Closed);
+        // p4 is now stale (the close bumped the epoch); consuming it is a no-op.
+        breaker.record_success(p4);
+        assert_eq!(breaker.state(), CircuitState::Closed);
+    }
+
+    #[tokio::test]
+    async fn half_open_partial_success_does_not_carry_across_a_reopen() {
+        // max_calls = 2: one success then a failure reopens. The prior success must NOT persist,
+        // so after the next promotion two FRESH successes are required to close.
+        let breaker = Arc::new(CircuitBreaker::new(fast_policy())); // threshold 3, max_calls 2
+        for _ in 0..3 {
+            let p = breaker.try_acquire().unwrap();
+            breaker.record_failure(p);
+        }
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        let p1 = breaker.try_acquire().unwrap(); // HalfOpen, slot 1
+        let p2 = breaker.try_acquire().unwrap(); // slot 2
+        breaker.record_success(p1); // successes 1 of 2
+        breaker.record_failure(p2); // any failure reopens; the success counter is discarded
+        assert!(matches!(breaker.state(), CircuitState::Open { .. }));
+
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let q1 = breaker.try_acquire().unwrap(); // fresh HalfOpen, successes start at 0
+        breaker.record_success(q1);
+        assert_eq!(
+            breaker.state(),
+            CircuitState::HalfOpen,
+            "one fresh success must not close — the pre-reopen success did not carry over"
+        );
+        let q2 = breaker.try_acquire().unwrap();
+        breaker.record_success(q2);
+        assert_eq!(breaker.state(), CircuitState::Closed);
+    }
+
+    #[tokio::test]
+    async fn stale_half_open_permit_ignored_after_reopen() {
+        // Two trials in flight; one fails and reopens (epoch bumps). The other, consumed late, is
+        // stale and must be ignored — it cannot close or otherwise mutate the reopened breaker.
+        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+            failure_threshold: 1,
+            reset_timeout: Duration::from_millis(20),
+            half_open_max_calls: 2,
+        }));
+        let p = breaker.try_acquire().unwrap();
+        breaker.record_failure(p);
+        tokio::time::sleep(Duration::from_millis(40)).await;
+
+        let p1 = breaker.try_acquire().unwrap(); // HalfOpen
+        let p2 = breaker.try_acquire().unwrap();
+        breaker.record_failure(p1); // reopens; epoch bumps -> p2 is now stale
+        assert!(matches!(breaker.state(), CircuitState::Open { .. }));
+        breaker.record_success(p2); // stale -> no-op
+        assert!(
+            matches!(breaker.state(), CircuitState::Open { .. }),
+            "a stale HalfOpen success must not mutate the reopened breaker"
+        );
+    }
+
+    #[test]
+    fn stale_closed_failure_ignored_after_trip() {
+        // A Closed permit consumed *as a failure* after the breaker has already tripped (via other
+        // failures) is stale and must be ignored — this also guards the `unreachable` Open-arm
+        // debug_assert in do_record_failure from firing on a stale outcome.
+        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+            failure_threshold: 2,
+            reset_timeout: Duration::from_secs(60),
+            half_open_max_calls: 1,
+        }));
+        let stale = breaker.try_acquire().unwrap(); // Closed, epoch 0
+        for _ in 0..2 {
+            let p = breaker.try_acquire().unwrap();
+            breaker.record_failure(p);
+        }
+        assert!(matches!(breaker.state(), CircuitState::Open { .. }));
+        breaker.record_failure(stale); // epoch mismatch -> no-op, no panic
+        assert!(matches!(breaker.state(), CircuitState::Open { .. }));
+    }
+
+    #[test]
+    fn concurrent_failures_trip_without_corruption() {
+        // Many threads hammer try_acquire + record_failure on one shared breaker. The state
+        // machine (a std Mutex) must stay consistent: the breaker ends Open and never panics or
+        // deadlocks. Plain threads (the breaker is synchronous) keep the load light.
+        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+            failure_threshold: 5,
+            reset_timeout: Duration::from_secs(60),
+            half_open_max_calls: 1,
+        }));
+        std::thread::scope(|s| {
+            for _ in 0..6 {
+                let b = Arc::clone(&breaker);
+                s.spawn(move || {
+                    for _ in 0..30 {
+                        if let Ok(permit) = b.try_acquire() {
+                            b.record_failure(permit);
+                        }
+                    }
+                });
+            }
+        });
+        // 6 × 30 attempts ≫ threshold 5 -> Open; state() reads cleanly (no poison / deadlock).
+        assert!(matches!(breaker.state(), CircuitState::Open { .. }));
+    }
 }
 
 #[cfg(all(test, feature = "metrics"))]
@@ -812,6 +1001,48 @@ mod metrics_tests {
                 &rows,
                 "cano_circuit_outcomes_total",
                 &[("outcome", "failure")]
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn half_open_transitions_are_recorded() {
+        // Exercise the recovery-side transitions the closed_to_open test doesn't reach:
+        // open_to_halfopen (lazy promotion) and halfopen_to_closed (successful probe).
+        let ((), rows) = run_with_recorder(|| async {
+            let b = Arc::new(CircuitBreaker::new(CircuitPolicy {
+                failure_threshold: 1,
+                reset_timeout: Duration::from_millis(20),
+                half_open_max_calls: 1,
+            }));
+            let p = b.try_acquire().unwrap();
+            b.record_failure(p); // closed -> open
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            let p = b.try_acquire().unwrap(); // open -> halfopen (lazy)
+            b.record_success(p); // halfopen -> closed
+        });
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_circuit_transitions_total",
+                &[("transition", "closed_to_open")]
+            ),
+            1
+        );
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_circuit_transitions_total",
+                &[("transition", "open_to_halfopen")]
+            ),
+            1
+        );
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_circuit_transitions_total",
+                &[("transition", "halfopen_to_closed")]
             ),
             1
         );

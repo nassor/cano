@@ -1,7 +1,7 @@
 +++
 title = "PollTask"
 description = "PollTask in Cano - wait-until loops without blocking a thread, with adaptive backoff and a per-poll error policy."
-template = "page.html"
+template = "section.html"
 +++
 
 <div class="content-wrapper">

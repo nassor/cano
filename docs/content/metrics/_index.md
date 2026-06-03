@@ -1,7 +1,7 @@
 +++
 title = "Metrics"
 description = "Optional metrics-crate counters, histograms, and gauges for Cano workflows via the metrics feature."
-template = "page.html"
+template = "section.html"
 +++
 
 <div class="content-wrapper">
@@ -170,6 +170,16 @@ exporter's responsibility. Metric names follow <code>metrics</code>-crate unders
 <li><code>cano_circuit_transitions_total{transition}</code> — counter; <code>transition</code> ∈ <code>closed_to_open</code>|<code>open_to_halfopen</code>|<code>halfopen_to_closed</code>|<code>halfopen_to_open</code></li>
 <li><code>cano_circuit_acquires_total{result}</code> — counter; <code>result</code> ∈ <code>acquired</code>|<code>rejected</code></li>
 <li><code>cano_circuit_outcomes_total{outcome}</code> — counter; <code>outcome</code> ∈ <code>success</code>|<code>failure</code></li>
+</ul>
+</div>
+<div class="card">
+<h3 id="rate-limiter-metrics"><a href="#rate-limiter-metrics" class="anchor-link" aria-hidden="true">#</a>Rate Limiter</h3>
+<ul>
+<li><code>cano_rate_limiter_acquired_total</code> — counter; successful acquisitions (via <code>try_acquire</code> / <code>acquire</code> / their <code>_n</code> forms)</li>
+<li><code>cano_rate_limiter_tokens_consumed_total</code> — counter; weighted units consumed (sum of acquire <code>cost</code>s)</li>
+<li><code>cano_rate_limiter_throttled_total{result}</code> — counter; <code>result</code> ∈ <code>waited</code>|<code>rejected</code></li>
+<li><code>cano_rate_limiter_wait_seconds</code> — histogram (seconds); wall-clock time <code>acquire</code> blocked</li>
+<li><code>cano_multi_rate_limiter_throttled_total{tier}</code> — counter; <code>MultiRateLimiter</code> rejections, by the tier that blocked them</li>
 </ul>
 </div>
 <div class="card">

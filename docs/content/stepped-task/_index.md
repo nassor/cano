@@ -1,7 +1,7 @@
 +++
 title = "SteppedTask"
 description = "SteppedTask in Cano - resumable iterative work that checkpoints a cursor so a crashed run resumes mid-loop."
-template = "page.html"
+template = "section.html"
 +++
 
 <div class="content-wrapper">

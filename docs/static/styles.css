@@ -249,18 +249,21 @@ details.nav-section[open] > summary.nav-section-label::after {
     transform: translateY(2px) rotate(-135deg);
 }
 
-/* Indent the sub-links under a parent nav link (subfolder style) and give them a
-   guide rail so the nesting is legible */
-.nav-sublinks {
-    margin: 2px 0 var(--space-1);
-    padding-left: var(--space-4);
-    border-left: 1px solid var(--border-subtle);
+/* Sub-links under a parent nav link: indented and lighter than their parent links so
+   the children read as a distinct group. The doubled `.nav-links.nav-sublinks` and the
+   `li a` selector keep these ahead of the later `.nav-links { padding: 0 }` reset and
+   `.nav-links a` rules (equal specificity would otherwise let those win on source order). */
+.nav-links.nav-sublinks {
+    list-style: none;
+    margin: var(--space-1) 0 var(--space-2);
+    padding-left: var(--space-5); /* the space that sets the children apart */
 }
 
-.nav-sublinks a {
-    font-size: var(--text-sm);
+.nav-sublinks li a {
     padding-top: var(--space-2);
     padding-bottom: var(--space-2);
+    font-weight: 200;
+    color: var(--text-color); /* lighter than the parent links' --text-muted */
 }
 
 .nav-links {
@@ -285,7 +288,7 @@ details.nav-section[open] > summary.nav-section-label::after {
     align-items: center;
     gap: var(--space-3);
     font-size: var(--text-sm);
-    font-weight: 500;
+    font-weight: 700;
     position: relative;
 }
 

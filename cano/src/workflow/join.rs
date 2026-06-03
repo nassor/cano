@@ -209,4 +209,98 @@ mod tests {
         assert!(JoinStrategy::PartialTimeout.is_satisfied(3, 4));
         assert!(!JoinStrategy::PartialTimeout.is_satisfied(0, 4));
     }
+
+    // ----- edge cases: is_satisfied boundaries -----
+
+    #[test]
+    fn is_satisfied_boundary_cases() {
+        // `All` over zero tasks is vacuously satisfied (the empty-split case).
+        assert!(JoinStrategy::All.is_satisfied(0, 0));
+        // `Any` needs >= 1 completion; zero tasks can never satisfy it.
+        assert!(!JoinStrategy::Any.is_satisfied(0, 0));
+        // `Quorum(0)` is always satisfied; a quorum larger than the task count never is.
+        assert!(JoinStrategy::Quorum(0).is_satisfied(0, 3));
+        assert!(!JoinStrategy::Quorum(5).is_satisfied(3, 3));
+        // `PartialResults(0)` is always satisfied.
+        assert!(JoinStrategy::PartialResults(0).is_satisfied(0, 4));
+        // `PartialTimeout` is not satisfied with zero completions.
+        assert!(!JoinStrategy::PartialTimeout.is_satisfied(0, 4));
+    }
+
+    #[test]
+    fn percentage_uses_ceil_and_handles_one_and_zero_total() {
+        // 1.0 == `All`: every task must complete.
+        assert!(JoinStrategy::Percentage(1.0).is_satisfied(3, 3));
+        assert!(!JoinStrategy::Percentage(1.0).is_satisfied(2, 3));
+        // `ceil` rounding on an odd total: 50% of 3 -> ceil(1.5) = 2 required.
+        assert!(!JoinStrategy::Percentage(0.5).is_satisfied(1, 3));
+        assert!(JoinStrategy::Percentage(0.5).is_satisfied(2, 3));
+        // Zero total -> required = ceil(0) = 0 -> vacuously satisfied.
+        assert!(JoinStrategy::Percentage(0.5).is_satisfied(0, 0));
+    }
+
+    #[test]
+    fn percentage_saturation_guard_does_not_overflow() {
+        // The required-count computation saturates to `usize::MAX` rather than wrapping when
+        // `total * p` would exceed the usize range. Exercise that guard with a huge total.
+        assert!(JoinStrategy::Percentage(1.0).is_satisfied(usize::MAX, usize::MAX));
+        assert!(!JoinStrategy::Percentage(1.0).is_satisfied(0, usize::MAX));
+    }
+
+    // ----- edge cases: SplitResult counts -----
+
+    #[test]
+    fn split_result_counts() {
+        let mut r: SplitResult<u8> = SplitResult::new();
+        assert_eq!(r.completed_count(), 0);
+        assert_eq!(r.total_count(), 0);
+
+        r.successes.push(SplitTaskResult {
+            task_index: 0,
+            result: Ok(TaskResult::Single(1)),
+        });
+        r.successes.push(SplitTaskResult {
+            task_index: 1,
+            result: Ok(TaskResult::Single(2)),
+        });
+        r.errors.push(SplitTaskResult {
+            task_index: 2,
+            result: Err(CanoError::generic("boom")),
+        });
+        r.cancelled.push(3);
+        r.cancelled.push(4);
+
+        assert_eq!(r.completed_count(), 3, "2 successes + 1 error");
+        assert_eq!(r.total_count(), 5, "completed + 2 cancelled");
+    }
+
+    #[test]
+    fn split_result_default_and_with_capacity_start_empty() {
+        let d: SplitResult<u8> = SplitResult::default();
+        assert_eq!(d.total_count(), 0);
+        assert!(d.successes.is_empty() && d.errors.is_empty() && d.cancelled.is_empty());
+
+        let c: SplitResult<u8> = SplitResult::with_capacity(10);
+        assert_eq!(c.total_count(), 0);
+    }
+
+    // ----- edge cases: JoinConfig builder -----
+
+    #[test]
+    fn join_config_builder_defaults_and_setters() {
+        let base = JoinConfig::new(JoinStrategy::All, "done");
+        assert_eq!(base.strategy, JoinStrategy::All);
+        assert_eq!(base.join_state, "done");
+        assert_eq!(base.timeout, None);
+        assert_eq!(base.bulkhead, None);
+
+        let tuned = JoinConfig::new(JoinStrategy::Any, "done")
+            .with_timeout(Duration::from_millis(250))
+            .with_join_state("elsewhere")
+            .with_bulkhead(4);
+        assert_eq!(tuned.strategy, JoinStrategy::Any);
+        assert_eq!(tuned.timeout, Some(Duration::from_millis(250)));
+        assert_eq!(tuned.join_state, "elsewhere");
+        assert_eq!(tuned.bulkhead, Some(4));
+    }
 }
