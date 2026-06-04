@@ -159,7 +159,7 @@ will warn you if you discard the return value. If you forget to capture it, the 
 <tr>
 <td><code>register(state, task)</code></td>
 <td><code>Single</code></td>
-<td>One <a href="../task/">Task</a> (or <a href="../poll-task/">PollTask</a>, <a href="../batch-task/">BatchTask</a> — all dispatch as <code>Task</code>).</td>
+<td>One <a href="../task/">Task</a> (or <a href="../poll-task/">PollTask</a>, <a href="../timer-task/">TimerTask</a>, <a href="../batch-task/">BatchTask</a> — all dispatch as <code>Task</code>).</td>
 </tr>
 <tr>
 <td><code>register_split(state, tasks, join_config)</code></td>

@@ -11,9 +11,10 @@ template = "section.html"
 <p>
 A <code>Task</code> is the fundamental building block of a Cano workflow: a single <code>run</code>
 method that decides the next state. <strong>Start here</strong> — <code>Task</code> is the default
-choice for every processing unit. The other four processing models
+choice for every processing unit. The other five processing models
 (<a href="../router-task/">RouterTask</a>,
-<a href="../poll-task/">PollTask</a>, <a href="../batch-task/">BatchTask</a>,
+<a href="../poll-task/">PollTask</a>, <a href="../timer-task/">TimerTask</a>,
+<a href="../batch-task/">BatchTask</a>,
 <a href="../stepped-task/">SteppedTask</a>) are specialisations you reach for only when a task
 has a shape that one of them fits better — see <a href="#task-family">The Task Family</a> below for
 the decision matrix. Tasks receive a <code>&amp;Resources</code> reference at dispatch time — see
@@ -349,6 +350,12 @@ nothing. Registered with <code>register_router</code>; leaves no checkpoint row.
 <p><strong>Reach for it when:</strong> waiting on an external job, queue, or flag flip.</p>
 </div>
 <div class="card">
+<h3><a href="../timer-task/">TimerTask</a></h3>
+<p>Wait-then-transition: <code>wait</code> returns a <code>Duration</code> or monotonic
+<code>Instant</code>, the engine sleeps <em>once</em>, then <code>after_wait</code> routes.</p>
+<p><strong>Reach for it when:</strong> a fixed cool-down/debounce, or resuming at a set instant.</p>
+</div>
+<div class="card">
 <h3><a href="../batch-task/">BatchTask</a></h3>
 <p>Fan out over data: <code>load → process_item (×N, bounded concurrency, per-item retry) → finish</code>,
 re-joined in one state.</p>
@@ -366,7 +373,7 @@ step, so a crash resumes mid-loop. Registered with <code>register_stepped</code>
 <hr class="section-divider">
 <h2 id="choosing"><a href="#choosing" class="anchor-link" aria-hidden="true">#</a>Choosing a Processing Model</h2>
 <p>
-All five models dispatch as a <code>Task</code>, so you can mix them in one workflow. Start from
+All six models dispatch as a <code>Task</code>, so you can mix them in one workflow. Start from
 <code>Task</code> and move to a specialised model only when your work has its shape:
 </p>
 
@@ -392,6 +399,11 @@ All five models dispatch as a <code>Task</code>, so you can mix them in one work
 <tr>
 <td><a href="../poll-task/"><strong><code>PollTask</code></strong></a></td>
 <td>You need to <em>wait until</em> something is ready — an external job, a queue, a flag flip — without blocking a thread.</td>
+<td><code>register</code></td>
+</tr>
+<tr>
+<td><a href="../timer-task/"><strong><code>TimerTask</code></strong></a></td>
+<td>You just need to <em>pause then continue</em> — a fixed cool-down/debounce, or sleeping until a monotonic instant — with a single scheduled wake-up, not a poll loop.</td>
 <td><code>register</code></td>
 </tr>
 <tr>

@@ -14,6 +14,7 @@
 //! - `#[cano::task]` — for `impl Task` (and the `Task` trait definition itself)
 //! - `#[cano::task::router]` — for `impl RouterTask` and the `RouterTask` trait
 //! - `#[cano::task::poll]` — for `impl PollTask` and the `PollTask` trait
+//! - `#[cano::task::timer]` — for `impl TimerTask` and the `TimerTask` trait
 //! - `#[cano::task::batch]` — for `impl BatchTask` and the `BatchTask` trait
 //! - `#[cano::task::stepped]` — for `impl SteppedTask` and the `SteppedTask` trait
 //! - `#[cano::saga::task]` — for `impl CompensatableTask`
@@ -38,6 +39,7 @@ mod resource_derive;
 mod router_task_impl;
 mod stepped_task_impl;
 mod task_impl;
+mod timer_task_impl;
 
 /// Derive a `from_resources(&Resources<_>) -> CanoResult<Self>` constructor that
 /// pulls each field out of a `cano::Resources` map.
@@ -278,6 +280,44 @@ pub fn batch_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn poll_task(attr: TokenStream, item: TokenStream) -> TokenStream {
     poll_task_impl::expand(attr.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Apply to the `TimerTask` trait definition, an
+/// `impl TimerTask<S [, K]> for T` block, or — for less boilerplate — an
+/// inherent `impl T { ... }` block.
+///
+/// Use as `#[cano::task::timer]`.
+///
+/// Two surface forms on impl blocks:
+///
+/// 1. **Trait-impl form:** `#[task::timer] impl TimerTask<S> for T { async fn wait(..) { ... } async fn after_wait(..) { ... } }` —
+///    user writes the trait header. The macro async-rewrites the `TimerTask` impl AND emits a
+///    companion `impl Task<S> for T` whose `Task::run` sleeps for the returned `TimerOutcome`
+///    (via the `run_timer` helper) then calls `after_wait`.
+/// 2. **Inherent-impl form:** `#[task::timer(state = S [, key = K])] impl T { async fn wait(..) { ... } async fn after_wait(..) { ... } }` —
+///    the macro builds the `impl TimerTask<S [, K]> for T` header from the attribute args, enforces
+///    that both `wait` and `after_wait` are present (`config` / `name` may be overridden), and emits
+///    the same companion `impl Task<S [, K]> for T`.
+///
+/// On a trait definition (`#[task::timer] pub trait TimerTask ...`) the macro just performs the
+/// async-fn-in-trait rewrite.
+///
+/// Because a blanket `impl<T: TimerTask<..>> Task<..> for T` would conflict (E0119) with the
+/// analogous blanket impls for the other specialized task traits — a type can implement more than
+/// one — the companion `Task` impl is generated per-use-site rather than as a blanket.
+///
+/// The default `config()` injected by the inherent form is [`TaskConfig::minimal()`]
+/// (no retries) — a single scheduled sleep needs no outer retry wrapping.
+///
+/// The **inherent form** routes `Task::run` through `::cano::task::timer::run_timer`, so the user
+/// crate needs no direct `tokio` dependency. The **trait-impl form** inlines the sleep, so a crate
+/// using `#[task::timer] impl TimerTask<S> for T` must depend on `tokio` (feature `time`),
+/// reachable as `::tokio` — the same requirement the sibling `#[task::poll]` macro has.
+#[proc_macro_attribute]
+pub fn timer_task(attr: TokenStream, item: TokenStream) -> TokenStream {
+    timer_task_impl::expand(attr.into(), item.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }
