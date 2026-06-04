@@ -47,7 +47,7 @@ tempfile = "3"
 wide = "1.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 chrono = { version = "0.4", features = ["serde"] }
-tokio = { version = "1.52.1", features = ["macros", "sync", "time", "rt-multi-thread", "signal"] }
+tokio = { version = "1.52.1", features = ["macros", "sync", "time", "rt-multi-thread", "signal", "test-util"] }
 metrics-util = { version = "0.20.3", features = ["debugging"] }
 metrics-tracing-context = "0.18.1"
 
@@ -208,6 +208,10 @@ path = "examples/router_task.rs"
 [[example]]
 name = "poll_task"
 path = "examples/poll_task.rs"
+
+[[example]]
+name = "timer_task"
+path = "examples/timer_task.rs"
 
 [[example]]
 name = "batch_task"

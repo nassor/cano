@@ -611,7 +611,7 @@ fn bench_large_split_collect(c: &mut Criterion) {
             let workflow = Workflow::<S>::bare()
                 .register_split(
                     S::Start,
-                    (0..n).map(|_| Noop).collect::<Vec<_>>(),
+                    (0..n).map(|_| Noop),
                     JoinConfig::new(JoinStrategy::All, S::Done),
                 )
                 .add_exit_state(S::Done);

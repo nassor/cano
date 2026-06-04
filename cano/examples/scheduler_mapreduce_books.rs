@@ -391,24 +391,18 @@ fn create_batch_workflow(
         // Split: Download all books in parallel
         .register_split(
             BookAnalysisState::DownloadBatch,
-            books
-                .iter()
-                .map(|(id, title)| DownloadTask {
-                    book_id: *id,
-                    title: title.clone(),
-                    batch_name: batch_name.clone(),
-                })
-                .collect::<Vec<_>>(),
+            books.iter().map(|(id, title)| DownloadTask {
+                book_id: *id,
+                title: title.clone(),
+                batch_name: batch_name.clone(),
+            }),
             JoinConfig::new(JoinStrategy::All, BookAnalysisState::AnalyzeBatch)
                 .with_timeout(Duration::from_secs(120)),
         )
         // Split: Analyze all books in parallel
         .register_split(
             BookAnalysisState::AnalyzeBatch,
-            books
-                .iter()
-                .map(|(id, _)| AnalyzeTask { book_id: *id })
-                .collect::<Vec<_>>(),
+            books.iter().map(|(id, _)| AnalyzeTask { book_id: *id }),
             JoinConfig::new(
                 JoinStrategy::Percentage(0.75), // Proceed if 75% complete
                 BookAnalysisState::SummarizeBatch,

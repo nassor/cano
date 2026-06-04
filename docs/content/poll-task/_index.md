@@ -13,8 +13,9 @@ A <code>PollTask</code> repeatedly calls its <code>poll</code> method until the 
 is ready. Each call returns either "ready, here's the next state" or "not yet, try again in
 <em>n</em> milliseconds" — an async sleep, not a blocked thread. It is one of the
 <a href="../task/">Task</a> family of processing models, alongside
-<a href="../router-task/">RouterTask</a>, <a href="../batch-task/">BatchTask</a>, and
-<a href="../stepped-task/">SteppedTask</a>. A <code>PollTask</code> reads typed dependencies from
+<a href="../router-task/">RouterTask</a>, <a href="../timer-task/">TimerTask</a>,
+<a href="../batch-task/">BatchTask</a>, and <a href="../stepped-task/">SteppedTask</a>. A
+<code>PollTask</code> reads typed dependencies from
 <a href="../resources/">Resources</a> the same way every other model does. New to Cano? Read
 <a href="../workflows/">Workflows</a> and <a href="../resources/">Resources</a> first.
 </p>

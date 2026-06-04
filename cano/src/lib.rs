@@ -119,12 +119,16 @@
 //!   [`PollOutcome::Pending { delay_ms }`](PollOutcome::Pending) on each call. Defaults to
 //!   [`TaskConfig::minimal()`](task::TaskConfig::minimal) (no retries). Registered with
 //!   [`Workflow::register`] — the engine applies `attempt_timeout` if set via `config()`.
+//! - [`TimerTask`] trait: wait-then-transition; `wait()` returns a [`TimerOutcome`] (a
+//!   [`Duration`](std::time::Duration) or monotonic [`Instant`](std::time::Instant)) and the
+//!   engine sleeps **once** before `after_wait()` routes. Registered with
+//!   [`Workflow::register`]. A resumed run re-runs `wait()`, so the delay restarts after a crash.
 //! - [`BatchTask`] trait: fan-out over data items via `load`/`process_item`/`finish`.
 //! - [`SteppedTask`] trait: resumable iterative work via `step()` with a serializable cursor.
 //!
-//! Every [`RouterTask`], [`PollTask`], [`BatchTask`], and [`SteppedTask`] automatically
-//! implements [`Task`] via companion impls emitted by the `#[task::router]`,
-//! `#[task::poll]`, `#[task::batch]`, and `#[task::stepped]` macros respectively.
+//! Every [`RouterTask`], [`PollTask`], [`TimerTask`], [`BatchTask`], and [`SteppedTask`]
+//! automatically implements [`Task`] via companion impls emitted by the `#[task::router]`,
+//! `#[task::poll]`, `#[task::timer]`, `#[task::batch]`, and `#[task::stepped]` macros respectively.
 //!
 //! ### Parallel Execution (Split/Join)
 //!
@@ -188,6 +192,11 @@
 //! to `TaskConfig::minimal()` (no retries). Use `config().with_attempt_timeout(dur)` to cap
 //! total wall-clock time; registered with [`Workflow::register`] like any other task.
 //!
+//! **TimerTask**: `wait()` returns a [`TimerOutcome`] and `after_wait()` returns the next state —
+//! the engine schedules a single sleep between them (no polling loop). Defaults to
+//! `TaskConfig::minimal()`; an `attempt_timeout` caps the wait. Registered with
+//! [`Workflow::register`] like any other task.
+//!
 //! ### Timeouts
 //!
 //! Three layered budgets bound a run. [`TaskConfig::with_attempt_timeout`](task::TaskConfig::with_attempt_timeout)
@@ -203,6 +212,7 @@
 //! - [`mod@task`]: The [`Task`] trait — single `run()` / `run_bare()` method
 //! - [`task::router`]: The [`RouterTask`] trait — side-effect-free branching via `route()`; registered with [`Workflow::register_router`]
 //! - [`task::poll`]: The [`PollTask`] trait — wait-until loop via `poll()`; registered with [`Workflow::register`]
+//! - [`task::timer`]: The [`TimerTask`] trait — wait-then-transition via `wait()`/`after_wait()`; registered with [`Workflow::register`]
 //! - [`task::batch`]: The [`BatchTask`] trait — fan-out over data items via `load`/`process_item`/`finish`; registered with [`Workflow::register`]
 //! - [`task::stepped`]: The [`SteppedTask`] trait — resumable iterative work via `step()` with a serializable cursor; registered with [`Workflow::register_stepped`] (persists the cursor when a checkpoint store is attached)
 //! - [`workflow`]: [`Workflow`] — FSM orchestration with Split/Join support
@@ -271,6 +281,7 @@ pub use task::router::{DynRouterTask, RouterTask, RouterTaskObject};
 pub use task::stepped::{
     DefaultStepCursor, DynSteppedTask, StepOutcome, SteppedTask, SteppedTaskObject, run_stepped,
 };
+pub use task::timer::{DynTimerTask, TimerOutcome, TimerTask, TimerTaskObject, run_timer};
 
 #[cfg(feature = "recovery")]
 pub use recovery::RedbCheckpointStore;
@@ -297,6 +308,7 @@ pub use scheduler::{BackoffPolicy, FlowInfo, RunningScheduler, Schedule, Schedul
 /// Processing-model macros are namespaced under `cano::task::` and `cano::saga::`:
 /// - `#[cano::task::router]` — for `impl RouterTask` blocks
 /// - `#[cano::task::poll]` — for `impl PollTask` blocks
+/// - `#[cano::task::timer]` — for `impl TimerTask` blocks
 /// - `#[cano::task::batch]` — for `impl BatchTask` blocks
 /// - `#[cano::task::stepped]` — for `impl SteppedTask` blocks
 /// - `#[cano::saga::task]` — for `impl CompensatableTask` blocks
@@ -347,8 +359,8 @@ pub mod prelude {
         PollErrorPolicy, PollOutcome, PollTask, RateLimiter, RateLimiterPermit, RateLimiterPolicy,
         Reservation, Resource, Resources, RetryMode, RouterTask, RowKind, SplitResult,
         SplitTaskResult, StateEntry, StepOutcome, SteppedTask, Task, TaskConfig, TaskObject,
-        TaskResult, Tier, WindowPermit, WindowPolicy, WindowedRateLimiter, Workflow,
-        WorkflowObserver, run_stepped,
+        TaskResult, Tier, TimerOutcome, TimerTask, WindowPermit, WindowPolicy, WindowedRateLimiter,
+        Workflow, WorkflowObserver, run_stepped,
     };
 
     #[cfg(feature = "scheduler")]
