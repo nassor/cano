@@ -449,21 +449,26 @@ where
         self
     }
 
-    /// Register multiple tasks that will execute in parallel with a join configuration
+    /// Register multiple tasks that execute in parallel with a join configuration.
+    ///
+    /// `tasks` accepts any [`IntoIterator`] (a `Vec`, an array, a `(0..n).map(…)` chain,
+    /// etc.); the tasks are collected eagerly at registration time.
     pub fn register_split<T>(
         mut self,
         state: TState,
-        tasks: Vec<T>,
+        tasks: impl IntoIterator<Item = T>,
         join_config: JoinConfig<TState>,
     ) -> Self
     where
         T: Task<TState, TResourceKey> + Send + Sync + 'static,
     {
         self.forget_compensator_for(&state);
-        let configs: Vec<Arc<crate::task::TaskConfig>> =
-            tasks.iter().map(|t| Arc::new(t.config())).collect();
-        let arc_tasks: Vec<Arc<dyn Task<TState, TResourceKey> + Send + Sync>> =
-            tasks.into_iter().map(|t| Arc::new(t) as Arc<_>).collect();
+        let mut configs: Vec<Arc<crate::task::TaskConfig>> = Vec::new();
+        let mut arc_tasks: Vec<Arc<dyn Task<TState, TResourceKey> + Send + Sync>> = Vec::new();
+        for t in tasks {
+            configs.push(Arc::new(t.config()));
+            arc_tasks.push(Arc::new(t) as Arc<_>);
+        }
 
         self.states.insert(
             state,
@@ -568,8 +573,11 @@ where
         self
     }
 
-    /// Add multiple exit states
-    pub fn add_exit_states(mut self, states: Vec<TState>) -> Self {
+    /// Add multiple exit states.
+    ///
+    /// `states` accepts any [`IntoIterator`] (a `Vec`, an array, a `.map(…)` chain, etc.);
+    /// duplicates already present are skipped.
+    pub fn add_exit_states(mut self, states: impl IntoIterator<Item = TState>) -> Self {
         for state in states {
             if !self.exit_states.contains(&state) {
                 self.exit_states.push(state);
@@ -1445,6 +1453,61 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
         assert!(workflow.validate().is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_register_split_accepts_array_input() {
+        // An array literal is `IntoIterator<Item = T>` but not a `Vec`; it must
+        // register and run through split/join just like a `Vec` does.
+        let workflow = Workflow::bare()
+            .register_split(
+                TestState::Start,
+                [
+                    SimpleTask::new(TestState::Complete),
+                    SimpleTask::new(TestState::Complete),
+                ],
+                JoinConfig::new(JoinStrategy::All, TestState::Complete),
+            )
+            .add_exit_state(TestState::Complete);
+
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        assert_eq!(result, TestState::Complete);
+    }
+
+    #[tokio::test]
+    async fn test_register_split_accepts_lazy_iterator_input() {
+        // A `Range::map` adapter is a lazy iterator with no `Vec` backing — it must
+        // be consumed and materialized by `register_split` without a `.collect()`.
+        let workflow = Workflow::bare()
+            .register_split(
+                TestState::Start,
+                (0..3).map(|_| SimpleTask::new(TestState::Complete)),
+                JoinConfig::new(JoinStrategy::All, TestState::Complete),
+            )
+            .add_exit_state(TestState::Complete);
+
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        assert_eq!(result, TestState::Complete);
+    }
+
+    #[tokio::test]
+    async fn test_add_exit_states_accepts_array_input() {
+        // An array literal is `IntoIterator` but not a `Vec`.
+        let workflow = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Complete))
+            .add_exit_states([TestState::Complete, TestState::Error]);
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        assert_eq!(result, TestState::Complete);
+    }
+
+    #[tokio::test]
+    async fn test_add_exit_states_accepts_lazy_iterator_and_dedups() {
+        // A lazy iterator (no Vec) carrying a duplicate — dedup must still hold.
+        let workflow = Workflow::bare()
+            .register(TestState::Start, SimpleTask::new(TestState::Complete))
+            .add_exit_states([TestState::Complete, TestState::Complete].into_iter());
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        assert_eq!(result, TestState::Complete);
     }
 
     #[test]

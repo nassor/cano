@@ -157,7 +157,8 @@ async fn main() -> Result<(), CanoError> {
 
     // Eight workers, each taking ~50ms. With bulkhead=2 only 2 run at once,
     // so total time will be roughly 4 × 50ms = 200ms instead of 50ms flat.
-    let workers: Vec<Worker> = (0..8).map(|id| Worker { id }).collect();
+    // `register_split` takes any iterator, so the mapped range goes straight in.
+    let workers = (0..8).map(|id| Worker { id });
 
     let join_config = JoinConfig::new(JoinStrategy::All, Step::Summarize).with_bulkhead(2);
 
