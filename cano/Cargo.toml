@@ -102,6 +102,11 @@ path = "examples/scheduler_graceful_shutdown.rs"
 required-features = ["scheduler"]
 
 [[example]]
+name = "scheduler_cancellation"
+path = "examples/scheduler_cancellation.rs"
+required-features = ["scheduler"]
+
+[[example]]
 name = "scheduler_mixed_workflows"
 path = "examples/scheduler_mixed_workflows.rs"
 required-features = ["scheduler"]
@@ -200,6 +205,10 @@ path = "examples/saga_payment.rs"
 [[example]]
 name = "workflow_total_timeout"
 path = "examples/workflow_total_timeout.rs"
+
+[[example]]
+name = "workflow_cancellation"
+path = "examples/workflow_cancellation.rs"
 
 [[example]]
 name = "router_task"

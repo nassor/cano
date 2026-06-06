@@ -107,6 +107,15 @@ pub trait WorkflowObserver: Send + Sync + 'static {
     /// wrapped timeout (dirty rollback).
     fn on_workflow_timeout(&self, _elapsed: std::time::Duration, _limit: std::time::Duration) {}
 
+    /// Called when a run is cancelled via a
+    /// [`CancellationToken`](crate::cancel::CancellationToken) — either observed at a state
+    /// boundary or while a cancellable task was in flight. `state` is the `Debug` rendering of the
+    /// state the cancellation was observed at. Fires exactly once per cancelled run, immediately
+    /// before the compensation stack is drained. Followed on the public API's return by a
+    /// `CanoError::WithStateContext` wrapping a `CanoError::Cancelled` (clean rollback), or a
+    /// `CanoError::CompensationFailed` whose `errors[0]` is the wrapped `Cancelled` (dirty rollback).
+    fn on_cancelled(&self, _state: &str) {}
+
     /// Called when the engine attempted to clear a checkpoint log (after a
     /// successful run or after a clean compensation drain) and the backend
     /// returned an error.
@@ -236,6 +245,9 @@ impl WorkflowObserver for TracingObserver {
             "workflow total timeout exceeded"
         );
     }
+    fn on_cancelled(&self, state: &str) {
+        tracing::warn!(state, "workflow cancelled");
+    }
     fn on_checkpoint_clear_failed(&self, workflow_id: &str, error: &CanoError) {
         tracing::warn!(workflow_id, error = %error, "checkpoint log clear failed");
     }
@@ -296,6 +308,9 @@ impl WorkflowObserver for MetricsObserver {
     }
     fn on_workflow_timeout(&self, elapsed: std::time::Duration, limit: std::time::Duration) {
         crate::metrics::observed_workflow_timeout(elapsed, limit);
+    }
+    fn on_cancelled(&self, _state: &str) {
+        crate::metrics::observed_cancellation();
     }
     fn on_checkpoint_clear_failed(&self, _workflow_id: &str, _error: &CanoError) {
         crate::metrics::checkpoint_clear(false);

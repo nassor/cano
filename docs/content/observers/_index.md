@@ -151,6 +151,15 @@ before the compensation drain runs. Followed on the public API's return by
 <code>CanoError::WithStateContext</code> wrapping a <code>CanoError::WorkflowTimeout</code> (clean
 rollback) or <code>CanoError::CompensationFailed</code> if a <code>compensate</code> also fails
 (its <code>errors[0]</code> carries the wrapped timeout).</p>
+
+<h3 id="on-cancelled"><a href="#on-cancelled" class="anchor-link" aria-hidden="true">#</a><code>on_cancelled(state: &amp;str)</code></h3>
+<p>Fired when a run is cancelled via a
+<a href="../resilience/#cancellation"><code>CancellationToken</code></a> — either observed at a state
+boundary or while a cancellable task was in flight. <code>state</code> is the <code>Debug</code>
+rendering of the state the cancel was observed at. Fires exactly once per cancelled run, before the
+compensation drain. Followed on the public API's return by <code>CanoError::WithStateContext</code>
+wrapping a <code>CanoError::Cancelled</code> (clean rollback) or <code>CanoError::CompensationFailed</code>
+whose <code>errors[0]</code> is the wrapped cancel (dirty rollback).</p>
 </div>
 </div>
 
@@ -284,6 +293,7 @@ Because the events carry the <code>cano::observer</code> target, you can filter 
 <tr><td><code>on_checkpoint</code></td><td><code>DEBUG</code></td><td><code>"checkpoint appended"</code></td><td><code>workflow_id</code>, <code>sequence</code></td></tr>
 <tr><td><code>on_resume</code></td><td><code>INFO</code></td><td><code>"workflow resumed from checkpoint"</code></td><td><code>workflow_id</code>, <code>sequence</code></td></tr>
 <tr><td><code>on_workflow_timeout</code></td><td><code>WARN</code></td><td><code>"workflow total timeout exceeded"</code></td><td><code>elapsed_ms</code>, <code>limit_ms</code></td></tr>
+<tr><td><code>on_cancelled</code></td><td><code>WARN</code></td><td><code>"workflow cancelled"</code></td><td><code>state</code></td></tr>
 </tbody>
 </table>
 <hr class="section-divider">

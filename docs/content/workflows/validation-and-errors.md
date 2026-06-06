@@ -133,9 +133,9 @@ during execution. Understanding these errors helps you build robust error recove
 <td>Increase <code>with_total_timeout()</code> or speed up the workflow; see <a href="../../resilience/#workflow-total-timeout">Resilience → Workflow Total Timeout</a></td>
 </tr>
 <tr>
-<td><code>CanoError::Workflow</code></td>
-<td>Legacy <code>with_timeout()</code> outer <code>tokio::time::timeout</code> elapsed (no graceful compensation)</td>
-<td>Prefer <code>with_total_timeout()</code> for new code; otherwise increase <code>with_timeout()</code> or optimize task execution time</td>
+<td><code>CanoError::Cancelled</code></td>
+<td>Run cancelled via a <code>CancellationToken</code> (<code>orchestrate_with_cancel</code> / <code>resume_from_with_cancel</code>); in-flight task aborted, compensation stack drained. Surfaced under <code>CanoError::WithStateContext</code> (or <code>CompensationFailed</code> on a dirty rollback).</td>
+<td>Expected when you cancel deliberately; see <a href="../../resilience/#cancellation">Resilience → Cooperative Cancellation</a></td>
 </tr>
 <tr>
 <td><code>CanoError::Configuration</code></td>

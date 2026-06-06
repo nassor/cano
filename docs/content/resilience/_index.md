@@ -30,7 +30,8 @@ probes — lives in <a href="../recovery/">Recovery</a>, <a href="../saga/">Saga
 <li><a href="#workflow-total-timeout">Workflow Total Timeout</a></li>
 <li class="toc-sub"><a href="#workflow-total-timeout-compensation">Compensation drain budget</a></li>
 <li class="toc-sub"><a href="#workflow-total-timeout-observer">Observer hook</a></li>
-<li class="toc-sub"><a href="#workflow-total-timeout-vs">The three timeout knobs</a></li>
+<li class="toc-sub"><a href="#workflow-total-timeout-vs">The two timeout knobs</a></li>
+<li><a href="#cancellation">Cooperative Cancellation</a></li>
 <li><a href="#cb-rl-guides">Circuit Breakers &amp; Rate Limiting</a></li>
 <li><a href="#bulkhead">Bulkheads (split concurrency)</a></li>
 <li><a href="#panic-safety">Panic Safety</a></li>
@@ -101,8 +102,7 @@ impl CallTask {
 ```
 
 <p>Distinct from <code>Workflow::with_total_timeout</code> (the wall-clock budget for the entire
-orchestration — see below) and from the legacy <code>Workflow::with_timeout</code> (a blunt outer
-<code>tokio::time::timeout</code> with no graceful compensation). The full <code>TaskConfig</code> /
+orchestration — see below). The full <code>TaskConfig</code> /
 <code>RetryMode</code> API — including how attempt timeouts compose with each retry mode — lives in
 <a href="../task/configuration/">Tasks → Configuration &amp; Retries</a>.</p>
 <hr class="section-divider">
@@ -158,25 +158,96 @@ fields under the <code>cano::observer</code> target. See <a href="../observers/#
 Lifecycle Events</a> for the full hook reference.
 </p>
 
-<h3 id="workflow-total-timeout-vs"><a href="#workflow-total-timeout-vs" class="anchor-link" aria-hidden="true">#</a>The three timeout knobs</h3>
+<h3 id="workflow-total-timeout-vs"><a href="#workflow-total-timeout-vs" class="anchor-link" aria-hidden="true">#</a>The two timeout knobs</h3>
 <table class="styled-table">
 <thead><tr><th>API</th><th>Scope</th><th>On expiry</th><th>Compensation drain</th></tr></thead>
 <tbody>
 <tr><td><code>TaskConfig::with_attempt_timeout</code></td><td>One attempt of one task</td><td><code>CanoError::Timeout</code> — retried like any other failure; final timeout becomes <code>RetryExhausted</code></td><td>Triggered like any other terminal task error (unbounded)</td></tr>
 <tr><td><code>Workflow::with_total_timeout</code></td><td>The entire <code>orchestrate</code> / <code>resume_from</code> call</td><td>In-flight task aborted; <code>CanoError::WorkflowTimeout</code> (wrapped in <code>WithStateContext</code>)</td><td>Bounded by <code>with_compensation_timeout</code> or the default <code>min(remaining/2, 30s)</code></td></tr>
-<tr><td><code>Workflow::with_timeout</code> <em>(legacy)</em></td><td>The whole orchestration future</td><td><code>CanoError::Workflow("Workflow timeout exceeded")</code> — no graceful abort</td><td><strong>None</strong> — the future is dropped abruptly</td></tr>
 </tbody>
 </table>
 <p>
-Pick <code>with_total_timeout</code> for any new code that needs a workflow-wide budget. The legacy
-<code>with_timeout</code> remains for backward compatibility and composes naturally — if both are
-set, whichever fires first wins.
+Reach for <code>with_attempt_timeout</code> to bound a single call and <code>with_total_timeout</code>
+for a workflow-wide budget; they compose. To stop a run on an external signal rather than a deadline,
+use <a href="#cancellation">cooperative cancellation</a>.
 </p>
 
 <div class="callout callout-tip">
 <p>Runnable example: <code>cargo run --example workflow_total_timeout</code> — a 3-step saga where the
 shipping step overruns the budget; the timeout fires, the prior steps' compensations run in reverse,
 and the final error is the wrapped <code>WorkflowTimeout</code>.</p>
+</div>
+<hr class="section-divider">
+
+<h2 id="cancellation"><a href="#cancellation" class="anchor-link" aria-hidden="true">#</a>Cooperative Cancellation</h2>
+<p>
+Where a total timeout aborts a run on a <em>deadline</em>, cancellation aborts it on a <em>signal</em>
+you control — a shutdown handler, a user "stop" button, a parent task giving up.
+<code>Workflow::orchestrate_with_cancel(start, token)</code> (and
+<code>resume_from_with_cancel(id, token)</code>) take a <code>CancellationToken</code>; firing the
+paired <code>CancellationHandle</code> aborts the in-flight task at its next await point, drains the
+<a href="../saga/">saga compensation stack</a>, and returns <code>CanoError::Cancelled</code> wrapped
+in <code>CanoError::WithStateContext</code> (or <code>CanoError::CompensationFailed</code> if a
+<code>compensate</code> also fails).
+</p>
+
+```rust
+use cano::CancellationToken;
+
+let (handle, token) = CancellationToken::new();
+
+// Cancel from anywhere — a signal handler, a sibling task, a timer:
+let canceller = tokio::spawn(async move {
+    shutdown_signal().await;
+    handle.cancel(); // idempotent; the handle is Clone, so many owners can trigger it
+});
+
+let result = workflow.orchestrate_with_cancel(Step::Reserve, token).await;
+assert!(matches!(result, Err(e) if e.category() == "cancelled"));
+```
+
+<p>
+<code>orchestrate(start)</code> is exactly <code>orchestrate_with_cancel(start, &lt;never-cancelled
+token&gt;)</code>, so the no-token path is unchanged and zero-cost — the cancellation
+<code>select!</code> is skipped entirely when the token can never fire.
+</p>
+
+<div class="callout callout-warning">
+<p><strong>Cancellation is cooperative.</strong> The engine drops the running task's future at its next
+<code>.await</code>. A task spinning in a tight synchronous/CPU loop with no <code>.await</code> is not
+interrupted until it next yields — design long-running task bodies to <code>.await</code> periodically
+if they must be cancellable.</p>
+</div>
+
+<h3 id="cancellation-saga"><a href="#cancellation-saga" class="anchor-link" aria-hidden="true">#</a>Saga safety</h3>
+<p>
+A <a href="../saga/">compensatable task</a> is <strong>never</strong> interrupted mid-run. Aborting it
+after an in-task side effect committed but before its <code>Output</code> reached the compensation
+stack would orphan that side effect with nothing to roll back. So a <code>CompensatableTask</code>
+always runs to completion (recording its rollback entry); the cancellation is honoured at the
+<em>next</em> state boundary, which then drains the now-complete stack. The compensation drain itself
+is uncancellable — a cancel that lands during rollback does not abort the remaining compensators.
+</p>
+
+<h3 id="cancellation-observer"><a href="#cancellation-observer" class="anchor-link" aria-hidden="true">#</a>Observer hook &amp; precedence</h3>
+<p>
+A <code>WorkflowObserver</code> receives one <code>on_cancelled(state)</code> call when the cancel is
+observed, before the drain runs; <code>TracingObserver</code> re-emits it as a <code>WARN</code> event
+and <code>MetricsObserver</code> increments <code>cano_observed_cancellations_total</code>. Against
+<code>with_total_timeout</code>, cancellation wins: it is checked deterministically at each state
+boundary and biased ahead of the per-state budget mid-task.
+</p>
+
+<div class="callout callout-tip">
+<p>The scheduler builds on this: <a href="../scheduler/#cancellation"><code>RunningScheduler::cancel_flow(id)</code></a>
+cancels an in-flight scheduled run, and graceful <code>stop()</code> cancels every in-flight flow
+(rolling back their sagas) instead of waiting for them to finish.</p>
+</div>
+
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example workflow_cancellation</code> — a 3-step saga where a
+sibling task cancels the shipping step mid-flight; the prior steps' compensations run in reverse and
+the final error is the wrapped <code>Cancelled</code>.</p>
 </div>
 <hr class="section-divider">
 

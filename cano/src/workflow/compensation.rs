@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use futures_util::FutureExt;
 
+use crate::cancel::CancellationToken;
 use crate::error::CanoError;
 use crate::recovery::RowKind;
 use crate::saga::{CompensationEntry, ErasedCompensatable};
@@ -515,6 +516,24 @@ where
     ///   this workflow (e.g. resuming against a different workflow definition).
     /// - Any [`CanoError`] propagated from a task during the resumed execution.
     pub async fn resume_from(&self, workflow_id: impl Into<Arc<str>>) -> Result<TState, CanoError> {
+        self.resume_from_with_cancel(workflow_id, CancellationToken::never())
+            .await
+    }
+
+    /// Like [`resume_from`](Self::resume_from), but cooperatively cancellable via `token`.
+    ///
+    /// Behaves identically to `resume_from` except that firing the paired
+    /// [`CancellationHandle`](crate::cancel::CancellationHandle) aborts the resumed run at the next
+    /// await point and drains the rehydrated compensation stack, returning
+    /// [`CanoError::Cancelled`]. See [`orchestrate_with_cancel`](Self::orchestrate_with_cancel) and
+    /// the [`cancel`](crate::cancel) module for the full cancellation semantics.
+    ///
+    /// `resume_from(id)` is exactly `resume_from_with_cancel(id, <never-cancelled token>)`.
+    pub async fn resume_from_with_cancel(
+        &self,
+        workflow_id: impl Into<Arc<str>>,
+        token: CancellationToken,
+    ) -> Result<TState, CanoError> {
         let workflow_id: Arc<str> = workflow_id.into();
 
         #[cfg(feature = "tracing")]
@@ -553,7 +572,8 @@ where
         // run teardown — even the rehydration `?`/`return Err` early-returns
         // between here and `execute_workflow_from`. Wrap the body so a single
         // `teardown_range` call at the bottom handles every path uniformly.
-        let result: Result<TState, CanoError> = self.execute_resume_inner(workflow_id, store).await;
+        let result: Result<TState, CanoError> =
+            self.execute_resume_inner(workflow_id, store, token).await;
         self.resources
             .teardown_range(0..self.resources.lifecycle_len())
             .await;
@@ -570,6 +590,7 @@ where
         &self,
         workflow_id: Arc<str>,
         store: Arc<dyn crate::recovery::CheckpointStore>,
+        token: CancellationToken,
     ) -> Result<TState, CanoError> {
         let mut rows = store.load_run(&workflow_id).await.map_err(|e| {
             CanoError::checkpoint_store(format!("load checkpoint run {workflow_id:?}: {e}"))
@@ -662,15 +683,15 @@ where
             resume_cursors,
             prior_transitions,
             total_budget,
+            token,
         );
         // Teardown happens in the outer `resume_from` after this function
         // returns, so this branch only produces the error value and lets
-        // the caller clean up. `await_with_outer_timeout` owns the
-        // workflow_run metric emission for both timeout and
-        // completed/failed outcomes — see its docstring for the
-        // precedence rules between `with_timeout` and `with_total_timeout`.
-        self.await_with_outer_timeout(exec, total_budget, started)
-            .await
+        // the caller clean up. Emit the workflow-run outcome metric here, the
+        // same way `run_workflow` does for the forward direction.
+        let result = exec.await;
+        Self::record_run_outcome(&result, started);
+        result
     }
 }
 
@@ -4348,62 +4369,11 @@ mod rehydrated_run_tests {
 mod metrics_tests {
     use crate::metrics::test_support::*;
     use crate::prelude::*;
-    use crate::recovery::CheckpointRow;
     use crate::task::TaskConfig;
     use crate::workflow::test_support::{CompLog, CompTask, MemCheckpoints, SimpleTask, TestState};
     use std::sync::{Arc, Mutex};
 
     // ---- Recovery: checkpoint append + clear counters ----
-
-    #[test]
-    fn legacy_timeout_on_resume_only_increments_timeout_counter() {
-        // Regression for F8: previously `execute_resume_inner`'s legacy
-        // `with_timeout` arm recorded `outcome="timeout"` and then fell
-        // through to the unconditional `workflow_run("timeout"|"failed")`
-        // emission at the bottom of the function — double-counting the same
-        // invocation. `run_workflow` in the orchestrate direction already
-        // used `return Err(...)` to avoid this; the resume path now matches.
-        struct Slow;
-        #[crate::task]
-        impl Task<TestState> for Slow {
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                Ok(TaskResult::Single(TestState::Complete))
-            }
-        }
-
-        let (res, rows) = run_with_recorder(|| async {
-            let store = Arc::new(MemCheckpoints::default());
-            // Pre-populate so resume_from has something to rehydrate.
-            store
-                .append(
-                    "wf-legacy-timeout",
-                    CheckpointRow::new(0, "Start", "S").with_workflow_version(0),
-                )
-                .await
-                .unwrap();
-            let workflow = Workflow::bare()
-                .with_checkpoint_store(store.clone())
-                .with_timeout(std::time::Duration::from_millis(20))
-                .register(TestState::Start, Slow)
-                .add_exit_state(TestState::Complete);
-            workflow.resume_from("wf-legacy-timeout").await
-        });
-        assert!(res.is_err());
-        assert_eq!(
-            counter(&rows, "cano_workflow_runs_total", &[("outcome", "timeout")]),
-            1,
-            "exactly one `outcome=timeout` row should be recorded"
-        );
-        assert_eq!(
-            counter_opt(&rows, "cano_workflow_runs_total", &[("outcome", "failed")]).unwrap_or(0),
-            0,
-            "resume timeout must not also be counted as `outcome=failed`"
-        );
-    }
 
     #[test]
     fn checkpoint_append_and_clear_counters_on_successful_run() {

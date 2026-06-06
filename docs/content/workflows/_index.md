@@ -319,7 +319,7 @@ fn build_workflow(store: MemoryStore) -> Workflow<TextPipelineState> {
         .register(TextPipelineState::Parse, ParseTask)
         .register(TextPipelineState::Transform, TransformTask)
         .add_exit_state(TextPipelineState::Done)
-        .with_timeout(Duration::from_secs(5))
+        .with_total_timeout(Duration::from_secs(5))
 }
 
 // Inside an HTTP handler:
@@ -333,7 +333,7 @@ let word_count: usize = store.get("word_count")?;
 <div class="callout callout-tip">
 <span class="callout-label">Tip</span>
 <p>
-Use <code>.with_timeout()</code> on the workflow to keep a hung request from blocking indefinitely. For
+Use <code>.with_total_timeout()</code> on the workflow to keep a hung request from blocking indefinitely. For
 read-heavy workloads with shared reference data, pre-populate one store, share it via <code>Arc</code>,
 and use per-request keys to avoid collisions. The full Axum version is in
 <code>cargo run --example workflow_on_request</code>.

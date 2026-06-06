@@ -120,6 +120,11 @@ pub enum RecordedEvent {
         /// The sequence of the last persisted row.
         sequence: u64,
     },
+    /// A run was cancelled via a [`CancellationToken`](crate::cancel::CancellationToken).
+    Cancelled {
+        /// The `Debug` rendering of the state cancellation was observed at.
+        state: String,
+    },
 }
 
 /// A [`WorkflowObserver`] that records every event it
@@ -289,6 +294,11 @@ impl WorkflowObserver for RecordingObserver {
         self.events.lock().push(RecordedEvent::Resume {
             workflow_id: workflow_id.into(),
             sequence,
+        });
+    }
+    fn on_cancelled(&self, state: &str) {
+        self.events.lock().push(RecordedEvent::Cancelled {
+            state: state.into(),
         });
     }
 }

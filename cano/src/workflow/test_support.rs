@@ -265,6 +265,9 @@ pub(crate) enum TestEvent {
         elapsed: Duration,
         limit: Duration,
     },
+    Cancelled {
+        state: String,
+    },
     CheckpointClearFailed {
         workflow_id: String,
         error: String,
@@ -334,6 +337,11 @@ impl WorkflowObserver for EventLog {
     fn on_workflow_timeout(&self, elapsed: Duration, limit: Duration) {
         self.0.record(TestEvent::WorkflowTimeout { elapsed, limit });
     }
+    fn on_cancelled(&self, state: &str) {
+        self.0.record(TestEvent::Cancelled {
+            state: state.to_string(),
+        });
+    }
     fn on_checkpoint_clear_failed(&self, workflow_id: &str, error: &CanoError) {
         self.0.record(TestEvent::CheckpointClearFailed {
             workflow_id: workflow_id.to_string(),
@@ -377,6 +385,7 @@ impl Recorder<TestEvent> {
                 TestEvent::WorkflowTimeout { limit, .. } => {
                     format!("workflow_timeout:{}ms", limit.as_millis())
                 }
+                TestEvent::Cancelled { state } => format!("cancelled:{state}"),
                 TestEvent::CheckpointClearFailed { workflow_id, .. } => {
                     format!("checkpoint_clear_failed:{workflow_id}")
                 }

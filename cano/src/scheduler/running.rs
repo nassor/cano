@@ -210,6 +210,44 @@ where
         })?
     }
 
+    /// Request cooperative cancellation of a flow's in-flight run.
+    ///
+    /// Fires the run's [`CancellationToken`](crate::cancel::CancellationToken):
+    /// the in-flight workflow aborts at its next await point, drains its saga
+    /// compensation stack, and returns [`CanoError::Cancelled`]. The flow then
+    /// returns to [`Status::Idle`](crate::scheduler::Status::Idle) — a deliberate
+    /// cancel is **not** counted as a failure against the [`BackoffPolicy`](crate::scheduler::BackoffPolicy),
+    /// so the next scheduled run fires normally.
+    ///
+    /// A **no-op** (returns `Ok`) when the flow exists but isn't currently
+    /// running. Graceful [`stop`](Self::stop) cancels every in-flight flow this
+    /// same way before draining.
+    ///
+    /// # Errors
+    ///
+    /// - [`CanoError::Workflow`] — the scheduler is not running, `id` is unknown,
+    ///   or the command queue is full.
+    pub async fn cancel_flow(&self, id: &str) -> CanoResult<()> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.command_tx
+            .try_send(SchedulerCommand::Cancel {
+                id: Arc::from(id),
+                response: response_tx,
+            })
+            .map_err(|e| match e {
+                mpsc::error::TrySendError::Closed(_) => CanoError::Workflow(
+                    "Scheduler not running — call start() before cancel_flow()".to_string(),
+                ),
+                mpsc::error::TrySendError::Full(_) => {
+                    CanoError::Workflow("Scheduler command queue full".to_string())
+                }
+            })?;
+
+        response_rx.await.map_err(|_| {
+            CanoError::Workflow("Scheduler stopped before cancel was processed".to_string())
+        })?
+    }
+
     /// Get a snapshot of the workflow status.
     pub async fn status(&self, id: &str) -> Option<FlowInfo> {
         let info = self.flows.get(id)?;
@@ -716,74 +754,6 @@ mod tests {
                 err.to_string().contains("Scheduler not running"),
                 "expected not-running error after shutdown, got: {err}"
             );
-        })
-        .await;
-
-        assert!(result.is_ok(), "Test timed out");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn test_trigger_during_graceful_shutdown_window_reports_not_running() {
-        // While the driver task is parked waiting for a slow in-flight workflow
-        // to finish, a concurrent trigger() must surface "not running" instead
-        // of enqueueing into the closed command channel.
-        #[derive(Clone)]
-        struct SlowTask;
-
-        #[task]
-        impl Task<TestState> for SlowTask {
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
-                // Hold Status::Running long enough to span the shutdown window.
-                sleep(Duration::from_millis(400)).await;
-                Ok(TaskResult::Single(TestState::Complete))
-            }
-        }
-
-        let timeout = Duration::from_secs(5);
-        let result = tokio::time::timeout(timeout, async {
-            let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
-            let slow_workflow = Workflow::bare()
-                .register(TestState::Start, SlowTask)
-                .add_exit_state(TestState::Complete)
-                .add_exit_state(TestState::Error);
-            scheduler
-                .manual("slow_task", slow_workflow, TestState::Start)
-                .unwrap();
-
-            let running = scheduler.start().await.unwrap();
-            let probe = running.clone();
-
-            // Kick off the slow workflow and wait until it is actually Running.
-            probe.trigger("slow_task").await.unwrap();
-            sleep(Duration::from_millis(50)).await;
-            assert!(
-                probe.has_running_flows().await,
-                "slow workflow should be Running before stop()"
-            );
-
-            // Spawn stop() so we can probe the shutdown window concurrently.
-            let stop_handle = tokio::spawn(async move { running.stop().await });
-
-            // Let the driver dequeue Stop and close the command channel. The
-            // slow workflow is still running (~400ms total), so the driver is
-            // parked inside has_running_flows() — the shutdown window we want
-            // to probe.
-            sleep(Duration::from_millis(50)).await;
-            assert!(
-                !stop_handle.is_finished(),
-                "stop() must still be parked while the slow workflow is in flight"
-            );
-
-            // During the window, trigger() must report not-running.
-            let err = probe.trigger("slow_task").await.unwrap_err();
-            assert!(
-                err.to_string().contains("Scheduler not running"),
-                "expected not-running during shutdown window, got: {err}"
-            );
-
-            // stop() eventually returns Ok (teardown finishes).
-            let stop_result = stop_handle.await.expect("stop task should not panic");
-            stop_result.expect("stop should succeed once slow workflow finishes");
         })
         .await;
 
@@ -1534,97 +1504,229 @@ mod tests {
         assert!(result.is_ok(), "Test timed out");
     }
 
+    // A long-running, cancellable flow task that records when it starts and (if
+    // never cancelled) when it completes — used to verify graceful shutdown
+    // cooperatively cancels in-flight flows.
+    #[derive(Clone)]
+    struct CancellableSlow {
+        started: std::sync::Arc<AtomicU32>,
+        completed: std::sync::Arc<AtomicU32>,
+    }
+    #[task]
+    impl Task<TestState> for CancellableSlow {
+        fn config(&self) -> crate::task::TaskConfig {
+            crate::task::TaskConfig::minimal()
+        }
+        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            self.started.fetch_add(1, Ordering::SeqCst);
+            sleep(Duration::from_secs(30)).await;
+            self.completed.fetch_add(1, Ordering::SeqCst);
+            Ok(TaskResult::Single(TestState::Complete))
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
-    async fn drop_aborts_wedged_handle_currently_being_awaited_by_driver() {
-        // Regression for F9: when the driver pops a JoinHandle from
-        // `scheduler_tasks` and awaits it, the popped handle no longer lives
-        // in the Vec. A `Drop` firing while the await is in flight previously
-        // aborted `driver_handle` (cancelling the driver future, which then
-        // dropped the popped JoinHandle — detaching the underlying task
-        // instead of aborting it). The wedged task leaked indefinitely.
-        //
-        // Now `RunningScheduler::in_flight_drain` holds the popped handle's
-        // `AbortHandle` for the duration of the await, so Drop can reach the
-        // wedged task. This test triggers a workflow whose task sleeps for
-        // far longer than the test's tolerance, stops the scheduler so the
-        // driver enters its drain phase, drops the last clone, and asserts
-        // that the workflow's completion counter never advances.
-        use std::sync::atomic::{AtomicUsize, Ordering};
-
-        #[derive(Clone)]
-        struct SlowTask {
-            completions: Arc<AtomicUsize>,
-        }
-        #[task]
-        impl Task<TestState> for SlowTask {
-            fn config(&self) -> crate::task::TaskConfig {
-                crate::task::TaskConfig::minimal()
-            }
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
-                // Sleeps far longer than the test tolerance. If the abort
-                // doesn't reach this task, the counter eventually ticks up.
-                sleep(Duration::from_secs(30)).await;
-                self.completions.fetch_add(1, Ordering::SeqCst);
-                Ok(TaskResult::Single(TestState::Complete))
-            }
-        }
-
-        let timeout = Duration::from_secs(8);
-        let result = tokio::time::timeout(timeout, async {
-            let completions = Arc::new(AtomicUsize::new(0));
+    async fn graceful_stop_cancels_in_flight_flow() {
+        // Graceful shutdown cooperatively cancels a running flow instead of
+        // blocking until it finishes: `stop()` returns promptly (not after the
+        // task's 30s sleep) and the task never reaches completion.
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let started = std::sync::Arc::new(AtomicU32::new(0));
+            let completed = std::sync::Arc::new(AtomicU32::new(0));
             let mut scheduler: Scheduler<TestState> = Scheduler::new();
-            scheduler
-                .manual(
-                    "wedged",
-                    Workflow::bare()
-                        .register(
-                            TestState::Start,
-                            SlowTask {
-                                completions: Arc::clone(&completions),
-                            },
-                        )
-                        .add_exit_state(TestState::Complete)
-                        .add_exit_state(TestState::Error),
+            let wf = Workflow::bare()
+                .register(
                     TestState::Start,
+                    CancellableSlow {
+                        started: started.clone(),
+                        completed: completed.clone(),
+                    },
                 )
-                .unwrap();
+                .add_exit_state(TestState::Complete)
+                .add_exit_state(TestState::Error);
+            scheduler.manual("slow", wf, TestState::Start).unwrap();
 
             let running = scheduler.start().await.unwrap();
-            running.trigger("wedged").await.unwrap();
-            // Give the spawn time to land in scheduler_tasks.
-            sleep(Duration::from_millis(100)).await;
+            running.trigger("slow").await.unwrap();
+            // Wait until the flow is actually in flight.
+            while started.load(Ordering::SeqCst) == 0 {
+                sleep(Duration::from_millis(5)).await;
+            }
+            assert!(running.has_running_flows().await);
 
-            // Spawn stop() so the driver advances into its drain loop and
-            // pops the wedged Trigger handle. stop() will not return because
-            // the awaited handle is sleeping for 30s.
-            let running_for_stop = running.clone();
-            let stop_handle = tokio::spawn(async move { running_for_stop.stop().await });
-
-            // Let the driver actually enter the drain phase and pop the handle.
-            sleep(Duration::from_millis(200)).await;
+            let t0 = std::time::Instant::now();
+            running.stop().await.expect("graceful stop should succeed");
             assert!(
-                !stop_handle.is_finished(),
-                "stop() should still be parked while the wedged trigger handle is in flight"
+                t0.elapsed() < Duration::from_secs(5),
+                "stop() must cancel the in-flight flow, not wait for its 30s sleep"
             );
-
-            // Drop every clone — the in_flight_drain slot's AbortHandle must
-            // be used to abort the popped, in-flight handle.
-            drop(stop_handle.abort_handle());
-            stop_handle.abort();
-            drop(running);
-
-            // Wait long enough that, if abort had failed, the slow task
-            // could have advanced. With the fix, the task is aborted before
-            // it can increment completions.
-            sleep(Duration::from_secs(2)).await;
             assert_eq!(
-                completions.load(Ordering::SeqCst),
+                completed.load(Ordering::SeqCst),
                 0,
-                "wedged spawn must have been aborted by Drop's in_flight_drain abort path"
+                "the in-flight flow must be cancelled, not run to completion"
             );
         })
         .await;
+        assert!(result.is_ok(), "Test timed out");
+    }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn trigger_after_graceful_stop_reports_not_running() {
+        // Once graceful shutdown has run, the command channel is closed, so a
+        // subsequent trigger() reports "not running" rather than enqueueing.
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let started = std::sync::Arc::new(AtomicU32::new(0));
+            let completed = std::sync::Arc::new(AtomicU32::new(0));
+            let mut scheduler: Scheduler<TestState> = Scheduler::new();
+            let wf = Workflow::bare()
+                .register(
+                    TestState::Start,
+                    CancellableSlow {
+                        started: started.clone(),
+                        completed: completed.clone(),
+                    },
+                )
+                .add_exit_state(TestState::Complete)
+                .add_exit_state(TestState::Error);
+            scheduler.manual("slow", wf, TestState::Start).unwrap();
+
+            let running = scheduler.start().await.unwrap();
+            running.trigger("slow").await.unwrap();
+            while started.load(Ordering::SeqCst) == 0 {
+                sleep(Duration::from_millis(5)).await;
+            }
+            running.stop().await.expect("graceful stop should succeed");
+
+            let err = running.trigger("slow").await.unwrap_err();
+            assert!(
+                err.to_string().contains("Scheduler not running"),
+                "trigger after shutdown must report not-running, got: {err}"
+            );
+        })
+        .await;
+        assert!(result.is_ok(), "Test timed out");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancel_flow_cancels_in_flight_run_and_returns_to_idle() {
+        // `cancel_flow` cooperatively cancels the in-flight run; the flow returns
+        // to Idle (a deliberate cancel is NOT a failure, so the streak stays 0 and
+        // the flow does not trip) and the task never completes.
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let started = std::sync::Arc::new(AtomicU32::new(0));
+            let completed = std::sync::Arc::new(AtomicU32::new(0));
+            let mut scheduler: Scheduler<TestState> = Scheduler::new();
+            let wf = Workflow::bare()
+                .register(
+                    TestState::Start,
+                    CancellableSlow {
+                        started: started.clone(),
+                        completed: completed.clone(),
+                    },
+                )
+                .add_exit_state(TestState::Complete)
+                .add_exit_state(TestState::Error);
+            scheduler.manual("slow", wf, TestState::Start).unwrap();
+
+            let running = scheduler.start().await.unwrap();
+            running.trigger("slow").await.unwrap();
+            while started.load(Ordering::SeqCst) == 0 {
+                sleep(Duration::from_millis(5)).await;
+            }
+
+            running
+                .cancel_flow("slow")
+                .await
+                .expect("cancel_flow should succeed");
+
+            // Wait for the cancelled run's apply_outcome to settle the status.
+            loop {
+                let st = running.status("slow").await.unwrap().status;
+                if st != crate::scheduler::Status::Running {
+                    break;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+            let info = running.status("slow").await.unwrap();
+            assert_eq!(
+                info.status,
+                crate::scheduler::Status::Idle,
+                "a cancelled run returns to Idle"
+            );
+            assert_eq!(info.failure_streak, 0, "cancel must not count as a failure");
+            assert_eq!(
+                completed.load(Ordering::SeqCst),
+                0,
+                "task was cancelled, not completed"
+            );
+            running.stop().await.unwrap();
+        })
+        .await;
+        assert!(result.is_ok(), "Test timed out");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancel_flow_on_idle_flow_is_noop() {
+        // Cancelling a registered flow that isn't running is an idempotent no-op.
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let started = std::sync::Arc::new(AtomicU32::new(0));
+            let completed = std::sync::Arc::new(AtomicU32::new(0));
+            let mut scheduler: Scheduler<TestState> = Scheduler::new();
+            let wf = Workflow::bare()
+                .register(
+                    TestState::Start,
+                    CancellableSlow {
+                        started: started.clone(),
+                        completed: completed.clone(),
+                    },
+                )
+                .add_exit_state(TestState::Complete)
+                .add_exit_state(TestState::Error);
+            scheduler.manual("idle", wf, TestState::Start).unwrap();
+
+            let running = scheduler.start().await.unwrap();
+            // Never triggered → no in-flight run → cancel is a no-op Ok.
+            running
+                .cancel_flow("idle")
+                .await
+                .expect("cancel on idle flow is a no-op");
+            assert_eq!(
+                running.status("idle").await.unwrap().status,
+                crate::scheduler::Status::Idle
+            );
+            running.stop().await.unwrap();
+        })
+        .await;
+        assert!(result.is_ok(), "Test timed out");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancel_flow_unknown_flow_errors() {
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            let started = std::sync::Arc::new(AtomicU32::new(0));
+            let completed = std::sync::Arc::new(AtomicU32::new(0));
+            let mut scheduler: Scheduler<TestState> = Scheduler::new();
+            let wf = Workflow::bare()
+                .register(
+                    TestState::Start,
+                    CancellableSlow {
+                        started: started.clone(),
+                        completed: completed.clone(),
+                    },
+                )
+                .add_exit_state(TestState::Complete)
+                .add_exit_state(TestState::Error);
+            scheduler.manual("known", wf, TestState::Start).unwrap();
+
+            let running = scheduler.start().await.unwrap();
+            let err = running.cancel_flow("nope").await.unwrap_err();
+            assert!(
+                err.to_string().contains("No workflow registered"),
+                "unknown flow must error, got: {err}"
+            );
+            running.stop().await.unwrap();
+        })
+        .await;
         assert!(result.is_ok(), "Test timed out");
     }
 

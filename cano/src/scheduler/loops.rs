@@ -13,6 +13,7 @@ use tokio::sync::{Notify, RwLock, mpsc, watch};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Duration, sleep};
 
+use crate::cancel::{CancellationHandle, CancellationToken};
 use crate::error::{CanoError, CanoResult};
 use crate::workflow::Workflow;
 
@@ -73,11 +74,13 @@ async fn sleep_unless_stopped(
 /// Per-flow `Every`-schedule loop body. Lives outside `start` so the driver
 /// task and the loops are decoupled — the driver owns the workflows
 /// HashMap, the loops just see the data they need.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn spawn_every_loop<TState, TResourceKey>(
     workflow: Arc<Workflow<TState, TResourceKey>>,
     initial_state: TState,
     info: Arc<RwLock<FlowInfo>>,
     policy: Arc<BackoffPolicy>,
+    cancel: Arc<RwLock<Option<CancellationHandle>>>,
     running: Arc<RwLock<bool>>,
     stop_notify: Arc<Notify>,
     interval: Duration,
@@ -98,6 +101,7 @@ pub(super) async fn spawn_every_loop<TState, TResourceKey>(
             initial_state.clone(),
             Arc::clone(&info),
             &policy,
+            Arc::clone(&cancel),
         )
         .await;
     }
@@ -134,6 +138,7 @@ pub(super) async fn spawn_every_loop<TState, TResourceKey>(
             initial_state.clone(),
             Arc::clone(&info),
             &policy,
+            Arc::clone(&cancel),
         )
         .await;
     }
@@ -141,11 +146,13 @@ pub(super) async fn spawn_every_loop<TState, TResourceKey>(
 
 /// Per-flow `Cron`-schedule loop body. See [`spawn_every_loop`] for the
 /// rationale on splitting the loop bodies out of `start`.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn spawn_cron_loop<TState, TResourceKey>(
     workflow: Arc<Workflow<TState, TResourceKey>>,
     initial_state: TState,
     info: Arc<RwLock<FlowInfo>>,
     policy: Arc<BackoffPolicy>,
+    cancel: Arc<RwLock<Option<CancellationHandle>>>,
     running: Arc<RwLock<bool>>,
     stop_notify: Arc<Notify>,
     schedule: Box<CronSchedule>,
@@ -208,6 +215,7 @@ pub(super) async fn spawn_cron_loop<TState, TResourceKey>(
             initial_state.clone(),
             Arc::clone(&info),
             &policy,
+            Arc::clone(&cancel),
         )
         .await;
     }
@@ -258,8 +266,16 @@ pub(super) async fn driver_task<TState, TResourceKey>(
                             let initial_state = flow.initial_state.clone();
                             let info = Arc::clone(&flow.info);
                             let policy = Arc::clone(&flow.policy);
+                            let cancel = Arc::clone(&flow.cancel);
                             let handle = tokio::spawn(async move {
-                                execute_reserved_flow(workflow, initial_state, info, &policy).await;
+                                execute_reserved_flow(
+                                    workflow,
+                                    initial_state,
+                                    info,
+                                    &policy,
+                                    cancel,
+                                )
+                                .await;
                             });
                             let mut tasks = scheduler_tasks.write().await;
                             tasks.retain(|h| !h.is_finished());
@@ -301,6 +317,24 @@ pub(super) async fn driver_task<TState, TResourceKey>(
 
                 let _ = response.send(outcome);
             }
+            SchedulerCommand::Cancel { id, response } => {
+                let outcome = if let Some(flow) = workflows.get(&id) {
+                    // Fire the in-flight run's cancellation handle, if any. The
+                    // run observes `Cancelled` at its next await, drains its saga,
+                    // and `apply_outcome` returns the flow to `Idle`. A flow that
+                    // isn't currently running has no handle — an idempotent no-op.
+                    if let Some(h) = flow.cancel.read().await.as_ref() {
+                        h.cancel();
+                    }
+                    Ok(())
+                } else {
+                    Err(CanoError::Workflow(format!(
+                        "No workflow registered with id '{id}'"
+                    )))
+                };
+
+                let _ = response.send(outcome);
+            }
         }
     }
 
@@ -312,6 +346,17 @@ pub(super) async fn driver_task<TState, TResourceKey>(
     // `running == false` and exit immediately, bounding shutdown latency by
     // how long an in-flight workflow takes — not by the schedule interval.
     stop_notify.notify_waiters();
+
+    // Cooperatively cancel every in-flight run so shutdown latency is bounded by
+    // the time to the next await + the saga drain, not by how long the workflow
+    // would naturally take. Each cancelled run drains its compensation stack and
+    // returns `Cancelled` (recorded as Idle, not a failure, by `apply_outcome`).
+    // The bounded wait below still caps the total drain time.
+    for flow in workflows.values() {
+        if let Some(h) = flow.cancel.read().await.as_ref() {
+            h.cancel();
+        }
+    }
 
     // Wait for all scheduler loop tasks to finish.
     //
@@ -387,6 +432,7 @@ async fn execute_flow<TState, TResourceKey>(
     initial_state: TState,
     info: Arc<RwLock<FlowInfo>>,
     policy: &BackoffPolicy,
+    cancel: Arc<RwLock<Option<CancellationHandle>>>,
 ) where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
     TResourceKey: Hash + Eq + Send + Sync + 'static,
@@ -398,7 +444,7 @@ async fn execute_flow<TState, TResourceKey>(
         return;
     }
 
-    execute_reserved_flow(workflow, initial_state, info, policy).await;
+    execute_reserved_flow(workflow, initial_state, info, policy, cancel).await;
 }
 
 /// Result of attempting to reserve a flow for dispatch. The Tripped and
@@ -434,6 +480,7 @@ async fn execute_reserved_flow<TState, TResourceKey>(
     initial_state: TState,
     info: Arc<RwLock<FlowInfo>>,
     policy: &BackoffPolicy,
+    cancel: Arc<RwLock<Option<CancellationHandle>>>,
 ) where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
     TResourceKey: Hash + Eq + Send + Sync + 'static,
@@ -455,6 +502,13 @@ async fn execute_reserved_flow<TState, TResourceKey>(
         .total_timeout
         .map(|d| (std::time::Instant::now(), d));
 
+    // Publish a fresh cancellation handle for this run so `cancel_flow` and
+    // graceful shutdown can cooperatively stop it (and drain its saga). A fresh
+    // token per run means cancelling one run never poisons a later one. Cleared
+    // below once the run finishes, so a `cancel_flow` on an idle flow is a no-op.
+    let (handle, token) = CancellationToken::new();
+    *cancel.write().await = Some(handle);
+
     // Wrap the workflow future in `catch_unwind`. A panic inside any path
     // that bypasses the FSM's own `catch_unwind` (e.g. an observer that
     // panics, a custom checkpoint store that panics) would otherwise abort
@@ -465,10 +519,10 @@ async fn execute_reserved_flow<TState, TResourceKey>(
     // `BackoffPolicy`.
     #[cfg(feature = "tracing")]
     let workflow_fut = workflow
-        .execute_workflow(initial_state, total_budget)
+        .execute_workflow(initial_state, total_budget, token)
         .instrument(tracing::info_span!("execute_flow"));
     #[cfg(not(feature = "tracing"))]
-    let workflow_fut = workflow.execute_workflow(initial_state, total_budget);
+    let workflow_fut = workflow.execute_workflow(initial_state, total_budget, token);
 
     let result = match AssertUnwindSafe(workflow_fut).catch_unwind().await {
         Ok(inner) => inner,
@@ -481,6 +535,10 @@ async fn execute_reserved_flow<TState, TResourceKey>(
             )))
         }
     };
+
+    // The run is over: drop the handle so a later `cancel_flow` on this now-idle
+    // flow is a clean no-op rather than firing a stale token.
+    *cancel.write().await = None;
 
     #[cfg(feature = "metrics")]
     crate::metrics::scheduler_flow_run(&_flow_id, result.is_ok(), _started.elapsed());
@@ -503,6 +561,14 @@ async fn apply_outcome(
             info_guard.status = Status::Completed;
             info_guard.failure_streak = 0;
             info_guard.next_eligible = None;
+        }
+        // A deliberate cancellation (via `cancel_flow` or graceful shutdown) is
+        // not a fault: return the flow to `Idle` without touching the failure
+        // streak or backoff window, so its next scheduled run fires normally. A
+        // *dirty* cancel whose rollback itself failed surfaces as
+        // `compensation_failed`, which falls through to the backoff arm below.
+        Err(ref e) if e.category() == "cancelled" => {
+            info_guard.status = Status::Idle;
         }
         Err(e) => {
             let err_str: Arc<str> = Arc::from(e.to_string());

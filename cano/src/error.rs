@@ -205,6 +205,17 @@ pub enum CanoError {
         limit: std::time::Duration,
     },
 
+    /// A run was cancelled via a [`CancellationToken`](crate::cancel::CancellationToken).
+    ///
+    /// Emitted by [`orchestrate_with_cancel`](crate::workflow::Workflow::orchestrate_with_cancel)
+    /// and [`resume_from_with_cancel`](crate::workflow::Workflow::resume_from_with_cancel) when the
+    /// paired [`CancellationHandle`](crate::cancel::CancellationHandle) fires. The in-flight
+    /// cancellable task is dropped at its next await point and the compensation stack is drained
+    /// before this error surfaces. Like every task error from the FSM it is wrapped in
+    /// [`CanoError::WithStateContext`] (clean rollback); a dirty rollback yields
+    /// [`CanoError::CompensationFailed`] whose `errors[0]` carries the wrapped `Cancelled`.
+    Cancelled,
+
     /// A call was rejected because the circuit breaker is open.
     ///
     /// Emitted by [`crate::circuit::CircuitBreaker::try_acquire`] (and surfaced through the
@@ -382,6 +393,11 @@ impl CanoError {
         CanoError::WorkflowTimeout { elapsed, limit }
     }
 
+    /// Create a new cancellation error.
+    pub fn cancelled() -> Self {
+        CanoError::Cancelled
+    }
+
     /// Create a new circuit-open error
     pub fn circuit_open<S: Into<String>>(msg: S) -> Self {
         CanoError::CircuitOpen(msg.into())
@@ -510,6 +526,7 @@ impl CanoError {
             CanoError::RetryExhausted { source, .. } => source.message(),
             CanoError::Timeout(msg) => msg,
             CanoError::WorkflowTimeout { .. } => "workflow total timeout exceeded",
+            CanoError::Cancelled => "workflow cancelled",
             CanoError::CircuitOpen(msg) => msg,
             CanoError::RateLimited { .. } => "rate limited",
             CanoError::CheckpointStore(msg) => msg,
@@ -588,6 +605,7 @@ impl CanoError {
             CanoError::RetryExhausted { .. } => "retry_exhausted",
             CanoError::Timeout(_) => "timeout",
             CanoError::WorkflowTimeout { .. } => "workflow_timeout",
+            CanoError::Cancelled => "cancelled",
             CanoError::CircuitOpen(_) => "circuit_open",
             CanoError::RateLimited { .. } => "rate_limited",
             CanoError::CheckpointStore(_) => "checkpoint_store",
@@ -618,6 +636,7 @@ impl std::fmt::Display for CanoError {
                 f,
                 "Workflow total timeout exceeded: elapsed={elapsed:?} limit={limit:?}"
             ),
+            CanoError::Cancelled => write!(f, "Workflow cancelled"),
             CanoError::CircuitOpen(msg) => write!(f, "Circuit open: {msg}"),
             CanoError::RateLimited { tier, retry_after } => {
                 write!(
@@ -713,6 +732,7 @@ impl PartialEq for CanoError {
                     limit: l2,
                 },
             ) => e1 == e2 && l1 == l2,
+            (CanoError::Cancelled, CanoError::Cancelled) => true,
             (CanoError::CircuitOpen(a), CanoError::CircuitOpen(b)) => a == b,
             (
                 CanoError::RateLimited {
@@ -989,6 +1009,43 @@ mod tests {
         let timeout = CanoError::timeout("k");
         let workflow = CanoError::workflow("k");
         assert_ne!(timeout, workflow);
+    }
+
+    #[test]
+    fn test_cancelled_constructor_category_display_and_eq() {
+        let err = CanoError::cancelled();
+        assert_eq!(err.message(), "workflow cancelled");
+        assert_eq!(err.category(), "cancelled");
+        assert_eq!(err.outer_category(), "cancelled");
+        assert_eq!(format!("{err}"), "Workflow cancelled");
+        assert_eq!(CanoError::cancelled(), CanoError::Cancelled);
+        assert_ne!(CanoError::cancelled(), CanoError::timeout("x"));
+    }
+
+    #[test]
+    fn test_cancelled_wrapped_in_state_context() {
+        // How a cancel actually surfaces from orchestrate: wrapped with FSM context.
+        let wrapped = CanoError::with_state_context(
+            "Ship",
+            0,
+            vec!["Reserve".into(), "Ship".into()],
+            CanoError::cancelled(),
+        );
+        // `category()` unwraps `WithStateContext` so alerting still buckets on the cause.
+        assert_eq!(wrapped.category(), "cancelled");
+        assert_eq!(wrapped.outer_category(), "with_state_context");
+        assert!(matches!(wrapped.inner(), CanoError::Cancelled));
+        // A dirty rollback nests it under CompensationFailed with errors[0] = the wrapped cancel.
+        let dirty = CanoError::compensation_failed(vec![
+            wrapped,
+            CanoError::task_execution("compensator boom"),
+        ]);
+        assert_eq!(dirty.category(), "compensation_failed");
+        if let CanoError::CompensationFailed { errors } = &dirty {
+            assert_eq!(errors[0].category(), "cancelled");
+        } else {
+            panic!("expected CompensationFailed");
+        }
     }
 
     #[test]

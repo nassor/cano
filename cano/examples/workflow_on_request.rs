@@ -142,7 +142,7 @@ fn build_workflow(resources: Resources) -> Workflow<TextPipelineState> {
         .register(TextPipelineState::Parse, ParseTask)
         .register(TextPipelineState::Transform, TransformTask)
         .add_exit_state(TextPipelineState::Done)
-        .with_timeout(Duration::from_secs(5))
+        .with_total_timeout(Duration::from_secs(5))
 }
 
 // ============================================================================

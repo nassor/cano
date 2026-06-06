@@ -184,6 +184,7 @@ where
                 schedule,
                 info,
                 policy: Arc::new(BackoffPolicy::default()),
+                cancel: Arc::new(RwLock::new(None)),
             },
         );
         self.flow_order.push(id);
@@ -323,6 +324,7 @@ where
                 let initial_state = fd.initial_state.clone();
                 let info = Arc::clone(&fd.info);
                 let policy = fd.policy.clone();
+                let cancel = Arc::clone(&fd.cancel);
                 let running_clone = Arc::clone(&running);
                 let notify_clone = Arc::clone(&stop_notify);
 
@@ -334,6 +336,7 @@ where
                             initial_state,
                             info,
                             policy,
+                            cancel,
                             running_clone,
                             notify_clone,
                             interval,
@@ -347,6 +350,7 @@ where
                             initial_state,
                             info,
                             policy,
+                            cancel,
                             running_clone,
                             notify_clone,
                             cron_schedule,
