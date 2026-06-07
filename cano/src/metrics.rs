@@ -118,6 +118,9 @@ pub const CIRCUIT_OUTCOMES_TOTAL: &str = "cano_circuit_outcomes_total";
 pub const POLL_ITERATIONS_TOTAL: &str = "cano_poll_iterations_total";
 pub const BATCH_RUNS_TOTAL: &str = "cano_batch_runs_total";
 pub const BATCH_ITEMS_TOTAL: &str = "cano_batch_items_total";
+pub const STREAM_RUNS_TOTAL: &str = "cano_stream_runs_total";
+pub const STREAM_WINDOWS_TOTAL: &str = "cano_stream_windows_total";
+pub const STREAM_ITEMS_TOTAL: &str = "cano_stream_items_total";
 pub const STEP_ITERATIONS_TOTAL: &str = "cano_step_iterations_total";
 pub const CHECKPOINT_APPENDS_TOTAL: &str = "cano_checkpoint_appends_total";
 pub const CHECKPOINT_CLEARS_TOTAL: &str = "cano_checkpoint_clears_total";
@@ -265,6 +268,21 @@ pub fn describe() {
         BATCH_ITEMS_TOTAL,
         Unit::Count,
         "BatchTask items processed, by result (ok|err)"
+    );
+    describe_counter!(
+        STREAM_RUNS_TOTAL,
+        Unit::Count,
+        "StreamTask runs, by outcome (completed|failed)"
+    );
+    describe_counter!(
+        STREAM_WINDOWS_TOTAL,
+        Unit::Count,
+        "StreamTask windows flushed"
+    );
+    describe_counter!(
+        STREAM_ITEMS_TOTAL,
+        Unit::Count,
+        "StreamTask items processed, by result (ok|err)"
     );
     describe_counter!(
         STEP_ITERATIONS_TOTAL,
@@ -477,6 +495,20 @@ pub(crate) fn batch_items(ok: usize, err: usize) {
 }
 pub(crate) fn step_iteration(done: bool) {
     counter!(STEP_ITERATIONS_TOTAL, "outcome" => if done { "done" } else { "more" }).increment(1);
+}
+pub(crate) fn stream_run(ok: bool) {
+    counter!(STREAM_RUNS_TOTAL, "outcome" => if ok { "completed" } else { "failed" }).increment(1);
+}
+pub(crate) fn stream_window() {
+    counter!(STREAM_WINDOWS_TOTAL).increment(1);
+}
+pub(crate) fn stream_items(ok: usize, err: usize) {
+    if ok > 0 {
+        counter!(STREAM_ITEMS_TOTAL, "result" => "ok").increment(ok as u64);
+    }
+    if err > 0 {
+        counter!(STREAM_ITEMS_TOTAL, "result" => "err").increment(err as u64);
+    }
 }
 
 // ----- recovery / saga -----

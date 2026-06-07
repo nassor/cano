@@ -381,6 +381,7 @@ name = "cano-macros"
 version = "0.14.0"
 dependencies = [
  "cano",
+ "futures-util",
  "proc-macro2",
  "quote",
  "serde",

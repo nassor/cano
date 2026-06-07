@@ -17,6 +17,7 @@
 //! - `#[cano::task::timer]` — for `impl TimerTask` and the `TimerTask` trait
 //! - `#[cano::task::batch]` — for `impl BatchTask` and the `BatchTask` trait
 //! - `#[cano::task::stepped]` — for `impl SteppedTask` and the `SteppedTask` trait
+//! - `#[cano::task::stream]` — for `impl StreamTask` and the `StreamTask` trait
 //! - `#[cano::saga::task]` — for `impl CompensatableTask`
 //! - `#[cano::resource]` — for `impl Resource` and the `Resource` trait
 //! - `#[cano::checkpoint_store]` — for `impl CheckpointStore` and the `CheckpointStore` trait
@@ -38,6 +39,7 @@ mod poll_task_impl;
 mod resource_derive;
 mod router_task_impl;
 mod stepped_task_impl;
+mod stream_task_impl;
 mod task_impl;
 mod timer_task_impl;
 
@@ -350,6 +352,34 @@ pub fn timer_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn stepped_task(attr: TokenStream, item: TokenStream) -> TokenStream {
     stepped_task_impl::expand(attr.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Apply to the `StreamTask` trait definition, an `impl StreamTask<S [, K]> for T`
+/// block, or an inherent `impl T { ... }` block.
+///
+/// Use as `#[cano::task::stream]`. `StreamTask` is a genuine stream-processing model:
+/// consume an `impl Stream` continuously, flush per [`WindowPolicy`] window, run until
+/// the workflow's `CancellationToken` fires, and persist a resumable cursor (via
+/// [`Workflow::register_stream`]). Per-item errors are governed by [`StreamErrorPolicy`].
+///
+/// Two surface forms on impl blocks:
+///
+/// 1. **Trait-impl form:** `#[task::stream] impl StreamTask<S> for T { type Item = ..; .. }`.
+/// 2. **Inherent-impl form:** `#[task::stream(state = S [, key = K])] impl T { async fn open(..) .. }` —
+///    the macro infers `type Item` from `process_item`'s owned `item` parameter and
+///    `type Output` / `type Cursor` from the `Ok` 2-tuple of `process_item`'s return,
+///    requires `open` / `process_item` / `flush_window` / `on_close`, and emits a
+///    companion `impl Task<S [, K]> for T` whose `run` forwards to `StreamTask::run_in_memory`.
+///
+/// On a trait definition the macro just performs the async-fn-in-trait rewrite.
+///
+/// The default `config()` injected by the inherent form is [`TaskConfig::minimal()`]
+/// (no outer retry — like `PollTask`; an outer retry would re-invoke `open()`).
+#[proc_macro_attribute]
+pub fn stream_task(attr: TokenStream, item: TokenStream) -> TokenStream {
+    stream_task_impl::expand(attr.into(), item.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

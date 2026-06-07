@@ -14,7 +14,8 @@ the task decides <em>where to go next</em>. There is no loop and no condition re
 timer schedules one <code>tokio::time::sleep</code> and wakes a single time. It is one of the
 <a href="../task/">Task</a> family of processing models, alongside
 <a href="../router-task/">RouterTask</a>, <a href="../poll-task/">PollTask</a>,
-<a href="../batch-task/">BatchTask</a>, and <a href="../stepped-task/">SteppedTask</a>. A
+<a href="../batch-task/">BatchTask</a>, <a href="../stepped-task/">SteppedTask</a>, and
+<a href="../stream-task/">StreamTask</a>. A
 <code>TimerTask</code> reads typed dependencies from <a href="../resources/">Resources</a> the same
 way every other model does. New to Cano? Read <a href="../workflows/">Workflows</a> and
 <a href="../resources/">Resources</a> first.

@@ -15,7 +15,8 @@ returns either "more work, here's the new cursor" or "done, here's the next stat
 step — so a crash mid-loop resumes from where it left off, not from step zero. It is one of the
 <a href="../task/">Task</a> family of processing models, alongside
 <a href="../router-task/">RouterTask</a>, <a href="../poll-task/">PollTask</a>,
-<a href="../timer-task/">TimerTask</a>, and <a href="../batch-task/">BatchTask</a>, and it reads
+<a href="../timer-task/">TimerTask</a>, <a href="../batch-task/">BatchTask</a>, and
+<a href="../stream-task/">StreamTask</a>, and it reads
 typed dependencies from
 <a href="../resources/">Resources</a> like the rest. New to Cano? Read
 <a href="../workflows/">Workflows</a> and <a href="../resources/">Resources</a> first; for the

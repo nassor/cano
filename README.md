@@ -30,7 +30,7 @@ The engine is built on three core concepts: **Tasks** for logic, **Workflows** f
 ## Features
 
 - **Type-Safe State Machines**: Enum-driven transitions with compile-time guarantees.
-- **Multiple Processing Models**: `Task` for general-purpose work, plus `RouterTask`, `PollTask`, `TimerTask`, `BatchTask`, and `SteppedTask` for specialized shapes — mixed freely in one workflow.
+- **Multiple Processing Models**: `Task` for general-purpose work, plus `RouterTask`, `PollTask`, `TimerTask`, `BatchTask`, `SteppedTask`, and `StreamTask` for specialized shapes — mixed freely in one workflow.
 - **Resource Dependency Injection**: Typed, lifecycle-managed `Resources` dictionary with `setup`/`teardown`/`health` hooks, looked up by key and type, plus `#[derive(FromResources)]` for ergonomic wiring.
 - **Parallel Execution (Split/Join)**: Run tasks concurrently and join results with strategies like `All`, `Any`, `Quorum`, or `PartialResults`, with an optional bulkhead to cap concurrency.
 - **Robust Retry Logic**: Configurable strategies including exponential backoff with jitter and per-attempt timeouts.
