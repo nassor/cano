@@ -127,7 +127,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .register(Step::PanicTask, Panicker)
             .add_exit_state(Step::Done);
 
-        match workflow.orchestrate(Step::PanicTask).await {
+        match workflow
+            .orchestrate(Step::PanicTask, CancellationToken::disabled())
+            .await
+        {
             Ok(s) => println!("  outcome: Ok({s:?})  (unexpected)"),
             Err(e) => {
                 println!("  outcome: Err(\"{e}\")");
@@ -157,7 +160,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .register(Step::PanicTask, PanicAfterReserve)
             .add_exit_state(Step::Done);
 
-        match workflow.orchestrate(Step::Reserve).await {
+        match workflow
+            .orchestrate(Step::Reserve, CancellationToken::disabled())
+            .await
+        {
             Ok(s) => println!("  outcome: Ok({s:?})  (unexpected)"),
             Err(e) => {
                 println!("  outcome: Err(\"{e}\")");

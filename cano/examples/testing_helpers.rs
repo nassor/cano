@@ -117,7 +117,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_checkpoint_store(checkpoints.clone())
         .with_workflow_id("demo-run");
 
-    let final_state = workflow.orchestrate(Step::Start).await?;
+    let final_state = workflow
+        .orchestrate(Step::Start, CancellationToken::disabled())
+        .await?;
     assert_eq!(final_state, Step::Done);
 
     // The observer captured the whole path and the checkpoint appends along the way.
@@ -135,7 +137,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let panicky = Workflow::bare()
         .register(Step::Start, panic_on_attempt(1, Step::Done))
         .add_exit_state(Step::Done);
-    match panicky.orchestrate(Step::Start).await {
+    match panicky
+        .orchestrate(Step::Start, CancellationToken::disabled())
+        .await
+    {
         Ok(_) => unreachable!("the task panics on its first attempt"),
         Err(e) => println!("panic_on_attempt surfaced as error: {e}"),
     }
@@ -149,7 +154,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .register_with_compensation(Step::Work, Charge)
         .register(Step::Finish, Boom) // fails → drains the compensation stack in reverse
         .add_exit_state(Step::Done);
-    let _ = saga.orchestrate(Step::Start).await; // expected to fail and roll back
+    let _ = saga
+        .orchestrate(Step::Start, CancellationToken::disabled())
+        .await; // expected to fail and roll back
 
     let ran = handle.0.lock().unwrap().clone();
     // Charge ran last, so it compensates first; then Reserve.

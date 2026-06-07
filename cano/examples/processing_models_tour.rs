@@ -242,7 +242,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_checkpoint_store(checkpoint_store.clone())
         .with_workflow_id(run_id);
 
-    let result = workflow.orchestrate(Stage::Route).await?;
+    let result = workflow
+        .orchestrate(Stage::Route, CancellationToken::disabled())
+        .await?;
     assert_eq!(result, Stage::Done);
 
     println!("\ncompleted at {result:?}");

@@ -2,11 +2,12 @@
 //!
 //! [`CancellationToken`] / [`CancellationHandle`] form a clonable signal pair built on
 //! [`tokio::sync::watch`] — no extra dependency. Hand a token to
-//! [`Workflow::orchestrate_with_cancel`](crate::workflow::Workflow::orchestrate_with_cancel)
-//! (or [`resume_from_with_cancel`](crate::workflow::Workflow::resume_from_with_cancel)) and keep
+//! [`Workflow::orchestrate`](crate::workflow::Workflow::orchestrate)
+//! (or [`resume_from`](crate::workflow::Workflow::resume_from)) and keep
 //! the handle; calling [`CancellationHandle::cancel`] aborts the in-flight cancellable task at its
 //! next await point, drains the saga compensation stack, and surfaces
-//! [`CanoError::Cancelled`](crate::error::CanoError::Cancelled).
+//! [`CanoError::Cancelled`](crate::error::CanoError::Cancelled). To opt a run out of cancellation
+//! entirely, pass [`CancellationToken::disabled`].
 //!
 //! Cancellation is **cooperative**: the engine drops the running task future at its next `.await`,
 //! so a task doing uninterrupted synchronous/CPU work is not interrupted until it next yields. A
@@ -40,16 +41,16 @@
 //! // Cancel from anywhere (another task, a signal handler, …):
 //! handle.cancel();
 //!
-//! let result = workflow.orchestrate_with_cancel(Step::Start, token).await;
+//! let result = workflow.orchestrate(Step::Start, token).await;
 //! assert!(matches!(result, Err(e) if e.category() == "cancelled"));
 //! # }
 //! ```
 
 /// The observing half of a cancellation signal. Clonable and cheap to pass into a workflow.
 ///
-/// A token built via [`CancellationToken::new`] observes its paired [`CancellationHandle`]; the
-/// internal "never" token (used by [`orchestrate`](crate::workflow::Workflow::orchestrate) and
-/// [`resume_from`](crate::workflow::Workflow::resume_from)) never fires and adds no overhead.
+/// A token built via [`CancellationToken::new`] observes its paired [`CancellationHandle`]; a
+/// [`disabled`](CancellationToken::disabled) token never fires and adds no overhead, so a run
+/// passed one opts out of cancellation entirely.
 #[derive(Clone, Debug)]
 pub struct CancellationToken {
     rx: Option<tokio::sync::watch::Receiver<bool>>,
@@ -75,9 +76,13 @@ impl CancellationToken {
         )
     }
 
-    /// The internal "never cancels" token. No channel is allocated, so the no-token path the
-    /// existing entry points use stays allocation- and overhead-free.
-    pub(crate) fn never() -> Self {
+    /// A token that can never be cancelled — pass it to
+    /// [`orchestrate`](crate::workflow::Workflow::orchestrate) /
+    /// [`resume_from`](crate::workflow::Workflow::resume_from) to opt a run out of cancellation.
+    /// No channel is allocated, so this path stays allocation- and overhead-free: the FSM skips
+    /// the cancellation `select!` entirely.
+    #[must_use]
+    pub fn disabled() -> Self {
         Self { rx: None }
     }
 
@@ -182,12 +187,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn never_is_never_cancelled_and_can_cancel_false() {
-        let token = CancellationToken::never();
+    async fn disabled_is_never_cancelled_and_can_cancel_false() {
+        let token = CancellationToken::disabled();
         assert!(!token.is_cancelled());
         assert!(!token.can_cancel());
         let res = tokio::time::timeout(Duration::from_millis(50), token.cancelled()).await;
-        assert!(res.is_err(), "never token should stay pending");
+        assert!(res.is_err(), "disabled token should stay pending");
     }
 
     #[test]

@@ -86,7 +86,7 @@ async fn main() -> Result<(), CanoError> {
         .register(Step::Init, InitTask)
         .add_exit_state(Step::Done);
 
-    workflow.orchestrate(Step::Init).await?;
+    workflow.orchestrate(Step::Init, CancellationToken::disabled()).await?;
     Ok(())
 }
 

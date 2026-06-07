@@ -159,7 +159,9 @@ async fn main() -> CanoResult<()> {
 
         // Execute workflow
         println!("\nStarting workflow...\n");
-        let final_state = workflow.orchestrate(RequestState::Start).await?;
+        let final_state = workflow
+            .orchestrate(RequestState::Start, CancellationToken::disabled())
+            .await?;
 
         // Display results
         println!("\nFinal Results:");
@@ -198,7 +200,9 @@ async fn main() -> CanoResult<()> {
 
         // Execute workflow
         println!("\nStarting workflow...\n");
-        let final_state = workflow.orchestrate(RequestState::Start).await?;
+        let final_state = workflow
+            .orchestrate(RequestState::Start, CancellationToken::disabled())
+            .await?;
 
         // Display results
         println!("\nFinal Results:");
@@ -237,7 +241,9 @@ async fn main() -> CanoResult<()> {
 
         // Execute workflow
         println!("\nStarting workflow...\n");
-        let final_state = workflow.orchestrate(RequestState::Start).await?;
+        let final_state = workflow
+            .orchestrate(RequestState::Start, CancellationToken::disabled())
+            .await?;
 
         // Display results
         println!("\nFinal Results:");

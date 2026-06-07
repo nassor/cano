@@ -409,7 +409,7 @@ async fn main() {
     // 2. Run the workflow a few times directly.
     for _ in 0..3 {
         workflow()
-            .orchestrate(Step::Fetch)
+            .orchestrate(Step::Fetch, CancellationToken::disabled())
             .await
             .expect("workflow run");
     }

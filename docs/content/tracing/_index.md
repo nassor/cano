@@ -382,7 +382,7 @@ async fn main() -> Result<(), CanoError> {
 
     // 3. Run
     info!("Submitting order...");
-    workflow.orchestrate(State::Start).await?;
+    workflow.orchestrate(State::Start, CancellationToken::disabled()).await?;
 
     Ok(())
 }

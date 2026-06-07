@@ -173,7 +173,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- First run: Process crashes; the checkpoint log is kept. -------
     println!("=== run 1: Process will crash ===");
-    match workflow.orchestrate(Step::Init).await {
+    match workflow
+        .orchestrate(Step::Init, CancellationToken::disabled())
+        .await
+    {
         Ok(s) => println!("  completed at {s:?} (unexpected)"),
         Err(e) => println!("  stopped with error: {e}"),
     }
@@ -201,7 +204,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Second run: resume from last checkpoint (Process, attempt 2). ---
     println!("\n=== run 2: resume_from ===");
-    let final_state = workflow.resume_from(run_id).await?;
+    let final_state = workflow
+        .resume_from(run_id, CancellationToken::disabled())
+        .await?;
     println!("  reached {final_state:?}");
     assert_eq!(final_state, Step::Done);
 

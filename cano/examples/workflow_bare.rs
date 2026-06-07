@@ -87,7 +87,10 @@ async fn main() -> CanoResult<()> {
         .register(Stage::Sanitize, SanitizeTask)
         .add_exit_states(vec![Stage::Persist, Stage::Done]);
 
-    match workflow.orchestrate(Stage::Validate).await {
+    match workflow
+        .orchestrate(Stage::Validate, CancellationToken::disabled())
+        .await
+    {
         Ok(final_state) => println!("\nBare workflow reached: {final_state:?}\n"),
         Err(e) => {
             eprintln!("Workflow failed: {e}");
@@ -105,7 +108,10 @@ async fn main() -> CanoResult<()> {
         .register(Stage::Persist, PersistTask) // resource task
         .add_exit_states(vec![Stage::Done]);
 
-    match workflow.orchestrate(Stage::Validate).await {
+    match workflow
+        .orchestrate(Stage::Validate, CancellationToken::disabled())
+        .await
+    {
         Ok(final_state) => {
             println!("\nMixed workflow reached: {final_state:?}");
             if let Ok(v) = store.get::<i32>("sanitized_value") {

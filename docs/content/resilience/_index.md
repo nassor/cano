@@ -183,9 +183,9 @@ and the final error is the wrapped <code>WorkflowTimeout</code>.</p>
 <p>
 Where a total timeout aborts a run on a <em>deadline</em>, cancellation aborts it on a <em>signal</em>
 you control — a shutdown handler, a user "stop" button, a parent task giving up.
-<code>Workflow::orchestrate_with_cancel(start, token)</code> (and
-<code>resume_from_with_cancel(id, token)</code>) take a <code>CancellationToken</code>; firing the
-paired <code>CancellationHandle</code> aborts the in-flight task at its next await point, drains the
+<code>Workflow::orchestrate(start, token)</code> (and <code>resume_from(id, token)</code>) always take
+a <code>CancellationToken</code>; firing the paired <code>CancellationHandle</code> aborts the
+in-flight task at its next await point, drains the
 <a href="../saga/">saga compensation stack</a>, and returns <code>CanoError::Cancelled</code> wrapped
 in <code>CanoError::WithStateContext</code> (or <code>CanoError::CompensationFailed</code> if a
 <code>compensate</code> also fails).
@@ -202,14 +202,14 @@ let canceller = tokio::spawn(async move {
     handle.cancel(); // idempotent; the handle is Clone, so many owners can trigger it
 });
 
-let result = workflow.orchestrate_with_cancel(Step::Reserve, token).await;
+let result = workflow.orchestrate(Step::Reserve, token).await;
 assert!(matches!(result, Err(e) if e.category() == "cancelled"));
 ```
 
 <p>
-<code>orchestrate(start)</code> is exactly <code>orchestrate_with_cancel(start, &lt;never-cancelled
-token&gt;)</code>, so the no-token path is unchanged and zero-cost — the cancellation
-<code>select!</code> is skipped entirely when the token can never fire.
+To opt a run out of cancellation, pass <code>CancellationToken::disabled()</code> instead of a live
+token: <code>workflow.orchestrate(start, CancellationToken::disabled())</code>. A disabled token
+never fires and is zero-cost — the cancellation <code>select!</code> is skipped entirely.
 </p>
 
 <div class="callout callout-warning">

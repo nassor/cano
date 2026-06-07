@@ -240,7 +240,10 @@ async fn main() -> CanoResult<()> {
         .register(WorkflowState::GenerateReport, ReportTask)
         .add_exit_states(vec![WorkflowState::Complete]);
 
-    match workflow.orchestrate(WorkflowState::GenerateData).await {
+    match workflow
+        .orchestrate(WorkflowState::GenerateData, CancellationToken::disabled())
+        .await
+    {
         Ok(_final_state) => {
             println!("\nWorkflow completed successfully!");
 

@@ -94,7 +94,7 @@ async fn main() {
     // Path 1: Cano's own `workflow_orchestrate` span carries `workflow_id`.
     workflow()
         .with_workflow_id("demo-run-1")
-        .orchestrate(Step::Fetch)
+        .orchestrate(Step::Fetch, CancellationToken::disabled())
         .await
         .expect("workflow run");
 
@@ -103,7 +103,7 @@ async fn main() {
         let span = info_span!("api_request", request_id = "abc");
         let _enter = span.enter();
         workflow()
-            .orchestrate(Step::Fetch)
+            .orchestrate(Step::Fetch, CancellationToken::disabled())
             .await
             .expect("workflow run");
     }

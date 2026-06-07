@@ -86,7 +86,7 @@ async fn main() -> Result<(), CanoError> {
         .add_exit_state(Step::Done)
         .with_observer(counter.clone());
 
-    workflow.orchestrate(Step::Start).await?;
+    workflow.orchestrate(Step::Start, CancellationToken::disabled()).await?;
     assert_eq!(counter.0.load(Ordering::Relaxed), 1);
     Ok(())
 }
@@ -269,7 +269,7 @@ async fn main() -> Result<(), CanoError> {
         .add_exit_state(Step::Done)
         .with_observer(Arc::new(TracingObserver::new()));
 
-    workflow.orchestrate(Step::Start).await?;
+    workflow.orchestrate(Step::Start, CancellationToken::disabled()).await?;
     Ok(())
 }
 ```
@@ -430,7 +430,7 @@ async fn main() -> Result<(), CanoError> {
         .add_exit_state(Step::Done)
         .with_observer(observer.clone());
 
-    workflow.orchestrate(Step::Load).await?;
+    workflow.orchestrate(Step::Load, CancellationToken::disabled()).await?;
     assert_eq!(observer.failures.load(Ordering::Relaxed), 0);
     Ok(())
 }

@@ -100,7 +100,9 @@ async fn main() -> CanoResult<()> {
         .register(Step::Process, Process)
         .add_exit_state(Step::Done);
 
-    let result = workflow.orchestrate(Step::CoolDown).await?;
+    let result = workflow
+        .orchestrate(Step::CoolDown, CancellationToken::disabled())
+        .await?;
     assert_eq!(result, Step::Done);
     println!("\ncompleted at {result:?}");
 

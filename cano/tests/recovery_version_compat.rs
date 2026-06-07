@@ -98,7 +98,7 @@ async fn legacy_redb_row_resumes_under_default_workflow_version() {
         .with_checkpoint_store(store);
 
     let final_state = workflow
-        .resume_from(wf_id)
+        .resume_from(wf_id, CancellationToken::disabled())
         .await
         .expect("legacy row must resume cleanly under default workflow_version");
     assert_eq!(final_state, St::Done);
@@ -124,7 +124,7 @@ async fn legacy_redb_row_rejected_when_workflow_version_bumped() {
         .with_workflow_version(1);
 
     let err = workflow
-        .resume_from(wf_id)
+        .resume_from(wf_id, CancellationToken::disabled())
         .await
         .expect_err("bumped workflow_version must reject the legacy row");
     assert_eq!(err, CanoError::workflow_version_mismatch(0, 1));

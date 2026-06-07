@@ -240,7 +240,9 @@ async fn main() -> CanoResult<()> {
         .register(Step::Summarise, Summarise { url_count })
         .add_exit_state(Step::Done);
 
-    let result = workflow.orchestrate(Step::ParseUrls).await?;
+    let result = workflow
+        .orchestrate(Step::ParseUrls, CancellationToken::disabled())
+        .await?;
     assert_eq!(result, Step::Done);
     println!("\ncompleted at {result:?}");
 

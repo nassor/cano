@@ -51,7 +51,10 @@ async fn test_workflow_with_tracing_span() {
         .register(TestState::Processing, TestTask::new("processing"))
         .add_exit_state(TestState::Complete);
 
-    let result = workflow.orchestrate(TestState::Start).await.unwrap();
+    let result = workflow
+        .orchestrate(TestState::Start, CancellationToken::disabled())
+        .await
+        .unwrap();
 
     assert_eq!(result, TestState::Complete);
 }
@@ -71,7 +74,10 @@ async fn test_concurrent_workflow_with_tracing_span() {
         .register(TestState::Processing, TestTask::new("processing"))
         .add_exit_state(TestState::Complete);
 
-    let result = workflow.orchestrate(TestState::Start).await.unwrap();
+    let result = workflow
+        .orchestrate(TestState::Start, CancellationToken::disabled())
+        .await
+        .unwrap();
 
     assert_eq!(result, TestState::Complete);
 }
@@ -117,7 +123,10 @@ async fn test_workflow_tracing_without_custom_span() {
         .register(TestState::Processing, TestTask::new("processing"))
         .add_exit_state(TestState::Complete);
 
-    let result = workflow.orchestrate(TestState::Start).await.unwrap();
+    let result = workflow
+        .orchestrate(TestState::Start, CancellationToken::disabled())
+        .await
+        .unwrap();
 
     assert_eq!(result, TestState::Complete);
 }
@@ -217,7 +226,13 @@ async fn test_tracing_observer_runs_workflow() {
         )
         .add_exit_state(Flow::Done)
         .with_observer(Arc::new(TracingObserver::new()));
-    assert_eq!(workflow.orchestrate(Flow::A).await.unwrap(), Flow::Done);
+    assert_eq!(
+        workflow
+            .orchestrate(Flow::A, CancellationToken::disabled())
+            .await
+            .unwrap(),
+        Flow::Done
+    );
 }
 
 #[derive(Clone)]
@@ -255,7 +270,12 @@ async fn test_tracing_observer_captures_events() {
         .register(Flow::A, AlwaysFail)
         .add_exit_state(Flow::Done)
         .with_observer(Arc::new(TracingObserver::new()));
-    assert!(fail_wf.orchestrate(Flow::A).await.is_err());
+    assert!(
+        fail_wf
+            .orchestrate(Flow::A, CancellationToken::disabled())
+            .await
+            .is_err()
+    );
 
     // Pre-tripped breaker → on_circuit_open + on_task_failure.
     let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
@@ -274,7 +294,10 @@ async fn test_tracing_observer_captures_events() {
         )
         .add_exit_state(Flow::Done)
         .with_observer(Arc::new(TracingObserver::new()));
-    let cb_err = cb_wf.orchestrate(Flow::B).await.unwrap_err();
+    let cb_err = cb_wf
+        .orchestrate(Flow::B, CancellationToken::disabled())
+        .await
+        .unwrap_err();
     // The FSM wraps task failures with state context; `.inner()` peels one layer.
     assert!(matches!(cb_err.inner(), CanoError::CircuitOpen(_)));
 

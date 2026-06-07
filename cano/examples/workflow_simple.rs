@@ -152,7 +152,10 @@ async fn main() -> Result<(), CanoError> {
         .register(WorkflowAction::Count, CounterTask)
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
-    match workflow.orchestrate(WorkflowAction::Generate).await {
+    match workflow
+        .orchestrate(WorkflowAction::Generate, CancellationToken::disabled())
+        .await
+    {
         Ok(WorkflowAction::Complete) => {
             println!("\nWorkflow completed successfully!");
             match store.get::<usize>("number_count") {

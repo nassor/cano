@@ -207,9 +207,9 @@ pub enum CanoError {
 
     /// A run was cancelled via a [`CancellationToken`](crate::cancel::CancellationToken).
     ///
-    /// Emitted by [`orchestrate_with_cancel`](crate::workflow::Workflow::orchestrate_with_cancel)
-    /// and [`resume_from_with_cancel`](crate::workflow::Workflow::resume_from_with_cancel) when the
-    /// paired [`CancellationHandle`](crate::cancel::CancellationHandle) fires. The in-flight
+    /// Emitted by [`orchestrate`](crate::workflow::Workflow::orchestrate)
+    /// and [`resume_from`](crate::workflow::Workflow::resume_from) when the paired
+    /// [`CancellationHandle`](crate::cancel::CancellationHandle) fires. The in-flight
     /// cancellable task is dropped at its next await point and the compensation stack is drained
     /// before this error surfaces. Like every task error from the FSM it is wrapped in
     /// [`CanoError::WithStateContext`] (clean rollback); a dirty rollback yields

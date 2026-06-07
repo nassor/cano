@@ -110,7 +110,9 @@ async fn run_strategy(label: &str, strategy: JoinStrategy) -> CanoResult<()> {
         .add_exit_state(Step::Done);
 
     let start = Instant::now();
-    let result = workflow.orchestrate(Step::Parallel).await?;
+    let result = workflow
+        .orchestrate(Step::Parallel, CancellationToken::disabled())
+        .await?;
     let elapsed = start.elapsed();
 
     // Count how many workers managed to log a result before being cancelled.

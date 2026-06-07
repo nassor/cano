@@ -167,7 +167,9 @@ async fn main() -> Result<(), CanoError> {
         .register(Step::Summarize, Summarize)
         .add_exit_state(Step::Done);
 
-    let result = workflow.orchestrate(Step::ParallelWork).await?;
+    let result = workflow
+        .orchestrate(Step::ParallelWork, CancellationToken::disabled())
+        .await?;
     println!("\ncompleted at {result:?}");
 
     println!("\n=== Done ===");

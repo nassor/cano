@@ -161,7 +161,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- (a) First run: Charge fails; compensations drain LIFO. ----------
     println!("--- run: Reserve → Authorize → Charge (fails) → compensate LIFO ---\n");
-    match workflow.orchestrate(Step::Reserve).await {
+    match workflow
+        .orchestrate(Step::Reserve, CancellationToken::disabled())
+        .await
+    {
         Ok(s) => println!("\ncompleted at {s:?} (unexpected)"),
         Err(e) => println!("\nfailed + rolled back: {e}"),
     }

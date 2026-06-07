@@ -1319,7 +1319,10 @@ mod tests {
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1337,7 +1340,10 @@ mod tests {
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1356,7 +1362,10 @@ mod tests {
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1376,7 +1385,10 @@ mod tests {
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1394,7 +1406,9 @@ mod tests {
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await;
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await;
         assert!(result.is_err());
     }
 
@@ -1413,7 +1427,10 @@ mod tests {
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1440,7 +1457,9 @@ mod tests {
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await;
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("timeout"));
     }
@@ -1462,7 +1481,10 @@ mod tests {
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
 
         // Verify all tasks wrote their data
@@ -1496,7 +1518,10 @@ mod tests {
             .register(TestState::Process, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
 
         // Verify all data was written
@@ -1553,7 +1578,10 @@ mod tests {
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1608,7 +1636,10 @@ mod tests {
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1636,7 +1667,9 @@ mod tests {
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await;
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("timeout"));
     }
@@ -1686,7 +1719,10 @@ mod tests {
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1742,7 +1778,10 @@ mod tests {
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1776,7 +1815,10 @@ mod tests {
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1801,7 +1843,9 @@ mod tests {
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await;
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await;
         assert!(result.is_err());
         assert!(
             result
@@ -1818,7 +1862,10 @@ mod tests {
         let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1830,7 +1877,10 @@ mod tests {
         let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
-        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        let err = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, CanoError::Configuration(_)),
             "expected Configuration error, got {err:?}"
@@ -1848,7 +1898,10 @@ mod tests {
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
         assert_eq!(
-            workflow.orchestrate(TestState::Start).await.unwrap(),
+            workflow
+                .orchestrate(TestState::Start, CancellationToken::disabled())
+                .await
+                .unwrap(),
             TestState::Complete
         );
 
@@ -1857,7 +1910,12 @@ mod tests {
         let workflow2 = Workflow::bare()
             .register_split(TestState::Start, tasks_fail, join_config2)
             .add_exit_state(TestState::Complete);
-        assert!(workflow2.orchestrate(TestState::Start).await.is_err());
+        assert!(
+            workflow2
+                .orchestrate(TestState::Start, CancellationToken::disabled())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -1871,7 +1929,10 @@ mod tests {
         let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
-        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        let err = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, CanoError::Configuration(_)),
             "expected Configuration error, got {err:?}"
@@ -1885,7 +1946,10 @@ mod tests {
         let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1896,7 +1960,10 @@ mod tests {
         let workflow = Workflow::bare()
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1905,7 +1972,9 @@ mod tests {
         // No exit states means validate() rejects the workflow before any task runs.
         let workflow =
             Workflow::bare().register(TestState::Start, SimpleTask::new(TestState::Complete));
-        let result = workflow.orchestrate(TestState::Start).await;
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await;
         let err = result.unwrap_err();
         assert_eq!(err.category(), "configuration");
         assert!(err.to_string().contains("no exit states"));
@@ -1926,7 +1995,9 @@ mod tests {
         let workflow = Workflow::bare()
             .register(TestState::Start, SplitReturningTask)
             .add_exit_state(TestState::Complete);
-        let result = workflow.orchestrate(TestState::Start).await;
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("register_split"));
     }
@@ -1963,7 +2034,9 @@ mod tests {
             .register(TestState::Start, task)
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await;
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await;
         assert!(result.is_err());
 
         // With max_retries=2, there should be exactly 3 attempts (1 initial + 2 retries).
@@ -2016,7 +2089,9 @@ mod tests {
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await;
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await;
         assert!(result.is_ok(), "workflow should succeed after retries");
         assert_eq!(
             call_count.load(Ordering::SeqCst),
@@ -2049,7 +2124,7 @@ mod tests {
             .add_exit_state(TestState::Complete);
 
         let err = workflow
-            .orchestrate(TestState::Start)
+            .orchestrate(TestState::Start, CancellationToken::disabled())
             .await
             .expect_err("panic must surface as Err");
         // The FSM wraps the failure with state context; `.inner()` peels one layer.
@@ -2073,7 +2148,7 @@ mod tests {
             .add_exit_state(TestState::Complete);
 
         let err = workflow
-            .orchestrate(TestState::Start)
+            .orchestrate(TestState::Start, CancellationToken::disabled())
             .await
             .expect_err("split panic must surface as Err");
         let msg = err.to_string();
@@ -2136,7 +2211,10 @@ mod tests {
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
         let observed = max.load(Ordering::SeqCst);
         assert!(
@@ -2155,7 +2233,7 @@ mod tests {
             .add_exit_state(TestState::Complete);
 
         let err = workflow
-            .orchestrate(TestState::Start)
+            .orchestrate(TestState::Start, CancellationToken::disabled())
             .await
             .expect_err("bulkhead=0 must error");
         assert!(matches!(err, CanoError::Configuration(_)), "got {err:?}");
@@ -2184,7 +2262,7 @@ mod tests {
         let err = Workflow::bare()
             .register(TestState::Start, SlowTask)
             .add_exit_state(TestState::Complete)
-            .orchestrate(TestState::Start)
+            .orchestrate(TestState::Start, CancellationToken::disabled())
             .await
             .expect_err("expected attempt timeout to exhaust retries");
         // The FSM wraps the failure with state context; `.inner()` peels one layer.
@@ -2238,7 +2316,9 @@ mod tests {
             .register_split(TestState::Start, tasks, join_config)
             .add_exit_state(TestState::Complete);
 
-        let _ = workflow.orchestrate(TestState::Start).await;
+        let _ = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await;
         assert!(
             matches!(breaker.state(), CircuitState::Open { .. }),
             "shared breaker must trip after 4 concurrent failures, got {:?}",
@@ -2283,7 +2363,7 @@ mod tests {
         let result = Workflow::bare()
             .register_stepped(TestState::Start, Counter { target: 5 })
             .add_exit_state(TestState::Complete)
-            .orchestrate(TestState::Start)
+            .orchestrate(TestState::Start, CancellationToken::disabled())
             .await
             .unwrap();
         assert_eq!(result, TestState::Complete);
@@ -2314,7 +2394,7 @@ mod tests {
         let err = Workflow::bare()
             .register_stepped(TestState::Start, SplitStepper)
             .add_exit_state(TestState::Complete)
-            .orchestrate(TestState::Start)
+            .orchestrate(TestState::Start, CancellationToken::disabled())
             .await
             .expect_err("split result from stepped must error");
         // The FSM wraps the failure with state context; `.inner()` peels one layer.
@@ -2350,7 +2430,10 @@ mod tests {
             .register(TestState::Process, FailNoRetry)
             .add_exit_state(TestState::Complete);
 
-        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        let err = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap_err();
         match err {
             CanoError::WithStateContext {
                 state,
@@ -2386,7 +2469,7 @@ mod tests {
         let err = Workflow::bare()
             .register(TestState::Start, AlwaysFails)
             .add_exit_state(TestState::Complete)
-            .orchestrate(TestState::Start)
+            .orchestrate(TestState::Start, CancellationToken::disabled())
             .await
             .unwrap_err();
         match err {
@@ -2418,7 +2501,10 @@ mod tests {
             .register(TestState::Process, FailTask::new(true))
             .add_exit_state(TestState::Complete);
 
-        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        let err = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap_err();
         match err {
             CanoError::WithStateContext {
                 transitions_so_far,
@@ -2472,7 +2558,10 @@ mod tests {
                 },
             )
             .add_exit_state(TestState::Complete);
-        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        let err = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap_err();
         match err {
             CanoError::WithStateContext {
                 attempt, source, ..
@@ -2502,7 +2591,10 @@ mod tests {
                 },
             )
             .add_exit_state(TestState::Complete);
-        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        let err = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap_err();
         // The engine wraps the timeout with state context; `.inner()` peels one layer.
         assert!(
             matches!(err.inner(), CanoError::WorkflowTimeout { .. }),
@@ -2524,7 +2616,9 @@ mod tests {
                 },
             )
             .add_exit_state(TestState::Complete);
-        let _ = workflow.orchestrate(TestState::Start).await;
+        let _ = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await;
         let events = rec.timeouts();
         assert_eq!(events.len(), 1, "hook should fire exactly once");
         let (elapsed, limit) = events[0];
@@ -2590,7 +2684,10 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
+        let err = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap_err();
         // Clean rollback → original error surfaced, wrapped with state context.
         assert!(
             matches!(err.inner(), CanoError::WorkflowTimeout { .. }),
@@ -2654,7 +2751,10 @@ mod tests {
         // The compensatable task runs ~80ms despite the 20ms total budget — and the
         // workflow exits cleanly (no compensation runs, no error surfaces) because
         // there's no further state for the budget to cancel.
-        let outcome = workflow.orchestrate(TestState::Start).await.unwrap();
+        let outcome = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(outcome, TestState::Complete);
         let log_entries = log.lock().unwrap().clone();
         assert_eq!(log_entries, vec!["ran".to_string()]);
@@ -2877,7 +2977,7 @@ mod dispatch_with_budget_tests {
         let cc = Arc::clone(&call_count);
         let result = Workflow::<TestState>::dispatch_with_budget(
             None,
-            &CancellationToken::never(),
+            &CancellationToken::disabled(),
             None,
             &observers,
             async { Ok::<TestState, CanoError>(TestState::Complete) },
@@ -2908,7 +3008,7 @@ mod dispatch_with_budget_tests {
         let cc = Arc::clone(&call_count);
         let result = Workflow::<TestState>::dispatch_with_budget(
             budget_for(Duration::from_secs(60)),
-            &CancellationToken::never(),
+            &CancellationToken::disabled(),
             None,
             &observers,
             async { Ok::<TestState, CanoError>(TestState::Complete) },
@@ -2941,7 +3041,7 @@ mod dispatch_with_budget_tests {
                 Duration::from_millis(50),
                 tokio::time::Instant::now() - Duration::from_millis(1),
             )),
-            &CancellationToken::never(),
+            &CancellationToken::disabled(),
             None,
             &observers,
             async {
@@ -2987,7 +3087,7 @@ mod dispatch_with_budget_tests {
                 Duration::from_millis(10),
                 tokio::time::Instant::now() - Duration::from_millis(1),
             )),
-            &CancellationToken::never(),
+            &CancellationToken::disabled(),
             None,
             &observers,
             async {
@@ -3023,7 +3123,7 @@ mod dispatch_with_budget_tests {
                 Duration::from_millis(5),
                 tokio::time::Instant::now() - Duration::from_millis(1),
             )),
-            &CancellationToken::never(),
+            &CancellationToken::disabled(),
             None,
             &observers,
             async {
@@ -3059,7 +3159,7 @@ mod dispatch_with_budget_tests {
         let observers: [Arc<dyn WorkflowObserver>; 0] = [];
         let err = Workflow::<TestState>::dispatch_with_budget(
             budget_for(Duration::from_secs(60)),
-            &CancellationToken::never(),
+            &CancellationToken::disabled(),
             None,
             &observers,
             async { Err::<TestState, _>(CanoError::task_execution("custom inner err")) },

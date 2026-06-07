@@ -202,7 +202,7 @@ async fn main() -> Result<(), CanoError> {
         .register(WorkflowState::Process, DoneTask)
         .add_exit_state(WorkflowState::Complete);
 
-    workflow.orchestrate(WorkflowState::Start).await?;
+    workflow.orchestrate(WorkflowState::Start, CancellationToken::disabled()).await?;
     Ok(())
 }
 

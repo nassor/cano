@@ -380,7 +380,10 @@ async fn stepped_task_in_workflow() {
         .register(MyState::Work, stepper)
         .add_exit_state(MyState::Done);
 
-    let result = workflow.orchestrate(MyState::Work).await.unwrap();
+    let result = workflow
+        .orchestrate(MyState::Work, CancellationToken::disabled())
+        .await
+        .unwrap();
     assert_eq!(result, MyState::Done);
 }
 

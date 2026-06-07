@@ -14,6 +14,7 @@ template = "section.html"
 <ol>
 <li><a href="#defining-states">Defining States</a></li>
 <li><a href="#building-a-workflow">Building a Workflow</a></li>
+<li><a href="#cancellation">Cancelling a Run</a></li>
 <li><a href="#builder-pattern">Builder Pattern</a></li>
 <li><a href="#validation-guide">Validation &amp; Errors</a></li>
 <li><a href="#split-join">Parallel Tasks: Split &amp; Join</a></li>
@@ -124,7 +125,7 @@ async fn main() -> Result<(), CanoError> {
         .add_exit_states(vec![OrderState::Complete, OrderState::Failed]);
 
     // 3. Execute
-    let result = workflow.orchestrate(OrderState::Start).await?;
+    let result = workflow.orchestrate(OrderState::Start, CancellationToken::disabled()).await?;
 
     println!("Final State: {:?}", result);
     Ok(())
@@ -136,6 +137,41 @@ async fn main() -> Result<(), CanoError> {
 <p>Runnable example: <code>cargo run --example workflow_simple</code> — a linear three-state workflow
 like the one above.</p>
 </div>
+<hr class="section-divider">
+
+<h2 id="cancellation"><a href="#cancellation" class="anchor-link" aria-hidden="true">#</a>Cancelling a Run</h2>
+<p>
+<code>orchestrate</code> always takes a <code>CancellationToken</code> as its second argument. The
+example above passes <code>CancellationToken::disabled()</code> — a token that never fires, opting
+the run out of cancellation at zero cost. To stop a run <em>early</em> on a signal you control — a
+shutdown handler, a user "stop" button, a parent task giving up — pass a live token from
+<code>CancellationToken::new()</code> instead and keep its paired <code>CancellationHandle</code>.
+Firing the handle aborts the in-flight task at its next <code>.await</code>, drains the
+<a href="../saga/">saga compensation stack</a>, and returns <code>CanoError::Cancelled</code>.
+</p>
+
+```rust
+use cano::prelude::*;
+
+let (handle, token) = CancellationToken::new();
+
+// Cancel from anywhere — the handle is Clone and cancel() is idempotent:
+tokio::spawn(async move {
+    shutdown_signal().await;
+    handle.cancel();
+});
+
+let result = workflow.orchestrate(OrderState::Start, token).await;
+assert!(matches!(result, Err(e) if e.category() == "cancelled"));
+```
+
+<p>
+Cancellation is <em>cooperative</em> (a task is interrupted only at an <code>.await</code>) and
+<em>saga-safe</em> (a <a href="../saga/">compensatable task</a> is never interrupted mid-run). The
+<a href="../resilience/#cancellation">Resilience → Cooperative Cancellation</a> page covers the full
+semantics, the <code>on_cancelled</code> observer hook, and precedence against
+<code>with_total_timeout</code>.
+</p>
 <hr class="section-divider">
 
 <h2 id="builder-pattern"><a href="#builder-pattern" class="anchor-link" aria-hidden="true">#</a>Builder Pattern and #[must_use]</h2>
@@ -326,7 +362,7 @@ fn build_workflow(store: MemoryStore) -> Workflow<TextPipelineState> {
 let store = MemoryStore::new();              // fresh store — full isolation
 store.put("input_text", text)?;
 let workflow = build_workflow(store.clone());
-let final_state = workflow.orchestrate(TextPipelineState::Parse).await?; // which terminal branch ran
+let final_state = workflow.orchestrate(TextPipelineState::Parse, CancellationToken::disabled()).await?; // which terminal branch ran
 let word_count: usize = store.get("word_count")?;
 ```
 

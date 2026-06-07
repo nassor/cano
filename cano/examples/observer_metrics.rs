@@ -141,7 +141,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_observer(metrics.clone());
 
     for run in 1..=2 {
-        match workflow.orchestrate(Step::Start).await {
+        match workflow
+            .orchestrate(Step::Start, CancellationToken::disabled())
+            .await
+        {
             Ok(state) => println!("run {run}: reached {state:?}"),
             Err(error) => println!("run {run}: stopped — {error}"),
         }

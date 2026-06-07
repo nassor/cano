@@ -57,7 +57,7 @@
 //!     .register(Step::Process, ProcessTask)
 //!     .add_exit_state(Step::Done);
 //!
-//! let final_state = workflow.orchestrate(Step::Fetch).await?;
+//! let final_state = workflow.orchestrate(Step::Fetch, CancellationToken::disabled()).await?;
 //! assert_eq!(final_state, Step::Done);
 //!
 //! // The sum of 1..=3 is 6.
@@ -95,7 +95,7 @@
 //!     .register(Step::Compute, ComputeTask)
 //!     .add_exit_state(Step::Done);
 //!
-//! let final_state = workflow.orchestrate(Step::Compute).await?;
+//! let final_state = workflow.orchestrate(Step::Compute, CancellationToken::disabled()).await?;
 //! assert_eq!(final_state, Step::Done);
 //! # Ok(())
 //! # }
@@ -209,15 +209,15 @@
 //!
 //! ### Cooperative cancellation
 //!
-//! [`Workflow::orchestrate_with_cancel`] (and [`resume_from_with_cancel`](Workflow::resume_from_with_cancel))
+//! [`Workflow::orchestrate`] (and [`resume_from`](Workflow::resume_from))
 //! take a [`CancellationToken`] obtained from [`CancellationToken::new`]; firing the paired
 //! [`CancellationHandle`] aborts the in-flight cancellable task at its next `.await`, drains the
 //! saga compensation stack, and returns [`CanoError::Cancelled`]. Cancellation is *cooperative*
 //! (a task in tight synchronous work isn't interrupted until it yields) and *saga-safe* (a
 //! [`CompensatableTask`] always runs to completion so its rollback entry is recorded; the cancel
 //! is honoured at the next state boundary). The compensation drain itself is uncancellable.
-//! `orchestrate(start)` is exactly `orchestrate_with_cancel(start, <never-cancelled token>)`, so
-//! the no-token path is unchanged and zero-cost. See the [`cancel`] module.
+//! To opt a run out of cancellation, pass [`CancellationToken::disabled`] — it never fires and is
+//! zero-cost (the FSM skips the cancellation `select!`). See the [`cancel`] module.
 //!
 //! ## Module Overview
 //!
@@ -227,7 +227,7 @@
 //! - [`task::timer`]: The [`TimerTask`] trait — wait-then-transition via `wait()`/`after_wait()`; registered with [`Workflow::register`]
 //! - [`task::batch`]: The [`BatchTask`] trait — fan-out over data items via `load`/`process_item`/`finish`; registered with [`Workflow::register`]
 //! - [`task::stepped`]: The [`SteppedTask`] trait — resumable iterative work via `step()` with a serializable cursor; registered with [`Workflow::register_stepped`] (persists the cursor when a checkpoint store is attached)
-//! - [`cancel`]: [`CancellationToken`] / [`CancellationHandle`] — cooperative cancellation for [`orchestrate_with_cancel`](Workflow::orchestrate_with_cancel)
+//! - [`cancel`]: [`CancellationToken`] / [`CancellationHandle`] — cooperative cancellation for [`orchestrate`](Workflow::orchestrate)
 //! - [`workflow`]: [`Workflow`] — FSM orchestration with Split/Join support
 //! - `scheduler` (requires `scheduler` feature): `Scheduler` (builder) and `RunningScheduler` (live handle) — cron and interval scheduling
 //! - [`mod@resource`]: [`Resource`] trait, [`Resources`] dictionary, and [`HealthStatus`] — lifecycle-aware resource management and health probes

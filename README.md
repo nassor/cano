@@ -142,7 +142,7 @@ async fn main() -> Result<(), CanoError> {
         .add_exit_state(FlowState::Complete);
 
     // 5. Run.
-    let result = workflow.orchestrate(FlowState::Start).await?;
+    let result = workflow.orchestrate(FlowState::Start, CancellationToken::disabled()).await?;
     println!("Workflow finished: {:?}", result);
 
     Ok(())

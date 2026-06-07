@@ -128,7 +128,7 @@ async fn main() -> Result<(), CanoError> {
         .add_exit_state(QueueState::Complete);
 
     loop {
-        let result = workflow.orchestrate(QueueState::PullBatch).await?;
+        let result = workflow.orchestrate(QueueState::PullBatch, CancellationToken::disabled()).await?;
         if result == QueueState::Complete && queue.lock().await.is_empty() {
             break;
         }
@@ -208,7 +208,7 @@ async fn main() -> Result<(), CanoError> {
         .register(DataState::Aggregate, FinishAggregate)
         .add_exit_state(DataState::Complete);
 
-    workflow.orchestrate(DataState::LoadRecords).await?;
+    workflow.orchestrate(DataState::LoadRecords, CancellationToken::disabled()).await?;
     Ok(())
 }
 ```

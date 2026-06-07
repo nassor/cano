@@ -103,7 +103,9 @@ async fn many_compensatable_workflows_concurrent_with_injected_failures() {
         // Sweep the failure point across all steps (3 of every 4 runs roll back).
         let fail_at = i % (STEPS + 1);
         handles.push(tokio::spawn(async move {
-            let result = saga(ledger.clone(), &account, fail_at).orchestrate(0).await;
+            let result = saga(ledger.clone(), &account, fail_at)
+                .orchestrate(0, CancellationToken::disabled())
+                .await;
             (account, fail_at, result)
         }));
     }
@@ -259,7 +261,10 @@ mod recovery {
             .add_exit_state(St::Done)
             .with_checkpoint_store(store.clone());
 
-        let err = wf.resume_from("g").await.unwrap_err();
+        let err = wf
+            .resume_from("g", CancellationToken::disabled())
+            .await
+            .unwrap_err();
         assert_eq!(err.message(), "C failed");
         // B re-ran on resume and re-pushed its own entry; its persisted completion row at the
         // resume point must NOT be replayed too, or B would compensate twice.

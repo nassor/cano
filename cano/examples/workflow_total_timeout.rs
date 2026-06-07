@@ -91,7 +91,10 @@ async fn main() {
         .register(Step::Ship, Ship)
         .add_exit_state(Step::Done);
 
-    match workflow.orchestrate(Step::Reserve).await {
+    match workflow
+        .orchestrate(Step::Reserve, CancellationToken::disabled())
+        .await
+    {
         Ok(state) => println!("\nworkflow completed at {state:?}"),
         Err(error) => println!("\nworkflow failed, rolled back: {error}"),
     }

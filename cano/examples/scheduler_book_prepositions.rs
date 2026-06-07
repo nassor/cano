@@ -273,7 +273,9 @@ async fn main() -> CanoResult<()> {
         )
         .add_exit_states(vec![WorkflowPhase::Analyze, WorkflowPhase::Complete]);
 
-    let _ = workflow1.orchestrate(WorkflowPhase::Download).await?;
+    let _ = workflow1
+        .orchestrate(WorkflowPhase::Download, CancellationToken::disabled())
+        .await?;
 
     // Book 2: Alice's Adventures in Wonderland
     let workflow2 = Workflow::new(Resources::new().insert("store", store.clone()))
@@ -283,7 +285,9 @@ async fn main() -> CanoResult<()> {
         )
         .add_exit_states(vec![WorkflowPhase::Analyze, WorkflowPhase::Complete]);
 
-    let _ = workflow2.orchestrate(WorkflowPhase::Download).await?;
+    let _ = workflow2
+        .orchestrate(WorkflowPhase::Download, CancellationToken::disabled())
+        .await?;
 
     // Book 3: A Christmas Carol
     let workflow3 = Workflow::new(Resources::new().insert("store", store.clone()))
@@ -293,7 +297,9 @@ async fn main() -> CanoResult<()> {
         )
         .add_exit_states(vec![WorkflowPhase::Analyze, WorkflowPhase::Complete]);
 
-    let _ = workflow3.orchestrate(WorkflowPhase::Download).await?;
+    let _ = workflow3
+        .orchestrate(WorkflowPhase::Download, CancellationToken::disabled())
+        .await?;
 
     // Analyze and rank the downloaded books
     println!("\nAnalyzing and ranking books...\n");
@@ -304,7 +310,7 @@ async fn main() -> CanoResult<()> {
         .add_exit_state(WorkflowPhase::Complete);
 
     analysis_workflow
-        .orchestrate(WorkflowPhase::Analyze)
+        .orchestrate(WorkflowPhase::Analyze, CancellationToken::disabled())
         .await?;
 
     println!("\nBook preposition analysis complete!");

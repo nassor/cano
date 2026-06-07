@@ -470,7 +470,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Pipeline: Generate -> Multiply -> Transform -> Statistics -> Complete\n");
 
     // Execute the workflow
-    let _final_state = workflow.orchestrate(PipelineState::Generate).await?;
+    let _final_state = workflow
+        .orchestrate(PipelineState::Generate, CancellationToken::disabled())
+        .await?;
 
     let total_duration = start_time.elapsed();
     println!("\nSIMD Matrix Processing Pipeline completed!");

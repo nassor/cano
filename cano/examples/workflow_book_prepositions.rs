@@ -507,7 +507,13 @@ async fn run_workflow() -> Result<(), CanoError> {
     println!("  BookRankingByPrepositionTask (Ranking phase)");
 
     // Execute the entire workflow using Workflow orchestration
-    match workflow.orchestrate(BookPrepositionAction::Download).await {
+    match workflow
+        .orchestrate(
+            BookPrepositionAction::Download,
+            CancellationToken::disabled(),
+        )
+        .await
+    {
         Ok(final_state) => {
             match final_state {
                 BookPrepositionAction::Complete => {
