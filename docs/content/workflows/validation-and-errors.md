@@ -90,7 +90,7 @@ async fn main() -> Result<(), CanoError> {
     workflow.validate_initial_state(&State::Start)?;
 
     // Safe to orchestrate
-    let _result = workflow.orchestrate(State::Start).await?;
+    let _result = workflow.orchestrate(State::Start, CancellationToken::disabled()).await?;
     Ok(())
 }
 ```
@@ -133,9 +133,9 @@ during execution. Understanding these errors helps you build robust error recove
 <td>Increase <code>with_total_timeout()</code> or speed up the workflow; see <a href="../../resilience/#workflow-total-timeout">Resilience → Workflow Total Timeout</a></td>
 </tr>
 <tr>
-<td><code>CanoError::Workflow</code></td>
-<td>Legacy <code>with_timeout()</code> outer <code>tokio::time::timeout</code> elapsed (no graceful compensation)</td>
-<td>Prefer <code>with_total_timeout()</code> for new code; otherwise increase <code>with_timeout()</code> or optimize task execution time</td>
+<td><code>CanoError::Cancelled</code></td>
+<td>Run cancelled via a live <code>CancellationToken</code> passed to <code>orchestrate</code> / <code>resume_from</code>; in-flight task aborted, compensation stack drained. Surfaced under <code>CanoError::WithStateContext</code> (or <code>CompensationFailed</code> on a dirty rollback).</td>
+<td>Expected when you cancel deliberately; see <a href="../../resilience/#cancellation">Resilience → Cooperative Cancellation</a></td>
 </tr>
 <tr>
 <td><code>CanoError::Configuration</code></td>
@@ -181,7 +181,7 @@ through the join strategy.
 </div>
 
 ```rust
-match workflow.orchestrate(State::Start).await {
+match workflow.orchestrate(State::Start, CancellationToken::disabled()).await {
     Ok(final_state) => println!("Completed: {:?}", final_state),
     Err(CanoError::Workflow(msg)) => eprintln!("Workflow error: {}", msg),
     Err(CanoError::Configuration(msg)) => eprintln!("Config error: {}", msg),

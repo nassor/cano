@@ -300,7 +300,7 @@ async fn main() -> Result<(), CanoError> {
         .register(Stage::Transform, TransformTask)
         .add_exit_state(Stage::Complete);
 
-    workflow.orchestrate(Stage::Ingest).await?;
+    workflow.orchestrate(Stage::Ingest, CancellationToken::disabled()).await?;
 
     // Read results after the workflow completes
     let result: Vec<u32> = store.get("result")?;

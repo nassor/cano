@@ -142,7 +142,9 @@ async fn main() -> Result<(), CanoError> {
             .register(DataProcessingState::Aggregate, Aggregator)
             .add_exit_state(DataProcessingState::Complete);
 
-        let result = workflow.orchestrate(DataProcessingState::Start).await?;
+        let result = workflow
+            .orchestrate(DataProcessingState::Start, CancellationToken::disabled())
+            .await?;
 
         let final_result: i32 = store.get("final_result")?;
         println!("Final result: {}", final_result);
@@ -172,7 +174,9 @@ async fn main() -> Result<(), CanoError> {
             .register(DataProcessingState::Aggregate, Aggregator)
             .add_exit_state(DataProcessingState::Complete);
 
-        let result = workflow.orchestrate(DataProcessingState::Start).await?;
+        let result = workflow
+            .orchestrate(DataProcessingState::Start, CancellationToken::disabled())
+            .await?;
 
         let processor_count: usize = store.get("processor_count")?;
         println!(
@@ -205,7 +209,9 @@ async fn main() -> Result<(), CanoError> {
             .register(DataProcessingState::Aggregate, Aggregator)
             .add_exit_state(DataProcessingState::Complete);
 
-        let result = workflow.orchestrate(DataProcessingState::Start).await?;
+        let result = workflow
+            .orchestrate(DataProcessingState::Start, CancellationToken::disabled())
+            .await?;
 
         println!("Workflow completed with Any strategy: {:?}\n", result);
     }
@@ -236,7 +242,9 @@ async fn main() -> Result<(), CanoError> {
             .register(DataProcessingState::Aggregate, Aggregator)
             .add_exit_state(DataProcessingState::Complete);
 
-        let result = workflow.orchestrate(DataProcessingState::Start).await?;
+        let result = workflow
+            .orchestrate(DataProcessingState::Start, CancellationToken::disabled())
+            .await?;
 
         let processor_count: usize = store.get("processor_count")?;
         println!("Processors completed: {} (66% threshold)", processor_count);
@@ -267,7 +275,10 @@ async fn main() -> Result<(), CanoError> {
             .register(DataProcessingState::Aggregate, Aggregator)
             .add_exit_state(DataProcessingState::Complete);
 
-        match workflow.orchestrate(DataProcessingState::Start).await {
+        match workflow
+            .orchestrate(DataProcessingState::Start, CancellationToken::disabled())
+            .await
+        {
             Ok(result) => println!("Workflow completed: {:?}", result),
             Err(e) => println!("Workflow failed (expected timeout): {}", e),
         }

@@ -197,7 +197,7 @@ let workflow = Workflow::new(resources)
     .add_exit_state(Stage::Done);
 
 // First run crashes after 600/1000 steps. Restart:
-// let result = workflow.resume_from("nightly-crunch").await?;
+// let result = workflow.resume_from("nightly-crunch", CancellationToken::disabled()).await?;
 // step() is first called with Some(Progress { processed: 600, .. }) — not None.
 ```
 </div>

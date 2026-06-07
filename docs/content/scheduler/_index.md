@@ -22,6 +22,7 @@ template = "section.html"
 <li class="toc-sub"><a href="#manual-triggering">Manual Triggering</a></li>
 <li class="toc-sub"><a href="#mixed-scheduling">Mixed Scheduling</a></li>
 <li><a href="#backoff-guide">Backoff &amp; Trip State</a></li>
+<li><a href="#cancellation">Cancelling a Flow</a></li>
 <li><a href="#graceful-shutdown">Graceful Shutdown</a></li>
 <li><a href="#multi-level-map-reduce">Advanced: Multi-Level Map-Reduce</a></li>
 </ol>
@@ -57,7 +58,7 @@ override it per flow via <code>set_backoff</code>. <code>Scheduler</code> is <st
 <li><strong><code>RunningScheduler</code></strong> is the <em>live handle</em> returned by
 <code>scheduler.start().await?</code>. It owns the spawned driver and per-flow loop tasks. It is cheap to
 clone — every clone shares the same command channel and flow registry, so you can call <code>trigger</code>,
-<code>status</code>, <code>list</code>, <code>reset_flow</code>, and <code>stop</code> from any task.</li>
+<code>status</code>, <code>list</code>, <code>reset_flow</code>, <code>cancel_flow</code>, and <code>stop</code> from any task.</li>
 </ul>
 <p>
 <code>start</code> consumes the builder, so the compiler prevents you from starting the same scheduler
@@ -490,24 +491,46 @@ on a dedicated page:</p>
 </ul>
 <hr class="section-divider">
 
-<h2 id="graceful-shutdown"><a href="#graceful-shutdown" class="anchor-link" aria-hidden="true">#</a>Graceful Shutdown</h2>
+<h2 id="cancellation"><a href="#cancellation" class="anchor-link" aria-hidden="true">#</a>Cancelling a Flow</h2>
 <p>
-The scheduler supports graceful shutdown, allowing currently running workflows to complete before stopping.
-This includes workflows started by interval or cron triggers as well as manually-triggered workflows.
-All active executions are tracked and included in the shutdown wait.
+<code>RunningScheduler::cancel_flow(id)</code> requests cooperative cancellation of a flow's in-flight
+run. The running workflow aborts at its next await point, its <a href="../saga/">saga compensation
+stack</a> drains (rolling back completed steps), and the flow returns to <code>Status::Idle</code>. A
+deliberate cancel is <strong>not</strong> counted as a failure against the
+<a href="#backoff-guide">BackoffPolicy</a> — the streak is left untouched and the flow never trips, so
+its next scheduled run fires normally. Cancelling a flow that isn't currently running is an idempotent
+no-op.
 </p>
 
 ```rust
-// Stop the scheduler and wait for running flows to finish.
-running.stop().await?;
+// Stop the in-flight run of a flow; its saga rolls back and the flow goes Idle.
+running.cancel_flow("order").await?;
+```
 
+<div class="callout callout-tip">
+<p>Runnable example: <code>cargo run --example scheduler_cancellation --features scheduler</code> —
+triggers a saga, cancels it mid-flight, and watches the compensators roll back in reverse.</p>
+</div>
+<hr class="section-divider">
+
+<h2 id="graceful-shutdown"><a href="#graceful-shutdown" class="anchor-link" aria-hidden="true">#</a>Graceful Shutdown</h2>
+<p>
+When <code>stop()</code> is called, the scheduler signals all scheduling loops to stop and then
+<strong>cooperatively cancels every in-flight flow</strong> — interval, cron, and manual alike — the
+same way <code>cancel_flow</code> does: each running workflow aborts at its next await and drains its
+saga before the scheduler runs resource <code>teardown</code> (reverse registration order) and returns.
+Shutdown latency is therefore bounded by the time to the next await plus the compensation drain, not by
+how long the workflows would naturally take.
+</p>
+
+```rust
+// Stop the scheduler: in-flight flows are cancelled + rolled back, then teardown runs.
+running.stop().await?;
 ```
 
 <p>
-When <code>stop()</code> is called, the scheduler signals all scheduling loops to stop,
-waits up to 30 seconds for any in-progress workflow executions to finish, and runs each
-workflow's resource <code>teardown_all</code> in reverse registration order before returning.
-A second <code>stop()</code> call after success is idempotent — it returns the same cached result.
+A bounded wait (up to 30 seconds) caps the drain; a second <code>stop()</code> after success is
+idempotent — it returns the same cached result.
 </p>
 
 <div class="callout callout-tip">

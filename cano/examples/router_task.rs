@@ -123,13 +123,17 @@ fn build_workflow(use_fast_path: bool) -> Workflow<Step> {
 async fn main() -> CanoResult<()> {
     println!("=== fast-path run ===");
     let workflow = build_workflow(true);
-    let result = workflow.orchestrate(Step::Classify).await?;
+    let result = workflow
+        .orchestrate(Step::Classify, CancellationToken::disabled())
+        .await?;
     assert_eq!(result, Step::Done);
     println!("completed at {result:?}\n");
 
     println!("=== slow-path run ===");
     let workflow = build_workflow(false);
-    let result = workflow.orchestrate(Step::Classify).await?;
+    let result = workflow
+        .orchestrate(Step::Classify, CancellationToken::disabled())
+        .await?;
     assert_eq!(result, Step::Done);
     println!("completed at {result:?}");
 

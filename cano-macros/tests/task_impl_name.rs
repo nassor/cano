@@ -55,5 +55,11 @@ async fn task_still_runs_in_a_workflow() {
     let workflow = Workflow::bare()
         .register(Step::Start, NamedInherentTask)
         .add_exit_state(Step::Done);
-    assert_eq!(workflow.orchestrate(Step::Start).await.unwrap(), Step::Done);
+    assert_eq!(
+        workflow
+            .orchestrate(Step::Start, CancellationToken::disabled())
+            .await
+            .unwrap(),
+        Step::Done
+    );
 }

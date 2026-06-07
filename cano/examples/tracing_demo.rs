@@ -213,7 +213,9 @@ async fn main() -> CanoResult<()> {
             .add_exit_states(vec![WorkflowState::Complete, WorkflowState::Error]);
 
         info!("Starting workflow execution...");
-        let result = workflow.orchestrate(WorkflowState::Start).await?;
+        let result = workflow
+            .orchestrate(WorkflowState::Start, CancellationToken::disabled())
+            .await?;
         info!(final_state = ?result, "Workflow completed");
 
         println!("Basic workflow completed with state: {result:?}\n");
@@ -248,7 +250,9 @@ async fn main() -> CanoResult<()> {
             .with_tracing_span(workflow_span);
 
         info!("Starting task-based workflow execution (with custom span)...");
-        let result = task_workflow.orchestrate(WorkflowState::Start).await?;
+        let result = task_workflow
+            .orchestrate(WorkflowState::Start, CancellationToken::disabled())
+            .await?;
 
         let math_result: i32 = store.get("math_result").unwrap_or(0);
         let completed_by: String = store.get("task_completed_by").unwrap_or_default();
@@ -329,7 +333,9 @@ async fn main() -> CanoResult<()> {
             .add_exit_states(vec![WorkflowState::Complete, WorkflowState::Error]);
 
         info!("Starting workflow that will encounter validation failure...");
-        let result = error_workflow.orchestrate(WorkflowState::Start).await?;
+        let result = error_workflow
+            .orchestrate(WorkflowState::Start, CancellationToken::disabled())
+            .await?;
 
         println!("Error workflow completed with state: {result:?}");
 
@@ -363,7 +369,9 @@ async fn main() -> CanoResult<()> {
             // One line: re-emit lifecycle/failure events as `tracing` events.
             .with_observer(Arc::new(TracingObserver::new()));
 
-        let result = observed_workflow.orchestrate(WorkflowState::Start).await?;
+        let result = observed_workflow
+            .orchestrate(WorkflowState::Start, CancellationToken::disabled())
+            .await?;
         println!("Observed workflow completed with state: {result:?}");
         println!(
             "   (look for `task started` / `task succeeded` events; filter with RUST_LOG=cano::observer=debug)\n"

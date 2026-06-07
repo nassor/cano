@@ -1,29 +1,32 @@
-//! # Workflow total timeout — saga rollback on budget exhaustion
+//! # Cooperative cancellation — saga rollback on cancel
 //!
-//! Demonstrates [`Workflow::with_total_timeout`](cano::Workflow::with_total_timeout):
-//! a 3-step saga `Reserve → Charge → Ship → Done` where `Ship` sleeps past the
-//! wall-clock budget. When the budget elapses, the in-flight task is aborted at
-//! its next await point, the saga compensation stack drains in reverse
-//! (`Charge` then `Reserve`), and `orchestrate` returns
-//! [`CanoError::WorkflowTimeout`](cano::CanoError::WorkflowTimeout).
+//! Demonstrates [`Workflow::orchestrate`](cano::Workflow::orchestrate) with a live token:
+//! a 3-step saga `Reserve → Charge → Ship → Done` where a sibling task fires a
+//! [`CancellationHandle`](cano::CancellationHandle) once `Ship` is in flight. The in-flight
+//! task is aborted at its next await point, the saga compensation stack drains in reverse
+//! (`Charge` then `Reserve`), and the call returns
+//! [`CanoError::Cancelled`](cano::CanoError::Cancelled).
 //!
 //! Run with:
 //! ```bash
-//! cargo run --example workflow_total_timeout
+//! cargo run --example workflow_cancellation
 //! ```
 //!
 //! Expected output (timings will vary):
 //! ```text
 //! reserve  : holding inventory (ticket #42)
 //! charge   : capturing $42.00 (auth auth-XYZ)
-//! ship     : dispatching shipment (this will overrun the 200ms budget)…
+//! ship     : dispatching shipment…  (a sibling task will cancel this)
 //! charge   : refunding auth auth-XYZ  (rollback)
 //! reserve  : releasing ticket #42  (rollback)
-//! workflow failed, rolled back: workflow total timeout exceeded: elapsed=...ms, limit=200ms
+//! workflow cancelled, rolled back: state=Ship attempt=0 path=[Reserve, Charge, Ship] caused by: Workflow cancelled
 //! ```
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use cano::CancellationToken;
 use cano::prelude::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -36,7 +39,6 @@ enum Step {
 
 struct Reserve;
 struct Charge;
-struct Ship;
 
 #[saga::task(state = Step)]
 impl Reserve {
@@ -66,16 +68,19 @@ impl Charge {
     }
 }
 
-// Plain (non-compensatable) task. It sleeps far past the workflow's total
-// budget, so the engine aborts it at the `sleep` await point and triggers
-// rollback of every compensatable step that ran before it.
+// Plain (non-compensatable) long-running task. It flips `started` so the sibling
+// canceller fires deterministically while this task is parked in its sleep.
+struct Ship {
+    started: Arc<AtomicBool>,
+}
 #[task(state = Step)]
 impl Ship {
     fn config(&self) -> TaskConfig {
         TaskConfig::minimal()
     }
     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-        println!("ship     : dispatching shipment (this will overrun the 200ms budget)…");
+        println!("ship     : dispatching shipment…  (a sibling task will cancel this)");
+        self.started.store(true, Ordering::SeqCst);
         tokio::time::sleep(Duration::from_secs(2)).await;
         println!("ship     : this line should never print");
         Ok(TaskResult::Single(Step::Done))
@@ -84,18 +89,32 @@ impl Ship {
 
 #[tokio::main]
 async fn main() {
+    let ship_started = Arc::new(AtomicBool::new(false));
     let workflow = Workflow::bare()
-        .with_total_timeout(Duration::from_millis(200))
         .register_with_compensation(Step::Reserve, Reserve)
         .register_with_compensation(Step::Charge, Charge)
-        .register(Step::Ship, Ship)
+        .register(
+            Step::Ship,
+            Ship {
+                started: ship_started.clone(),
+            },
+        )
         .add_exit_state(Step::Done);
 
-    match workflow
-        .orchestrate(Step::Reserve, CancellationToken::disabled())
-        .await
-    {
+    let (handle, token) = CancellationToken::new();
+
+    // Sibling task: cancel as soon as `Ship` is in flight.
+    let canceller = tokio::spawn(async move {
+        while !ship_started.load(Ordering::SeqCst) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        handle.cancel();
+    });
+
+    match workflow.orchestrate(Step::Reserve, token).await {
         Ok(state) => println!("\nworkflow completed at {state:?}"),
-        Err(error) => println!("\nworkflow failed, rolled back: {error}"),
+        Err(error) => println!("\nworkflow cancelled, rolled back: {error}"),
     }
+
+    canceller.await.expect("canceller task panicked");
 }

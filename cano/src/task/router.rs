@@ -53,7 +53,7 @@
 //!     .register(Step::PathA, DoPathA)
 //!     .add_exit_state(Step::Done);
 //!
-//! let result = workflow.orchestrate(Step::Route).await?;
+//! let result = workflow.orchestrate(Step::Route, CancellationToken::disabled()).await?;
 //! assert_eq!(result, Step::Done);
 //! # Ok(())
 //! # }
@@ -84,7 +84,7 @@
 //!     .register(Step::Route, SimpleRouter)
 //!     .add_exit_state(Step::Done);
 //!
-//! let result = workflow.orchestrate(Step::Route).await?;
+//! let result = workflow.orchestrate(Step::Route, CancellationToken::disabled()).await?;
 //! assert_eq!(result, Step::Done);
 //! # Ok(())
 //! # }
@@ -209,6 +209,7 @@ pub type RouterTaskObject<TState, TResourceKey = Cow<'static, str>> =
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cancel::CancellationToken;
     use crate::resource::Resources;
     use crate::task;
     use crate::task::Task;
@@ -357,7 +358,10 @@ mod tests {
             .register(Step::PathA, PathATask)
             .add_exit_state(Step::Done);
 
-        let result = workflow.orchestrate(Step::Decide).await.unwrap();
+        let result = workflow
+            .orchestrate(Step::Decide, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, Step::Done);
     }
 

@@ -30,6 +30,7 @@ mod backoff;
 
 pub use backoff::BackoffPolicy;
 
+use crate::cancel::CancellationHandle;
 use crate::error::CanoResult;
 use crate::workflow::Workflow;
 use chrono::{DateTime, Utc};
@@ -50,6 +51,12 @@ enum SchedulerCommand {
         response: oneshot::Sender<CanoResult<()>>,
     },
     Reset {
+        id: Arc<str>,
+        response: oneshot::Sender<CanoResult<()>>,
+    },
+    /// Request cooperative cancellation of a flow's in-flight run. A no-op when
+    /// the flow isn't currently running.
+    Cancel {
         id: Arc<str>,
         response: oneshot::Sender<CanoResult<()>>,
     },
@@ -134,6 +141,11 @@ where
     schedule: ParsedSchedule,
     info: Arc<RwLock<FlowInfo>>,
     policy: Arc<BackoffPolicy>,
+    /// Cancellation handle for the flow's *currently executing* run, published
+    /// by `execute_reserved_flow` while a run is in flight and cleared when it
+    /// finishes. `None` when the flow is idle. Lets `cancel_flow` and graceful
+    /// shutdown cooperatively cancel an in-flight run.
+    cancel: Arc<RwLock<Option<CancellationHandle>>>,
 }
 
 impl<TState, TResourceKey> Clone for FlowData<TState, TResourceKey>
@@ -148,6 +160,7 @@ where
             schedule: self.schedule.clone(),
             info: Arc::clone(&self.info),
             policy: self.policy.clone(),
+            cancel: Arc::clone(&self.cancel),
         }
     }
 }

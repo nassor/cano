@@ -212,7 +212,10 @@ async fn inherent_timer_integrates_with_workflow() {
         .register(Step::Wait, TraitTimer)
         .add_exit_state(Step::Done);
 
-    let result = workflow.orchestrate(Step::Wait).await.unwrap();
+    let result = workflow
+        .orchestrate(Step::Wait, CancellationToken::disabled())
+        .await
+        .unwrap();
     assert_eq!(result, Step::Done);
 }
 

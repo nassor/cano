@@ -72,7 +72,7 @@
 //!     .register(Step::Process, CsvProcessor)
 //!     .add_exit_state(Step::Done);
 //!
-//! let result = workflow.orchestrate(Step::Process).await?;
+//! let result = workflow.orchestrate(Step::Process, CancellationToken::disabled()).await?;
 //! assert_eq!(result, Step::Done);
 //! # Ok(())
 //! # }
@@ -119,7 +119,7 @@
 //! let workflow = Workflow::bare()
 //!     .register(Step::Process, TolerantProcessor)
 //!     .add_exit_state(Step::Done);
-//! let result = workflow.orchestrate(Step::Process).await?;
+//! let result = workflow.orchestrate(Step::Process, CancellationToken::disabled()).await?;
 //! assert_eq!(result, Step::Done);
 //! # Ok(())
 //! # }
@@ -468,6 +468,7 @@ pub type BatchTaskObject<TState, TResourceKey = Cow<'static, str>> =
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cancel::CancellationToken;
     use crate::resource::Resources;
     use crate::task;
     use crate::task::Task;
@@ -869,7 +870,10 @@ mod tests {
             .register(Step::Process, IndexedBatch { n: 3 })
             .add_exit_state(Step::Done);
 
-        let result = workflow.orchestrate(Step::Process).await.unwrap();
+        let result = workflow
+            .orchestrate(Step::Process, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, Step::Done);
     }
 
@@ -892,6 +896,7 @@ mod tests {
 #[cfg(all(test, feature = "metrics"))]
 mod metrics_tests {
     use super::*;
+    use crate::cancel::CancellationToken;
     use crate::metrics::test_support::*;
     use crate::task::Task;
     use crate::workflow::Workflow;
@@ -939,7 +944,9 @@ mod metrics_tests {
             let workflow = Workflow::bare()
                 .register(St::Process, ThreeItemBatch)
                 .add_exit_state(St::Done);
-            workflow.orchestrate(St::Process).await
+            workflow
+                .orchestrate(St::Process, CancellationToken::disabled())
+                .await
         });
         assert!(result.is_ok(), "workflow should succeed: {result:?}");
         assert_eq!(

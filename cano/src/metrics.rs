@@ -102,6 +102,7 @@ pub const OBSERVED_WORKFLOW_TIMEOUT_LIMIT_SECONDS: &str =
 pub const OBSERVED_WORKFLOW_TIMEOUT_ELAPSED_SECONDS: &str =
     "cano_observed_workflow_timeout_elapsed_seconds";
 pub const OBSERVED_UNKNOWN_RESUME_STATES_TOTAL: &str = "cano_observed_unknown_resume_states_total";
+pub const OBSERVED_CANCELLATIONS_TOTAL: &str = "cano_observed_cancellations_total";
 
 // Always-on direct instrumentation:
 pub const WORKFLOW_RUNS_TOTAL: &str = "cano_workflow_runs_total";
@@ -194,11 +195,16 @@ pub fn describe() {
         Unit::Count,
         "Checkpoint rows whose state label is not registered on the current workflow (emitted by MetricsObserver during resume_from)"
     );
+    describe_counter!(
+        OBSERVED_CANCELLATIONS_TOTAL,
+        Unit::Count,
+        "Workflow runs cancelled via a CancellationToken (emitted by MetricsObserver via on_cancelled)"
+    );
 
     describe_counter!(
         WORKFLOW_RUNS_TOTAL,
         Unit::Count,
-        "Workflow runs (via Workflow::orchestrate/resume_from), by terminal outcome (completed|failed|timeout)"
+        "Workflow runs (via Workflow::orchestrate/resume_from), by terminal outcome (completed|failed)"
     );
     describe_histogram!(
         WORKFLOW_DURATION_SECONDS,
@@ -401,6 +407,9 @@ pub(crate) fn observed_workflow_timeout(elapsed: Duration, limit: Duration) {
 }
 pub(crate) fn observed_unknown_resume_state() {
     counter!(OBSERVED_UNKNOWN_RESUME_STATES_TOTAL).increment(1);
+}
+pub(crate) fn observed_cancellation() {
+    counter!(OBSERVED_CANCELLATIONS_TOTAL).increment(1);
 }
 
 // ----- workflow run -----

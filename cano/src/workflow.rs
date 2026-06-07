@@ -77,6 +77,7 @@ use std::hash::Hash;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use crate::cancel::CancellationToken;
 use crate::error::CanoError;
 use crate::observer::WorkflowObserver;
 use crate::recovery::CheckpointStore;
@@ -213,8 +214,6 @@ where
     states: HashMap<TState, Arc<StateEntry<TState, TResourceKey>>>,
     /// Shared resources for all tasks
     pub(crate) resources: Arc<Resources<TResourceKey>>,
-    /// Global workflow timeout
-    workflow_timeout: Option<Duration>,
     /// Total wall-clock budget for the entire `orchestrate` / `resume_from` call.
     /// When set, the FSM aborts the in-flight task at its next await point as soon
     /// as the budget elapses and drains the compensation stack against
@@ -268,7 +267,6 @@ where
         Self {
             states: HashMap::new(),
             resources: Arc::new(resources),
-            workflow_timeout: None,
             total_timeout: None,
             compensation_timeout: None,
             exit_states: Vec::new(),
@@ -281,27 +279,6 @@ where
             #[cfg(feature = "tracing")]
             tracing_span: None,
         }
-    }
-
-    /// Set a blunt wall-clock timeout for the entire `orchestrate` /
-    /// `resume_from` call.
-    ///
-    /// Implemented as a single `tokio::time::timeout` around the workflow
-    /// future. The in-flight task is dropped at its next await point and the
-    /// call returns `CanoError::Workflow("Workflow timeout exceeded")` —
-    /// compensation does **not** run.
-    ///
-    /// When [`with_total_timeout`](Self::with_total_timeout) is also set, the
-    /// engine treats this value as a *floor* on the total budget: the
-    /// effective wall-clock cap is `min(with_timeout, with_total_timeout)`
-    /// and the graceful total-timeout path drives it (compensation runs
-    /// under [`with_compensation_timeout`](Self::with_compensation_timeout),
-    /// `on_workflow_timeout` fires). This preserves the "with_timeout is a
-    /// hard upper bound" intent while avoiding a race between two outer
-    /// timeouts that would drop the inner compensation drain mid-flight.
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.workflow_timeout = Some(timeout);
-        self
     }
 
     /// Set a wall-clock budget for the entire `orchestrate` (or `resume_from`) call.
@@ -343,7 +320,7 @@ where
     ///     .add_exit_state(Step::Done);
     ///
     /// let err = workflow
-    ///     .orchestrate(Step::Start)
+    ///     .orchestrate(Step::Start, CancellationToken::disabled())
     ///     .await
     ///     .expect_err("budget elapses before Done");
     /// // The engine wraps task errors with state context; `.inner()` peels one layer.
@@ -638,7 +615,7 @@ where
     ///     .register(Step::Start, NoopTask)
     ///     .add_exit_state(Step::Done)
     ///     .with_observer(counter.clone());
-    /// workflow.orchestrate(Step::Start).await?;
+    /// workflow.orchestrate(Step::Start, CancellationToken::disabled()).await?;
     /// assert_eq!(counter.0.load(Ordering::Relaxed), 1);
     /// # Ok(())
     /// # }
@@ -901,13 +878,35 @@ where
     ///
     /// Runs lifecycle setup before execution and teardown after, regardless of outcome.
     ///
+    /// `token` controls cooperative cancellation. Drive the run with a [`CancellationToken`]
+    /// obtained from [`CancellationToken::new`](crate::cancel::CancellationToken::new) and keep the
+    /// paired [`CancellationHandle`](crate::cancel::CancellationHandle); when the handle's
+    /// [`cancel`](crate::cancel::CancellationHandle::cancel) fires, the in-flight cancellable task
+    /// is dropped at its next await point, the saga compensation stack is drained, and the call
+    /// returns [`CanoError::Cancelled`] (wrapped in [`CanoError::WithStateContext`]; a dirty
+    /// rollback yields [`CanoError::CompensationFailed`] whose `errors[0]` is the wrapped cancel).
+    /// To opt a run out of cancellation, pass [`CancellationToken::disabled`] — it never fires and
+    /// is zero-cost (the FSM skips the cancellation `select!` entirely).
+    ///
+    /// Cancellation is cooperative and saga-safe: a task is only interrupted at an `.await`, and a
+    /// [`CompensatableTask`](crate::saga::CompensatableTask) is never interrupted mid-run (it
+    /// completes so its rollback entry is recorded, and the cancel is honoured at the next state
+    /// boundary). The compensation drain itself is uncancellable. See the
+    /// [`cancel`](crate::cancel) module for the full semantics and precedence rules against
+    /// [`with_total_timeout`](Self::with_total_timeout).
+    ///
     /// # Errors
     ///
     /// - [`CanoError::Workflow`] -- no handler is registered for the current state, a single
     ///   task returned a `TaskResult::Split` (use [`Workflow::register_split`] instead), the
     ///   global workflow timeout was exceeded, or a split strategy was misconfigured
+    /// - [`CanoError::Cancelled`] -- the run was cancelled via `token` (see above)
     /// - Any [`CanoError`] variant propagated from a task during execution
-    pub async fn orchestrate(&self, initial_state: TState) -> Result<TState, CanoError> {
+    pub async fn orchestrate(
+        &self,
+        initial_state: TState,
+        token: CancellationToken,
+    ) -> Result<TState, CanoError> {
         #[cfg(feature = "tracing")]
         let workflow_span = self.tracing_span.clone().unwrap_or_else(|| {
             if tracing::enabled!(tracing::Level::INFO) {
@@ -937,79 +936,48 @@ where
         self.validate_initial_state(&initial_state)?;
 
         self.resources.setup_all().await?;
-        let result = self.run_workflow(initial_state).await;
+        let result = self.run_workflow(initial_state, token).await;
         self.resources
             .teardown_range(0..self.resources.lifecycle_len())
             .await;
         result
     }
 
-    async fn run_workflow(&self, initial_state: TState) -> Result<TState, CanoError> {
+    async fn run_workflow(
+        &self,
+        initial_state: TState,
+        token: CancellationToken,
+    ) -> Result<TState, CanoError> {
         #[cfg(feature = "metrics")]
         let _active = crate::metrics::WorkflowActiveGuard::new();
         let started = std::time::Instant::now();
         let total_budget = self.resolve_total_budget(started);
-        let workflow_future = self.execute_workflow(initial_state, total_budget);
-        self.await_with_outer_timeout(workflow_future, total_budget, started)
-            .await
+        let result = self
+            .execute_workflow(initial_state, total_budget, token)
+            .await;
+        Self::record_run_outcome(&result, started);
+        result
     }
 
-    /// Resolve the effective wall-clock budget for the entire FSM call.
-    ///
-    /// Precedence:
-    /// 1. Both `with_timeout` and `with_total_timeout` set → graceful
-    ///    total-timeout path with `min(...)` as the budget. Treating
-    ///    `with_timeout` as a floor preserves the user's intent that it is
-    ///    a hard upper bound, while avoiding a race between two outer
-    ///    timeouts that would drop the compensation drain mid-flight.
-    /// 2. Only total set → graceful total-timeout path.
-    /// 3. Only `with_timeout` set → legacy blunt `tokio::time::timeout`
-    ///    wrapper applied externally; the FSM loop runs unbudgeted.
-    /// 4. Neither → zero-cost path.
+    /// Resolve the wall-clock budget for the entire FSM call: the
+    /// [`with_total_timeout`](Self::with_total_timeout) duration, or `None`
+    /// (the zero-cost path) when unset.
     pub(crate) fn resolve_total_budget(
         &self,
         started: std::time::Instant,
     ) -> Option<(std::time::Instant, Duration)> {
-        let effective = match (self.workflow_timeout, self.total_timeout) {
-            (Some(w), Some(t)) => Some(w.min(t)),
-            (_, Some(t)) => Some(t),
-            _ => None,
-        };
-        effective.map(|d| (started, d))
+        self.total_timeout.map(|d| (started, d))
     }
 
-    /// Apply the legacy `with_timeout` outer wrapper when (and only when) the
-    /// graceful total-timeout path is NOT also active. Emits the workflow-run
-    /// outcome metric exactly once per invocation — on the legacy-timeout
-    /// path the early return ensures `outcome="timeout"` is recorded
-    /// *without* a follow-up `outcome="failed"` for the same run; on the
-    /// non-timeout paths the post-match emission records `completed`/`failed`.
-    ///
-    /// Used by both `run_workflow` (forward direction) and
-    /// `execute_resume_inner` (resume direction) so the precedence rule
-    /// lives in one place.
-    pub(crate) async fn await_with_outer_timeout<F, T>(
-        &self,
-        fut: F,
-        total_budget: Option<(std::time::Instant, Duration)>,
-        #[allow(unused_variables)] started: std::time::Instant,
-    ) -> Result<T, CanoError>
-    where
-        F: std::future::Future<Output = Result<T, CanoError>>,
-    {
-        let result = match (self.workflow_timeout, total_budget) {
-            (Some(timeout_duration), None) => {
-                match tokio::time::timeout(timeout_duration, fut).await {
-                    Ok(inner) => inner,
-                    Err(_) => {
-                        #[cfg(feature = "metrics")]
-                        crate::metrics::workflow_run("timeout", started.elapsed());
-                        return Err(CanoError::workflow("Workflow timeout exceeded"));
-                    }
-                }
-            }
-            _ => fut.await,
-        };
+    /// Emit the workflow-run outcome metric (`completed` / `failed`) once per
+    /// run. Called by both `run_workflow` (forward) and `execute_resume_inner`
+    /// (resume) so the emission lives in one place. No-op without the `metrics`
+    /// feature.
+    #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
+    pub(crate) fn record_run_outcome<T>(
+        result: &Result<T, CanoError>,
+        started: std::time::Instant,
+    ) {
         #[cfg(feature = "metrics")]
         crate::metrics::workflow_run(
             if result.is_ok() {
@@ -1019,7 +987,6 @@ where
             },
             started.elapsed(),
         );
-        result
     }
 }
 
@@ -1032,7 +999,6 @@ where
         Self {
             states: self.states.clone(),
             resources: Arc::clone(&self.resources),
-            workflow_timeout: self.workflow_timeout,
             total_timeout: self.total_timeout,
             compensation_timeout: self.compensation_timeout,
             exit_states: self.exit_states.clone(),
@@ -1080,7 +1046,7 @@ where
     /// let result = Workflow::bare()
     ///     .register(Step::Start, NoopTask)
     ///     .add_exit_state(Step::Done)
-    ///     .orchestrate(Step::Start)
+    ///     .orchestrate(Step::Start, CancellationToken::disabled())
     ///     .await?;
     /// assert_eq!(result, Step::Done);
     /// # Ok(())
@@ -1100,7 +1066,6 @@ where
         f.debug_struct("Workflow")
             .field("states", &format!("{} states", self.states.len()))
             .field("exit_states", &self.exit_states)
-            .field("workflow_timeout", &self.workflow_timeout)
             .field("total_timeout", &self.total_timeout)
             .field("compensation_timeout", &self.compensation_timeout)
             .field("workflow_id", &self.workflow_id)
@@ -1151,7 +1116,11 @@ mod metrics_tests {
 
     #[test]
     fn successful_run_records_outcome_duration_and_clears_active_gauge() {
-        let (res, rows) = run_with_recorder(|| async { ok_workflow().orchestrate(S::Start).await });
+        let (res, rows) = run_with_recorder(|| async {
+            ok_workflow()
+                .orchestrate(S::Start, CancellationToken::disabled())
+                .await
+        });
         assert_eq!(res.unwrap(), S::Done);
         assert_eq!(
             counter(
@@ -1178,7 +1147,7 @@ mod metrics_tests {
             Workflow::bare()
                 .register(S::Start, Boom)
                 .add_exit_state(S::Done)
-                .orchestrate(S::Start)
+                .orchestrate(S::Start, CancellationToken::disabled())
                 .await
         });
         assert!(res.is_err());
@@ -1190,47 +1159,12 @@ mod metrics_tests {
     }
 
     #[test]
-    fn legacy_timeout_on_orchestrate_only_increments_timeout_counter() {
-        // Regression sentinel for F8: when `with_timeout` fires inside
-        // `run_workflow`, the early return guarantees only `outcome="timeout"`
-        // is incremented — not both `timeout` and `failed`. This test asserts
-        // the forward direction, which has always been correct; a sibling test
-        // in `compensation::tests` covers the resume direction (which used to
-        // double-count).
-        struct Slow;
-        #[crate::task]
-        impl Task<S> for Slow {
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
-            async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                Ok(TaskResult::Single(S::Done))
-            }
-        }
+    fn per_state_task_durations_are_recorded_single_and_split() {
         let (res, rows) = run_with_recorder(|| async {
-            Workflow::bare()
-                .with_timeout(std::time::Duration::from_millis(20))
-                .register(S::Start, Slow)
-                .add_exit_state(S::Done)
-                .orchestrate(S::Start)
+            ok_workflow()
+                .orchestrate(S::Start, CancellationToken::disabled())
                 .await
         });
-        assert!(res.is_err());
-        assert_eq!(
-            counter(&rows, "cano_workflow_runs_total", &[("outcome", "timeout")]),
-            1
-        );
-        assert_eq!(
-            counter_opt(&rows, "cano_workflow_runs_total", &[("outcome", "failed")]).unwrap_or(0),
-            0,
-            "legacy timeout must not double-count as both `timeout` and `failed`"
-        );
-    }
-
-    #[test]
-    fn per_state_task_durations_are_recorded_single_and_split() {
-        let (res, rows) = run_with_recorder(|| async { ok_workflow().orchestrate(S::Start).await });
         assert_eq!(res.unwrap(), S::Done);
         assert_eq!(
             histogram_count(
@@ -1282,7 +1216,7 @@ mod metrics_tests {
                     JoinConfig::new(JoinStrategy::PartialResults(2), S::Done),
                 )
                 .add_exit_state(S::Done)
-                .orchestrate(S::Start)
+                .orchestrate(S::Start, CancellationToken::disabled())
                 .await
         });
         assert_eq!(res.unwrap(), S::Done);
@@ -1345,7 +1279,10 @@ mod tests {
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1356,7 +1293,10 @@ mod tests {
             .register(TestState::Process, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1371,7 +1311,10 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
 
         let data: String = store.get("test_key").unwrap();
@@ -1384,7 +1327,9 @@ mod tests {
         // upfront rather than reaching the FSM loop.
         let workflow = Workflow::<TestState>::bare().add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await;
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await;
         let err = result.unwrap_err();
         assert_eq!(err.category(), "configuration");
         assert!(err.to_string().contains("no registered state handlers"));
@@ -1470,7 +1415,10 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1486,7 +1434,10 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1496,7 +1447,10 @@ mod tests {
         let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_states([TestState::Complete, TestState::Error]);
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1506,7 +1460,10 @@ mod tests {
         let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_states([TestState::Complete, TestState::Complete].into_iter());
-        let result = workflow.orchestrate(TestState::Start).await.unwrap();
+        let result = workflow
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1610,7 +1567,7 @@ mod tests {
         let result = Workflow::bare()
             .register(TestState::Start, BareWorkflowTask)
             .add_exit_state(TestState::Complete)
-            .orchestrate(TestState::Start)
+            .orchestrate(TestState::Start, CancellationToken::disabled())
             .await
             .unwrap();
         assert_eq!(result, TestState::Complete);
@@ -1644,7 +1601,7 @@ mod tests {
             .register_router(TestState::Start, RouteToProcess)
             .register(TestState::Process, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
-            .orchestrate(TestState::Start)
+            .orchestrate(TestState::Start, CancellationToken::disabled())
             .await
             .unwrap();
 
@@ -1770,7 +1727,7 @@ mod tests {
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
             .with_observer(Arc::new(PanickyObserver))
-            .orchestrate(TestState::Start)
+            .orchestrate(TestState::Start, CancellationToken::disabled())
             .await
             .expect("orchestrate must complete despite observer panic");
         assert_eq!(result, TestState::Complete);
@@ -1800,7 +1757,7 @@ mod tests {
             .register(TestState::Process, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
             .with_observer(Arc::new(CountThenPanic(Arc::clone(&count))))
-            .orchestrate(TestState::Start)
+            .orchestrate(TestState::Start, CancellationToken::disabled())
             .await
             .expect("orchestrate must complete despite repeated observer panics");
         assert_eq!(result, TestState::Complete);
@@ -1821,7 +1778,10 @@ mod tests {
         let wf = Workflow::bare()
             .register(TestState::Start, start.clone())
             .add_exit_state(TestState::Complete);
-        let result = wf.orchestrate(TestState::Complete).await.unwrap();
+        let result = wf
+            .orchestrate(TestState::Complete, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
         assert_eq!(
             start.count(),
@@ -1839,7 +1799,10 @@ mod tests {
             .register(TestState::Start, SimpleTask::new(TestState::Process))
             .register(TestState::Process, process.clone())
             .add_exit_state(TestState::Process);
-        let result = wf.orchestrate(TestState::Start).await.unwrap();
+        let result = wf
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Process);
         assert_eq!(
             process.count(),
@@ -1855,7 +1818,10 @@ mod tests {
         let wf = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Process))
             .add_exit_state(TestState::Complete);
-        let err = wf.orchestrate(TestState::Start).await.unwrap_err();
+        let err = wf
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("No task registered"), "got: {err}");
     }
 
@@ -1866,7 +1832,10 @@ mod tests {
         let wf = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete);
-        let err = wf.orchestrate(TestState::Process).await.unwrap_err();
+        let err = wf
+            .orchestrate(TestState::Process, CancellationToken::disabled())
+            .await
+            .unwrap_err();
         assert_eq!(err.category(), "configuration");
         assert!(
             err.to_string()
@@ -1889,7 +1858,10 @@ mod tests {
         let wf = Workflow::bare()
             .register(TestState::Start, ReturnsSplit)
             .add_exit_state(TestState::Complete);
-        let err = wf.orchestrate(TestState::Start).await.unwrap_err();
+        let err = wf
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap_err();
         assert!(err.to_string().contains("use register_split"), "got: {err}");
     }
 
@@ -1900,7 +1872,10 @@ mod tests {
             .register(TestState::Start, first.clone())
             .register(TestState::Start, SimpleTask::new(TestState::Complete)) // replaces `first`
             .add_exit_state(TestState::Complete);
-        let result = wf.orchestrate(TestState::Start).await.unwrap();
+        let result = wf
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete); // the second handler ran
         assert_eq!(first.count(), 0, "the replaced handler must not run");
     }
@@ -1936,7 +1911,10 @@ mod tests {
                 },
             )
             .add_exit_state(TestState::Complete);
-        let result = wf.orchestrate(TestState::Start).await.unwrap();
+        let result = wf
+            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, TestState::Complete);
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 5);
     }
@@ -1955,7 +1933,7 @@ mod tests {
             .add_exit_state(TestState::Complete);
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            wf.orchestrate(TestState::Start),
+            wf.orchestrate(TestState::Start, CancellationToken::disabled()),
         )
         .await
         .expect("orchestrate of an empty split must not hang");
@@ -1993,170 +1971,8 @@ mod tests {
     }
 }
 
-/// Edge-case unit tests for `await_with_outer_timeout`. Integration-level
-/// coverage already pins down the metric-emission shape end-to-end
-/// (`legacy_timeout_on_orchestrate_only_increments_timeout_counter`,
-/// `legacy_timeout_on_resume_only_increments_timeout_counter`,
-/// `with_timeout_acts_as_floor_when_combined_with_with_total_timeout`,
-/// `with_timeout_alone_still_uses_legacy_blunt_timeout`); these tests pin
-/// down the helper's behavior in isolation across every
-/// `(workflow_timeout, total_budget)` permutation.
-#[cfg(test)]
-mod await_with_outer_timeout_tests {
-    use super::test_support::TestState;
-    use super::*;
-    use std::time::Duration;
-
-    fn workflow_with(
-        workflow_timeout: Option<Duration>,
-        total_timeout: Option<Duration>,
-    ) -> Workflow<TestState> {
-        let mut w = Workflow::<TestState>::bare();
-        if let Some(d) = workflow_timeout {
-            w = w.with_timeout(d);
-        }
-        if let Some(d) = total_timeout {
-            w = w.with_total_timeout(d);
-        }
-        w
-    }
-
-    #[tokio::test]
-    async fn neither_timeout_just_awaits_future() {
-        let w = workflow_with(None, None);
-        let started = std::time::Instant::now();
-        let out = w
-            .await_with_outer_timeout(
-                async { Ok::<TestState, CanoError>(TestState::Complete) },
-                None,
-                started,
-            )
-            .await
-            .unwrap();
-        assert_eq!(out, TestState::Complete);
-    }
-
-    #[tokio::test]
-    async fn only_with_timeout_passes_through_when_future_is_fast() {
-        let w = workflow_with(Some(Duration::from_secs(60)), None);
-        let started = std::time::Instant::now();
-        let out = w
-            .await_with_outer_timeout(
-                async { Ok::<TestState, CanoError>(TestState::Complete) },
-                None,
-                started,
-            )
-            .await
-            .unwrap();
-        assert_eq!(out, TestState::Complete);
-    }
-
-    #[tokio::test]
-    async fn only_with_timeout_fires_legacy_timeout_on_slow_future() {
-        // Slow future + small `with_timeout` and no total_budget → the legacy
-        // arm fires. Surfaces the documented `CanoError::Workflow("Workflow
-        // timeout exceeded")` and the helper returns early so the post-match
-        // emission does not also fire.
-        let w = workflow_with(Some(Duration::from_millis(10)), None);
-        let started = std::time::Instant::now();
-        let err = w
-            .await_with_outer_timeout(
-                async {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                    Ok::<TestState, CanoError>(TestState::Complete)
-                },
-                None,
-                started,
-            )
-            .await
-            .expect_err("legacy timeout must fire");
-        assert!(
-            matches!(err, CanoError::Workflow(ref m) if m.contains("Workflow timeout exceeded")),
-            "expected legacy shape, got: {err}"
-        );
-        assert!(
-            started.elapsed() < Duration::from_millis(500),
-            "must bound to the legacy timeout, not the inner sleep"
-        );
-    }
-
-    #[tokio::test]
-    async fn only_total_budget_skips_legacy_path() {
-        // The helper's match has `(Some, None)` only — when total_budget is
-        // Some, the legacy arm is never taken. The slow future is allowed to
-        // run; here we stop it via a quick inner Ok so the test is fast.
-        let w = workflow_with(None, Some(Duration::from_millis(10)));
-        let total_budget = Some((std::time::Instant::now(), Duration::from_millis(10)));
-        let started = std::time::Instant::now();
-        let out = w
-            .await_with_outer_timeout(
-                async { Ok::<TestState, CanoError>(TestState::Complete) },
-                total_budget,
-                started,
-            )
-            .await
-            .unwrap();
-        assert_eq!(out, TestState::Complete);
-    }
-
-    #[tokio::test]
-    async fn both_timeouts_set_skips_legacy_path() {
-        // Both timeouts: the graceful path drives. Legacy wrapper must NOT
-        // wrap, otherwise the inner total-budget drain could be cancelled
-        // mid-flight. Verify by using a slow inner future and a Some
-        // total_budget: the helper passes the future through without timing
-        // out (since legacy doesn't apply and we don't simulate the graceful
-        // path here — that's the FSM loop's job).
-        let w = workflow_with(
-            Some(Duration::from_millis(5)),
-            Some(Duration::from_secs(60)),
-        );
-        let total_budget = Some((std::time::Instant::now(), Duration::from_secs(60)));
-        let started = std::time::Instant::now();
-        let out = w
-            .await_with_outer_timeout(
-                async {
-                    // ~20ms — well beyond `with_timeout(5ms)` — to prove the
-                    // legacy wrapper isn't applied.
-                    tokio::time::sleep(Duration::from_millis(20)).await;
-                    Ok::<TestState, CanoError>(TestState::Complete)
-                },
-                total_budget,
-                started,
-            )
-            .await
-            .unwrap();
-        assert_eq!(out, TestState::Complete);
-        assert!(
-            started.elapsed() >= Duration::from_millis(20),
-            "future must run to completion; legacy wrapper must NOT be applied"
-        );
-    }
-
-    #[tokio::test]
-    async fn legacy_path_propagates_inner_errors_unchanged() {
-        // When the inner future returns Err before the deadline, the helper
-        // must surface that error unchanged — not convert it to a timeout.
-        let w = workflow_with(Some(Duration::from_secs(60)), None);
-        let started = std::time::Instant::now();
-        let err = w
-            .await_with_outer_timeout(
-                async { Err::<TestState, _>(CanoError::task_execution("inner boom")) },
-                None,
-                started,
-            )
-            .await
-            .expect_err("inner err must propagate");
-        assert!(
-            matches!(err, CanoError::TaskExecution(ref m) if m == "inner boom"),
-            "must propagate verbatim, got: {err}"
-        );
-    }
-}
-
-/// Edge-case unit tests for `resolve_total_budget`. Verifies the precedence
-/// rules separately from the integration-level
-/// `with_timeout_acts_as_floor_when_combined_with_with_total_timeout`.
+/// Edge-case unit tests for `resolve_total_budget` — the budget is simply the
+/// `with_total_timeout` duration (or `None`).
 #[cfg(test)]
 mod resolve_total_budget_tests {
     use super::test_support::TestState;
@@ -2164,49 +1980,18 @@ mod resolve_total_budget_tests {
     use std::time::Duration;
 
     #[test]
-    fn neither_set_returns_none() {
+    fn unset_returns_none() {
         let w = Workflow::<TestState>::bare();
         assert!(w.resolve_total_budget(std::time::Instant::now()).is_none());
     }
 
     #[test]
-    fn only_with_timeout_set_returns_none() {
-        let w = Workflow::<TestState>::bare().with_timeout(Duration::from_secs(1));
-        assert!(
-            w.resolve_total_budget(std::time::Instant::now()).is_none(),
-            "with_timeout alone goes through the legacy wrapper; FSM gets no budget"
-        );
-    }
-
-    #[test]
-    fn only_total_timeout_set_returns_total() {
+    fn total_timeout_set_returns_total() {
         let w = Workflow::<TestState>::bare().with_total_timeout(Duration::from_secs(7));
         let now = std::time::Instant::now();
         let (start, limit) = w.resolve_total_budget(now).unwrap();
         assert_eq!(start, now);
         assert_eq!(limit, Duration::from_secs(7));
-    }
-
-    #[test]
-    fn both_set_returns_min_via_with_timeout_as_floor() {
-        // F5: when both are configured the smaller bounds the FSM, so the
-        // legacy hard cap still applies (graceful path).
-        let w = Workflow::<TestState>::bare()
-            .with_timeout(Duration::from_millis(50))
-            .with_total_timeout(Duration::from_secs(60));
-        let now = std::time::Instant::now();
-        let (_, limit) = w.resolve_total_budget(now).unwrap();
-        assert_eq!(limit, Duration::from_millis(50));
-    }
-
-    #[test]
-    fn both_set_total_smaller_returns_total() {
-        // Symmetric case: total smaller than legacy.
-        let w = Workflow::<TestState>::bare()
-            .with_timeout(Duration::from_secs(60))
-            .with_total_timeout(Duration::from_millis(50));
-        let (_, limit) = w.resolve_total_budget(std::time::Instant::now()).unwrap();
-        assert_eq!(limit, Duration::from_millis(50));
     }
 }
 

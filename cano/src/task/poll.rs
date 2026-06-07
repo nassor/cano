@@ -47,7 +47,7 @@
 //!     .register(Step::Wait, counter)
 //!     .add_exit_state(Step::Done);
 //!
-//! let result = workflow.orchestrate(Step::Wait).await?;
+//! let result = workflow.orchestrate(Step::Wait, CancellationToken::disabled()).await?;
 //! assert_eq!(result, Step::Done);
 //! # Ok(())
 //! # }
@@ -109,7 +109,7 @@
 //!     .register(Step::Poll, TraitPoller)
 //!     .add_exit_state(Step::Done);
 //!
-//! let result = workflow.orchestrate(Step::Poll).await?;
+//! let result = workflow.orchestrate(Step::Poll, CancellationToken::disabled()).await?;
 //! assert_eq!(result, Step::Done);
 //! # Ok(())
 //! # }
@@ -344,6 +344,7 @@ pub type PollTaskObject<TState, TResourceKey = Cow<'static, str>> =
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cancel::CancellationToken;
     use crate::resource::Resources;
     use crate::task;
     use crate::task::Task;
@@ -590,7 +591,10 @@ mod tests {
         // But wait: poll 1 => count becomes 1, 1 < 2 => Pending; poll 2 => count becomes 2, 2 >= 2 => Ready(Done)
         // But we registered Step::Done as exit state so Done is the final state
         // Actually CountingPoller returns Single(Step::Done) when ready, so we skip Next entirely
-        let result = workflow.orchestrate(Step::Wait).await.unwrap();
+        let result = workflow
+            .orchestrate(Step::Wait, CancellationToken::disabled())
+            .await
+            .unwrap();
         assert_eq!(result, Step::Done);
     }
 
@@ -754,7 +758,10 @@ mod tests {
             .add_exit_state(Step::Done);
 
         let start = std::time::Instant::now();
-        let err = workflow.orchestrate(Step::Wait).await.unwrap_err();
+        let err = workflow
+            .orchestrate(Step::Wait, CancellationToken::disabled())
+            .await
+            .unwrap_err();
         let elapsed = start.elapsed();
 
         // The FSM wraps the failure with state context; `.inner()` peels one layer.

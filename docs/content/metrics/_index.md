@@ -108,6 +108,7 @@ Workflow::bare()
 <li><code>cano_circuit_open_events_total{task}</code> — on <code>on_circuit_open</code></li>
 <li><code>cano_checkpoints_observed_total</code> — on <code>on_checkpoint</code></li>
 <li><code>cano_resumes_total</code> — on <code>on_resume</code></li>
+<li><code>cano_observed_cancellations_total</code> — on <code>on_cancelled</code> (run cancelled via a <code>CancellationToken</code>)</li>
 </ul>
 <p>
 <code>on_task_start</code> is intentionally <em>not</em> counted — every dispatch already shows up in
@@ -408,7 +409,7 @@ async fn main() {
     // 2. Run the workflow a few times directly.
     for _ in 0..3 {
         workflow()
-            .orchestrate(Step::Fetch)
+            .orchestrate(Step::Fetch, CancellationToken::disabled())
             .await
             .expect("workflow run");
     }

@@ -63,7 +63,7 @@
 //!     .register(Step::Wait, CoolDown)
 //!     .add_exit_state(Step::Done);
 //!
-//! let result = workflow.orchestrate(Step::Wait).await?;
+//! let result = workflow.orchestrate(Step::Wait, CancellationToken::disabled()).await?;
 //! assert_eq!(result, Step::Done);
 //! # Ok(())
 //! # }

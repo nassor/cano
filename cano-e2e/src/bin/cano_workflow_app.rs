@@ -13,6 +13,7 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
+use cano::CancellationToken;
 use cano_e2e::{Faults, Phase, PostgresCheckpointStore, StdoutTracer, build_workflow};
 
 #[tokio::main]
@@ -62,8 +63,16 @@ async fn main() -> anyhow::Result<()> {
     emit(&format!("READY {workflow_id} {mode}"));
 
     let result = match mode.as_str() {
-        "resume" => workflow.resume_from(workflow_id.clone()).await,
-        "run" => workflow.orchestrate(Phase::Reserve).await,
+        "resume" => {
+            workflow
+                .resume_from(workflow_id.clone(), CancellationToken::disabled())
+                .await
+        }
+        "run" => {
+            workflow
+                .orchestrate(Phase::Reserve, CancellationToken::disabled())
+                .await
+        }
         other => anyhow::bail!("unknown mode {other:?}"),
     };
     match result {

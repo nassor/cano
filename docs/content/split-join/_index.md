@@ -253,7 +253,7 @@ async fn main() -> Result<(), CanoError> {
         .register(DataState::Aggregate, Aggregator)
         .add_exit_state(DataState::Complete);
 
-    let result = workflow.orchestrate(DataState::Start).await?;
+    let result = workflow.orchestrate(DataState::Start, CancellationToken::disabled()).await?;
     let final_result: i32 = store.get("final_result")?;
     println!("Workflow completed: {:?} — total {}", result, final_result);
     Ok(())

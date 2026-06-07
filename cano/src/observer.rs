@@ -107,6 +107,15 @@ pub trait WorkflowObserver: Send + Sync + 'static {
     /// wrapped timeout (dirty rollback).
     fn on_workflow_timeout(&self, _elapsed: std::time::Duration, _limit: std::time::Duration) {}
 
+    /// Called when a run is cancelled via a
+    /// [`CancellationToken`](crate::cancel::CancellationToken) — either observed at a state
+    /// boundary or while a cancellable task was in flight. `state` is the `Debug` rendering of the
+    /// state the cancellation was observed at. Fires exactly once per cancelled run, immediately
+    /// before the compensation stack is drained. Followed on the public API's return by a
+    /// `CanoError::WithStateContext` wrapping a `CanoError::Cancelled` (clean rollback), or a
+    /// `CanoError::CompensationFailed` whose `errors[0]` is the wrapped `Cancelled` (dirty rollback).
+    fn on_cancelled(&self, _state: &str) {}
+
     /// Called when the engine attempted to clear a checkpoint log (after a
     /// successful run or after a clean compensation drain) and the backend
     /// returned an error.
@@ -236,6 +245,9 @@ impl WorkflowObserver for TracingObserver {
             "workflow total timeout exceeded"
         );
     }
+    fn on_cancelled(&self, state: &str) {
+        tracing::warn!(state, "workflow cancelled");
+    }
     fn on_checkpoint_clear_failed(&self, workflow_id: &str, error: &CanoError) {
         tracing::warn!(workflow_id, error = %error, "checkpoint log clear failed");
     }
@@ -296,6 +308,9 @@ impl WorkflowObserver for MetricsObserver {
     }
     fn on_workflow_timeout(&self, elapsed: std::time::Duration, limit: std::time::Duration) {
         crate::metrics::observed_workflow_timeout(elapsed, limit);
+    }
+    fn on_cancelled(&self, _state: &str) {
+        crate::metrics::observed_cancellation();
     }
     fn on_checkpoint_clear_failed(&self, _workflow_id: &str, _error: &CanoError) {
         crate::metrics::checkpoint_clear(false);
@@ -382,7 +397,13 @@ mod tests {
             .add_exit_state(S::Done)
             .with_observer(Arc::new(obs));
 
-        assert_eq!(workflow.orchestrate(S::Start).await.unwrap(), S::Done);
+        assert_eq!(
+            workflow
+                .orchestrate(S::Start, CancellationToken::disabled())
+                .await
+                .unwrap(),
+            S::Done
+        );
 
         let events = rec.labels();
         assert!(
@@ -415,7 +436,12 @@ mod tests {
             .add_exit_state(S::Done)
             .with_observer(Arc::new(obs));
 
-        assert!(workflow.orchestrate(S::Start).await.is_err());
+        assert!(
+            workflow
+                .orchestrate(S::Start, CancellationToken::disabled())
+                .await
+                .is_err()
+        );
 
         let events = rec.labels();
         assert!(
@@ -463,7 +489,10 @@ mod tests {
             .add_exit_state(S::Done)
             .with_observer(Arc::new(obs));
 
-        let err = workflow.orchestrate(S::Start).await.unwrap_err();
+        let err = workflow
+            .orchestrate(S::Start, CancellationToken::disabled())
+            .await
+            .unwrap_err();
         // The FSM wraps the failure with state context; the inner is CircuitOpen.
         assert!(matches!(err.inner(), CanoError::CircuitOpen(_)), "{err}");
 
@@ -484,7 +513,13 @@ mod tests {
         let workflow = Workflow::bare()
             .register(S::Start, OkTask)
             .add_exit_state(S::Done);
-        assert_eq!(workflow.orchestrate(S::Start).await.unwrap(), S::Done);
+        assert_eq!(
+            workflow
+                .orchestrate(S::Start, CancellationToken::disabled())
+                .await
+                .unwrap(),
+            S::Done
+        );
     }
 
     #[test]
@@ -580,7 +615,7 @@ mod metrics_observer_tests {
                 .register(S::Start, GoTo(S::Mid))
                 .register(S::Mid, GoTo(S::Done))
                 .add_exit_state(S::Done)
-                .orchestrate(S::Start)
+                .orchestrate(S::Start, CancellationToken::disabled())
                 .await
         });
         assert_eq!(res.unwrap(), S::Done);
@@ -633,7 +668,7 @@ mod metrics_observer_tests {
                 .with_total_timeout(std::time::Duration::from_millis(20))
                 .register(S::Start, SlowTask)
                 .add_exit_state(S::Done)
-                .orchestrate(S::Start)
+                .orchestrate(S::Start, CancellationToken::disabled())
                 .await
         });
         assert!(res.is_err());
@@ -681,7 +716,7 @@ mod metrics_observer_tests {
                 .with_observer(Arc::new(MetricsObserver::new()))
                 .register(S::Start, Flaky(n2))
                 .add_exit_state(S::Done)
-                .orchestrate(S::Start)
+                .orchestrate(S::Start, CancellationToken::disabled())
                 .await
         });
         assert_eq!(res.unwrap(), S::Done);

@@ -72,7 +72,10 @@ async fn inherent_compensatable_impl_registers_and_compensates() {
         .register(Step::Boom, Boom)
         .add_exit_state(Step::Done);
 
-    let err = workflow.orchestrate(Step::Reserve).await.unwrap_err();
+    let err = workflow
+        .orchestrate(Step::Reserve, CancellationToken::disabled())
+        .await
+        .unwrap_err();
     assert_eq!(err.message(), "boom"); // clean rollback -> the original failure is surfaced
     assert!(
         compensated.load(Ordering::SeqCst),
@@ -85,7 +88,10 @@ async fn inherent_compensatable_impl_registers_and_compensates() {
         .register_with_compensation(Step::Reserve, ReserveNamed)
         .add_exit_state(Step::Done);
     assert_eq!(
-        workflow.orchestrate(Step::Reserve).await.unwrap(),
+        workflow
+            .orchestrate(Step::Reserve, CancellationToken::disabled())
+            .await
+            .unwrap(),
         Step::Done
     );
 }

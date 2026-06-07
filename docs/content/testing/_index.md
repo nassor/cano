@@ -86,7 +86,7 @@ async fn recording_observer_captures_the_path() {
         .add_exit_state(S::Done)
         .with_observer(observer.clone());
 
-    assert_eq!(wf.orchestrate(S::Start).await.unwrap(), S::Done);
+    assert_eq!(wf.orchestrate(S::Start, CancellationToken::disabled()).await.unwrap(), S::Done);
 
     // Assert the whole path, or inspect events directly.
     observer.assert_path(&["Start", "Done"]);
@@ -144,7 +144,7 @@ async fn every_registered_state_is_reached() {
         .register(S::Worker, Go(S::Done))
         .add_exit_state(S::Done)
         .with_observer(observer.clone());
-    wf.orchestrate(S::Start).await.unwrap();
+    wf.orchestrate(S::Start, CancellationToken::disabled()).await.unwrap();
 
     // Every registered handler was actually reached — no dead states.
     observer.assert_registered_states_entered(&wf).expect("no dead states");
@@ -189,7 +189,7 @@ async fn checkpoints_run_in_memory() {
         .add_exit_state(S::Done)
         .with_checkpoint_store(store.clone())
         .with_workflow_id("run-1");
-    assert_eq!(wf.orchestrate(S::Start).await.unwrap(), S::Done);
+    assert_eq!(wf.orchestrate(S::Start, CancellationToken::disabled()).await.unwrap(), S::Done);
 }
 ```
 
@@ -240,7 +240,7 @@ async fn panicking_task_fails_fast() {
         .register(S::Start, panic_on_attempt(1, S::Done))
         .add_exit_state(S::Done);
 
-    let err = wf.orchestrate(S::Start).await.unwrap_err();
+    let err = wf.orchestrate(S::Start, CancellationToken::disabled()).await.unwrap_err();
     assert!(err.to_string().contains("panic"));
 }
 ```

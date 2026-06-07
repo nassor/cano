@@ -85,7 +85,7 @@ async fn main() -> Result<(), CanoError> {
         .with_checkpoint_store(checkpoint_store)
         .with_workflow_id("run-42");
 
-    workflow.orchestrate(Step::Start).await?;
+    workflow.orchestrate(Step::Start, CancellationToken::disabled()).await?;
     Ok(())
 }
 ```
@@ -175,7 +175,7 @@ async fn main() -> Result<(), CanoError> {
         .with_checkpoint_store(checkpoint_store);
 
     // Some earlier process crashed mid-run; pick up where it left off.
-    let final_state = workflow.resume_from("run-42").await?;
+    let final_state = workflow.resume_from("run-42", CancellationToken::disabled()).await?;
     assert_eq!(final_state, Step::Done);
     Ok(())
 }
@@ -435,10 +435,10 @@ async fn main() -> Result<(), CanoError> {
         .with_workflow_id("demo-run");
 
     // Run 1: crashes inside ProcessTask. The Start and Process rows are already durable.
-    let _ = workflow.orchestrate(Step::Start).await;
+    let _ = workflow.orchestrate(Step::Start, CancellationToken::disabled()).await;
 
     // Run 2: resume — re-runs ProcessTask (now it succeeds) and finishes at Done.
-    let final_state = workflow.resume_from("demo-run").await?;
+    let final_state = workflow.resume_from("demo-run", CancellationToken::disabled()).await?;
     assert_eq!(final_state, Step::Done);
 
     // The append-only log: Start, Process (crash), Process (re-run), Finalize, Done —
