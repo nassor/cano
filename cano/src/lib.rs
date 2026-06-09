@@ -125,10 +125,17 @@
 //!   [`Workflow::register`]. A resumed run re-runs `wait()`, so the delay restarts after a crash.
 //! - [`BatchTask`] trait: fan-out over data items via `load`/`process_item`/`finish`.
 //! - [`SteppedTask`] trait: resumable iterative work via `step()` with a serializable cursor.
+//! - [`StreamTask`] trait: a genuine stream-processing model — consume an `impl Stream`
+//!   continuously via `open`/`process_item`/`flush_window`/`on_close`, flush per
+//!   [`StreamWindow`] window, run until the [`CancellationToken`] fires, and resume from a
+//!   persisted cursor. Registered with [`Workflow::register_stream`]; per-item errors are
+//!   governed by [`StreamErrorPolicy`]. (Plain [`Workflow::register`] runs an in-memory,
+//!   non-durable, non-cancellable companion loop.)
 //!
-//! Every [`RouterTask`], [`PollTask`], [`TimerTask`], [`BatchTask`], and [`SteppedTask`]
-//! automatically implements [`Task`] via companion impls emitted by the `#[task::router]`,
-//! `#[task::poll]`, `#[task::timer]`, `#[task::batch]`, and `#[task::stepped]` macros respectively.
+//! Every [`RouterTask`], [`PollTask`], [`TimerTask`], [`BatchTask`], [`SteppedTask`], and
+//! [`StreamTask`] automatically implements [`Task`] via companion impls emitted by the
+//! `#[task::router]`, `#[task::poll]`, `#[task::timer]`, `#[task::batch]`, `#[task::stepped]`,
+//! and `#[task::stream]` macros respectively.
 //!
 //! ### Parallel Execution (Split/Join)
 //!
@@ -227,6 +234,7 @@
 //! - [`task::timer`]: The [`TimerTask`] trait — wait-then-transition via `wait()`/`after_wait()`; registered with [`Workflow::register`]
 //! - [`task::batch`]: The [`BatchTask`] trait — fan-out over data items via `load`/`process_item`/`finish`; registered with [`Workflow::register`]
 //! - [`task::stepped`]: The [`SteppedTask`] trait — resumable iterative work via `step()` with a serializable cursor; registered with [`Workflow::register_stepped`] (persists the cursor when a checkpoint store is attached)
+//! - [`task::stream`]: The [`StreamTask`] trait — a genuine stream-processing model: consume an `impl Stream` continuously, flush per [`StreamWindow`] window, run until the [`CancellationToken`] fires, and resume from a persisted cursor; registered with [`Workflow::register_stream`]
 //! - [`cancel`]: [`CancellationToken`] / [`CancellationHandle`] — cooperative cancellation for [`orchestrate`](Workflow::orchestrate)
 //! - [`workflow`]: [`Workflow`] — FSM orchestration with Split/Join support
 //! - `scheduler` (requires `scheduler` feature): `Scheduler` (builder) and `RunningScheduler` (live handle) — cron and interval scheduling
@@ -296,6 +304,7 @@ pub use task::router::{DynRouterTask, RouterTask, RouterTaskObject};
 pub use task::stepped::{
     DefaultStepCursor, DynSteppedTask, StepOutcome, SteppedTask, SteppedTaskObject, run_stepped,
 };
+pub use task::stream::{CloseReason, StreamErrorPolicy, StreamTask, StreamWindow, WindowSignal};
 pub use task::timer::{DynTimerTask, TimerOutcome, TimerTask, TimerTaskObject, run_timer};
 
 #[cfg(feature = "recovery")]
@@ -326,6 +335,7 @@ pub use scheduler::{BackoffPolicy, FlowInfo, RunningScheduler, Schedule, Schedul
 /// - `#[cano::task::timer]` — for `impl TimerTask` blocks
 /// - `#[cano::task::batch]` — for `impl BatchTask` blocks
 /// - `#[cano::task::stepped]` — for `impl SteppedTask` blocks
+/// - `#[cano::task::stream]` — for `impl StreamTask` blocks
 /// - `#[cano::saga::task]` — for `impl CompensatableTask` blocks
 ///
 /// [`cano-macros`]: https://docs.rs/cano-macros
@@ -369,13 +379,14 @@ pub mod prelude {
 
     pub use crate::{
         BatchTask, CancellationHandle, CancellationToken, CanoError, CanoResult, CheckpointRow,
-        CheckpointStore, CircuitBreaker, CircuitPermit, CircuitPolicy, CircuitState,
+        CheckpointStore, CircuitBreaker, CircuitPermit, CircuitPolicy, CircuitState, CloseReason,
         CompensatableTask, HealthStatus, JoinConfig, JoinStrategy, MemoryStore, Meter, MeterStatus,
         MultiPermit, MultiRateLimiter, PollErrorPolicy, PollOutcome, PollTask, RateLimiter,
         RateLimiterPermit, RateLimiterPolicy, Reservation, Resource, Resources, RetryMode,
         RouterTask, RowKind, SplitResult, SplitTaskResult, StateEntry, StepOutcome, SteppedTask,
-        Task, TaskConfig, TaskObject, TaskResult, Tier, TimerOutcome, TimerTask, WindowPermit,
-        WindowPolicy, WindowedRateLimiter, Workflow, WorkflowObserver, run_stepped,
+        StreamErrorPolicy, StreamTask, StreamWindow, Task, TaskConfig, TaskObject, TaskResult,
+        Tier, TimerOutcome, TimerTask, WindowPermit, WindowPolicy, WindowSignal,
+        WindowedRateLimiter, Workflow, WorkflowObserver, run_stepped,
     };
 
     #[cfg(feature = "scheduler")]

@@ -88,6 +88,7 @@ pub mod poll;
 mod retry;
 pub mod router;
 pub mod stepped;
+pub mod stream;
 pub mod timer;
 
 pub use batch::{
@@ -101,17 +102,19 @@ pub use router::{DynRouterTask, RouterTask, RouterTaskObject};
 pub use stepped::{
     DefaultStepCursor, DynSteppedTask, StepOutcome, SteppedTask, SteppedTaskObject, run_stepped,
 };
+pub use stream::{CloseReason, StreamErrorPolicy, StreamTask, StreamWindow, WindowSignal};
 pub use timer::{DynTimerTask, TimerOutcome, TimerTask, TimerTaskObject, run_timer};
 
 // Attribute macros namespaced under `cano::task::` so that
-// `#[task::router]`, `#[task::poll]`, `#[task::timer]`, `#[task::batch]`, and
-// `#[task::stepped]` all resolve as path-qualified attribute macros.
+// `#[task::router]`, `#[task::poll]`, `#[task::timer]`, `#[task::batch]`,
+// `#[task::stepped]`, and `#[task::stream]` all resolve as path-qualified attribute macros.
 // (Modules and macros occupy different namespaces, so these coexist with the
-// `router`, `poll`, `timer`, `batch`, and `stepped` submodules above.)
+// `router`, `poll`, `timer`, `batch`, `stepped`, and `stream` submodules above.)
 pub use cano_macros::batch_task as batch;
 pub use cano_macros::poll_task as poll;
 pub use cano_macros::router_task as router;
 pub use cano_macros::stepped_task as stepped;
+pub use cano_macros::stream_task as stream;
 pub use cano_macros::timer_task as timer;
 
 /// Result type for task execution that supports both single and split transitions

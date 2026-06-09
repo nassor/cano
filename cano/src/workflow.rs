@@ -84,6 +84,7 @@ use crate::recovery::CheckpointStore;
 use crate::resource::Resources;
 use crate::saga::{CompensatableTask, ErasedCompensatable};
 use crate::task::stepped::{ErasedSteppedTask, SteppedAdapter, SteppedTask};
+use crate::task::stream::{ErasedStreamTask, StreamAdapter, StreamTask};
 use crate::task::{RouterTask, Task};
 
 #[cfg(feature = "tracing")]
@@ -535,6 +536,36 @@ where
         self.states.insert(
             state,
             Arc::new(StateEntry::Stepped {
+                task: erased,
+                config,
+            }),
+        );
+        self
+    }
+
+    /// Register a [`StreamTask`](crate::task::stream::StreamTask) for `state`, with
+    /// engine-driven windowing, cooperative cancellation, and cursor persistence.
+    ///
+    /// Unlike `register` (which runs a `StreamTask`'s in-memory companion loop with no
+    /// persistence and no cancellation), this drives the stream through the FSM engine: it
+    /// observes the run's [`CancellationToken`](crate::cancel::CancellationToken), and —
+    /// when a [`checkpoint store`](Self::with_checkpoint_store) + a
+    /// [`workflow id`](Self::with_workflow_id) are attached — persists the cursor of each
+    /// flushed window so a crashed or cancelled run resumes from the last committed
+    /// position via [`resume_from`](Self::resume_from).
+    ///
+    /// Replaces any handler previously registered for `state`. Infallible.
+    pub fn register_stream<T>(mut self, state: TState, task: T) -> Self
+    where
+        T: StreamTask<TState, TResourceKey> + 'static,
+    {
+        self.forget_compensator_for(&state);
+        let config = Arc::new(StreamTask::config(&task));
+        let erased: Arc<dyn ErasedStreamTask<TState, TResourceKey>> =
+            Arc::new(StreamAdapter(Arc::new(task)));
+        self.states.insert(
+            state,
+            Arc::new(StateEntry::Stream {
                 task: erased,
                 config,
             }),

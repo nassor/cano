@@ -11,11 +11,11 @@ template = "section.html"
 <p>
 A <code>Task</code> is the fundamental building block of a Cano workflow: a single <code>run</code>
 method that decides the next state. <strong>Start here</strong> — <code>Task</code> is the default
-choice for every processing unit. The other five processing models
+choice for every processing unit. The other six processing models
 (<a href="../router-task/">RouterTask</a>,
 <a href="../poll-task/">PollTask</a>, <a href="../timer-task/">TimerTask</a>,
 <a href="../batch-task/">BatchTask</a>,
-<a href="../stepped-task/">SteppedTask</a>) are specialisations you reach for only when a task
+<a href="../stepped-task/">SteppedTask</a>, <a href="../stream-task/">StreamTask</a>) are specialisations you reach for only when a task
 has a shape that one of them fits better — see <a href="#task-family">The Task Family</a> below for
 the decision matrix. Tasks receive a <code>&amp;Resources</code> reference at dispatch time — see
 <a href="../resources/">Resources</a> for how to register and retrieve typed dependencies.
@@ -38,7 +38,7 @@ example on this page wires a task into a <code>Workflow</code> and pulls depende
 <li><a href="#resource-free">Resource-Free Tasks</a></li>
 <li><a href="#configuration-guide">Configuring Tasks</a></li>
 <li><a href="#patterns">Real-World Task Patterns</a></li>
-<li><a href="#task-family">The Task Family: Four More Processing Models</a></li>
+<li><a href="#task-family">The Task Family: Six More Processing Models</a></li>
 <li><a href="#choosing">Choosing a Processing Model</a></li>
 </ol>
 </nav>
@@ -328,10 +328,10 @@ impl AggregatorTask {
 
 <!-- Section: The Task Family -->
 <hr class="section-divider">
-<h2 id="task-family"><a href="#task-family" class="anchor-link" aria-hidden="true">#</a>The Task Family: Four More Processing Models</h2>
+<h2 id="task-family"><a href="#task-family" class="anchor-link" aria-hidden="true">#</a>The Task Family: Six More Processing Models</h2>
 <p>
 Beyond the plain <code>Task</code>, Cano ships
-<strong>four more <code>Task</code>-derived processing models</strong>. Each is a specialised shape —
+<strong>six more <code>Task</code>-derived processing models</strong>. Each is a specialised shape —
 they all ultimately dispatch as a <code>Task</code>, so you mix them freely in one workflow — and
 each has its own page with the full reference.
 </p>
@@ -367,13 +367,20 @@ re-joined in one state.</p>
 step, so a crash resumes mid-loop. Registered with <code>register_stepped</code>.</p>
 <p><strong>Reach for it when:</strong> long page-by-page scans, chunked migrations — crash-resume finer than per-state.</p>
 </div>
+<div class="card">
+<h3><a href="../stream-task/">StreamTask</a></h3>
+<p>Continuous stream consumption: <code>open → process_item → flush_window</code> per tumbling window,
+running until cancelled/exhausted, resumable from a committed cursor. Registered with
+<code>register_stream</code>.</p>
+<p><strong>Reach for it when:</strong> unbounded sources — Kafka, SSE, file-tail — with per-window emission and resume-from-cursor.</p>
+</div>
 </div>
 
 <!-- Section: Choosing a Processing Model -->
 <hr class="section-divider">
 <h2 id="choosing"><a href="#choosing" class="anchor-link" aria-hidden="true">#</a>Choosing a Processing Model</h2>
 <p>
-All six models dispatch as a <code>Task</code>, so you can mix them in one workflow. Start from
+All seven models dispatch as a <code>Task</code>, so you can mix them in one workflow. Start from
 <code>Task</code> and move to a specialised model only when your work has its shape:
 </p>
 
@@ -415,6 +422,11 @@ All six models dispatch as a <code>Task</code>, so you can mix them in one workf
 <td><a href="../stepped-task/"><strong><code>SteppedTask</code></strong></a></td>
 <td>You have a <em>long iterative job</em> (page-by-page scan, chunked migration) you want to crash-resume mid-loop, finer than per-state.</td>
 <td><code>register_stepped</code></td>
+</tr>
+<tr>
+<td><a href="../stream-task/"><strong><code>StreamTask</code></strong></a></td>
+<td>You're consuming an <em>unbounded / continuous source</em> (Kafka, SSE, file-tail) — per-window emission, bounded memory, runs until cancelled/exhausted, resumable from a cursor.</td>
+<td><code>register_stream</code></td>
 </tr>
 </tbody>
 </table>
