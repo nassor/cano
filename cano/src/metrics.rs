@@ -272,7 +272,7 @@ pub fn describe() {
     describe_counter!(
         STREAM_RUNS_TOTAL,
         Unit::Count,
-        "StreamTask runs, by outcome (completed|failed)"
+        "StreamTask runs, by outcome (completed|cancelled|failed)"
     );
     describe_counter!(
         STREAM_WINDOWS_TOTAL,
@@ -496,8 +496,9 @@ pub(crate) fn batch_items(ok: usize, err: usize) {
 pub(crate) fn step_iteration(done: bool) {
     counter!(STEP_ITERATIONS_TOTAL, "outcome" => if done { "done" } else { "more" }).increment(1);
 }
-pub(crate) fn stream_run(ok: bool) {
-    counter!(STREAM_RUNS_TOTAL, "outcome" => if ok { "completed" } else { "failed" }).increment(1);
+pub(crate) fn stream_run(outcome: &'static str) {
+    // `outcome` is one of "completed" | "cancelled" | "failed".
+    counter!(STREAM_RUNS_TOTAL, "outcome" => outcome).increment(1);
 }
 pub(crate) fn stream_window() {
     counter!(STREAM_WINDOWS_TOTAL).increment(1);

@@ -39,9 +39,11 @@
 //! The FSM writes the state-entry checkpoint *before* running the task, so a resumed run
 //! re-enters the state and calls [`open`](StreamTask::open) again from the last committed
 //! cursor. The window *after* that cursor may be partially processed then replayed —
-//! [`open`](StreamTask::open) and [`process_item`](StreamTask::process_item) **must be
-//! idempotent**. `config` defaults to [`TaskConfig::minimal()`] (no outer retry) because an
-//! outer retry would re-invoke `open()` and re-consume the stream.
+//! [`open`](StreamTask::open), [`process_item`](StreamTask::process_item), and
+//! [`on_close`](StreamTask::on_close) **must be idempotent**. `config` defaults to
+//! [`TaskConfig::minimal()`] (no outer retry) because an outer retry would re-invoke
+//! `open()` and re-consume the stream; only [`attempt_timeout`](crate::task::TaskConfig)
+//! is honored — as a per-[`process_item`](StreamTask::process_item) bound.
 
 use crate::cancel::CancellationToken;
 use crate::error::CanoError;
@@ -158,8 +160,14 @@ where
         StreamErrorPolicy::FailFast
     }
 
-    /// Task configuration. Defaults to [`TaskConfig::minimal()`] (no outer retry) because
-    /// an outer retry would re-invoke [`open`](StreamTask::open) and re-consume the stream.
+    /// Task configuration. Defaults to [`TaskConfig::minimal()`].
+    ///
+    /// Only [`attempt_timeout`](crate::task::TaskConfig) is applied — as a bound on each
+    /// [`process_item`](StreamTask::process_item) call (a timeout becomes an item error
+    /// governed by [`on_item_error`](StreamTask::on_item_error)). **Outer retry
+    /// (`max_attempts`) is intentionally not applied**: it would re-invoke
+    /// [`open`](StreamTask::open) and re-consume the stream. The per-item error policy, the
+    /// `CancellationToken`, and the window loop are the resilience surface.
     fn config(&self) -> TaskConfig {
         TaskConfig::minimal()
     }
@@ -194,13 +202,18 @@ where
         outputs: Vec<Self::Output>,
     ) -> Result<WindowSignal<TState>, CanoError>;
 
-    /// Close hook, called once after the in-flight partial window has been flushed.
+    /// Close hook, called after the in-flight partial window has been flushed.
     ///
     /// - [`CloseReason::Exhausted`]: the returned [`TaskResult`] is the **next state**.
     /// - [`CloseReason::Cancelled`]: a **cleanup** hook — the returned `TaskResult` is
     ///   **ignored** and the run ends as
     ///   [`CanoError::Cancelled`](crate::error::CanoError::Cancelled) (an `Err` returned
     ///   here *is* propagated). Use it to release resources / commit final offsets.
+    ///
+    /// **At-least-once:** like [`open`](StreamTask::open) / [`process_item`](StreamTask::process_item),
+    /// `on_close` runs once per run but may be **re-invoked on crash-resume** (a crash
+    /// between `on_close` and the cursor commit replays the boundary window). It **must be
+    /// idempotent** — e.g. committing final offsets here must tolerate a repeat.
     async fn on_close(
         &self,
         res: &Resources<TResourceKey>,
@@ -252,6 +265,7 @@ pub(crate) enum WindowStep<TCursor, TState> {
 
 /// Pull and process items until one window flushes (or the loop terminates). Shared by the
 /// in-memory companion and the engine-driven session — there is exactly one loop body.
+#[allow(clippy::too_many_arguments)]
 async fn drive_window<T, S, K>(
     task: &T,
     res: &Resources<K>,
@@ -259,6 +273,7 @@ async fn drive_window<T, S, K>(
     consecutive_errors: &mut u32,
     window: &StreamWindow,
     policy: &StreamErrorPolicy,
+    attempt_timeout: Option<std::time::Duration>,
     token: &CancellationToken,
 ) -> Result<WindowStep<T::Cursor, S>, CanoError>
 where
@@ -313,6 +328,9 @@ where
                 if !buf.is_empty() {
                     #[cfg(feature = "metrics")]
                     crate::metrics::stream_window();
+                    // On cancel, `flush_window` runs only to commit the partial window's
+                    // side effects; its `WindowSignal` is ignored (the run ends as
+                    // `Cancelled` regardless — honoring `Stop` here would contradict that).
                     let _ = task.flush_window(res, std::mem::take(&mut buf)).await?;
                 }
                 // `on_close(Cancelled)` is a cleanup hook; its returned state is ignored —
@@ -345,35 +363,61 @@ where
             }
             item = stream.next() => {
                 match item {
-                    Some(item) => match task.process_item(res, item).await {
-                        Ok((out, cursor)) => {
-                            *consecutive_errors = 0;
-                            buf.push(out);
-                            last_cursor = Some(cursor);
-                            #[cfg(feature = "metrics")]
-                            crate::metrics::stream_items(1, 0);
-                        }
-                        Err(e) => {
-                            #[cfg(feature = "metrics")]
-                            crate::metrics::stream_items(0, 1);
-                            match policy {
-                                StreamErrorPolicy::FailFast => return Err(e),
-                                StreamErrorPolicy::SkipAndContinue => {}
-                                StreamErrorPolicy::RetryOnError { max_errors } => {
-                                    *consecutive_errors += 1;
-                                    if *consecutive_errors > *max_errors {
-                                        return Err(e);
+                    Some(item) => {
+                        // Bound a single `process_item` by `config().attempt_timeout` when set
+                        // (a hung source item is the realistic failure mode). A timeout becomes
+                        // an ordinary item error governed by `on_item_error()` below. Outer
+                        // retry (`max_attempts`) is intentionally NOT applied — the per-item
+                        // policy + the loop are the resilience surface.
+                        let processed = match attempt_timeout {
+                            Some(d) => match tokio::time::timeout(d, task.process_item(res, item)).await {
+                                Ok(inner) => inner,
+                                Err(_elapsed) => Err(CanoError::timeout(
+                                    "stream process_item exceeded attempt_timeout",
+                                )),
+                            },
+                            None => task.process_item(res, item).await,
+                        };
+                        match processed {
+                            Ok((out, cursor)) => {
+                                *consecutive_errors = 0;
+                                buf.push(out);
+                                last_cursor = Some(cursor);
+                                #[cfg(feature = "metrics")]
+                                crate::metrics::stream_items(1, 0);
+                            }
+                            Err(e) => {
+                                #[cfg(feature = "metrics")]
+                                crate::metrics::stream_items(0, 1);
+                                match policy {
+                                    StreamErrorPolicy::FailFast => return Err(e),
+                                    StreamErrorPolicy::SkipAndContinue => {}
+                                    StreamErrorPolicy::RetryOnError { max_errors } => {
+                                        *consecutive_errors += 1;
+                                        if *consecutive_errors > *max_errors {
+                                            return Err(e);
+                                        }
                                     }
                                 }
                             }
                         }
-                    },
+                    }
                     None => {
-                        // Source exhausted: flush the partial window, then close.
+                        // Source exhausted: flush the final partial window. Honor a `Stop`
+                        // here (transition to it) just like a full window; on `Continue`
+                        // fall through to `on_close(Exhausted)` for the terminal transition.
                         if !buf.is_empty() {
                             #[cfg(feature = "metrics")]
                             crate::metrics::stream_window();
-                            let _ = task.flush_window(res, std::mem::take(&mut buf)).await?;
+                            match task.flush_window(res, std::mem::take(&mut buf)).await? {
+                                WindowSignal::Stop(result) => {
+                                    return Ok(WindowStep::Done {
+                                        final_cursor: last_cursor,
+                                        result,
+                                    });
+                                }
+                                WindowSignal::Continue => {}
+                            }
                         }
                         let result = task.on_close(res, CloseReason::Exhausted).await?;
                         return Ok(WindowStep::Done { final_cursor: last_cursor, result });
@@ -398,6 +442,7 @@ where
     let token = CancellationToken::disabled();
     let window = task.window();
     let policy = task.on_item_error();
+    let attempt_timeout = task.config().attempt_timeout;
     let mut consecutive_errors: u32 = 0;
 
     let result: Result<TaskResult<S>, CanoError> = async {
@@ -410,6 +455,7 @@ where
                 &mut consecutive_errors,
                 &window,
                 &policy,
+                attempt_timeout,
                 &token,
             )
             .await?
@@ -423,8 +469,13 @@ where
     }
     .await;
 
+    // The in-memory companion uses a disabled token, so it never cancels.
     #[cfg(feature = "metrics")]
-    crate::metrics::stream_run(result.is_ok());
+    crate::metrics::stream_run(if result.is_ok() {
+        "completed"
+    } else {
+        "failed"
+    });
     result
 }
 
@@ -482,10 +533,12 @@ where
 {
     fn name(&self) -> Cow<'static, str>;
     /// Open (or resume) the source from `cursor_bytes`, returning a driven session.
+    /// `attempt_timeout` (from the registered `config()`) bounds each `process_item`.
     fn open_session<'a>(
         &'a self,
         res: &'a Resources<TResourceKey>,
         cursor_bytes: Option<Vec<u8>>,
+        attempt_timeout: Option<std::time::Duration>,
     ) -> OpenSessionFuture<'a, TState, TResourceKey>;
 }
 
@@ -501,6 +554,7 @@ where
     stream: Pin<Box<dyn Stream<Item = T::Item> + Send>>,
     window: StreamWindow,
     policy: StreamErrorPolicy,
+    attempt_timeout: Option<std::time::Duration>,
     consecutive_errors: u32,
 }
 
@@ -524,6 +578,7 @@ where
                 &mut self.consecutive_errors,
                 &self.window,
                 &self.policy,
+                self.attempt_timeout,
                 token,
             )
             .await?;
@@ -569,6 +624,7 @@ where
         &'a self,
         res: &'a Resources<TResourceKey>,
         cursor_bytes: Option<Vec<u8>>,
+        attempt_timeout: Option<std::time::Duration>,
     ) -> OpenSessionFuture<'a, TState, TResourceKey> {
         Box::pin(async move {
             let cursor: Option<T::Cursor> = match cursor_bytes {
@@ -586,6 +642,7 @@ where
                 stream,
                 window: self.0.window(),
                 policy: self.0.on_item_error(),
+                attempt_timeout,
                 consecutive_errors: 0,
             };
             Ok(Box::new(session) as Box<dyn ErasedStreamSession<TState, TResourceKey>>)
@@ -1055,6 +1112,191 @@ mod tests {
             "resume reprocesses only the items after the committed cursor"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // Fix 1: WindowSignal::Stop from the terminal (exhaustion) partial flush is honored.
+    // -----------------------------------------------------------------------
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    enum S3 {
+        Consume,
+        ViaStop,
+        ViaClose,
+    }
+
+    struct StopOnFinalWindow;
+
+    #[task::stream]
+    impl StreamTask<S3> for StopOnFinalWindow {
+        type Item = u32;
+        type Output = u32;
+        type Cursor = u64;
+
+        fn window(&self) -> StreamWindow {
+            StreamWindow::Count(3) // never fills for a 2-item stream → terminal partial flush
+        }
+
+        async fn open(
+            &self,
+            _res: &Resources,
+            _cursor: Option<u64>,
+        ) -> Result<Pin<Box<dyn Stream<Item = u32> + Send>>, CanoError> {
+            Ok(Box::pin(stream::iter(vec![1u32, 2])) as Pin<Box<dyn Stream<Item = u32> + Send>>)
+        }
+
+        async fn process_item(&self, _res: &Resources, item: u32) -> Result<(u32, u64), CanoError> {
+            Ok((item, item as u64))
+        }
+
+        async fn flush_window(
+            &self,
+            _res: &Resources,
+            _outputs: Vec<u32>,
+        ) -> Result<WindowSignal<S3>, CanoError> {
+            Ok(WindowSignal::Stop(TaskResult::Single(S3::ViaStop)))
+        }
+
+        async fn on_close(
+            &self,
+            _res: &Resources,
+            _reason: CloseReason,
+        ) -> Result<TaskResult<S3>, CanoError> {
+            // Must NOT run: the terminal partial flush returned Stop.
+            Ok(TaskResult::Single(S3::ViaClose))
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_flush_stop_is_honored() {
+        use crate::cancel::CancellationToken;
+        use crate::workflow::Workflow;
+
+        let workflow = Workflow::bare()
+            .register_stream(S3::Consume, StopOnFinalWindow)
+            .add_exit_states([S3::ViaStop, S3::ViaClose]);
+        let result = workflow
+            .orchestrate(S3::Consume, CancellationToken::disabled())
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            S3::ViaStop,
+            "a Stop from the final partial flush must win over on_close(Exhausted)"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix 2: cooperative cancel fires on_cancelled exactly once.
+    // -----------------------------------------------------------------------
+
+    #[derive(Default)]
+    struct CancelCounter {
+        cancels: AtomicU32,
+    }
+
+    impl crate::observer::WorkflowObserver for CancelCounter {
+        fn on_cancelled(&self, _state: &str) {
+            self.cancels.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_fires_on_cancelled_once() {
+        use crate::cancel::CancellationToken;
+        use crate::workflow::Workflow;
+
+        let task = Forever {
+            closed_cancelled: Arc::new(AtomicBool::new(false)),
+            flushed_windows: Arc::new(AtomicU32::new(0)),
+        };
+        let counter = Arc::new(CancelCounter::default());
+        let (handle, token) = CancellationToken::new();
+        let workflow = Workflow::bare()
+            .register_stream(Step::Consume, task)
+            .add_exit_state(Step::Done)
+            .with_observer(counter.clone());
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            handle.cancel();
+        });
+
+        let result = workflow.orchestrate(Step::Consume, token).await;
+        assert!(matches!(&result, Err(e) if e.category() == "cancelled"));
+        assert_eq!(
+            counter.cancels.load(Ordering::SeqCst),
+            1,
+            "on_cancelled must fire exactly once on a stream cancel"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix 4: config().attempt_timeout bounds each process_item.
+    // -----------------------------------------------------------------------
+
+    struct SlowItem;
+
+    #[task::stream]
+    impl StreamTask<Step> for SlowItem {
+        type Item = u32;
+        type Output = u32;
+        type Cursor = u64;
+
+        fn config(&self) -> TaskConfig {
+            TaskConfig::minimal().with_attempt_timeout(std::time::Duration::from_millis(10))
+        }
+
+        async fn open(
+            &self,
+            _res: &Resources,
+            _cursor: Option<u64>,
+        ) -> Result<Pin<Box<dyn Stream<Item = u32> + Send>>, CanoError> {
+            Ok(Box::pin(stream::iter(vec![1u32])) as Pin<Box<dyn Stream<Item = u32> + Send>>)
+        }
+
+        async fn process_item(&self, _res: &Resources, item: u32) -> Result<(u32, u64), CanoError> {
+            // Far longer than the 10ms attempt_timeout.
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            Ok((item, item as u64))
+        }
+
+        async fn flush_window(
+            &self,
+            _res: &Resources,
+            _outputs: Vec<u32>,
+        ) -> Result<WindowSignal<Step>, CanoError> {
+            Ok(WindowSignal::Continue)
+        }
+
+        async fn on_close(
+            &self,
+            _res: &Resources,
+            _reason: CloseReason,
+        ) -> Result<TaskResult<Step>, CanoError> {
+            Ok(TaskResult::Single(Step::Done))
+        }
+    }
+
+    #[tokio::test]
+    async fn attempt_timeout_bounds_process_item() {
+        use crate::cancel::CancellationToken;
+        use crate::workflow::Workflow;
+
+        let workflow = Workflow::bare()
+            .register_stream(Step::Consume, SlowItem)
+            .add_exit_state(Step::Done);
+        // FailFast (default) → the timed-out item fails the run promptly.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            workflow.orchestrate(Step::Consume, CancellationToken::disabled()),
+        )
+        .await
+        .expect("attempt_timeout must bound the hung process_item well under 5s");
+        assert!(
+            matches!(&result, Err(e) if e.category() == "timeout"),
+            "a process_item exceeding attempt_timeout must surface a timeout error, got {result:?}"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "metrics"))]
@@ -1141,6 +1383,66 @@ mod metrics_tests {
             counter(&rows, "cano_stream_items_total", &[("result", "ok")]),
             5,
             "five ok items"
+        );
+    }
+
+    /// Cancels itself after the first window (deterministic — no spawn/sleep).
+    struct SelfCancel {
+        handle: crate::cancel::CancellationHandle,
+    }
+
+    #[task::stream]
+    impl StreamTask<St> for SelfCancel {
+        type Item = u32;
+        type Output = u32;
+        type Cursor = u64;
+
+        async fn open(
+            &self,
+            _res: &Resources,
+            _cursor: Option<u64>,
+        ) -> Result<Pin<Box<dyn Stream<Item = u32> + Send>>, CanoError> {
+            Ok(Box::pin(stream::iter(0u32..)) as Pin<Box<dyn Stream<Item = u32> + Send>>)
+        }
+
+        async fn process_item(&self, _res: &Resources, item: u32) -> Result<(u32, u64), CanoError> {
+            Ok((item, item as u64))
+        }
+
+        async fn flush_window(
+            &self,
+            _res: &Resources,
+            _outputs: Vec<u32>,
+        ) -> Result<WindowSignal<St>, CanoError> {
+            // Default window is Count(1); fire cancel after the first window — the next
+            // loop iteration observes it and drains cooperatively.
+            self.handle.cancel();
+            Ok(WindowSignal::Continue)
+        }
+
+        async fn on_close(
+            &self,
+            _res: &Resources,
+            _reason: CloseReason,
+        ) -> Result<TaskResult<St>, CanoError> {
+            Ok(TaskResult::Single(St::Done))
+        }
+    }
+
+    #[test]
+    fn cancelled_stream_records_cancelled_outcome() {
+        let (handle, token) = CancellationToken::new();
+        let (result, rows) = run_with_recorder(|| async move {
+            let workflow = Workflow::bare()
+                .register_stream(St::Consume, SelfCancel { handle })
+                .add_exit_state(St::Done);
+            workflow.orchestrate(St::Consume, token).await
+        });
+        assert!(result.is_err(), "a cancelled run is Err: {result:?}");
+        assert_eq!(
+            counter(&rows, "cano_stream_runs_total", &[("outcome", "cancelled")]),
+            1,
+            "a cooperative cancel is recorded as cancelled, not failed"
         );
     }
 }

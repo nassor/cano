@@ -98,8 +98,9 @@ where
     /// The engine drives the windowed consume loop, persisting the cursor of each flushed
     /// window's last item as a [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor)
     /// row. Unlike every other variant the driver observes the `CancellationToken` itself
-    /// (a cooperative drain: flush the in-flight window, then transition via `on_close`)
-    /// rather than being dropped mid-window by `dispatch_with_budget`.
+    /// (a cooperative drain: flush the in-flight window, commit its cursor, run `on_close`
+    /// for cleanup, then end as `Cancelled` so `resume_from` continues) rather than being
+    /// dropped mid-window by `dispatch_with_budget`.
     Stream {
         /// Type-erased stream task — exposes `name`, `config`, and `open_session`.
         task: Arc<dyn ErasedStreamTask<TState, TResourceKey>>,
@@ -1036,14 +1037,15 @@ where
     /// window at a time, persisting each flushed window's cursor as a
     /// [`RowKind::StepCursor`] row before continuing (crash-safe ordering, identical to
     /// `execute_stepped_task`). The `token` is observed cooperatively inside the session so
-    /// a cancel flushes the in-flight window and transitions via `on_close` rather than
-    /// dropping the future. Returns the next `TState` on a terminal window; rejects a
-    /// `Split` result (single-next-state only, like `Stepped`).
+    /// a cancel flushes the in-flight window, commits its cursor, runs `on_close` for
+    /// cleanup, and returns `Err(Cancelled)` (resumable) rather than dropping the future.
+    /// Returns the next `TState` on a terminal window; rejects a `Split` result
+    /// (single-next-state only, like `Stepped`).
     #[allow(clippy::too_many_arguments)]
     async fn execute_stream_task(
         &self,
         task: Arc<dyn ErasedStreamTask<TState, TResourceKey>>,
-        _config: Arc<crate::task::TaskConfig>,
+        config: Arc<crate::task::TaskConfig>,
         workflow_id: &Option<Arc<str>>,
         state_label: &str,
         sequence: &mut u64,
@@ -1056,8 +1058,14 @@ where
             notify_observers(slice, |o| o.on_task_start(task_name.as_ref()));
         }
 
+        // Set in the `ErasedWindowStep::Cancelled` arm so the post-loop observer + metrics
+        // can distinguish a cooperative cancel from a genuine error. `AtomicBool` (not
+        // `Cell`) so the spawned workflow future stays `Send`.
+        let was_cancelled = std::sync::atomic::AtomicBool::new(false);
         let outcome: Result<TState, CanoError> = async {
-            let mut session = task.open_session(&self.resources, resume_cursor).await?;
+            let mut session = task
+                .open_session(&self.resources, resume_cursor, config.attempt_timeout)
+                .await?;
             loop {
                 // Catch a panic inside `process_item`/`flush_window`/`on_close` so it
                 // becomes a `CanoError` instead of unwinding past the FSM and skipping
@@ -1085,6 +1093,7 @@ where
                             (final_cursor, Some(next))
                         }
                         ErasedWindowStep::Cancelled { final_cursor } => {
+                            was_cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
                             (final_cursor, Some(Err(CanoError::cancelled())))
                         }
                     };
@@ -1117,13 +1126,29 @@ where
         }
         .await;
 
+        let cancelled = was_cancelled.load(std::sync::atomic::Ordering::Relaxed);
+
         #[cfg(feature = "metrics")]
-        crate::metrics::stream_run(outcome.is_ok());
+        crate::metrics::stream_run(if outcome.is_ok() {
+            "completed"
+        } else if cancelled {
+            "cancelled"
+        } else {
+            "failed"
+        });
 
         if let Some(ref slice) = observers {
             match &outcome {
                 Ok(_) => notify_observers(slice, |o| o.on_task_success(task_name.as_ref())),
-                Err(e) => notify_observers(slice, |o| o.on_task_failure(task_name.as_ref(), e)),
+                Err(e) => {
+                    notify_observers(slice, |o| o.on_task_failure(task_name.as_ref(), e));
+                    // The stream arm bypasses `dispatch_with_budget`, so it fires
+                    // `on_cancelled` itself — exactly once per cancelled run, mirroring the
+                    // fan-out + `on_cancelled` pairing dispatch does for other task types.
+                    if cancelled {
+                        notify_observers(slice, |o| o.on_cancelled(state_label));
+                    }
+                }
             }
         }
         outcome
