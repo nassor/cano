@@ -207,7 +207,8 @@ pub trait CheckpointStore: Send + Sync + 'static {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::Mutex;
+
+    use parking_lot::Mutex;
 
     /// Minimal in-memory `CheckpointStore` for exercising the trait contract.
     #[derive(Default)]
@@ -216,7 +217,7 @@ mod tests {
     #[checkpoint_store]
     impl CheckpointStore for InMemoryStore {
         async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
-            let mut runs = self.0.lock().unwrap();
+            let mut runs = self.0.lock();
             let rows = runs.entry(workflow_id.to_string()).or_default();
             if rows.iter().any(|r| r.sequence == row.sequence) {
                 return Err(CanoError::checkpoint_store(format!(
@@ -232,7 +233,6 @@ mod tests {
             let mut rows = self
                 .0
                 .lock()
-                .unwrap()
                 .get(workflow_id)
                 .cloned()
                 .unwrap_or_default();
@@ -241,7 +241,7 @@ mod tests {
         }
 
         async fn clear(&self, workflow_id: &str) -> Result<(), CanoError> {
-            self.0.lock().unwrap().remove(workflow_id);
+            self.0.lock().remove(workflow_id);
             Ok(())
         }
     }

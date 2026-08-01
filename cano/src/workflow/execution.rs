@@ -149,6 +149,33 @@ where
     }
 }
 
+impl<TState, TResourceKey> StateEntry<TState, TResourceKey>
+where
+    TState: Clone + std::fmt::Debug + Send + Sync + 'static,
+    TResourceKey: Hash + Eq + Send + Sync + 'static,
+{
+    /// The task identifier for this state entry, or an empty `String` for
+    /// variants with no single task (`Split`) or for variants that are
+    /// unreachable at this call site (e.g. `Router` when called from
+    /// checkpoint code that has already excluded them).
+    ///
+    /// This method centralises the task-name extraction logic so future
+    /// `StateEntry` variants cannot silently produce an empty `task_id`
+    /// through a missing match arm.
+    pub(crate) fn task_id(&self) -> String {
+        match self {
+            StateEntry::Single { task, .. } => task.name().into_owned(),
+            StateEntry::CompensatableSingle { task, .. } => task.name().into_owned(),
+            StateEntry::Stepped { task, .. } => task.name().into_owned(),
+            StateEntry::Stream { task, .. } => task.name().into_owned(),
+            // Router is unreachable from checkpoint code (excluded by the
+            // `is_router` guard in `execute_workflow_from`); Split has no
+            // single task identifier. Both fall to the empty-string default.
+            StateEntry::Router { .. } | StateEntry::Split { .. } => String::new(),
+        }
+    }
+}
+
 fn split_error_summary<TState>(errors: &[SplitTaskResult<TState>]) -> String {
     const MAX_ERRORS_TO_REPORT: usize = 3;
 
@@ -370,14 +397,11 @@ where
                 };
                 // `state_label` is always `Some` here (checkpoint_store ⇒ label computed).
                 let label = state_label.as_deref().unwrap_or_default();
-                let task_id = match self.states.get(&current_state).map(|e| e.as_ref()) {
-                    Some(StateEntry::Single { task, .. }) => task.name().into_owned(),
-                    Some(StateEntry::CompensatableSingle { task, .. }) => task.name().into_owned(),
-                    Some(StateEntry::Stepped { task, .. }) => task.name().into_owned(),
-                    Some(StateEntry::Stream { task, .. }) => task.name().into_owned(),
-                    // Router is unreachable here (is_router guard above), Split has no single task_id.
-                    _ => String::new(),
-                };
+                let task_id = self
+                    .states
+                    .get(&current_state)
+                    .map(|e| e.as_ref())
+                    .map_or(String::new(), |entry| entry.task_id());
                 let append_result = store
                     .append(
                         wf_id,

@@ -39,6 +39,10 @@ pub const UNITS: i64 = 5;
 /// The `kind` column maps [`cano::recovery::RowKind`] to a `SMALLINT`:
 /// `0 = StateEntry`, `1 = CompensationCompletion`, `2 = StepCursor`. Pre-existing rows
 /// (written before this column existed) read back as `StateEntry` via `DEFAULT 0`.
+///
+/// The `workflow_version` column is stored as `bigint` in Postgres and loaded back as
+/// `u32`. Values exceeding `u32::MAX` produce a `CanoError::CheckpointStore` on load.
+/// The `u32` range is more than sufficient for workflow definition versioning.
 #[derive(Clone)]
 pub struct PostgresCheckpointStore {
     client: Arc<Client>,
@@ -75,35 +79,52 @@ async fn connect_raw(dsn: &str) -> anyhow::Result<Client> {
 }
 
 async fn migrate(client: &Client) -> anyhow::Result<()> {
+    // Run each statement separately so a partial migration is still valid
+    // if one statement fails (e.g. a future schema change). A single
+    // `batch_execute` would abort the entire set on the first failure.
     client
         .batch_execute(
             "CREATE TABLE IF NOT EXISTS cano_checkpoints (
-                 workflow_id      text     NOT NULL,
-                 sequence         bigint   NOT NULL,
-                 state            text     NOT NULL,
-                 task_id          text     NOT NULL,
-                 output_blob      bytea,
-                 kind             smallint NOT NULL DEFAULT 0,
-                 workflow_version bigint   NOT NULL DEFAULT 0,
-                 PRIMARY KEY (workflow_id, sequence)
-             );
-             ALTER TABLE cano_checkpoints
-                 ADD COLUMN IF NOT EXISTS workflow_version bigint NOT NULL DEFAULT 0;
-             CREATE TABLE IF NOT EXISTS ledger (
-                 workflow_id text   NOT NULL,
-                 account     text   NOT NULL,
-                 tag         text   NOT NULL,
-                 amount      bigint NOT NULL,
-                 PRIMARY KEY (workflow_id, account, tag)
-             );
-             CREATE TABLE IF NOT EXISTS events (
-                 id          bigserial PRIMARY KEY,
-                 workflow_id text NOT NULL,
-                 label       text NOT NULL
-             );",
+                  workflow_id      text     NOT NULL,
+                  sequence         bigint   NOT NULL,
+                  state            text     NOT NULL,
+                  task_id          text     NOT NULL,
+                  output_blob      bytea,
+                  kind             smallint NOT NULL DEFAULT 0,
+                  PRIMARY KEY (workflow_id, sequence)
+              );",
         )
         .await
-        .context("running schema migration")?;
+        .context("creating cano_checkpoints table")?;
+    client
+        .batch_execute(
+            "ALTER TABLE cano_checkpoints
+                  ADD COLUMN IF NOT EXISTS workflow_version bigint NOT NULL DEFAULT 0;",
+        )
+        .await
+        .context("adding workflow_version column")?;
+    client
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS ledger (
+                  workflow_id text   NOT NULL,
+                  account     text   NOT NULL,
+                  tag         text   NOT NULL,
+                  amount      bigint NOT NULL,
+                  PRIMARY KEY (workflow_id, account, tag)
+              );",
+        )
+        .await
+        .context("creating ledger table")?;
+    client
+        .batch_execute(
+            "CREATE TABLE IF NOT EXISTS events (
+                  id          bigserial PRIMARY KEY,
+                  workflow_id text NOT NULL,
+                  label       text NOT NULL
+              );",
+        )
+        .await
+        .context("creating events table")?;
     Ok(())
 }
 
@@ -240,7 +261,10 @@ impl Db {
             .map_err(|e| CanoError::generic(format!("record event: {e}")))?;
         Ok(())
     }
-    /// Idempotent: applying the same `(account, tag)` again is a no-op.
+    /// Idempotent: applying the same `(account, tag)` again is a no-op because
+    /// `ON CONFLICT DO NOTHING` silently discards duplicate inserts — the *first*
+    /// write's `amount` wins and retries produce a conflict. This is intentional:
+    /// saga steps must only write once, and compensation reverts via `ledger_revert`.
     async fn ledger_apply(
         &self,
         wf: &str,

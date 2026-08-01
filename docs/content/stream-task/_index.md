@@ -304,20 +304,25 @@ often <code>flush_window</code> fires and how much the driver buffers. Larger wi
 flush + checkpoint cost.
 </p>
 
-<div class="card-stack">
-<div class="card">
-<h3><code>StreamWindow::Count(n)</code></h3>
-<p>Flush after every <code>n</code> successfully processed items (clamped to a minimum of 1). The
-default is <code>Count(1)</code> — flush per item.</p>
-</div>
-<div class="card">
-<h3><code>StreamWindow::Duration(d)</code></h3>
-<p>Flush every <code>d</code> of wall-clock time, tumbling. <strong>Empty windows are skipped</strong>
-— an idle source emits no spurious empty flushes; the deadline simply advances.</p>
-</div>
-</div>
+ <div class="card-stack">
+ <div class="card">
+ <h3><code>StreamWindow::Count(n)</code></h3>
+ <p>Flush after every <code>n</code> successfully processed items (clamped to a minimum of 1). The
+ default is <code>Count(1)</code> — flush per item.</p>
+ </div>
+ <div class="card">
+ <h3><code>StreamWindow::Duration(d)</code></h3>
+ <p>Flush every <code>d</code> of wall-clock time, tumbling. <strong>Empty windows are skipped</strong>
+ — an idle source emits no spurious empty flushes; the deadline simply advances.</p>
+ </div>
+ </div>
 
-<!-- Section: Error policy -->
+ <p>
+ <code>StreamBatch</code> is an alias for <code>StreamWindow</code> — it is semantically identical
+ but emphasises the batching semantics of <code>Count(n)</code> windows.
+ </p>
+
+ <!-- Section: Error policy -->
 <hr class="section-divider">
 <h2 id="error-policy"><a href="#error-policy" class="anchor-link" aria-hidden="true">#</a>Per-Item Error Policy</h2>
 <p>
@@ -475,7 +480,9 @@ Plain <code>register</code> runs the macro-generated companion <code>Task</code>
 <strong>in-memory</strong> windowed loop with <strong>no</strong> cursor persistence and
 <strong>no</strong> cancellation — it always runs to exhaustion. Reach for <code>register_stream</code>
 for anything real; it is the path that observes the <code>CancellationToken</code> and persists
-cursors.
+cursors. <code>register_stream</code> also wraps <code>on_close</code> in panic safety, so a panic
+in cleanup becomes a <code>CanoError</code> instead of unwinding past the FSM — <code>register</code>
+does <strong>not</strong> do this.
 </p>
 
 <!-- Section: explicit -->

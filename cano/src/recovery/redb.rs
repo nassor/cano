@@ -27,9 +27,15 @@ use cano_macros::checkpoint_store;
 /// `(workflow_id, sequence) -> postcard(StoredRow)`.
 const CHECKPOINTS: TableDefinition<(&str, u64), &[u8]> = TableDefinition::new("cano_checkpoints");
 
+/// Upper bound of the sequence key range — the largest valid `sequence` value.
+const SEQUENCE_MAX: u64 = u64::MAX;
+
+/// Lower bound of the sequence key range — the smallest valid `sequence` value.
+const SEQUENCE_MIN: u64 = u64::MIN;
+
 /// The payload half of a [`CheckpointRow`]: everything except `sequence`, which
 /// is carried by the redb key. Kept private — callers only ever see `CheckpointRow`.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 struct StoredRow {
     state: String,
     task_id: String,
@@ -40,7 +46,7 @@ struct StoredRow {
 
 /// Pre-versioning on-disk shape. Kept solely as a decode fallback so existing
 /// redb databases written before `workflow_version` was added still load.
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 struct StoredRowV0 {
     state: String,
     task_id: String,
@@ -50,7 +56,7 @@ struct StoredRowV0 {
 
 /// The key range covering every row for `workflow_id`, in ascending `sequence` order.
 fn workflow_range(workflow_id: &str) -> RangeInclusive<(&str, u64)> {
-    (workflow_id, u64::MIN)..=(workflow_id, u64::MAX)
+    (workflow_id, SEQUENCE_MIN)..=(workflow_id, SEQUENCE_MAX)
 }
 
 /// Wrap any `redb` error (they all implement [`Display`](std::fmt::Display)) as a
@@ -90,6 +96,9 @@ impl RedbCheckpointStore {
 impl CheckpointStore for RedbCheckpointStore {
     async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
         let sequence = row.sequence;
+        // Serialize *before* acquiring the write lock so heap allocation does
+        // not hold the transaction open. On failure the transaction is never
+        // begun, avoiding unnecessary lock contention.
         let payload = StoredRow {
             state: row.state,
             task_id: row.task_id,
@@ -129,7 +138,11 @@ impl CheckpointStore for RedbCheckpointStore {
         let tx = self.db.begin_read().map_err(redb_err)?;
         let table = tx.open_table(CHECKPOINTS).map_err(redb_err)?;
 
-        let mut rows = Vec::new();
+        // Reserve capacity for rows in this workflow's key range; the count
+        // is an upper bound on the table size so it may over-allocate for
+        // high-sequence IDs, but the trade-off is worth avoiding repeated
+        // reallocations on the common path of loading a single run.
+        let mut rows = Vec::with_capacity(64);
         for entry in table.range(workflow_range(workflow_id)).map_err(redb_err)? {
             let (key, value) = entry.map_err(redb_err)?;
             let sequence = key.value().1;

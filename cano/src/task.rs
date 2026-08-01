@@ -102,7 +102,9 @@ pub use router::{DynRouterTask, RouterTask, RouterTaskObject};
 pub use stepped::{
     DefaultStepCursor, DynSteppedTask, StepOutcome, SteppedTask, SteppedTaskObject, run_stepped,
 };
-pub use stream::{CloseReason, StreamErrorPolicy, StreamTask, StreamWindow, WindowSignal};
+pub use stream::{
+    CloseReason, StreamBatch, StreamErrorPolicy, StreamTask, StreamWindow, WindowSignal,
+};
 pub use timer::{DynTimerTask, TimerOutcome, TimerTask, TimerTaskObject, run_timer};
 
 // Attribute macros namespaced under `cano::task::` so that

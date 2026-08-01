@@ -267,9 +267,12 @@ where
                 && tokio::time::Instant::now() >= d
             {
                 let remaining_count = stack.len() + 1; // +1 for the just-popped entry
-                // Push the just-popped entry back so a single drain turns it and
-                // every remaining entry — in unchanged LIFO order — into an
-                // `OrphanedCompensation`, one `compensation_run(false)` apiece.
+                // Push the just-popped entry back so every entry (including it)
+                // is drained in LIFO order into `OrphanedCompensation`. The
+                // `errors` vector will contain orphans in the reverse of the
+                // original completion order (LIFO), matching the order in which
+                // the compensators *would* have been called if the deadline had
+                // not elapsed. This is the natural compensation drain order.
                 stack.push(entry);
                 while let Some(CompensationEntry {
                     task_id,

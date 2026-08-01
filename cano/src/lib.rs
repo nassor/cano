@@ -304,7 +304,9 @@ pub use task::router::{DynRouterTask, RouterTask, RouterTaskObject};
 pub use task::stepped::{
     DefaultStepCursor, DynSteppedTask, StepOutcome, SteppedTask, SteppedTaskObject, run_stepped,
 };
-pub use task::stream::{CloseReason, StreamErrorPolicy, StreamTask, StreamWindow, WindowSignal};
+pub use task::stream::{
+    CloseReason, StreamBatch, StreamErrorPolicy, StreamTask, StreamWindow, WindowSignal,
+};
 pub use task::timer::{DynTimerTask, TimerOutcome, TimerTask, TimerTaskObject, run_timer};
 
 #[cfg(feature = "recovery")]
@@ -384,8 +386,8 @@ pub mod prelude {
         MultiPermit, MultiRateLimiter, PollErrorPolicy, PollOutcome, PollTask, RateLimiter,
         RateLimiterPermit, RateLimiterPolicy, Reservation, Resource, Resources, RetryMode,
         RouterTask, RowKind, SplitResult, SplitTaskResult, StateEntry, StepOutcome, SteppedTask,
-        StreamErrorPolicy, StreamTask, StreamWindow, Task, TaskConfig, TaskObject, TaskResult,
-        Tier, TimerOutcome, TimerTask, WindowPermit, WindowPolicy, WindowSignal,
+        StreamBatch, StreamErrorPolicy, StreamTask, StreamWindow, Task, TaskConfig, TaskObject,
+        TaskResult, Tier, TimerOutcome, TimerTask, WindowPermit, WindowPolicy, WindowSignal,
         WindowedRateLimiter, Workflow, WorkflowObserver, run_stepped,
     };
 

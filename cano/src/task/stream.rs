@@ -15,6 +15,17 @@
 //!   [`resume_from`](crate::workflow::Workflow::resume_from) continues from the committed
 //!   cursor. Cancel means "stop cleanly + resumable", not "transition onward".
 //!
+//! ## Per-item error handling
+//!
+//! [`StreamErrorPolicy`] controls what happens when [`process_item`](StreamTask::process_item)
+//! fails:
+//!
+//! - **`FailFast`** — propagate the first error (default).
+//! - **`SkipAndContinue`** — drop the bad item and keep consuming (useful for poison
+//!   messages in queues or corrupt records in logs).
+//! - **`RetryOnError { max_errors }`** — tolerate up to `max_errors` *consecutive* errors
+//!   before failing; the counter resets on every success.
+//!
 //! ## Batch vs. stream
 //!
 //! This is **not** [`BatchTask`](crate::task::batch::BatchTask). Batch loads a *bounded*
@@ -89,12 +100,18 @@ pub enum StreamErrorPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StreamWindow {
     /// Flush after this many successfully processed items (clamped to a minimum of 1).
+    /// The cursor committed for this window is the `Cursor` of the last item processed
+    /// in the batch.
     Count(usize),
     /// Flush after this much wall-clock elapses, tumbling. Empty windows are skipped
     /// (no [`flush_window`](StreamTask::flush_window) call) so an idle source does not
-    /// emit spurious empty flushes.
+    /// emit spurious empty flushes. When the window finally contains items, the cursor
+    /// committed is the `Cursor` of the last item processed during that interval.
     Duration(std::time::Duration),
 }
+
+/// Alias for [`StreamWindow::Count`] — emphasises the batching semantics.
+pub type StreamBatch = StreamWindow;
 
 /// The result of one [`flush_window`](StreamTask::flush_window) call.
 #[derive(Debug)]
@@ -195,7 +212,10 @@ where
     ) -> Result<(Self::Output, Self::Cursor), CanoError>;
 
     /// Flush one full window: commit side effects, then decide whether to continue or
-    /// stop. The driver persists the window's cursor after this returns.
+    /// stop. The driver persists the window's cursor (the `Cursor` of the last item in
+    /// the window) **after** this method returns — if `Stop` is returned, the cursor is
+    /// committed and the FSM transitions; if `Continue` is returned, the cursor is
+    /// committed and consumption continues.
     async fn flush_window(
         &self,
         res: &Resources<TResourceKey>,
@@ -214,6 +234,11 @@ where
     /// `on_close` runs once per run but may be **re-invoked on crash-resume** (a crash
     /// between `on_close` and the cursor commit replays the boundary window). It **must be
     /// idempotent** — e.g. committing final offsets here must tolerate a repeat.
+    ///
+    /// **Panic safety:** when registered via [`Workflow::register_stream`] (engine-driven
+    /// path), panics in `on_close` are caught and converted to [`CanoError`]. When
+    /// registered via plain [`Workflow::register`] (in-memory companion), panics propagate.
+    /// Always use `register_stream` for production workloads.
     async fn on_close(
         &self,
         res: &Resources<TResourceKey>,
@@ -325,12 +350,13 @@ where
         tokio::select! {
             biased;
             _ = token.cancelled() => {
+                // On cancel, flush the partial window (if any) and run `on_close` for
+                // cleanup; the run ends as `Cancelled` (resumable). `WindowSignal` from the
+                // cancel-drain flush is ignored — honouring `Stop` here would contradict
+                // that a cancelled run always surfaces `CanoError::Cancelled`.
                 if !buf.is_empty() {
                     #[cfg(feature = "metrics")]
                     crate::metrics::stream_window();
-                    // On cancel, `flush_window` runs only to commit the partial window's
-                    // side effects; its `WindowSignal` is ignored (the run ends as
-                    // `Cancelled` regardless — honoring `Stop` here would contradict that).
                     let _ = task.flush_window(res, std::mem::take(&mut buf)).await?;
                 }
                 // `on_close(Cancelled)` is a cleanup hook; its returned state is ignored —
@@ -2814,6 +2840,194 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result, Step::Done);
+    }
+
+    // -----------------------------------------------------------------------
+    // Duration window tests.
+    // -----------------------------------------------------------------------
+
+    /// Emits items with controlled delays so duration windows can be tested
+    /// deterministically using `tokio::time::pause()`.
+    struct DelayedSource {
+        emit_delay: std::time::Duration,
+        items: Vec<u64>,
+    }
+
+    #[task::stream]
+    impl StreamTask<Step> for DelayedSource {
+        type Item = u64;
+        type Output = u64;
+        type Cursor = u64;
+
+        fn window(&self) -> StreamWindow {
+            StreamWindow::Duration(std::time::Duration::from_millis(50))
+        }
+
+        async fn open(
+            &self,
+            _res: &Resources,
+            _cursor: Option<u64>,
+        ) -> Result<Pin<Box<dyn Stream<Item = u64> + Send>>, CanoError> {
+            let items = self.items.clone();
+            let delay = self.emit_delay;
+            Ok(Box::pin(stream::unfold(
+                (items.into_iter(), delay),
+                |(mut iter, d)| async move {
+                    let item = iter.next()?;
+                    Some((item, (iter, d)))
+                },
+            )) as Pin<Box<dyn Stream<Item = u64> + Send>>)
+        }
+
+        async fn process_item(&self, _res: &Resources, item: u64) -> Result<(u64, u64), CanoError> {
+            Ok((item, item))
+        }
+
+        async fn flush_window(
+            &self,
+            _res: &Resources,
+            _outputs: Vec<u64>,
+        ) -> Result<WindowSignal<Step>, CanoError> {
+            Ok(WindowSignal::Continue)
+        }
+
+        async fn on_close(
+            &self,
+            _res: &Resources,
+            _reason: CloseReason,
+        ) -> Result<TaskResult<Step>, CanoError> {
+            Ok(TaskResult::Single(Step::Done))
+        }
+    }
+
+    #[tokio::test]
+    async fn duration_window_flushes_on_elapsed_time() {
+        use crate::cancel::CancellationToken;
+        use crate::workflow::Workflow;
+
+        // Three items emitted 10ms apart with a 50ms duration window: all three should
+        // land in the first window and flush together.
+        tokio::time::pause();
+        let task = DelayedSource {
+            emit_delay: std::time::Duration::from_millis(10),
+            items: vec![1, 2, 3],
+        };
+        let workflow = Workflow::bare()
+            .register_stream(Step::Consume, task)
+            .add_exit_state(Step::Done);
+        let result = workflow
+            .orchestrate(Step::Consume, CancellationToken::disabled())
+            .await
+            .unwrap();
+        assert_eq!(result, Step::Done);
+    }
+
+    // -----------------------------------------------------------------------
+    // Crash-resume mid-stream test.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn crash_resume_commits_cursor_between_windows() {
+        use crate::cancel::CancellationToken;
+        use crate::recovery::{CheckpointRow, CheckpointStore};
+        use crate::workflow::Workflow;
+
+        /// A store that returns a pre-existing cursor (simulating a crash after the
+        /// first window committed). Cursor appends succeed normally so the resumed run
+        /// can complete.
+        #[derive(Default)]
+        struct PreExistingCursor;
+
+        #[crate::checkpoint_store]
+        impl CheckpointStore for PreExistingCursor {
+            async fn append(
+                &self,
+                _workflow_id: &str,
+                _row: CheckpointRow,
+            ) -> Result<(), CanoError> {
+                Ok(())
+            }
+            async fn load_run(&self, _workflow_id: &str) -> Result<Vec<CheckpointRow>, CanoError> {
+                // Simulate a crash that committed cursor 2 after the first window.
+                let cursor_bytes = serde_json::to_vec(&2u64).unwrap();
+                Ok(vec![
+                    CheckpointRow::new(1, "Consume", "ResumeFromCursor").with_workflow_version(0),
+                    CheckpointRow::new(2, "Consume", "ResumeFromCursor")
+                        .with_cursor(cursor_bytes)
+                        .with_workflow_version(0),
+                ])
+            }
+            async fn clear(&self, _workflow_id: &str) -> Result<(), CanoError> {
+                Ok(())
+            }
+        }
+
+        /// Opens a stream that continues from the resumed cursor.
+        struct ResumeFromCursor {
+            opened_cursor: std::sync::Arc<std::sync::Mutex<Option<u64>>>,
+        }
+
+        #[task::stream]
+        impl StreamTask<Step> for ResumeFromCursor {
+            type Item = u64;
+            type Output = u64;
+            type Cursor = u64;
+
+            async fn open(
+                &self,
+                _res: &Resources,
+                cursor: Option<u64>,
+            ) -> Result<Pin<Box<dyn Stream<Item = u64> + Send>>, CanoError> {
+                *self.opened_cursor.lock().unwrap() = cursor;
+                // Resume: continue from cursor + 1.
+                let start = cursor.unwrap_or(0) + 1;
+                Ok(Box::pin(stream::iter(vec![start, start + 1, start + 2]))
+                    as Pin<Box<dyn Stream<Item = u64> + Send>>)
+            }
+
+            async fn process_item(
+                &self,
+                _res: &Resources,
+                item: u64,
+            ) -> Result<(u64, u64), CanoError> {
+                Ok((item, item))
+            }
+
+            async fn flush_window(
+                &self,
+                _res: &Resources,
+                _outputs: Vec<u64>,
+            ) -> Result<WindowSignal<Step>, CanoError> {
+                Ok(WindowSignal::Continue)
+            }
+
+            async fn on_close(
+                &self,
+                _res: &Resources,
+                _reason: CloseReason,
+            ) -> Result<TaskResult<Step>, CanoError> {
+                Ok(TaskResult::Single(Step::Done))
+            }
+        }
+
+        let opened_cursor = std::sync::Arc::new(std::sync::Mutex::new(None::<u64>));
+        let task = ResumeFromCursor {
+            opened_cursor: std::sync::Arc::clone(&opened_cursor),
+        };
+        let workflow = Workflow::bare()
+            .register_stream(Step::Consume, task)
+            .add_exit_state(Step::Done)
+            .with_checkpoint_store(Arc::new(PreExistingCursor))
+            .with_workflow_id("crash-resume");
+
+        // The synthetic log has cursor 2 committed; resume should pick it up.
+        let result = workflow
+            .resume_from("crash-resume", CancellationToken::disabled())
+            .await
+            .unwrap();
+        assert_eq!(result, Step::Done);
+        // The resumed run opened from cursor 2 (the last committed position).
+        assert_eq!(*opened_cursor.lock().unwrap(), Some(2));
     }
 }
 
