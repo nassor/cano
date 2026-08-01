@@ -123,12 +123,15 @@ impl Summarize {
             println!("    {:>2}  {:>6}ms -> {:>6}ms", id, start, finish);
         }
 
-        // Verify the bulkhead: count the maximum number of overlapping intervals.
+        // Verify the bulkhead: count the maximum number of tasks running
+        // concurrently at any single instant. We use a sweep-line over all
+        // start/finish events — at each start time we count how many
+        // intervals contain that point (start <= t < finish).
         let mut max_concurrent = 0usize;
-        for &(_, s1, f1) in &entries {
+        for &(_, s, _) in &entries {
             let concurrent = entries
                 .iter()
-                .filter(|&&(_, s2, f2)| s2 < f1 && s1 < f2)
+                .filter(|&&(_, s2, f2)| s2 <= s && s < f2)
                 .count();
             max_concurrent = max_concurrent.max(concurrent);
         }
