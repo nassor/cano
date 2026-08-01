@@ -230,12 +230,7 @@ mod tests {
         }
 
         async fn load_run(&self, workflow_id: &str) -> Result<Vec<CheckpointRow>, CanoError> {
-            let mut rows = self
-                .0
-                .lock()
-                .get(workflow_id)
-                .cloned()
-                .unwrap_or_default();
+            let mut rows = self.0.lock().get(workflow_id).cloned().unwrap_or_default();
             rows.sort_by_key(|r| r.sequence);
             Ok(rows)
         }
