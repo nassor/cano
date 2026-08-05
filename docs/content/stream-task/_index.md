@@ -478,7 +478,8 @@ A <code>StreamTask</code> can be registered two ways, and the difference is dura
 <p>
 Plain <code>register</code> runs the macro-generated companion <code>Task</code>, which drives an
 <strong>in-memory</strong> windowed loop with <strong>no</strong> cursor persistence and
-<strong>no</strong> cancellation — it always runs to exhaustion. Reach for <code>register_stream</code>
+<strong>no</strong> cancellation — it cannot be cancelled once running, and ends only via source
+exhaustion, a <code>WindowSignal::Stop</code>, or an error. Reach for <code>register_stream</code>
 for anything real; it is the path that observes the <code>CancellationToken</code> and persists
 cursors. <code>register_stream</code> also wraps <code>on_close</code> in panic safety, so a panic
 in cleanup becomes a <code>CanoError</code> instead of unwinding past the FSM — <code>register</code>

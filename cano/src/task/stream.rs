@@ -1,8 +1,11 @@
 //! # StreamTask — A Genuine Stream-Processing Model
 //!
 //! A [`StreamTask`] consumes an `impl Stream` **continuously**, processes each item, and
-//! flushes per-[`StreamWindow`] window — so memory stays bounded and downstream sees
-//! progress before the source ends. It terminates in one of three ways:
+//! flushes per-[`StreamWindow`] window — memory is bounded by the window (a
+//! [`Count`](StreamWindow::Count) window buffers at most that many outputs; a
+//! [`Duration`](StreamWindow::Duration) window buffers whatever the source yields during
+//! the interval) and downstream sees progress before the source ends. It terminates in
+//! one of three ways:
 //!
 //! - **Exhausted** — the source returns `None`: the partial window is flushed and
 //!   [`on_close`](StreamTask::on_close)`(Exhausted)` chooses the next state.
@@ -13,7 +16,14 @@
 //!   `on_close(Cancelled)` runs for cleanup (its returned state is *ignored*), and the run
 //!   ends as [`CanoError::Cancelled`](crate::error::CanoError::Cancelled) so a later
 //!   [`resume_from`](crate::workflow::Workflow::resume_from) continues from the committed
-//!   cursor. Cancel means "stop cleanly + resumable", not "transition onward".
+//!   cursor. Cancel means "stop cleanly + resumable", not "transition onward". If the
+//!   drain flush itself fails, `on_close(Cancelled)` still runs (best-effort) and the
+//!   flush error is surfaced instead of `Cancelled`. Cancellation is observed **between
+//!   items** — set [`attempt_timeout`](crate::task::TaskConfig) to bound cancel latency
+//!   when `process_item` can hang. A workflow total timeout
+//!   ([`with_total_timeout`](crate::workflow::Workflow::with_total_timeout)) is delivered
+//!   through this same drain and surfaces as
+//!   [`CanoError::WorkflowTimeout`](crate::error::CanoError::WorkflowTimeout).
 //!
 //! ## Per-item error handling
 //!
@@ -103,10 +113,13 @@ pub enum StreamWindow {
     /// The cursor committed for this window is the `Cursor` of the last item processed
     /// in the batch.
     Count(usize),
-    /// Flush after this much wall-clock elapses, tumbling. Empty windows are skipped
-    /// (no [`flush_window`](StreamTask::flush_window) call) so an idle source does not
-    /// emit spurious empty flushes. When the window finally contains items, the cursor
-    /// committed is the `Cursor` of the last item processed during that interval.
+    /// Flush after this much wall-clock elapses, tumbling — clamped to a minimum of 1ms
+    /// (a zero duration would otherwise starve the source; see the clamp in the driver).
+    /// Empty windows are skipped (no [`flush_window`](StreamTask::flush_window) call) so
+    /// an idle source does not emit spurious empty flushes. When the window finally
+    /// contains items, the cursor committed is the `Cursor` of the last item processed
+    /// during that interval. Unlike [`Count`](StreamWindow::Count), buffering is bounded
+    /// only by what the source yields during the interval.
     Duration(std::time::Duration),
 }
 
@@ -181,10 +194,12 @@ where
     ///
     /// Only [`attempt_timeout`](crate::task::TaskConfig) is applied — as a bound on each
     /// [`process_item`](StreamTask::process_item) call (a timeout becomes an item error
-    /// governed by [`on_item_error`](StreamTask::on_item_error)). **Outer retry
-    /// (`max_attempts`) is intentionally not applied**: it would re-invoke
-    /// [`open`](StreamTask::open) and re-consume the stream. The per-item error policy, the
-    /// `CancellationToken`, and the window loop are the resilience surface.
+    /// governed by [`on_item_error`](StreamTask::on_item_error)). Because cancellation is
+    /// observed between items, `attempt_timeout` is also what bounds cancel latency when
+    /// `process_item` can hang. **Outer retry (`max_attempts`) is intentionally not
+    /// applied**: it would re-invoke [`open`](StreamTask::open) and re-consume the stream.
+    /// The per-item error policy, the `CancellationToken`, and the window loop are the
+    /// resilience surface.
     fn config(&self) -> TaskConfig {
         TaskConfig::minimal()
     }
@@ -228,7 +243,9 @@ where
     /// - [`CloseReason::Cancelled`]: a **cleanup** hook — the returned `TaskResult` is
     ///   **ignored** and the run ends as
     ///   [`CanoError::Cancelled`](crate::error::CanoError::Cancelled) (an `Err` returned
-    ///   here *is* propagated). Use it to release resources / commit final offsets.
+    ///   here *is* propagated). Use it to release resources / commit final offsets. It
+    ///   runs even when the cancel-drain flush fails — best-effort: in that case its own
+    ///   error is dropped and the flush error is surfaced.
     ///
     /// **At-least-once:** like [`open`](StreamTask::open) / [`process_item`](StreamTask::process_item),
     /// `on_close` runs once per run but may be **re-invoked on crash-resume** (a crash
@@ -288,6 +305,13 @@ pub(crate) enum WindowStep<TCursor, TState> {
     Cancelled { final_cursor: Option<TCursor> },
 }
 
+/// Floor applied to [`StreamWindow::Duration`] deadlines. A zero (or otherwise
+/// near-zero) duration would make the tick arm of the `select!` below always-ready,
+/// starving `stream.next()` in a busy-loop that never makes progress. 1ms is far
+/// below any realistic window and only matters for a misconfigured zero/near-zero
+/// duration.
+const MIN_DURATION_WINDOW: std::time::Duration = std::time::Duration::from_millis(1);
+
 /// Pull and process items until one window flushes (or the loop terminates). Shared by the
 /// in-memory companion and the engine-driven session — there is exactly one loop body.
 #[allow(clippy::too_many_arguments)]
@@ -313,7 +337,9 @@ where
         StreamWindow::Duration(_) => None,
     };
     let mut deadline: Option<tokio::time::Instant> = match window {
-        StreamWindow::Duration(d) => Some(tokio::time::Instant::now() + *d),
+        StreamWindow::Duration(d) => {
+            Some(tokio::time::Instant::now() + (*d).max(MIN_DURATION_WINDOW))
+        }
         StreamWindow::Count(_) => None,
     };
 
@@ -357,7 +383,17 @@ where
                 if !buf.is_empty() {
                     #[cfg(feature = "metrics")]
                     crate::metrics::stream_window();
-                    let _ = task.flush_window(res, std::mem::take(&mut buf)).await?;
+
+                    let drain_flush = task.flush_window(res, std::mem::take(&mut buf)).await;
+                    if let Err(e) = drain_flush {
+                        // The drain flush failed: `on_close(Cancelled)` still gets its
+                        // cleanup shot (best-effort — its own error is dropped in favour
+                        // of the flush error), then the flush error is surfaced. The
+                        // window's cursor is NOT committed, so a resume replays the
+                        // window (at-least-once).
+                        let _ = task.on_close(res, CloseReason::Cancelled).await;
+                        return Err(e);
+                    }
                 }
                 // `on_close(Cancelled)` is a cleanup hook; its returned state is ignored —
                 // a cancelled run ends as `CanoError::Cancelled` (an `Err` it returns IS
@@ -370,7 +406,7 @@ where
                 if buf.is_empty() {
                     // Empty tumbling window: advance the deadline and keep waiting.
                     if let (Some(d), StreamWindow::Duration(dur)) = (deadline.as_mut(), window) {
-                        *d = tokio::time::Instant::now() + *dur;
+                        *d = tokio::time::Instant::now() + (*dur).max(MIN_DURATION_WINDOW);
                     }
                     continue;
                 }
@@ -1261,6 +1297,298 @@ mod tests {
             counter.cancels.load(Ordering::SeqCst),
             1,
             "on_cancelled must fire exactly once on a stream cancel"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix: StreamWindow::Duration(ZERO) must not busy-loop and starve the source.
+    // -----------------------------------------------------------------------
+
+    struct ZeroWindow {
+        seen: Arc<parking_lot::Mutex<Vec<u32>>>,
+    }
+
+    #[task::stream]
+    impl StreamTask<Step> for ZeroWindow {
+        type Item = u32;
+        type Output = u32;
+        type Cursor = u64;
+
+        fn window(&self) -> StreamWindow {
+            StreamWindow::Duration(std::time::Duration::ZERO)
+        }
+
+        async fn open(
+            &self,
+            _res: &Resources,
+            _cursor: Option<u64>,
+        ) -> Result<Pin<Box<dyn Stream<Item = u32> + Send>>, CanoError> {
+            Ok(Box::pin(stream::iter(vec![1u32, 2, 3])) as Pin<Box<dyn Stream<Item = u32> + Send>>)
+        }
+
+        async fn process_item(&self, _res: &Resources, item: u32) -> Result<(u32, u64), CanoError> {
+            self.seen.lock().push(item);
+            Ok((item, item as u64))
+        }
+
+        async fn flush_window(
+            &self,
+            _res: &Resources,
+            _outputs: Vec<u32>,
+        ) -> Result<WindowSignal<Step>, CanoError> {
+            Ok(WindowSignal::Continue)
+        }
+
+        async fn on_close(
+            &self,
+            _res: &Resources,
+            _reason: CloseReason,
+        ) -> Result<TaskResult<Step>, CanoError> {
+            Ok(TaskResult::Single(Step::Done))
+        }
+    }
+
+    #[tokio::test]
+    async fn duration_window_zero_is_clamped_not_livelocked() {
+        use crate::cancel::CancellationToken;
+        use crate::workflow::Workflow;
+
+        let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let workflow = Workflow::bare()
+            .register_stream(Step::Consume, ZeroWindow { seen: seen.clone() })
+            .add_exit_state(Step::Done);
+
+        // A zero-duration window's tick arm would otherwise always be ready in the
+        // `select!`, starving `stream.next()` in a busy loop that never makes progress.
+        // The driver clamps it to `MIN_DURATION_WINDOW`; bound the wait so a livelock
+        // regression fails the test instead of hanging the suite.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            workflow.orchestrate(Step::Consume, CancellationToken::disabled()),
+        )
+        .await
+        .expect("must not livelock on a zero-duration window");
+
+        assert!(matches!(result, Ok(Step::Done)), "got {result:?}");
+        assert_eq!(&*seen.lock(), &[1, 2, 3]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix: a cancel-drain flush error must still run on_close(Cancelled) before
+    // surfacing (best-effort cleanup), rather than skipping straight past it.
+    // -----------------------------------------------------------------------
+
+    struct FlushFailsOnDrain {
+        on_close_reason: Arc<parking_lot::Mutex<Option<CloseReason>>>,
+    }
+
+    #[task::stream]
+    impl StreamTask<Step> for FlushFailsOnDrain {
+        type Item = u64;
+        type Output = u64;
+        type Cursor = u64;
+
+        fn window(&self) -> StreamWindow {
+            // Large enough that the count-window never flushes on its own — only the
+            // cancel-drain (with a non-empty partial buffer) calls `flush_window`.
+            StreamWindow::Count(1000)
+        }
+
+        async fn open(
+            &self,
+            _res: &Resources,
+            _cursor: Option<u64>,
+        ) -> Result<Pin<Box<dyn Stream<Item = u64> + Send>>, CanoError> {
+            Ok(Box::pin(stream::unfold(0u64, |n| async move {
+                tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+                Some((n, n + 1))
+            })) as Pin<Box<dyn Stream<Item = u64> + Send>>)
+        }
+
+        async fn process_item(&self, _res: &Resources, item: u64) -> Result<(u64, u64), CanoError> {
+            Ok((item, item))
+        }
+
+        async fn flush_window(
+            &self,
+            _res: &Resources,
+            _outputs: Vec<u64>,
+        ) -> Result<WindowSignal<Step>, CanoError> {
+            Err(CanoError::task_execution("flush failed during drain"))
+        }
+
+        async fn on_close(
+            &self,
+            _res: &Resources,
+            reason: CloseReason,
+        ) -> Result<TaskResult<Step>, CanoError> {
+            *self.on_close_reason.lock() = Some(reason);
+            Ok(TaskResult::Single(Step::Done))
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_drain_flush_error_still_runs_on_close() {
+        use crate::cancel::CancellationToken;
+        use crate::workflow::Workflow;
+
+        let on_close_reason = Arc::new(parking_lot::Mutex::new(None));
+        let task = FlushFailsOnDrain {
+            on_close_reason: on_close_reason.clone(),
+        };
+        let (handle, token) = CancellationToken::new();
+        let workflow = Workflow::bare()
+            .register_stream(Step::Consume, task)
+            .add_exit_state(Step::Done);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            handle.cancel();
+        });
+
+        let result = workflow.orchestrate(Step::Consume, token).await;
+        assert!(
+            matches!(&result, Err(e) if e.category() == "task_execution"),
+            "the drain flush error must be surfaced, not swallowed into `Cancelled`; got \
+             {result:?}"
+        );
+        assert_eq!(
+            *on_close_reason.lock(),
+            Some(CloseReason::Cancelled),
+            "on_close(Cancelled) must still run as best-effort cleanup even though the \
+             drain flush failed"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix: `with_total_timeout` must be honoured for a `Stream` state — folded into
+    // the same cooperative drain as a real cancel, then reclassified as
+    // `WorkflowTimeout` rather than `Cancelled`.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn total_timeout_flushes_commits_and_reclassifies() {
+        use crate::cancel::CancellationToken;
+        use crate::workflow::Workflow;
+
+        let task = Forever {
+            closed_cancelled: Arc::new(AtomicBool::new(false)),
+            flushed_windows: Arc::new(AtomicU32::new(0)),
+        };
+        let closed = Arc::clone(&task.closed_cancelled);
+        let store = Arc::new(InMemoryStore::default());
+        let workflow = Workflow::bare()
+            .register_stream(Step::Consume, task)
+            .add_exit_state(Step::Done)
+            .with_checkpoint_store(store.clone())
+            .with_workflow_id("total-timeout")
+            .with_total_timeout(std::time::Duration::from_millis(30));
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            workflow.orchestrate(Step::Consume, CancellationToken::disabled()),
+        )
+        .await
+        .expect("a Stream state must not silently defeat with_total_timeout");
+
+        assert!(
+            matches!(&result, Err(e) if e.category() == "workflow_timeout"),
+            "a total-timeout budget must be honoured for a Stream state, not silently \
+             ignored; got {result:?}"
+        );
+        assert!(
+            closed.load(Ordering::SeqCst),
+            "on_close(Cancelled) must still run — the timeout is delivered through the \
+             same cooperative drain as a real cancel"
+        );
+        assert!(
+            !store.committed.lock().unwrap().is_empty(),
+            "the in-flight window's cursor must be committed before the timeout surfaces"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fix: cancellation must be observable while `open()` is still in flight, not
+    // just between windows.
+    // -----------------------------------------------------------------------
+
+    struct HangingOpen {
+        on_close_called: Arc<AtomicBool>,
+    }
+
+    #[task::stream]
+    impl StreamTask<Step> for HangingOpen {
+        type Item = u64;
+        type Output = u64;
+        type Cursor = u64;
+
+        async fn open(
+            &self,
+            _res: &Resources,
+            _cursor: Option<u64>,
+        ) -> Result<Pin<Box<dyn Stream<Item = u64> + Send>>, CanoError> {
+            // Never resolves on its own; only cancellation ends the run.
+            std::future::pending::<()>().await;
+            unreachable!("cancellation must interrupt a hung open() before this resolves")
+        }
+
+        async fn process_item(&self, _res: &Resources, item: u64) -> Result<(u64, u64), CanoError> {
+            Ok((item, item))
+        }
+
+        async fn flush_window(
+            &self,
+            _res: &Resources,
+            _outputs: Vec<u64>,
+        ) -> Result<WindowSignal<Step>, CanoError> {
+            Ok(WindowSignal::Continue)
+        }
+
+        async fn on_close(
+            &self,
+            _res: &Resources,
+            _reason: CloseReason,
+        ) -> Result<TaskResult<Step>, CanoError> {
+            self.on_close_called.store(true, Ordering::SeqCst);
+            Ok(TaskResult::Single(Step::Done))
+        }
+    }
+
+    #[tokio::test]
+    async fn cancel_during_open_session_is_cancellable_without_on_close() {
+        use crate::cancel::CancellationToken;
+        use crate::workflow::Workflow;
+
+        let on_close_called = Arc::new(AtomicBool::new(false));
+        let (handle, token) = CancellationToken::new();
+        let workflow = Workflow::bare()
+            .register_stream(
+                Step::Consume,
+                HangingOpen {
+                    on_close_called: on_close_called.clone(),
+                },
+            )
+            .add_exit_state(Step::Done);
+
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            handle.cancel();
+        });
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            workflow.orchestrate(Step::Consume, token),
+        )
+        .await
+        .expect("a hung open() must still be cancellable");
+
+        assert!(
+            matches!(&result, Err(e) if e.category() == "cancelled"),
+            "got {result:?}"
+        );
+        assert!(
+            !on_close_called.load(Ordering::SeqCst),
+            "on_close must not run — open() never produced a session to close"
         );
     }
 
@@ -3175,6 +3503,82 @@ mod metrics_tests {
             counter(&rows, "cano_stream_runs_total", &[("outcome", "cancelled")]),
             1,
             "a cooperative cancel is recorded as cancelled, not failed"
+        );
+    }
+
+    /// Infinite source; used with a near-zero `with_total_timeout` so the *deadline*
+    /// (not a real `CancellationToken`) drives the drain — the outcome must reclassify
+    /// as `workflow_timeout`, not `cancelled`.
+    struct NeverStops;
+
+    #[task::stream]
+    impl StreamTask<St> for NeverStops {
+        type Item = u32;
+        type Output = u32;
+        type Cursor = u64;
+
+        async fn open(
+            &self,
+            _res: &Resources,
+            _cursor: Option<u64>,
+        ) -> Result<Pin<Box<dyn Stream<Item = u32> + Send>>, CanoError> {
+            Ok(Box::pin(stream::iter(0u32..)) as Pin<Box<dyn Stream<Item = u32> + Send>>)
+        }
+
+        async fn process_item(&self, _res: &Resources, item: u32) -> Result<(u32, u64), CanoError> {
+            // `stream::iter(0u32..)` and this method are both instantly-ready with no
+            // internal `.await` suspension; with the default `Count(1)` window that would
+            // make `drive_window` never actually return `Poll::Pending`, starving the
+            // runtime and preventing the deadline-forwarder task (spawned for
+            // `with_total_timeout`) from ever being polled. Yield explicitly so the
+            // scheduler gets a turn each item — the same role `Forever`'s real 2ms sleep
+            // plays elsewhere in this file, without adding wall-clock delay here.
+            tokio::task::yield_now().await;
+            Ok((item, item as u64))
+        }
+
+        async fn flush_window(
+            &self,
+            _res: &Resources,
+            _outputs: Vec<u32>,
+        ) -> Result<WindowSignal<St>, CanoError> {
+            Ok(WindowSignal::Continue)
+        }
+
+        async fn on_close(
+            &self,
+            _res: &Resources,
+            _reason: CloseReason,
+        ) -> Result<TaskResult<St>, CanoError> {
+            Ok(TaskResult::Single(St::Done))
+        }
+    }
+
+    #[test]
+    fn total_timeout_stream_records_failed_not_cancelled() {
+        let (result, rows) = run_with_recorder(|| async {
+            let workflow = Workflow::bare()
+                .register_stream(St::Consume, NeverStops)
+                .add_exit_state(St::Done)
+                .with_total_timeout(std::time::Duration::from_nanos(1));
+            workflow
+                .orchestrate(St::Consume, CancellationToken::disabled())
+                .await
+        });
+        assert!(
+            matches!(&result, Err(e) if e.category() == "workflow_timeout"),
+            "a tripped total-timeout budget must surface as WorkflowTimeout: {result:?}"
+        );
+        assert_eq!(
+            counter(&rows, "cano_stream_runs_total", &[("outcome", "failed")]),
+            1,
+            "a total-timeout trip is recorded as failed, not cancelled — `cancelled` is \
+             reserved for a real CancellationToken firing"
+        );
+        assert_eq!(
+            counter_opt(&rows, "cano_stream_runs_total", &[("outcome", "cancelled")]),
+            None,
+            "must not also be recorded as cancelled"
         );
     }
 

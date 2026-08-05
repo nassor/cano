@@ -457,8 +457,9 @@ fn synthesise_task_impl(
 // ---------------------------------------------------------------------------
 
 /// Return the type of the owned third parameter of `process_item`
-/// (`&self`, `res`, then `item: T` → `T`). The type is returned verbatim — no
-/// reference is peeled (stream items are owned, unlike `BatchTask::process_item`).
+/// (`&self`, `res`, then `item: T` → `T`). The type is returned verbatim — a
+/// reference is rejected rather than peeled (stream items are owned, unlike
+/// `BatchTask::process_item`).
 fn peel_owned_param(f: &ImplItemFn, fn_name: &str) -> syn::Result<Type> {
     let third = f.sig.inputs.iter().nth(2).ok_or_else(|| {
         syn::Error::new_spanned(
@@ -471,7 +472,18 @@ fn peel_owned_param(f: &ImplItemFn, fn_name: &str) -> syn::Result<Type> {
     })?;
 
     match third {
-        FnArg::Typed(pt) => Ok((*pt.ty).clone()),
+        FnArg::Typed(pt) => {
+            if matches!(&*pt.ty, Type::Reference(_)) {
+                return Err(syn::Error::new_spanned(
+                    &pt.ty,
+                    format!(
+                        "#[cano::task::stream]: `{fn_name}`'s `item` parameter must be an owned \
+                         type (stream items are moved into the task); found a reference"
+                    ),
+                ));
+            }
+            Ok((*pt.ty).clone())
+        }
         FnArg::Receiver(_) => Err(syn::Error::new_spanned(
             third,
             format!(
@@ -544,4 +556,59 @@ fn tuple_return_error(fn_name: &str, ret_ty: &Type) -> syn::Error {
             quote! { #ret_ty }
         ),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `process_item` whose `item` parameter is a reference must be rejected:
+    /// stream items are moved into the task, so `type Item` cannot be inferred
+    /// from `&T`. All four required methods are present so that expansion gets
+    /// past required-method validation and actually reaches `peel_owned_param`.
+    #[test]
+    fn process_item_rejects_reference_item_param() {
+        let attr = quote!(state = TestState);
+        let item = quote! {
+            impl Counter {
+                async fn open(
+                    &self,
+                    _res: &Resources<TestState>,
+                    _cursor: Option<u64>,
+                ) -> Result<Pin<Box<dyn Stream<Item = u64> + Send>>, CanoError> {
+                    unimplemented!()
+                }
+
+                async fn process_item(
+                    &self,
+                    _res: &Resources<TestState>,
+                    item: &u64,
+                ) -> Result<(u64, u64), CanoError> {
+                    unimplemented!()
+                }
+
+                async fn flush_window(
+                    &self,
+                    _res: &Resources<TestState>,
+                    _outputs: Vec<u64>,
+                ) -> Result<WindowSignal<u64>, CanoError> {
+                    unimplemented!()
+                }
+
+                async fn on_close(
+                    &self,
+                    _res: &Resources<TestState>,
+                    _reason: CloseReason,
+                ) -> Result<TaskResult<TestState>, CanoError> {
+                    unimplemented!()
+                }
+            }
+        };
+
+        let err = expand(attr, item).expect_err("`item: &u64` must not be accepted");
+        assert!(
+            err.to_string().contains("must be an owned type"),
+            "unexpected error: {err}"
+        );
+    }
 }

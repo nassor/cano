@@ -138,10 +138,8 @@ impl CheckpointStore for RedbCheckpointStore {
         let tx = self.db.begin_read().map_err(redb_err)?;
         let table = tx.open_table(CHECKPOINTS).map_err(redb_err)?;
 
-        // Reserve capacity for rows in this workflow's key range; the count
-        // is an upper bound on the table size so it may over-allocate for
-        // high-sequence IDs, but the trade-off is worth avoiding repeated
-        // reallocations on the common path of loading a single run.
+        // Fixed capacity heuristic: 64 rows covers typical runs (one state-entry row
+        // per state plus a handful of cursor rows); longer runs just reallocate.
         let mut rows = Vec::with_capacity(64);
         for entry in table.range(workflow_range(workflow_id)).map_err(redb_err)? {
             let (key, value) = entry.map_err(redb_err)?;
