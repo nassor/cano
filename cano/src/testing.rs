@@ -18,7 +18,7 @@
 //! | [`RecordingObserver`] | a [`WorkflowObserver`] that captures every lifecycle event into an inspectable [`Vec<RecordedEvent>`] |
 //! | [`InMemoryCheckpointStore`] | a process-local [`CheckpointStore`] for resume/recovery tests, with no `recovery` feature or on-disk file needed |
 //! | [`TestResources`] | a tiny builder for the [`Resources`] dictionary a workflow needs |
-//! | [`panic_on_attempt`] | a [`Task`] that panics on its first *N* attempts — exercises the panic-safety path (panics fail fast, they are not retried) |
+//! | [`panic_on_attempt`] | a [`PanicOnAttempt`] task factory that panics on its first *N* attempts — exercises the panic-safety path (panics fail fast, they are not retried) |
 //! | [`assert_compensation_ran`] | a saga assertion that compares the recorded compensation order against an expected sequence |
 //!
 //! This module is **not** in the [`prelude`](crate::prelude) — import it explicitly with
@@ -170,6 +170,15 @@ impl RecordingObserver {
     /// reuses one observer.
     pub fn clear(&self) {
         self.events.lock().clear();
+    }
+
+    /// Snapshot and drop every recorded event, returning the consumed `Vec`.
+    ///
+    /// Cheaper than [`events`](Self::events) + [`clear`](Self::clear) because it
+    /// moves the buffer out in a single allocation-free swap rather than cloning
+    /// and then clearing.
+    pub fn take(&self) -> Vec<RecordedEvent> {
+        std::mem::take(&mut self.events.lock())
     }
 
     /// Assert that the last state the FSM entered is `final_state`.
