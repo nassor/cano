@@ -171,34 +171,31 @@ fn expand_inherent_impl(
         }
     }
 
-    if !has_open {
-        errors.push(syn::Error::new(
-            item_impl.span(),
-            "#[cano::task::stream] requires an `async fn open(&self, res: &Resources<_>, \
-             cursor: Option<_>) -> Result<Pin<Box<dyn Stream<Item = _> + Send>>, CanoError>` method",
-        ));
-    }
-    if process_item_fn.is_none() {
-        errors.push(syn::Error::new(
-            item_impl.span(),
-            "#[cano::task::stream] requires an `async fn process_item(&self, res: &Resources<_>, \
-             item: T) -> Result<(Output, Cursor), CanoError>` method",
-        ));
-    }
-    if !has_flush_window {
-        errors.push(syn::Error::new(
-            item_impl.span(),
-            "#[cano::task::stream] requires an `async fn flush_window(&self, res: &Resources<_>, \
-             outputs: Vec<_>) -> Result<WindowSignal<_>, CanoError>` method",
-        ));
-    }
-    if !has_on_close {
-        errors.push(syn::Error::new(
-            item_impl.span(),
-            "#[cano::task::stream] requires an `async fn on_close(&self, res: &Resources<_>, \
-             reason: CloseReason) -> Result<TaskResult<_>, CanoError>` method",
-        ));
-    }
+    let mut require = |present: bool, message: &str| {
+        if !present {
+            errors.push(syn::Error::new(item_impl.span(), message));
+        }
+    };
+    require(
+        has_open,
+        "#[cano::task::stream] requires an `async fn open(&self, res: &Resources<_>, \
+         cursor: Option<_>) -> Result<Pin<Box<dyn Stream<Item = _> + Send>>, CanoError>` method",
+    );
+    require(
+        process_item_fn.is_some(),
+        "#[cano::task::stream] requires an `async fn process_item(&self, res: &Resources<_>, \
+         item: T) -> Result<(Output, Cursor), CanoError>` method",
+    );
+    require(
+        has_flush_window,
+        "#[cano::task::stream] requires an `async fn flush_window(&self, res: &Resources<_>, \
+         outputs: Vec<_>) -> Result<WindowSignal<_>, CanoError>` method",
+    );
+    require(
+        has_on_close,
+        "#[cano::task::stream] requires an `async fn on_close(&self, res: &Resources<_>, \
+         reason: CloseReason) -> Result<TaskResult<_>, CanoError>` method",
+    );
 
     if !errors.is_empty() {
         return Err(combine_errors(errors));
@@ -217,17 +214,10 @@ fn expand_inherent_impl(
         (None, None)
     } else {
         let (out_ty, cur_ty) = peel_result_tuple_return(process_item, "process_item")?;
-        let out = if has_output_ty {
-            None
-        } else {
-            Some(quote!(type Output = #out_ty;))
-        };
-        let cur = if has_cursor_ty {
-            None
-        } else {
-            Some(quote!(type Cursor = #cur_ty;))
-        };
-        (out, cur)
+        (
+            (!has_output_ty).then(|| quote!(type Output = #out_ty;)),
+            (!has_cursor_ty).then(|| quote!(type Cursor = #cur_ty;)),
+        )
     };
 
     let stream_trait_ref: syn::Path = match &key_ty {
@@ -471,26 +461,26 @@ fn peel_owned_param(f: &ImplItemFn, fn_name: &str) -> syn::Result<Type> {
         )
     })?;
 
-    match third {
-        FnArg::Typed(pt) => {
-            if matches!(&*pt.ty, Type::Reference(_)) {
-                return Err(syn::Error::new_spanned(
-                    &pt.ty,
-                    format!(
-                        "#[cano::task::stream]: `{fn_name}`'s `item` parameter must be an owned \
-                         type (stream items are moved into the task); found a reference"
-                    ),
-                ));
-            }
-            Ok((*pt.ty).clone())
-        }
-        FnArg::Receiver(_) => Err(syn::Error::new_spanned(
+    let FnArg::Typed(pt) = third else {
+        return Err(syn::Error::new_spanned(
             third,
             format!(
                 "#[cano::task::stream]: `{fn_name}` third parameter must be a typed argument, not `self`"
             ),
-        )),
+        ));
+    };
+
+    if matches!(&*pt.ty, Type::Reference(_)) {
+        return Err(syn::Error::new_spanned(
+            &pt.ty,
+            format!(
+                "#[cano::task::stream]: `{fn_name}`'s `item` parameter must be an owned \
+                 type (stream items are moved into the task); found a reference"
+            ),
+        ));
     }
+
+    Ok((*pt.ty).clone())
 }
 
 /// Extract `(Output, Cursor)` from the `Ok` 2-tuple of `process_item`'s
@@ -510,19 +500,17 @@ fn peel_result_tuple_return(f: &ImplItemFn, fn_name: &str) -> syn::Result<(Type,
         }
     };
 
+    let bad_return = || tuple_return_error(fn_name, ret_ty);
+
     let Type::Path(tp) = ret_ty else {
-        return Err(tuple_return_error(fn_name, ret_ty));
+        return Err(bad_return());
     };
-    let last = tp
-        .path
-        .segments
-        .last()
-        .ok_or_else(|| tuple_return_error(fn_name, ret_ty))?;
+    let last = tp.path.segments.last().ok_or_else(bad_return)?;
     if last.ident != "Result" && last.ident != "CanoResult" {
-        return Err(tuple_return_error(fn_name, ret_ty));
+        return Err(bad_return());
     }
     let PathArguments::AngleBracketed(args) = &last.arguments else {
-        return Err(tuple_return_error(fn_name, ret_ty));
+        return Err(bad_return());
     };
     let ok_ty = args
         .args
@@ -531,13 +519,13 @@ fn peel_result_tuple_return(f: &ImplItemFn, fn_name: &str) -> syn::Result<(Type,
             GenericArgument::Type(t) => Some(t),
             _ => None,
         })
-        .ok_or_else(|| tuple_return_error(fn_name, ret_ty))?;
+        .ok_or_else(bad_return)?;
 
     let Type::Tuple(tuple) = ok_ty else {
-        return Err(tuple_return_error(fn_name, ret_ty));
+        return Err(bad_return());
     };
     if tuple.elems.len() != 2 {
-        return Err(tuple_return_error(fn_name, ret_ty));
+        return Err(bad_return());
     }
     let mut it = tuple.elems.iter();
     let output_ty = it.next().unwrap().clone();

@@ -405,7 +405,6 @@ where
                 let task_id = self
                     .states
                     .get(&current_state)
-                    .map(|e| e.as_ref())
                     .map_or(String::new(), |entry| entry.task_id());
                 let append_result = store
                     .append(
@@ -1098,6 +1097,8 @@ where
             tokio::time::Instant,
         )>,
     ) -> Result<TState, CanoError> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
         // Aborts the spawned deadline-forwarder task when dropped, so a run that ends
         // normally (or via a real cancel, well before any deadline) doesn't leave that task
         // sleeping until the total-timeout deadline for no reason.
@@ -1121,23 +1122,22 @@ where
         // `dispatch_with_budget` to avoid. `token.clone()` is cheap (a disabled token clones
         // `None`; a live one bumps a `watch::Receiver`'s refcount), so the `step_budget: None`
         // path (no timeout configured — the common case) spawns no extra task.
-        let (effective_token, _forwarder_guard): (CancellationToken, Option<AbortOnDrop>) =
-            match step_budget {
-                None => (token.clone(), None),
-                Some((_, _, deadline)) => {
-                    let (handle, forwarded) = CancellationToken::new();
-                    let watched = token.clone();
-                    let join = tokio::spawn(async move {
-                        tokio::select! {
-                            biased;
-                            _ = watched.cancelled() => {}
-                            _ = tokio::time::sleep_until(deadline) => {}
-                        }
-                        handle.cancel();
-                    });
-                    (forwarded, Some(AbortOnDrop(join)))
-                }
-            };
+        let (effective_token, _forwarder_guard) = match step_budget {
+            None => (token.clone(), None),
+            Some((_, _, deadline)) => {
+                let (handle, forwarded) = CancellationToken::new();
+                let watched = token.clone();
+                let join = tokio::spawn(async move {
+                    tokio::select! {
+                        biased;
+                        _ = watched.cancelled() => {}
+                        _ = tokio::time::sleep_until(deadline) => {}
+                    }
+                    handle.cancel();
+                });
+                (forwarded, Some(AbortOnDrop(join)))
+            }
+        };
 
         // Set when the engine's own cooperative-drain path ends the run (the
         // `ErasedWindowStep::Cancelled` arm below, or the cancel-during-`open_session` race
@@ -1145,12 +1145,12 @@ where
         // `process_item`/`flush_window`/`on_close`, which must NOT flip metrics/observers
         // onto the cancelled path. `AtomicBool` (not `Cell`) so the spawned workflow future
         // stays `Send`.
-        let was_cancelled = std::sync::atomic::AtomicBool::new(false);
+        let was_cancelled = AtomicBool::new(false);
         let outcome: Result<TState, CanoError> = async {
             let mut session = tokio::select! {
                 biased;
                 _ = effective_token.cancelled() => {
-                    was_cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
+                    was_cancelled.store(true, Ordering::Relaxed);
                     return Err(CanoError::cancelled());
                 }
                 res = task.open_session(&self.resources, resume_cursor, config.attempt_timeout) => res?,
@@ -1168,26 +1168,25 @@ where
                 // `terminal == Some(_)` ends the loop with that result after the cursor is
                 // persisted. A cancelled stream commits its final cursor, then surfaces
                 // `Cancelled` (so the log is NOT cleared and `resume_from` continues).
-                let (cursor_to_commit, terminal): (Option<Vec<u8>>, Option<Result<TState, CanoError>>) =
-                    match step {
-                        ErasedWindowStep::Window { cursor } => (Some(cursor), None),
-                        ErasedWindowStep::Done {
-                            final_cursor,
-                            result,
-                        } => {
-                            let next = match result {
-                                TaskResult::Single(next_state) => Ok(next_state),
-                                TaskResult::Split(_) => Err(CanoError::workflow(
-                                    "Stream task returned split result — split is not supported for Stream states",
-                                )),
-                            };
-                            (final_cursor, Some(next))
-                        }
-                        ErasedWindowStep::Cancelled { final_cursor } => {
-                            was_cancelled.store(true, std::sync::atomic::Ordering::Relaxed);
-                            (final_cursor, Some(Err(CanoError::cancelled())))
-                        }
-                    };
+                let (cursor_to_commit, terminal) = match step {
+                    ErasedWindowStep::Window { cursor } => (Some(cursor), None),
+                    ErasedWindowStep::Done {
+                        final_cursor,
+                        result,
+                    } => {
+                        let next = match result {
+                            TaskResult::Single(next_state) => Ok(next_state),
+                            TaskResult::Split(_) => Err(CanoError::workflow(
+                                "Stream task returned split result — split is not supported for Stream states",
+                            )),
+                        };
+                        (final_cursor, Some(next))
+                    }
+                    ErasedWindowStep::Cancelled { final_cursor } => {
+                        was_cancelled.store(true, Ordering::Relaxed);
+                        (final_cursor, Some(Err(CanoError::cancelled())))
+                    }
+                };
 
                 // Persist the window cursor before advancing so a crash/cancel resumes
                 // from this exact position. Gated on a store + workflow id both present.
@@ -1220,17 +1219,14 @@ where
         // The engine's drain path fired (`was_cancelled`) AND the outcome it produced is
         // still `Cancelled` (not overwritten by e.g. a later checkpoint-append failure,
         // which must report as a failure, not a cancel).
-        let drained_as_cancelled = was_cancelled.load(std::sync::atomic::Ordering::Relaxed)
-            && matches!(outcome, Err(CanoError::Cancelled));
+        let drained_as_cancelled =
+            was_cancelled.load(Ordering::Relaxed) && matches!(outcome, Err(CanoError::Cancelled));
 
         // The drain fired but the caller's ORIGINAL token was never cancelled — so the
         // *deadline* must be what fired the forwarded `effective_token`. Reclassify,
         // mirroring `dispatch_with_budget`'s `WorkflowTimeout` handling for every other
         // state kind.
-        let (outcome, timed_out): (
-            Result<TState, CanoError>,
-            Option<(std::time::Duration, std::time::Duration)>,
-        ) = if drained_as_cancelled
+        let (outcome, timed_out) = if drained_as_cancelled
             && let Some((start, limit, _)) = step_budget
             && !token.is_cancelled()
         {

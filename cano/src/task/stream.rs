@@ -332,16 +332,13 @@ where
 {
     use futures_util::StreamExt as _;
 
-    let count_limit = match window {
-        StreamWindow::Count(n) => Some((*n).max(1)),
-        StreamWindow::Duration(_) => None,
+    // One match: exactly one of these is `Some`. The duration is clamped once so the
+    // initial deadline and every re-arm agree.
+    let (count_limit, duration_len) = match window {
+        StreamWindow::Count(n) => (Some((*n).max(1)), None),
+        StreamWindow::Duration(d) => (None, Some((*d).max(MIN_DURATION_WINDOW))),
     };
-    let mut deadline: Option<tokio::time::Instant> = match window {
-        StreamWindow::Duration(d) => {
-            Some(tokio::time::Instant::now() + (*d).max(MIN_DURATION_WINDOW))
-        }
-        StreamWindow::Count(_) => None,
-    };
+    let mut deadline = duration_len.map(|len| tokio::time::Instant::now() + len);
 
     let mut buf: Vec<T::Output> = Vec::new();
     let mut last_cursor: Option<T::Cursor> = None;
@@ -351,18 +348,7 @@ where
         if let Some(limit) = count_limit
             && buf.len() >= limit
         {
-            #[cfg(feature = "metrics")]
-            crate::metrics::stream_window();
-            let outputs = std::mem::take(&mut buf);
-            return Ok(match task.flush_window(res, outputs).await? {
-                WindowSignal::Continue => WindowStep::Window {
-                    cursor: last_cursor.expect("a non-empty window always has a cursor"),
-                },
-                WindowSignal::Stop(result) => WindowStep::Done {
-                    final_cursor: last_cursor,
-                    result,
-                },
-            });
+            return flush_full_window(task, res, std::mem::take(&mut buf), last_cursor).await;
         }
 
         // Resolves at the duration-window deadline, or never (count windows).
@@ -404,24 +390,11 @@ where
             _ = tick => {
                 // Duration window elapsed.
                 if buf.is_empty() {
-                    // Empty tumbling window: advance the deadline and keep waiting.
-                    if let (Some(d), StreamWindow::Duration(dur)) = (deadline.as_mut(), window) {
-                        *d = tokio::time::Instant::now() + (*dur).max(MIN_DURATION_WINDOW);
-                    }
+                    // Empty tumbling window: re-arm the deadline and keep waiting.
+                    deadline = duration_len.map(|len| tokio::time::Instant::now() + len);
                     continue;
                 }
-                #[cfg(feature = "metrics")]
-                crate::metrics::stream_window();
-                let outputs = std::mem::take(&mut buf);
-                return Ok(match task.flush_window(res, outputs).await? {
-                    WindowSignal::Continue => WindowStep::Window {
-                        cursor: last_cursor.expect("a non-empty window always has a cursor"),
-                    },
-                    WindowSignal::Stop(result) => WindowStep::Done {
-                        final_cursor: last_cursor,
-                        result,
-                    },
-                });
+                return flush_full_window(task, res, std::mem::take(&mut buf), last_cursor).await;
             }
             item = stream.next() => {
                 match item {
@@ -488,6 +461,38 @@ where
             }
         }
     }
+}
+
+/// Flush one non-empty window and map the task's [`WindowSignal`] onto the terminal
+/// [`WindowStep`]. Shared by the count-window and duration-window flush arms of
+/// [`drive_window`]: both commit the window's cursor either way — `Continue` carries it
+/// forward, `Stop` commits it before the FSM transitions.
+///
+/// Deliberately *not* used by the cancel drain (which ignores `Stop`, because a cancelled
+/// run always surfaces `CanoError::Cancelled`) nor by the exhausted path (where `Continue`
+/// falls through to `on_close(Exhausted)`); those arms have different signal semantics.
+async fn flush_full_window<T, S, K>(
+    task: &T,
+    res: &Resources<K>,
+    outputs: Vec<T::Output>,
+    last_cursor: Option<T::Cursor>,
+) -> Result<WindowStep<T::Cursor, S>, CanoError>
+where
+    T: StreamTask<S, K> + ?Sized,
+    S: Clone + fmt::Debug + Send + Sync + 'static,
+    K: Hash + Eq + Send + Sync + 'static,
+{
+    #[cfg(feature = "metrics")]
+    crate::metrics::stream_window();
+    Ok(match task.flush_window(res, outputs).await? {
+        WindowSignal::Continue => WindowStep::Window {
+            cursor: last_cursor.expect("a non-empty window always has a cursor"),
+        },
+        WindowSignal::Stop(result) => WindowStep::Done {
+            final_cursor: last_cursor,
+            result,
+        },
+    })
 }
 
 /// In-memory companion loop: drive windows with a disabled token (no cancellation), no
@@ -632,9 +637,8 @@ where
         token: &'a CancellationToken,
     ) -> WindowFuture<'a, S> {
         Box::pin(async move {
-            let task = Arc::clone(&self.task);
             let step = drive_window(
-                &*task,
+                &*self.task,
                 res,
                 &mut self.stream,
                 &mut self.consecutive_errors,
@@ -652,17 +656,15 @@ where
                     final_cursor,
                     result,
                 } => ErasedWindowStep::Done {
-                    final_cursor: match final_cursor {
-                        Some(c) => Some(encode_cursor(&c, &self.task.name())?),
-                        None => None,
-                    },
+                    final_cursor: final_cursor
+                        .map(|c| encode_cursor(&c, &self.task.name()))
+                        .transpose()?,
                     result,
                 },
                 WindowStep::Cancelled { final_cursor } => ErasedWindowStep::Cancelled {
-                    final_cursor: match final_cursor {
-                        Some(c) => Some(encode_cursor(&c, &self.task.name())?),
-                        None => None,
-                    },
+                    final_cursor: final_cursor
+                        .map(|c| encode_cursor(&c, &self.task.name()))
+                        .transpose()?,
                 },
             })
         })

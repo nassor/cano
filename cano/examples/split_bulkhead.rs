@@ -127,14 +127,16 @@ impl Summarize {
         // concurrently at any single instant. We use a sweep-line over all
         // start/finish events — at each start time we count how many
         // intervals contain that point (start <= t < finish).
-        let mut max_concurrent = 0usize;
-        for &(_, s, _) in &entries {
-            let concurrent = entries
-                .iter()
-                .filter(|&&(_, s2, f2)| s2 <= s && s < f2)
-                .count();
-            max_concurrent = max_concurrent.max(concurrent);
-        }
+        let max_concurrent = entries
+            .iter()
+            .map(|&(_, s, _)| {
+                entries
+                    .iter()
+                    .filter(|&&(_, s2, f2)| s2 <= s && s < f2)
+                    .count()
+            })
+            .max()
+            .unwrap_or(0);
         println!("\n  max concurrent tasks observed: {max_concurrent}");
         assert!(
             max_concurrent <= 2,

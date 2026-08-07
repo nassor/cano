@@ -31,7 +31,7 @@ use cano::prelude::*;
 use futures_util::{Stream, stream};
 use std::collections::VecDeque;
 use std::pin::Pin;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// Flip to `Alert` when a calm window contains a reading at or above this.
 const HIGH: i32 = 80;
@@ -62,7 +62,7 @@ impl Resource for Source {}
 
 /// Build a lazy stream that pops one reading at a time from the shared `Source`.
 /// Dropping this stream (when the FSM flips modes) leaves the rest in the queue.
-fn open_source(source: std::sync::Arc<Source>) -> Pin<Box<dyn Stream<Item = Reading> + Send>> {
+fn open_source(source: Arc<Source>) -> Pin<Box<dyn Stream<Item = Reading> + Send>> {
     Box::pin(stream::unfold(source, |source| async move {
         let next = source.queue.lock().unwrap().pop_front();
         next.map(|reading| (reading, source))
@@ -175,9 +175,9 @@ async fn main() -> CanoResult<()> {
     // A synthetic temperature stream that heats up and cools off twice.
     let temps = [70, 71, 73, 85, 88, 76, 71, 90, 68, 73, 74, 95, 88, 60];
     let readings: VecDeque<Reading> = temps
-        .iter()
+        .into_iter()
         .enumerate()
-        .map(|(i, &temp)| Reading {
+        .map(|(i, temp)| Reading {
             seq: i as u64,
             temp,
         })
