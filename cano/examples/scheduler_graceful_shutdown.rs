@@ -163,7 +163,10 @@ async fn main() -> CanoResult<()> {
             .expect("Failed to send SIGINT");
 
         #[cfg(not(unix))]
-        println!("Automatic SIGINT not supported on this platform, please press Ctrl+C manually");
+        println!(
+            "Automatic SIGINT not supported on this platform, please press Ctrl+C manually \
+             (or terminate pid {pid})"
+        );
     });
 
     // Block on the scheduler until shutdown completes.
