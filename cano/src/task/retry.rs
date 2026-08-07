@@ -991,13 +991,29 @@ mod tests {
         }
     }
 
+    /// Same thresholds as [`cb_policy`], but with a `reset_timeout` long enough that a
+    /// tripped breaker cannot lapse back into `HalfOpen` while the test is running.
+    ///
+    /// Tests that assert *short-circuit* behaviour need the `Open` window to outlive the
+    /// whole test body. With the 20ms default a loaded machine can drift past the
+    /// deadline between two attempts (the fixed retry sleep is only 1ms), which lazily
+    /// promotes the breaker to `HalfOpen`, admits a probe call, and inflates the
+    /// invocation count. `test_circuit_half_open_recovery_via_run_with_retries` is the
+    /// only test that actually exercises the reset deadline, so it keeps `cb_policy`.
+    fn cb_policy_stable_open(threshold: u32) -> CircuitPolicy {
+        CircuitPolicy {
+            reset_timeout: Duration::from_secs(60),
+            ..cb_policy(threshold)
+        }
+    }
+
     #[tokio::test]
     async fn test_circuit_open_short_circuits_without_invoking_task() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         // Threshold = 3, no retries, so the first three failing calls trip the breaker
         // and the fourth call must return CircuitOpen *without* invoking the task body.
-        let breaker = Arc::new(CircuitBreaker::new(cb_policy(3)));
+        let breaker = Arc::new(CircuitBreaker::new(cb_policy_stable_open(3)));
         let config = TaskConfig::minimal().with_circuit_breaker(Arc::clone(&breaker));
         let counter = Arc::new(AtomicUsize::new(0));
 
@@ -1044,7 +1060,7 @@ mod tests {
         // Even with retries enabled, a CircuitOpen must short-circuit immediately —
         // retries against an open breaker would only add load to the failing
         // dependency. The error should surface raw, not wrapped in RetryExhausted.
-        let breaker = Arc::new(CircuitBreaker::new(cb_policy(1)));
+        let breaker = Arc::new(CircuitBreaker::new(cb_policy_stable_open(1)));
         let config = TaskConfig::new()
             .with_fixed_retry(5, Duration::from_millis(1))
             .with_circuit_breaker(Arc::clone(&breaker));
@@ -1114,7 +1130,7 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         // Two tasks share one Arc<CircuitBreaker>; failures from task A trip it for B.
-        let breaker = Arc::new(CircuitBreaker::new(cb_policy(3)));
+        let breaker = Arc::new(CircuitBreaker::new(cb_policy_stable_open(3)));
         let config_a = TaskConfig::minimal().with_circuit_breaker(Arc::clone(&breaker));
         let config_b = TaskConfig::minimal().with_circuit_breaker(Arc::clone(&breaker));
 
@@ -1155,7 +1171,7 @@ mod tests {
         // raw CircuitOpen, not RetryExhausted.
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let breaker = Arc::new(CircuitBreaker::new(cb_policy(2)));
+        let breaker = Arc::new(CircuitBreaker::new(cb_policy_stable_open(2)));
         let config = TaskConfig::new()
             .with_fixed_retry(5, Duration::from_millis(1))
             .with_circuit_breaker(Arc::clone(&breaker));
@@ -1207,7 +1223,7 @@ mod tests {
         // CircuitOpen without ever invoking the task body.
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let breaker = Arc::new(CircuitBreaker::new(cb_policy(2)));
+        let breaker = Arc::new(CircuitBreaker::new(cb_policy_stable_open(2)));
         let config = TaskConfig::minimal()
             .with_attempt_timeout(Duration::from_millis(10))
             .with_circuit_breaker(Arc::clone(&breaker));
