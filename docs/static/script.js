@@ -77,19 +77,6 @@ document.addEventListener('DOMContentLoaded', () => {
   });
 
   // --------------------------------------------------------------------------
-  // Mermaid initialization (one-time). startOnLoad is false because we drive
-  // rendering manually in initContent() so diagrams also render after a swap.
-  // --------------------------------------------------------------------------
-  if (window.mermaid) {
-    mermaid.initialize({
-      startOnLoad: false,
-      theme: 'dark',
-      securityLevel: 'loose',
-      fontFamily: 'Outfit, sans-serif'
-    });
-  }
-
-  // --------------------------------------------------------------------------
   // setActiveLinks() — runs on first load and after every content swap.
   // Highlights the current page's link and reveals its ancestor <details>
   // (unless the user explicitly collapsed it).
@@ -117,7 +104,7 @@ document.addEventListener('DOMContentLoaded', () => {
   // --------------------------------------------------------------------------
   // initContent(scope) — idempotent per-page setup for the swapped-in content.
   // Runs on first load (scope = document) and after every Swup swap
-  // (scope = #swup), so Prism / Mermaid / external links re-apply to new content.
+  // (scope = #swup), so Prism / external links re-apply to new content.
   // --------------------------------------------------------------------------
   function initContent(scope) {
     scope = scope || document.getElementById('swup') || document;
@@ -129,15 +116,6 @@ document.addEventListener('DOMContentLoaded', () => {
     });
     if (window.Prism) {
       Prism.highlightAll();
-    }
-
-    // Mermaid: render only diagrams that haven't been processed yet, so a swap
-    // never double-renders an existing diagram or skips a new one.
-    if (window.mermaid) {
-      const nodes = Array.from(scope.querySelectorAll('.mermaid:not([data-processed])'));
-      if (nodes.length) {
-        try { mermaid.run({ nodes }); } catch (e) { /* malformed diagram — leave as-is */ }
-      }
     }
 
     // External links — open in new tab.
