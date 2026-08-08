@@ -29,21 +29,59 @@ and concurrency guarantees.
 
 <div class="diagram-frame">
 <p class="diagram-label">setup_all() in FIFO order; teardown in LIFO order</p>
-<div class="mermaid">
-sequenceDiagram
-participant E as Engine
-participant R0 as Resource A
-participant R1 as Resource B
-participant R2 as Resource C
-Note over E: setup_all() — FIFO
-E->>R0: setup()
-E->>R1: setup()
-E->>R2: setup()
-Note over E: execute_workflow()
-Note over E: teardown_range(all) — LIFO
-E->>R2: teardown()
-E->>R1: teardown()
-E->>R0: teardown()
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 750 496" role="img">
+<title>The engine calls setup() on resources in insertion order (FIFO) and teardown() in exactly the reverse order (LIFO), so each resource's live span nests inside the spans of the resources set up before it.</title>
+<defs><marker id="life-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<line class="lifeline" x1="110" y1="46" x2="110" y2="458"/>
+<line class="lifeline" x1="300" y1="46" x2="300" y2="458"/>
+<line class="lifeline" x1="480" y1="46" x2="480" y2="458"/>
+<line class="lifeline" x1="660" y1="46" x2="660" y2="458"/>
+<rect class="band" x="295" y="126" width="10" height="316" rx="5"/>
+<rect class="band" x="475" y="170" width="10" height="228" rx="5"/>
+<rect class="band" x="655" y="214" width="10" height="140" rx="5"/>
+<rect class="n" x="50" y="8" width="120" height="38" rx="8"/>
+<text class="t-strong" x="110" y="28">Engine</text>
+<rect class="n" x="235" y="8" width="130" height="38" rx="8"/>
+<text class="t-strong" x="300" y="28">Resource A</text>
+<rect class="n" x="415" y="8" width="130" height="38" rx="8"/>
+<text class="t-strong" x="480" y="28">Resource B</text>
+<rect class="n" x="595" y="8" width="130" height="38" rx="8"/>
+<text class="t-strong" x="660" y="28">Resource C</text>
+<rect class="n" x="22" y="58" width="176" height="44" rx="10"/>
+<text class="t-code" x="110" y="72">setup_all()</text>
+<text class="t-strong" x="110" y="89">FIFO order</text>
+<path class="e" d="M124,126 H293" marker-end="url(#life-ah)"/>
+<text class="t-code ta-s" x="142" y="113">setup()</text>
+<circle class="n" cx="110" cy="126" r="10"/>
+<text class="t-mut" x="110" y="127">1</text>
+<path class="e" d="M124,170 H473" marker-end="url(#life-ah)"/>
+<text class="t-code ta-s" x="142" y="157">setup()</text>
+<circle class="n" cx="110" cy="170" r="10"/>
+<text class="t-mut" x="110" y="171">2</text>
+<path class="e" d="M124,214 H653" marker-end="url(#life-ah)"/>
+<text class="t-code ta-s" x="142" y="201">setup()</text>
+<circle class="n" cx="110" cy="214" r="10"/>
+<text class="t-mut" x="110" y="215">3</text>
+<rect class="n" x="22" y="238" width="176" height="34" rx="10"/>
+<text class="t-code" x="110" y="256">execute_workflow()</text>
+<rect class="n-hot" x="22" y="286" width="176" height="44" rx="10"/>
+<text class="t-code" x="110" y="300">teardown_range(all)</text>
+<text class="t-strong t-hot" x="110" y="317">LIFO order</text>
+<path class="e" d="M124,354 H653" marker-end="url(#life-ah)"/>
+<text class="t-code ta-s" x="142" y="341">teardown()</text>
+<circle class="n" cx="110" cy="354" r="10"/>
+<text class="t-mut" x="110" y="355">4</text>
+<path class="e" d="M124,398 H473" marker-end="url(#life-ah)"/>
+<text class="t-code ta-s" x="142" y="385">teardown()</text>
+<circle class="n" cx="110" cy="398" r="10"/>
+<text class="t-mut" x="110" y="399">5</text>
+<path class="e" d="M124,442 H293" marker-end="url(#life-ah)"/>
+<text class="t-code ta-s" x="142" y="429">teardown()</text>
+<circle class="n" cx="110" cy="442" r="10"/>
+<text class="t-mut" x="110" y="443">6</text>
+<text class="t-mut" x="375" y="478">Bars mark each resource's live span — they nest, so teardown mirrors setup exactly.</text>
+</svg>
 </div>
 </div>
 

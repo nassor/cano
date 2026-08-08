@@ -76,11 +76,27 @@ waiting. A timer wakes once; a poller loops.
 
 <div class="diagram-frame">
 <p class="diagram-label">wait &rarr; sleep once &rarr; after_wait</p>
-<div class="mermaid">
-graph LR
-A[wait] -->|"TimerOutcome"| B[sleep once]
-B --> C[after_wait]
-C --> D[Next State]
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 726 204" role="img">
+<title>A TimerTask waits exactly once: wait returns a TimerOutcome, the engine schedules a single sleep for that duration or until that instant, then after_wait runs and its TaskResult moves the workflow to the next state.</title>
+<defs><marker id="timer-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<path class="e" d="M130,51 H276" marker-end="url(#timer-ah)"/>
+<text class="t-code" x="205" y="34">TimerOutcome</text>
+<path class="e" d="M440,51 H576" marker-end="url(#timer-ah)"/>
+<text class="t-mut" x="510" y="34">wakes once</text>
+<rect class="n" x="26" y="28" width="104" height="46" rx="10"/>
+<text class="t-code" x="78" y="52">wait</text>
+<rect class="n-hot" x="280" y="28" width="160" height="46" rx="10"/>
+<text class="t-strong" x="360" y="52">sleep once</text>
+<text class="t-code t-mut" x="360" y="96">Duration(d) &middot; Until(instant)</text>
+<text class="t-mut" x="360" y="116">exactly one wake-up &mdash; not a poll loop</text>
+<rect class="n" x="580" y="28" width="120" height="46" rx="10"/>
+<text class="t-code" x="640" y="52">after_wait</text>
+<path class="e" d="M640,74 V129" marker-end="url(#timer-ah)"/>
+<text class="t-code t-mut ta-e" x="630" y="102">TaskResult</text>
+<rect class="n-ok" x="582" y="134" width="116" height="46" rx="10"/>
+<text x="640" y="158">Next State</text>
+</svg>
 </div>
 </div>
 

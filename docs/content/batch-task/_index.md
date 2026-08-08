@@ -85,11 +85,31 @@ for "map this one operation over N <em>items</em>".
 
 <div class="diagram-frame">
 <p class="diagram-label">BatchTask: load &rarr; process_item (&times;N) &rarr; finish</p>
-<div class="mermaid">
-graph LR
-A[load] -->|"items: Vec of Item"| B[process_item ×N]
-B -->|"per-item Results — input order"| C[finish]
-C -->|TaskResult| D[Next State]
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 708 246" role="img">
+<title>A BatchTask fans out over data inside one state: load produces the items, process_item runs over all N with bounded concurrency, and finish re-joins the per-item results in input order before returning a TaskResult.</title>
+<defs><marker id="batch-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<path class="e e-dim" d="M626,64 V44 Q626,36 618,36 H84 Q76,36 76,44 V59" marker-end="url(#batch-ah)"/>
+<text class="t-mut" x="351" y="18">Err in load or finish &rarr; retry the whole cycle</text>
+<path class="e" d="M128,87 H262" marker-end="url(#batch-ah)"/>
+<text class="t-code" x="195" y="70">items: Vec&lt;Item&gt;</text>
+<path class="e" d="M444,87 H570" marker-end="url(#batch-ah)"/>
+<text class="t-mut" x="507" y="54">per-item Results</text>
+<text class="t-mut" x="507" y="70">in input order</text>
+<rect class="n" x="24" y="64" width="104" height="46" rx="10"/>
+<text class="t-code" x="76" y="88">load</text>
+<rect class="n" x="282" y="48" width="158" height="46" rx="10"/>
+<rect class="n" x="274" y="56" width="158" height="46" rx="10"/>
+<rect class="n-hot" x="266" y="64" width="158" height="46" rx="10"/>
+<text class="t-code t-strong" x="345" y="88">process_item</text>
+<text class="t-mut" x="345" y="130">&times;N &mdash; up to concurrency() at once</text>
+<rect class="n" x="574" y="64" width="104" height="46" rx="10"/>
+<text class="t-code" x="626" y="88">finish</text>
+<path class="e" d="M626,110 V171" marker-end="url(#batch-ah)"/>
+<text class="t-code t-mut ta-e" x="616" y="142">TaskResult</text>
+<rect class="n-ok" x="568" y="176" width="116" height="46" rx="10"/>
+<text x="626" y="200">Next State</text>
+</svg>
 </div>
 </div>
 

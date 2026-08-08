@@ -33,18 +33,35 @@ The <code>TaskConfig</code> struct allows you to specify the retry behavior.
 <h3>Retry Strategy Examples</h3>
 <div class="diagram-frame">
 <p class="diagram-label">Retry with backoff between attempts</p>
-<div class="mermaid">
-sequenceDiagram
-participant W as Workflow
-participant T as Task
-W->>T: Execute
-T-->>W: Fail
-Note over W: Wait (backoff)
-W->>T: Retry 1
-T-->>W: Fail
-Note over W: Wait (longer)
-W->>T: Retry 2
-T-->>W: Success ✓
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 720 398" role="img">
+<title>Retry with backoff: the workflow calls the task, the attempt fails, the workflow waits a backoff delay, retries, fails again, waits twice as long, and the third attempt succeeds.</title>
+<defs><marker id="cfg-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<line class="lifeline" x1="190" y1="46" x2="190" y2="332"/>
+<line class="lifeline" x1="530" y1="46" x2="530" y2="332"/>
+<rect class="n" x="120" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="190" y="32">Workflow</text>
+<rect class="n" x="460" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="530" y="32">Task</text>
+<rect class="band" x="182" y="120" width="16" height="40" rx="5"/>
+<text class="t-mut ta-e" x="172" y="145">wait (backoff)</text>
+<rect class="band" x="182" y="202" width="16" height="80" rx="5"/>
+<text class="t-mut ta-e" x="172" y="247">wait (longer, 2×)</text>
+<path class="e" d="M190,82 H526" marker-end="url(#cfg-ah)"/>
+<text class="t-mut" x="358" y="70">Execute</text>
+<path class="e e-dash" d="M530,116 H194" marker-end="url(#cfg-ah)"/>
+<text class="t-mut t-err" x="362" y="104">Fail</text>
+<path class="e" d="M190,164 H526" marker-end="url(#cfg-ah)"/>
+<text class="t-mut" x="358" y="152">Retry 1</text>
+<path class="e e-dash" d="M530,198 H194" marker-end="url(#cfg-ah)"/>
+<text class="t-mut t-err" x="362" y="186">Fail</text>
+<path class="e" d="M190,286 H526" marker-end="url(#cfg-ah)"/>
+<text class="t-mut" x="358" y="274">Retry 2</text>
+<path class="e e-dash" d="M530,320 H194" marker-end="url(#cfg-ah)"/>
+<text class="t-mut t-ok" x="362" y="308">Success ✓</text>
+<rect class="n-hot" x="40" y="340" width="640" height="34" rx="10"/>
+<text class="t-strong" x="360" y="362">Backoff grows between attempts; the loop stops at the first success.</text>
+</svg>
 </div>
 </div>
 

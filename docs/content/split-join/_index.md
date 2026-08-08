@@ -40,16 +40,36 @@ consumes <code>self</code> and returns a new <code>Workflow</code> — capture t
 
 <div class="diagram-frame">
 <p class="diagram-label">Split / Join Pattern</p>
-<div class="mermaid">
-graph TD
-A[Process State] -->|Split| B[Task 1]
-A -->|Split| C[Task 2]
-A -->|Split| D[Task 3]
-B --> E{Join Strategy}
-C --> E
-D --> E
-E -->|Satisfied| F[Aggregate State]
-E -->|Failed/Timeout| G[Error State]
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 720 440" role="img">
+<title>register_split fans one Process State out to three tasks that run concurrently; the join strategy gate collects their results and advances the workflow to the aggregate state once satisfied, or to the error state on failure or timeout.</title>
+<defs><marker id="split-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<rect class="n" x="280" y="20" width="160" height="46" rx="10"/>
+<text class="t-strong" x="360" y="44">Process State</text>
+<path class="e" d="M360,66 V88 Q360,96 352,96 H148 Q140,96 140,104 V122" marker-end="url(#split-ah)"/>
+<path class="e" d="M360,66 V122" marker-end="url(#split-ah)"/>
+<path class="e" d="M360,66 V88 Q360,96 368,96 H572 Q580,96 580,104 V122" marker-end="url(#split-ah)"/>
+<text class="t-mut ta-s" x="371" y="80">Split</text>
+<rect class="n" x="80" y="126" width="120" height="46" rx="10"/>
+<text x="140" y="150">Task 1</text>
+<rect class="n" x="300" y="126" width="120" height="46" rx="10"/>
+<text x="360" y="150">Task 2</text>
+<rect class="n" x="520" y="126" width="120" height="46" rx="10"/>
+<text x="580" y="150">Task 3</text>
+<path class="e" d="M140,172 V196 Q140,204 148,204 H292 Q300,204 300,212 V245" marker-end="url(#split-ah)"/>
+<path class="e" d="M360,172 V228" marker-end="url(#split-ah)"/>
+<path class="e" d="M580,172 V196 Q580,204 572,204 H428 Q420,204 420,212 V245" marker-end="url(#split-ah)"/>
+<path class="n-hot" d="M360,232 L490,270 L360,308 L230,270 Z"/>
+<text class="t-strong" x="360" y="271">Join Strategy</text>
+<path class="e e-hot" d="M230,270 H198 Q190,270 190,278 V358" marker-end="url(#split-ah)"/>
+<text class="t-mut t-hot ta-e" x="181" y="316">Satisfied</text>
+<path class="e" d="M490,270 H522 Q530,270 530,278 V358" marker-end="url(#split-ah)"/>
+<text class="t-mut ta-s" x="539" y="316">Failed / Timeout</text>
+<rect class="n-ok" x="105" y="364" width="170" height="46" rx="10"/>
+<text x="190" y="388">Aggregate State</text>
+<rect class="n-err" x="460" y="364" width="140" height="46" rx="10"/>
+<text x="530" y="388">Error State</text>
+</svg>
 </div>
 </div>
 

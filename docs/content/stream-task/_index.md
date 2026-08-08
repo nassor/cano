@@ -163,16 +163,40 @@ cancelled/exhausted, and resumes from a cursor.
 
 <div class="diagram-frame">
 <p class="diagram-label">open &rarr; process_item (×window) &rarr; flush_window &rarr; commit cursor &rarr; … &rarr; on_close</p>
-<div class="mermaid">
-graph LR
-A["open(cursor)"] --> B[process_item]
-B -->|"buffer until window full"| B
-B -->|"window full"| F[flush_window]
-F -->|"Continue"| P[commit cursor]
-P --> B
-F -->|"Stop(result)"| D[Next State]
-B -->|"source exhausted"| C[on_close]
-C --> D
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 340" role="img">
+<title>The stream loop: open resumes from a cursor, process_item buffers items until the window is full, flush_window emits that window, its cursor is committed and the loop repeats; a Stop signal or an exhausted source ends via on_close in the next state.</title>
+<defs><marker id="stream-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<path class="e e-dim" d="M292,64 V44 Q292,36 300,36 H362 Q370,36 370,44 V61" marker-end="url(#stream-ah)"/>
+<text class="t-mut" x="331" y="18">buffer until window full</text>
+<path class="e" d="M688,87 H722 Q734,87 734,99 V287 Q734,299 722,299 H692" marker-end="url(#stream-ah)"/>
+<text class="t-code ta-e" x="724" y="124">Stop(result)</text>
+<path class="e" d="M158,87 H248" marker-end="url(#stream-ah)"/>
+<text class="t-mut" x="203" y="70">once per run</text>
+<path class="e e-hot" d="M410,87 H526" marker-end="url(#stream-ah)"/>
+<text class="t-code t-hot" x="468" y="70">window full</text>
+<path class="e" d="M609,110 V186" marker-end="url(#stream-ah)"/>
+<text class="t-code ta-e" x="598" y="150">Continue</text>
+<path class="e" d="M530,213 H352 Q340,213 340,201 V114" marker-end="url(#stream-ah)"/>
+<text class="t-mut" x="440" y="196">next window</text>
+<path class="e" d="M292,110 V272" marker-end="url(#stream-ah)"/>
+<text class="t-mut ta-e" x="282" y="160">source exhausted</text>
+<path class="e" d="M372,299 H526" marker-end="url(#stream-ah)"/>
+<text class="t-code t-mut" x="449" y="282">TaskResult::Single</text>
+<rect class="n" x="16" y="64" width="142" height="46" rx="10"/>
+<text class="t-code" x="87" y="88">open(cursor)</text>
+<rect class="n" x="252" y="64" width="158" height="46" rx="10"/>
+<text class="t-code" x="331" y="88">process_item</text>
+<rect class="n-hot" x="530" y="64" width="158" height="46" rx="10"/>
+<text class="t-code t-strong" x="609" y="88">flush_window</text>
+<rect class="n-cop" x="530" y="190" width="158" height="46" rx="10"/>
+<text x="609" y="214">commit cursor</text>
+<text class="t-mut" x="609" y="252">StepCursor checkpoint row</text>
+<rect class="n" x="212" y="276" width="160" height="46" rx="10"/>
+<text class="t-code" x="292" y="300">on_close(reason)</text>
+<rect class="n-ok" x="530" y="276" width="158" height="46" rx="10"/>
+<text x="609" y="300">Next State</text>
+</svg>
 </div>
 </div>
 
@@ -312,8 +336,10 @@ flush + checkpoint cost.
  </div>
  <div class="card">
  <h3><code>StreamWindow::Duration(d)</code></h3>
- <p>Flush every <code>d</code> of wall-clock time, tumbling. <strong>Empty windows are skipped</strong>
- — an idle source emits no spurious empty flushes; the deadline simply advances.</p>
+ <p>Flush every <code>d</code> of wall-clock time, tumbling (clamped to a floor of <strong>1ms</strong>
+ — a zero duration would leave the tick permanently ready and busy-loop without ever polling the
+ source). <strong>Empty windows are skipped</strong> — an idle source emits no spurious empty flushes;
+ the deadline simply advances.</p>
  </div>
  </div>
 
@@ -406,6 +432,44 @@ drain</strong>:
 <li>the run ends as <code>CanoError::Cancelled</code> (category <code>"cancelled"</code>).</li>
 </ol>
 
+<p>
+The window boundary is not the only cancellable point: <code>open()</code> races the <em>same</em>
+effective token as the loop. A source that hangs while connecting — a broker that never hands back a
+consumer — is cancellable and timeoutable too, not just the gaps between windows. No cursor exists
+yet at that point, so there is nothing to flush or commit; the pending <code>open</code> future is
+simply dropped.
+</p>
+
+<p>
+<a href="../resilience/#workflow-total-timeout"><code>Workflow::with_total_timeout</code></a> is
+honoured for Stream states, and it is honoured <em>through that same drain</em>. Instead of wrapping
+the state in a deadline that would drop the future mid-window, the engine folds the budget into the
+token the loop already watches — so a deadline trip still flushes the in-flight window and still
+commits its cursor, exactly like a real cancel. Only the error at the end differs:
+</p>
+
+<table class="styled-table">
+<thead>
+<tr>
+<th>Stop trigger</th>
+<th>In-flight window</th>
+<th>Surfaced error</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>the run's <code>CancellationToken</code> fires</td>
+<td>flushed, cursor committed, <code>on_close(Cancelled)</code> runs</td>
+<td><code>CanoError::Cancelled</code> (category <code>"cancelled"</code>)</td>
+</tr>
+<tr>
+<td>the <code>with_total_timeout</code> deadline trips</td>
+<td>identical — the same cooperative drain</td>
+<td><code>CanoError::WorkflowTimeout</code> (category <code>"workflow_timeout"</code>)</td>
+</tr>
+</tbody>
+</table>
+
 <div class="callout callout-warning">
 <span class="callout-label">Cancel means "stop cleanly + resumable", not "transition onward"</span>
 <p>
@@ -414,6 +478,32 @@ A cancelled stream does <strong>not</strong> gracefully transition to another st
 <code>resume_from</code> continues from the last committed window. So cancellation is a clean,
 resumable stop, not a hand-off. (An <code>Err</code> returned by <code>on_close</code> during the
 drain <em>is</em> propagated.)
+</p>
+</div>
+
+<div class="callout callout-warning">
+<span class="callout-label">If the drain's own flush fails, that window replays</span>
+<p>
+The drain's <code>flush_window</code> can itself return an <code>Err</code>. When it does,
+<code>on_close(CloseReason::Cancelled)</code> still gets its cleanup shot — best-effort, its own error
+discarded in favour of the flush error — and the window's cursor is <strong>not</strong> committed.
+The flush error is what the run surfaces, and a later <code>resume_from</code> re-opens at the
+<em>previous</em> committed cursor, replaying that window. That is the
+<a href="#idempotency">at-least-once contract</a> earning its keep.
+</p>
+</div>
+
+<div class="callout callout-info">
+<div class="callout-label">"Cancelled" is a classification, not just a trigger</div>
+<p>
+A run is <em>reported</em> as cancelled — the
+<a href="../observers/#on-cancelled"><code>on_cancelled</code></a> observer hook, the
+<code>"cancelled"</code> metrics label — only when the engine's drain fired <strong>and</strong> the
+final result is still <code>Cancelled</code>. If something after an otherwise successful drain fails,
+most realistically the <code>StepCursor</code> checkpoint append, that error wins and the run is
+reported as <strong>failed</strong>. Conversely, a <code>StreamTask</code> that organically returns
+<code>Err(CanoError::Cancelled)</code> from <code>process_item</code> / <code>flush_window</code> /
+<code>on_close</code> never triggered the drain, so it stays on the failure path too.
 </p>
 </div>
 
