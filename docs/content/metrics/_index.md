@@ -139,6 +139,64 @@ Histograms record raw <code>f64</code> seconds samples — bucketing and quantil
 exporter's responsibility. Metric names follow <code>metrics</code>-crate underscore conventions.
 </p>
 
+<div class="diagram-frame">
+<p class="diagram-label">Where the counters fire along one run</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 510" role="img">
+<title>Emission points along a single workflow run: entering orchestrate, entering a state, acquiring the resilience guards, each retry-loop attempt, the split join and the exit state each emit their counters and histograms into the metrics facade, which forwards them to whatever recorder the application installed.</title>
+<defs><marker id="emit-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<text class="t-mut" x="110" y="34">one run, top to bottom</text>
+<text class="t-mut" x="556" y="34">emit point</text>
+<path class="e" d="M200,82 H592" marker-end="url(#emit-ah)"/>
+<text class="t-code t-mut" x="380" y="66">cano_workflow_active</text>
+<path class="e" d="M200,150 H592" marker-end="url(#emit-ah)"/>
+<text class="t-code t-mut" x="380" y="134">cano_state_enters_total{state}</text>
+<path class="e" d="M200,218 H592" marker-end="url(#emit-ah)"/>
+<text class="t-code t-mut" x="380" y="185">cano_circuit_acquires_total{result}</text>
+<text class="t-code t-mut" x="380" y="202">cano_rate_limiter_throttled_total{result}</text>
+<path class="e" d="M200,286 H592" marker-end="url(#emit-ah)"/>
+<text class="t-code t-mut" x="380" y="253">cano_task_attempts_total{outcome}</text>
+<text class="t-code t-mut" x="380" y="270">cano_task_retries_total{task}</text>
+<path class="e" d="M200,354 H592" marker-end="url(#emit-ah)"/>
+<text class="t-code t-mut" x="380" y="338">cano_split_branch_results_total{result}</text>
+<path class="e" d="M200,422 H592" marker-end="url(#emit-ah)"/>
+<text class="t-code t-mut" x="380" y="389">cano_workflow_runs_total{outcome}</text>
+<text class="t-code t-mut" x="380" y="406">cano_workflow_duration_seconds{outcome}</text>
+<path class="e e-dim" d="M110,106 V122" marker-end="url(#emit-ah)"/>
+<path class="e e-dim" d="M110,174 V190" marker-end="url(#emit-ah)"/>
+<path class="e e-dim" d="M110,242 V258" marker-end="url(#emit-ah)"/>
+<path class="e e-dim" d="M110,310 V326" marker-end="url(#emit-ah)"/>
+<path class="e e-dim" d="M110,378 V394" marker-end="url(#emit-ah)"/>
+<rect class="n" x="20" y="58" width="180" height="48" rx="10"/>
+<text class="t-code" x="110" y="83">orchestrate()</text>
+<rect class="n" x="20" y="126" width="180" height="48" rx="10"/>
+<text class="t-strong" x="110" y="151">state enter</text>
+<rect class="n" x="20" y="194" width="180" height="48" rx="10"/>
+<text class="t-strong" x="110" y="208">circuit breaker</text>
+<text class="t-mut" x="110" y="229">&middot; rate limiter</text>
+<rect class="n" x="20" y="262" width="180" height="48" rx="10"/>
+<text class="t-strong" x="110" y="276">task attempt</text>
+<text class="t-mut" x="110" y="297">inside the retry loop</text>
+<rect class="n" x="20" y="330" width="180" height="48" rx="10"/>
+<text class="t-strong" x="110" y="355">split &rarr; join</text>
+<rect class="n" x="20" y="398" width="180" height="48" rx="10"/>
+<text class="t-strong" x="110" y="412">exit state</text>
+<text class="t-mut" x="110" y="433">workflow returns</text>
+<circle class="n-hot" cx="556" cy="82" r="7"/>
+<circle class="n-hot" cx="556" cy="150" r="7"/>
+<circle class="n-hot" cx="556" cy="218" r="7"/>
+<circle class="n-hot" cx="556" cy="286" r="7"/>
+<circle class="n-hot" cx="556" cy="354" r="7"/>
+<circle class="n-hot" cx="556" cy="422" r="7"/>
+<rect class="n-cop" x="600" y="58" width="160" height="388" rx="12"/>
+<text class="t-strong" x="680" y="242">metrics facade</text>
+<text class="t-mut" x="680" y="264">&rarr; your recorder</text>
+<text class="t-mut" x="390" y="470">Dots mark emission points. Recovery, scheduler and poll/batch/step loop counters emit on the same rail.</text>
+<text class="t-mut" x="390" y="490">MetricsObserver supplies the state and retry counters; the rest is always-on engine instrumentation.</text>
+</svg>
+</div>
+</div>
+
 <div class="card-grid">
 <div class="card">
 <h3>Workflow</h3>

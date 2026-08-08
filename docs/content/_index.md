@@ -84,6 +84,60 @@ It excels at managing complex lifecycles where state transitions matter:
 </div>
 </div>
 
+<div class="diagram-frame">
+<p class="diagram-label">One trigger &rarr; one FSM run &rarr; one task per state</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 466" role="img">
+<title>How Cano fits together: a run starts either from a direct orchestrate() call or from the Scheduler's interval, cron and manual triggers; the Workflow FSM dispatches the Task registered for the current state and routes the returned TaskResult onward, appends every state entry to the CheckpointStore that resume_from replays after a crash, hands each task the shared Resources, and stops at an exit state &mdash; while observer hooks, tracing spans and metrics counters listen on a rail underneath.</title>
+<defs><marker id="arch-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<path class="e e-dim e-dash" d="M97,320 V392" marker-end="url(#arch-ah)"/>
+<path class="e e-dim e-dash" d="M390,370 V392" marker-end="url(#arch-ah)"/>
+<path class="e e-dim e-dash" d="M683,206 V392" marker-end="url(#arch-ah)"/>
+<path class="e" d="M390,94 V144" marker-end="url(#arch-ah)"/>
+<text class="t-mut ta-s" x="400" y="121">one run per trigger</text>
+<path class="e" d="M97,96 V122 Q97,130 105,130 H312 Q320,130 320,138 V144" marker-end="url(#arch-ah)"/>
+<rect class="n" x="16" y="40" width="162" height="54" rx="10"/>
+<text class="t-strong" x="97" y="59">Direct run</text>
+<text class="t-code" x="97" y="78">orchestrate()</text>
+<path class="e e-hot" d="M266,175 H182" marker-end="url(#arch-ah)"/>
+<text class="t-mut t-hot" x="222" y="162">reaches exit</text>
+<path class="e" d="M510,161 H598" marker-end="url(#arch-ah)"/>
+<text class="t-code" x="554" y="147">append()</text>
+<path class="e e-dash" d="M598,189 H514" marker-end="url(#arch-ah)"/>
+<text class="t-code" x="556" y="205">resume_from</text>
+<path class="e" d="M366,202 V258" marker-end="url(#arch-ah)"/>
+<text class="t-mut ta-e" x="358" y="232">dispatch</text>
+<path class="e" d="M414,262 V206" marker-end="url(#arch-ah)"/>
+<text class="t-code ta-s" x="422" y="232">TaskResult</text>
+<path class="e" d="M266,289 H182" marker-end="url(#arch-ah)"/>
+<text class="t-code" x="224" y="276">&amp;Resources</text>
+<rect class="n" x="270" y="40" width="240" height="54" rx="10"/>
+<text class="t-strong" x="390" y="59">Scheduler</text>
+<text class="t-mut" x="390" y="78">interval &middot; cron &middot; manual</text>
+<rect class="n-ok" x="16" y="148" width="162" height="54" rx="10"/>
+<text class="t-strong" x="97" y="167">Exit state</text>
+<text class="t-mut" x="97" y="186">run complete</text>
+<rect class="n-hot" x="270" y="148" width="240" height="54" rx="10"/>
+<text class="t-strong" x="390" y="167">Workflow FSM</text>
+<text class="t-mut" x="390" y="186">one task per state</text>
+<rect class="n-cop" x="602" y="148" width="162" height="54" rx="10"/>
+<text class="t-code" x="683" y="167">CheckpointStore</text>
+<text class="t-mut" x="683" y="186">one row per state</text>
+<rect class="n-cop" x="16" y="262" width="162" height="54" rx="10"/>
+<text class="t-strong" x="97" y="281">Resources</text>
+<text class="t-code" x="97" y="300">MemoryStore</text>
+<rect class="n" x="270" y="262" width="240" height="104" rx="10"/>
+<text class="t-strong" x="390" y="284">Task family</text>
+<text class="t-mut" x="390" y="310">Task &middot; RouterTask &middot; PollTask</text>
+<text class="t-mut" x="390" y="330">TimerTask &middot; BatchTask</text>
+<text class="t-mut" x="390" y="350">SteppedTask &middot; StreamTask</text>
+<rect class="n" x="16" y="396" width="748" height="56" rx="10"/>
+<text class="t-strong" x="390" y="415">Observability rail &mdash; opt-in, zero-cost when unused</text>
+<text class="t-mut" x="390" y="435">WorkflowObserver hooks &middot; tracing spans &middot; metrics counters</text>
+</svg>
+</div>
+</div>
+
 <h2>Resilient, Self-Healing</h2>
 <p>
 What the tagline means, concretely. Every one of these is <strong>opt-in and zero-cost when unused</strong> —

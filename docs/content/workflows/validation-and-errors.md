@@ -32,6 +32,41 @@ Before orchestrating a workflow, you can validate its configuration to catch com
 Cano provides two validation methods that check for different categories of problems.
 </p>
 
+<div class="diagram-frame">
+<p class="diagram-label">The gate every <code>orchestrate()</code> call passes through</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 300" role="img">
+<title>orchestrate() runs validate() once per workflow and validate_initial_state() on every call, before any resource setup; either check failing returns CanoError::Configuration before a task runs.</title>
+<defs><marker id="valgate-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<rect class="n-hot" x="25" y="40" width="200" height="58" rx="10"/>
+<text class="t-code" x="125" y="65">validate()</text>
+<text class="t-mut" x="125" y="85">cached — runs once</text>
+<rect class="n" x="285" y="40" width="215" height="58" rx="10"/>
+<text class="t-code" x="392" y="65">validate_initial_state</text>
+<text class="t-mut" x="392" y="85">every call · O(1)</text>
+<rect class="n-ok" x="560" y="40" width="195" height="58" rx="10"/>
+<text class="t-code" x="657" y="65">setup_all() → FSM</text>
+<text class="t-mut" x="657" y="85">the run begins</text>
+<path class="e" d="M229,69 H281" marker-end="url(#valgate-ah)"/>
+<text class="t-mut t-ok" x="255" y="57">Ok</text>
+<path class="e" d="M504,69 H556" marker-end="url(#valgate-ah)"/>
+<text class="t-mut t-ok" x="530" y="57">Ok</text>
+<path class="e" d="M125,98 V231 Q125,239 133,239 H186" marker-end="url(#valgate-ah)"/>
+<text class="t-mut t-err ta-s" x="136" y="124">no registered state handlers</text>
+<text class="t-mut t-err ta-s" x="136" y="142">no exit states defined</text>
+<text class="t-mut t-err ta-s" x="136" y="160">a split join_state that is neither</text>
+<text class="t-mut t-err ta-s" x="136" y="178">registered nor an exit state</text>
+<path class="e" d="M392,98 V206" marker-end="url(#valgate-ah)"/>
+<text class="t-mut t-err ta-s" x="402" y="124">initial state neither</text>
+<text class="t-mut t-err ta-s" x="402" y="142">registered nor an exit state</text>
+<rect class="n-err" x="190" y="210" width="400" height="58" rx="10"/>
+<text class="t-code" x="390" y="235">CanoError::Configuration</text>
+<text class="t-mut" x="390" y="255">returned before setup_all() or any task runs</text>
+<text class="t-mut" x="390" y="288">Calling validate() yourself runs the same checks earlier — at build time, not on the first run.</text>
+</svg>
+</div>
+</div>
+
 <h3 id="validate-method"><a href="#validate-method" class="anchor-link" aria-hidden="true">#</a>validate()</h3>
 <p>
 Checks the overall workflow structure. Returns <code>CanoError::Configuration</code> if problems are found.
@@ -107,6 +142,50 @@ exact errors <code>validate()</code> / <code>validate_initial_state()</code> ret
 The <code>orchestrate()</code> method can return several error variants depending on what goes wrong
 during execution. Understanding these errors helps you build robust error recovery logic.
 </p>
+
+<div class="diagram-frame">
+<p class="diagram-label">Where each runtime error comes from</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 332" role="img">
+<title>Map of orchestrate() failures: the run-wide budget and cancellation abort the in-flight attempt, state dispatch raises CanoError::Workflow, the attempt itself raises CircuitOpen, Timeout, RetryExhausted or TaskExecution, and a clean run returns Ok(final_state).</title>
+<defs><marker id="errmap-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<rect class="n-ghost" x="20" y="16" width="740" height="48" rx="10"/>
+<text class="t-strong ta-s" x="38" y="36">Whole-run budget &amp; cancellation</text>
+<text class="t-code t-err ta-s" x="38" y="55">WorkflowTimeout · Cancelled</text>
+<text class="t-mut ta-e" x="742" y="46">in-flight task aborted → compensation stack drained</text>
+<path class="e e-dash e-dim" d="M390,64 V96" marker-end="url(#errmap-ah)"/>
+<text class="t-mut ta-s" x="398" y="84">aborts the attempt</text>
+<rect class="n" x="25" y="100" width="200" height="58" rx="10"/>
+<text class="t-strong" x="125" y="125">dispatch state</text>
+<text class="t-mut" x="125" y="145">find the handler</text>
+<rect class="n-hot" x="290" y="100" width="200" height="58" rx="10"/>
+<text class="t-strong" x="390" y="125">run attempt</text>
+<text class="t-mut" x="390" y="145">breaker → try → retry</text>
+<rect class="n-ok" x="555" y="100" width="200" height="58" rx="10"/>
+<text class="t-strong" x="655" y="125">next state</text>
+<text class="t-mut" x="655" y="145">or a registered exit</text>
+<path class="e" d="M229,129 H286" marker-end="url(#errmap-ah)"/>
+<path class="e" d="M494,129 H551" marker-end="url(#errmap-ah)"/>
+<path class="e" d="M125,158 V186" marker-end="url(#errmap-ah)"/>
+<path class="e" d="M390,158 V186" marker-end="url(#errmap-ah)"/>
+<path class="e" d="M655,158 V186" marker-end="url(#errmap-ah)"/>
+<rect class="n-err" x="25" y="190" width="200" height="78" rx="10"/>
+<text class="t-code t-err" x="125" y="213">CanoError::Workflow</text>
+<text class="t-mut" x="125" y="233">no handler for state</text>
+<text class="t-mut" x="125" y="251">single task → Split</text>
+<rect class="n-err" x="290" y="190" width="200" height="78" rx="10"/>
+<text class="t-code t-err" x="390" y="213">CircuitOpen · Timeout</text>
+<text class="t-code t-err" x="390" y="233">RetryExhausted</text>
+<text class="t-code t-err" x="390" y="251">TaskExecution · panic</text>
+<rect class="n-ok" x="555" y="190" width="200" height="78" rx="10"/>
+<text class="t-code t-ok" x="655" y="213">Ok(final_state)</text>
+<text class="t-mut" x="655" y="233">exit state reached</text>
+<text class="t-mut" x="655" y="251">teardown, then return</text>
+<rect class="n-hot" x="25" y="286" width="730" height="34" rx="10"/>
+<text class="t-strong" x="390" y="308">Every failure raised during the run is wrapped in CanoError::WithStateContext</text>
+</svg>
+</div>
+</div>
 
 <table class="styled-table">
 <thead>

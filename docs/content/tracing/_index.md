@@ -108,6 +108,39 @@ tracing_subscriber::registry()
 <p>Workflow scheduling, concurrent execution, run counts, durations.</p>
 </div>
 </div>
+
+<div class="diagram-frame">
+<p class="diagram-label">The span tree one run emits &mdash; spans nest, fields inherit</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 292" role="img">
+<title>The nested span tree a run emits: a root workflow_orchestrate span holds one single_task_execution span per dispatched state, each of those holds a run_with_retries span, and every attempt of the task gets its own task_attempt child &mdash; so a state that retried once shows two.</title>
+<rect class="n-hot" x="16" y="40" width="748" height="192" rx="10"/>
+<text class="t-code ta-s" x="30" y="60">workflow_orchestrate { workflow_id }</text>
+<text class="t-mut ta-e" x="750" y="60">root span &mdash; every child inherits its fields</text>
+<rect class="n" x="32" y="74" width="400" height="144" rx="10"/>
+<text class="t-code ta-s" x="46" y="94">single_task_execution</text>
+<text class="t-mut ta-e" x="418" y="94">state = FetchData</text>
+<rect class="n" x="48" y="108" width="368" height="96" rx="10"/>
+<text class="t-code ta-s" x="62" y="128">run_with_retries { max_attempts = 2 }</text>
+<rect class="n-err" x="64" y="142" width="161" height="48" rx="10"/>
+<text class="t-code" x="145" y="158">task_attempt</text>
+<text class="t-mut" x="145" y="176">attempt = 1</text>
+<rect class="n-ok" x="239" y="142" width="161" height="48" rx="10"/>
+<text class="t-code" x="320" y="158">task_attempt</text>
+<text class="t-mut" x="320" y="176">attempt = 2</text>
+<rect class="n" x="446" y="74" width="302" height="144" rx="10"/>
+<text class="t-code ta-s" x="460" y="94">single_task_execution</text>
+<text class="t-mut ta-e" x="734" y="94">state = Persist</text>
+<rect class="n" x="462" y="108" width="272" height="96" rx="10"/>
+<text class="t-code ta-s" x="476" y="128">run_with_retries</text>
+<rect class="n-ok" x="478" y="142" width="240" height="48" rx="10"/>
+<text class="t-code" x="598" y="158">task_attempt</text>
+<text class="t-mut" x="598" y="176">attempt = 1</text>
+<text class="t-mut" x="390" y="254">Each event carries the fields of every span above it &mdash; workflow_id reaches the innermost attempt.</text>
+<text class="t-mut" x="390" y="276">Scheduled runs nest under execute_flow, resumes under workflow_resume, split branches under split_task.</text>
+</svg>
+</div>
+</div>
 <hr class="section-divider">
 
 <h2 id="error-tracing"><a href="#error-tracing" class="anchor-link" aria-hidden="true">#</a>Error Tracing</h2>
@@ -115,6 +148,42 @@ tracing_subscriber::registry()
 When the <code>tracing</code> feature is enabled, Cano automatically instruments error paths
 at appropriate severity levels so you can diagnose failures without adding custom logging.
 </p>
+
+<div class="diagram-frame">
+<p class="diagram-label">WARN per failed attempt, ERROR only when max_attempts is reached</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 296" role="img">
+<title>Severity escalation across a retried task: every failed attempt logs a WARN inside its own task_attempt span, the attempt that reaches max_attempts logs an ERROR instead, and the resulting CanoError surfaces again as an ERROR on the workflow span, carrying the failing state.</title>
+<defs><marker id="trace-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<path class="e" d="M172,122 H220" marker-end="url(#trace-ah)"/>
+<text class="t-mut" x="198" y="108">retry</text>
+<path class="e" d="M364,122 H412" marker-end="url(#trace-ah)"/>
+<text class="t-mut" x="390" y="108">retry</text>
+<path class="e e-hot" d="M556,122 H604" marker-end="url(#trace-ah)"/>
+<path class="e" d="M678,176 V204" marker-end="url(#trace-ah)"/>
+<text class="t-mut ta-e" x="668" y="192">propagates as CanoError</text>
+<rect class="n" x="16" y="44" width="748" height="132" rx="10"/>
+<text class="t-code ta-s" x="30" y="64">run_with_retries { max_attempts = 4 }</text>
+<text class="t-mut t-hot" x="582" y="74">attempt reaches max_attempts</text>
+<rect class="n-warn" x="32" y="88" width="140" height="68" rx="10"/>
+<text class="t-code" x="102" y="110">attempt = 1</text>
+<text class="t-strong t-warn" x="102" y="134">WARN</text>
+<rect class="n-warn" x="224" y="88" width="140" height="68" rx="10"/>
+<text class="t-code" x="294" y="110">attempt = 2</text>
+<text class="t-strong t-warn" x="294" y="134">WARN</text>
+<rect class="n-warn" x="416" y="88" width="140" height="68" rx="10"/>
+<text class="t-code" x="486" y="110">attempt = 3</text>
+<text class="t-strong t-warn" x="486" y="134">WARN</text>
+<rect class="n-err" x="608" y="88" width="140" height="68" rx="10"/>
+<text class="t-code" x="678" y="110">attempt = 4</text>
+<text class="t-strong t-err" x="678" y="134">ERROR</text>
+<rect class="n-err" x="16" y="208" width="748" height="56" rx="10"/>
+<text class="t-code" x="390" y="227">workflow_orchestrate</text>
+<text class="t-mut" x="390" y="247"><tspan class="t-err">ERROR</tspan> &mdash; Task failed in state FetchData after exhausting retries</text>
+<text class="t-mut" x="390" y="282">Any attempt that succeeds logs INFO and ends the loop &mdash; the ERROR level is reserved for exhaustion.</text>
+</svg>
+</div>
+</div>
 
 <div class="card-stack">
 <div class="card">
