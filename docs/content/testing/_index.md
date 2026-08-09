@@ -48,7 +48,7 @@ so the helpers compile only for tests and never ship in your release build:
 
 ```toml
 [dev-dependencies]
-cano = { version = "0.14", features = ["testing"] }
+{{ cano_dep(features=["testing"]) }}
 ```
 
 <p>The <code>testing</code> feature pulls in no extra dependencies and is zero-cost when off.</p>
