@@ -99,6 +99,60 @@ Every method on <code>WorkflowObserver</code> has a default no-op body — overr
 ones you care about.
 </p>
 
+<div class="diagram-frame">
+<p class="diagram-label">One state of an observed run, and the hooks that end a run</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 554" role="img">
+<title>Hook order across one state: the engine reports on_state_enter and on_task_start, the first attempt fails so on_retry fires, the second attempt succeeds and on_task_success fires, a checkpoint is reported when a checkpoint store is attached, and entering the next state starts the cycle again.</title>
+<defs><marker id="obs-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<line class="lifeline" x1="120" y1="46" x2="120" y2="424"/>
+<line class="lifeline" x1="390" y1="46" x2="390" y2="424"/>
+<line class="lifeline" x1="650" y1="46" x2="650" y2="424"/>
+<rect class="n" x="50" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="120" y="28">Engine</text>
+<rect class="n" x="320" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="390" y="28">Task</text>
+<rect class="n-hot" x="560" y="8" width="180" height="38" rx="8"/>
+<text class="t-strong" x="650" y="28">WorkflowObserver</text>
+<path class="e" d="M120,80 H646" marker-end="url(#obs-ah)"/>
+<text class="t-code ta-s" x="136" y="68">on_state_enter("Load")</text>
+<path class="e" d="M120,114 H646" marker-end="url(#obs-ah)"/>
+<text class="t-code ta-s" x="136" y="102">on_task_start("load")</text>
+<path class="e" d="M120,148 H386" marker-end="url(#obs-ah)"/>
+<text class="t-mut ta-s" x="136" y="136">attempt 1</text>
+<path class="e e-dash" d="M390,182 H124" marker-end="url(#obs-ah)"/>
+<text class="t-code t-err ta-e" x="374" y="170">Err(CanoError)</text>
+<path class="e" d="M120,216 H646" marker-end="url(#obs-ah)"/>
+<text class="t-code t-warn ta-s" x="136" y="204">on_retry("load", 1)</text>
+<path class="e" d="M120,250 H386" marker-end="url(#obs-ah)"/>
+<text class="t-mut ta-s" x="136" y="238">attempt 2</text>
+<path class="e e-dash" d="M390,284 H124" marker-end="url(#obs-ah)"/>
+<text class="t-code t-ok ta-e" x="374" y="272">Ok(TaskResult)</text>
+<path class="e" d="M120,318 H646" marker-end="url(#obs-ah)"/>
+<text class="t-code t-ok ta-s" x="136" y="306">on_task_success("load")</text>
+<path class="e e-dash" d="M120,368 H646" marker-end="url(#obs-ah)"/>
+<text class="t-mut ta-s" x="136" y="336">only with a checkpoint store</text>
+<text class="t-code ta-s" x="136" y="354">on_checkpoint(id, seq)</text>
+<path class="e" d="M120,412 H646" marker-end="url(#obs-ah)"/>
+<text class="t-code ta-s" x="136" y="400">on_state_enter("Done")</text>
+<rect class="n-warn" x="12" y="442" width="180" height="38" rx="10"/>
+<text class="t-code t-warn" x="102" y="462">on_circuit_open</text>
+<text class="t-mut" x="102" y="494">breaker is open</text>
+<rect class="n-err" x="204" y="442" width="180" height="38" rx="10"/>
+<text class="t-code t-err" x="294" y="462">on_task_failure</text>
+<text class="t-mut" x="294" y="494">retries exhausted</text>
+<rect class="n-ghost" x="396" y="442" width="180" height="38" rx="10"/>
+<text class="t-code t-warn" x="486" y="462">on_cancelled</text>
+<text class="t-mut" x="486" y="494">token cancelled</text>
+<rect class="n-warn" x="588" y="442" width="180" height="38" rx="10"/>
+<text class="t-code t-warn" x="678" y="462">on_workflow_timeout</text>
+<text class="t-mut" x="678" y="494">total budget spent</text>
+<text class="t-mut" x="390" y="520">on_resume fires once at the start of resume_from; every other hook fires inside the run.</text>
+<text class="t-mut" x="390" y="540">All hooks are synchronous — they run inline on the workflow's task.</text>
+</svg>
+</div>
+</div>
+
 <div class="card-stack">
 <div class="card">
 <h3 id="on-state-enter"><a href="#on-state-enter" class="anchor-link" aria-hidden="true">#</a><code>on_state_enter(state: &amp;str)</code></h3>

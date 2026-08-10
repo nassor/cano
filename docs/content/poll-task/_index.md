@@ -76,11 +76,23 @@ retry rarely makes sense, since the loop already keeps trying. For tolerating tr
 
 <div class="diagram-frame">
 <p class="diagram-label">The poll loop: poll &rarr; sleep &rarr; poll &hellip; until Ready</p>
-<div class="mermaid">
-graph LR
-A[poll] -->|"Pending { delay_ms }"| B[sleep delay_ms]
-B --> A
-A -->|"Ready(result)"| C[Next State]
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 720 196" role="img">
+<title>The poll loop: poll returns Pending with a delay, the engine sleeps that long and polls again; Ready(result) moves the workflow to the next state.</title>
+<defs><marker id="poll-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<path class="e e-hot" d="M100,58 V32 Q100,24 108,24 H617 Q625,24 625,32 V53" marker-end="url(#poll-ah)"/>
+<text class="t-code t-hot" x="362" y="41">Ready(result)</text>
+<rect class="n-hot" x="40" y="58" width="120" height="46" rx="10"/>
+<text class="t-strong" x="100" y="82">poll</text>
+<rect class="n" x="330" y="58" width="170" height="46" rx="10"/>
+<text x="415" y="82">sleep delay_ms</text>
+<rect class="n-ok" x="560" y="58" width="130" height="46" rx="10"/>
+<text x="625" y="82">Next State</text>
+<path class="e" d="M160,81 H326" marker-end="url(#poll-ah)"/>
+<text class="t-code t-mut" x="243" y="64">Pending { delay_ms }</text>
+<path class="e e-dim" d="M415,104 V138 Q415,146 407,146 H108 Q100,146 100,138 V107" marker-end="url(#poll-ah)"/>
+<text class="t-mut" x="257" y="162">repeat until Ready</text>
+</svg>
 </div>
 </div>
 

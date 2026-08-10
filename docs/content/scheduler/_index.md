@@ -124,17 +124,41 @@ scheduler.manual(...)
 
 <div class="diagram-frame">
 <p class="diagram-label">Interval Scheduling Timeline</p>
-<div class="mermaid">
-gantt
-title Interval Scheduling (Every 30 seconds)
-dateFormat ss
-axisFormat %Ss
-section Workflow
-Run 1 :0, 2s
-Wait  :2, 28s
-Run 2 :30, 2s
-Wait  :32, 28s
-Run 3 :60, 2s
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 760 180" role="img">
+<title>Interval scheduling every 30 seconds: a 2-second run is followed by a 28-second wait, so the workflow is busy for only 2 seconds out of every 30.</title>
+<defs><marker id="interval-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<path class="e e-dim" d="M150,36 H420" marker-start="url(#interval-ah)" marker-end="url(#interval-ah)"/>
+<text class="t-mut" x="285" y="22">30s period</text>
+<text class="t-strong ta-s" x="20" y="78">Workflow</text>
+<rect class="band" x="168" y="64" width="252" height="26" rx="6"/>
+<text class="t-mut" x="294" y="78">wait 28s</text>
+<rect class="band" x="438" y="64" width="252" height="26" rx="6"/>
+<text class="t-mut" x="564" y="78">wait 28s</text>
+<rect class="band-hot" x="150" y="64" width="18" height="26" rx="4"/>
+<rect class="band-hot" x="420" y="64" width="18" height="26" rx="4"/>
+<rect class="band-hot" x="690" y="64" width="18" height="26" rx="4"/>
+<text class="t-mut t-hot" x="159" y="52">Run 1</text>
+<text class="t-mut t-hot" x="429" y="52">Run 2</text>
+<text class="t-mut t-hot" x="699" y="52">Run 3</text>
+<line class="axis" x1="150" y1="112" x2="726" y2="112"/>
+<path class="e e-dim" d="M726,112 H744" marker-end="url(#interval-ah)"/>
+<line class="tick" x1="150" y1="112" x2="150" y2="118"/>
+<line class="tick" x1="240" y1="112" x2="240" y2="118"/>
+<line class="tick" x1="330" y1="112" x2="330" y2="118"/>
+<line class="tick" x1="420" y1="112" x2="420" y2="118"/>
+<line class="tick" x1="510" y1="112" x2="510" y2="118"/>
+<line class="tick" x1="600" y1="112" x2="600" y2="118"/>
+<line class="tick" x1="690" y1="112" x2="690" y2="118"/>
+<text class="t-mut" x="150" y="132">0s</text>
+<text class="t-mut" x="240" y="132">10s</text>
+<text class="t-mut" x="330" y="132">20s</text>
+<text class="t-mut" x="420" y="132">30s</text>
+<text class="t-mut" x="510" y="132">40s</text>
+<text class="t-mut" x="600" y="132">50s</text>
+<text class="t-mut" x="690" y="132">60s</text>
+<text class="t-mut" x="438" y="160">2s busy, 28s idle — the loop sleeps to the next 30s boundary, it does not spin</text>
+</svg>
 </div>
 </div>
 
@@ -193,16 +217,43 @@ plus cron and manual flows).</p>
 
 <div class="diagram-frame">
 <p class="diagram-label">Cron Scheduling Timeline</p>
-<div class="mermaid">
-gantt
-title Cron Scheduling (Daily at 9 AM and 6 PM)
-dateFormat HH
-axisFormat %H:00
-section Workflow
-Run 1 :09, 1h
-Run 2 :18, 1h
-%% Add empty space to ensure full visibility
-Space :20, 0h
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 760 180" role="img">
+<title>Cron scheduling: the workflow is idle through the day and runs for one hour at 09:00 and again at 18:00, repeating at the same wall-clock times daily.</title>
+<defs><marker id="cron-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<text class="t-code t-mut" x="378" y="26">0 0 9 * * *</text>
+<text class="t-code t-mut" x="594" y="26">0 0 18 * * *</text>
+<text class="t-mut t-hot" x="378" y="48">Run 1 · 09:00</text>
+<text class="t-mut t-hot" x="594" y="48">Run 2 · 18:00</text>
+<text class="t-strong ta-s" x="20" y="78">Workflow</text>
+<rect class="band" x="150" y="64" width="576" height="26" rx="6"/>
+<text class="t-mut" x="486" y="78">idle</text>
+<rect class="band-hot" x="366" y="64" width="24" height="26" rx="4"/>
+<rect class="band-hot" x="582" y="64" width="24" height="26" rx="4"/>
+<text class="t-mut" x="378" y="104">1h</text>
+<text class="t-mut" x="594" y="104">1h</text>
+<line class="axis" x1="150" y1="122" x2="726" y2="122"/>
+<path class="e e-dim" d="M726,122 H744" marker-end="url(#cron-ah)"/>
+<line class="tick" x1="150" y1="122" x2="150" y2="128"/>
+<line class="tick" x1="222" y1="122" x2="222" y2="128"/>
+<line class="tick" x1="294" y1="122" x2="294" y2="128"/>
+<line class="tick" x1="366" y1="122" x2="366" y2="128"/>
+<line class="tick" x1="438" y1="122" x2="438" y2="128"/>
+<line class="tick" x1="510" y1="122" x2="510" y2="128"/>
+<line class="tick" x1="582" y1="122" x2="582" y2="128"/>
+<line class="tick" x1="654" y1="122" x2="654" y2="128"/>
+<line class="tick" x1="726" y1="122" x2="726" y2="128"/>
+<text class="t-mut" x="150" y="142">00:00</text>
+<text class="t-mut" x="222" y="142">03:00</text>
+<text class="t-mut" x="294" y="142">06:00</text>
+<text class="t-mut" x="366" y="142">09:00</text>
+<text class="t-mut" x="438" y="142">12:00</text>
+<text class="t-mut" x="510" y="142">15:00</text>
+<text class="t-mut" x="582" y="142">18:00</text>
+<text class="t-mut" x="654" y="142">21:00</text>
+<text class="t-mut" x="726" y="142">24:00</text>
+<text class="t-mut" x="438" y="166">two 1-hour runs a day — idle the other 22 hours, then the same times tomorrow</text>
+</svg>
 </div>
 </div>
 
@@ -285,15 +336,30 @@ scheduler is running.
 
 <div class="diagram-frame">
 <p class="diagram-label">Manual Trigger Sequence</p>
-<div class="mermaid">
-sequenceDiagram
-participant API as API Request
-participant S as Scheduler
-participant W as Workflow
-API->>S: trigger("data_export")
-S->>W: Start Workflow
-W-->>S: Complete
-S-->>API: Success
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 720 284" role="img">
+<title>Manual triggering: an API request calls trigger on the running scheduler, which starts the workflow and relays its completion back to the caller.</title>
+<defs><marker id="manual-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<line class="lifeline" x1="110" y1="46" x2="110" y2="222"/>
+<line class="lifeline" x1="360" y1="46" x2="360" y2="222"/>
+<line class="lifeline" x1="610" y1="46" x2="610" y2="222"/>
+<rect class="n" x="35" y="8" width="150" height="38" rx="8"/>
+<text class="t-strong" x="110" y="28">API Request</text>
+<rect class="n-hot" x="285" y="8" width="150" height="38" rx="8"/>
+<text class="t-strong" x="360" y="28">Scheduler</text>
+<rect class="n" x="535" y="8" width="150" height="38" rx="8"/>
+<text class="t-strong" x="610" y="28">Workflow</text>
+<path class="e" d="M110,78 H356" marker-end="url(#manual-ah)"/>
+<text class="t-code" x="233" y="66">trigger("data_export")</text>
+<path class="e" d="M360,122 H606" marker-end="url(#manual-ah)"/>
+<text class="t-mut" x="483" y="110">Start Workflow</text>
+<path class="e e-dash" d="M610,166 H364" marker-end="url(#manual-ah)"/>
+<text class="t-mut t-ok" x="487" y="154">Complete</text>
+<path class="e e-dash" d="M360,210 H114" marker-end="url(#manual-ah)"/>
+<text class="t-mut t-ok" x="237" y="198">Success ✓</text>
+<rect class="n-hot" x="35" y="230" width="650" height="34" rx="10"/>
+<text class="t-strong" x="360" y="248">Nothing runs until trigger() is called — no interval, no cron</text>
+</svg>
 </div>
 </div>
 
@@ -357,18 +423,46 @@ async fn main() -> Result<(), CanoError> {
 
 <div class="diagram-frame">
 <p class="diagram-label">Mixed Strategy Overview</p>
-<div class="mermaid">
-gantt
-title Mixed Scheduling Strategies
-dateFormat HH:mm
-axisFormat %H:%M
-section Interval Tasks
-Sync Every 5min :00:00, 24h
-section Cron Tasks
-Daily Backup :03:00, 1h
-Weekly Report :09:00, 1h
-section Manual Tasks
-Emergency Export :done, 14:30, 15m
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 760 254" role="img">
+<title>Mixed scheduling over one day: an interval flow pulses all day long, two cron flows take one hour each at 03:00 and 09:00, and a manual export fires once at 14:30.</title>
+<defs><marker id="mixed-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<text class="t-mut t-hot" x="438" y="38">every 5 min · 288 runs/day (cadence illustrated)</text>
+<text class="t-strong ta-s" x="20" y="61">Interval</text>
+<rect class="band" x="150" y="48" width="576" height="26" rx="6"/>
+<path class="band-hot" d="M150,48h4v26h-4z M174,48h4v26h-4z M198,48h4v26h-4z M222,48h4v26h-4z M246,48h4v26h-4z M270,48h4v26h-4z M294,48h4v26h-4z M318,48h4v26h-4z M342,48h4v26h-4z M366,48h4v26h-4z M390,48h4v26h-4z M414,48h4v26h-4z M438,48h4v26h-4z M462,48h4v26h-4z M486,48h4v26h-4z M510,48h4v26h-4z M534,48h4v26h-4z M558,48h4v26h-4z M582,48h4v26h-4z M606,48h4v26h-4z M630,48h4v26h-4z M654,48h4v26h-4z M678,48h4v26h-4z M702,48h4v26h-4z"/>
+<text class="t-mut t-hot" x="234" y="84">Daily Backup</text>
+<text class="t-mut t-hot" x="378" y="84">Weekly Report</text>
+<text class="t-strong ta-s" x="20" y="107">Cron</text>
+<rect class="band" x="150" y="94" width="576" height="26" rx="6"/>
+<rect class="band-hot" x="222" y="94" width="24" height="26" rx="4"/>
+<rect class="band-hot" x="366" y="94" width="24" height="26" rx="4"/>
+<text class="t-mut t-hot" x="501" y="130">Emergency Export · 14:30</text>
+<text class="t-strong ta-s" x="20" y="153">Manual</text>
+<rect class="band" x="150" y="140" width="576" height="26" rx="6"/>
+<rect class="band-hot" x="498" y="140" width="6" height="26" rx="2"/>
+<line class="axis" x1="150" y1="190" x2="726" y2="190"/>
+<path class="e e-dim" d="M726,190 H744" marker-end="url(#mixed-ah)"/>
+<line class="tick" x1="150" y1="190" x2="150" y2="196"/>
+<line class="tick" x1="222" y1="190" x2="222" y2="196"/>
+<line class="tick" x1="294" y1="190" x2="294" y2="196"/>
+<line class="tick" x1="366" y1="190" x2="366" y2="196"/>
+<line class="tick" x1="438" y1="190" x2="438" y2="196"/>
+<line class="tick" x1="510" y1="190" x2="510" y2="196"/>
+<line class="tick" x1="582" y1="190" x2="582" y2="196"/>
+<line class="tick" x1="654" y1="190" x2="654" y2="196"/>
+<line class="tick" x1="726" y1="190" x2="726" y2="196"/>
+<text class="t-mut" x="150" y="210">00:00</text>
+<text class="t-mut" x="222" y="210">03:00</text>
+<text class="t-mut" x="294" y="210">06:00</text>
+<text class="t-mut" x="366" y="210">09:00</text>
+<text class="t-mut" x="438" y="210">12:00</text>
+<text class="t-mut" x="510" y="210">15:00</text>
+<text class="t-mut" x="582" y="210">18:00</text>
+<text class="t-mut" x="654" y="210">21:00</text>
+<text class="t-mut" x="726" y="210">24:00</text>
+<text class="t-mut" x="438" y="234">one scheduler, three trigger sources — interval, cron, and on-demand</text>
+</svg>
 </div>
 </div>
 

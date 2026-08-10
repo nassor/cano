@@ -48,6 +48,38 @@ example on this page wires a task into a <code>Workflow</code> and pulls depende
 <h2 id="implementing"><a href="#implementing" class="anchor-link" aria-hidden="true">#</a>Implementing a Task</h2>
 <p>To create a task, implement the <code>Task</code> trait for your struct. The trait requires a <code>run</code> method and an optional <code>config</code> method.</p>
 
+<div class="diagram-frame">
+<p class="diagram-label">One dispatch: config &rarr; retry envelope &rarr; run &rarr; TaskResult</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 270" role="img">
+<title>One task dispatch: config() supplies the TaskConfig when the task is registered, run_with_retries drives run(&amp;Resources) one attempt at a time — a failed attempt waits its backoff and retries, a success returns TaskResult::Single(next) and the workflow enters that state, and a failure on the last attempt propagates as a CanoError.</title>
+<defs><marker id="life-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<path class="e e-dim" d="M660,64 V42 Q660,34 652,34 H365 Q357,34 357,42 V57" marker-end="url(#life-ah)"/>
+<text class="t-mut" x="508" y="26">Err &#8594; wait backoff, then retry</text>
+<path class="e" d="M140,87 H248" marker-end="url(#life-ah)"/>
+<text class="t-code t-mut" x="194" y="70">TaskConfig</text>
+<path class="e" d="M462,87 H568" marker-end="url(#life-ah)"/>
+<text class="t-mut" x="515" y="70">each attempt</text>
+<path class="e" d="M357,114 V148 Q357,156 349,156 H109 Q101,156 101,164 V192" marker-end="url(#life-ah)"/>
+<text class="t-mut t-err ta-e" x="345" y="144">last attempt failed</text>
+<path class="e" d="M357,114 V148 Q357,156 365,156 H664 Q672,156 672,164 V192" marker-end="url(#life-ah)"/>
+<text class="t-code t-mut ta-s" x="367" y="144">Ok(TaskResult::Single(next))</text>
+<rect class="n" x="16" y="64" width="124" height="46" rx="10"/>
+<text class="t-code" x="78" y="88">config()</text>
+<text class="t-mut" x="78" y="128">once, at register</text>
+<rect class="n-hot" x="252" y="60" width="210" height="54" rx="10"/>
+<text class="t-code t-strong" x="357" y="78">run_with_retries</text>
+<text class="t-mut" x="357" y="97">retry &#183; timeout &#183; breaker</text>
+<rect class="n" x="572" y="64" width="176" height="46" rx="10"/>
+<text class="t-code" x="660" y="88">run(&amp;Resources)</text>
+<rect class="n-err" x="16" y="196" width="170" height="46" rx="10"/>
+<text class="t-code" x="101" y="220">Err(CanoError)</text>
+<rect class="n-ok" x="596" y="196" width="152" height="46" rx="10"/>
+<text x="672" y="220">Next State</text>
+</svg>
+</div>
+</div>
+
 <div class="code-block">
 <span class="code-block-label"><span class="label-icon">&#9998;</span> Implementing Task trait</span>
 
@@ -335,6 +367,43 @@ Beyond the plain <code>Task</code>, Cano ships
 they all ultimately dispatch as a <code>Task</code>, so you mix them freely in one workflow — and
 each has its own page with the full reference.
 </p>
+
+<div class="diagram-frame">
+<p class="diagram-label">The seven processing models, grouped by what they add to a plain Task</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 272" role="img">
+<title>The task family: a plain Task runs once and picks the next state; RouterTask decides in the same single pass but records no checkpoint; PollTask and TimerTask add a wait the engine sleeps through; BatchTask, SteppedTask and StreamTask iterate many units inside one state.</title>
+<defs><marker id="fam-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<path class="e" d="M156,138 H174 Q182,138 182,130 V62 Q182,54 190,54 H202" marker-end="url(#fam-ah)"/>
+<path class="e" d="M156,138 H202" marker-end="url(#fam-ah)"/>
+<path class="e" d="M156,138 H174 Q182,138 182,146 V214 Q182,222 190,222 H202" marker-end="url(#fam-ah)"/>
+<rect class="n-hot" x="14" y="106" width="142" height="64" rx="10"/>
+<text class="t-strong" x="85" y="129">Task</text>
+<text class="t-mut" x="85" y="148">run &#8594; next state</text>
+<text class="t-mut ta-s" x="206" y="18">immediate &#8212; returns a state in one pass</text>
+<rect class="n" x="206" y="28" width="176" height="52" rx="10"/>
+<text class="t-strong" x="294" y="45">RouterTask</text>
+<text class="t-mut" x="294" y="64">decide, no checkpoint</text>
+<text class="t-mut ta-s" x="206" y="102">wait-based &#8212; the engine sleeps, then continues</text>
+<rect class="n" x="206" y="112" width="176" height="52" rx="10"/>
+<text class="t-strong" x="294" y="129">PollTask</text>
+<text class="t-mut" x="294" y="148">loop until Ready</text>
+<rect class="n" x="398" y="112" width="176" height="52" rx="10"/>
+<text class="t-strong" x="486" y="129">TimerTask</text>
+<text class="t-mut" x="486" y="148">wait once, then route</text>
+<text class="t-mut ta-s" x="206" y="186">iterating &#8212; many units inside one state</text>
+<rect class="n" x="206" y="196" width="176" height="52" rx="10"/>
+<text class="t-strong" x="294" y="213">BatchTask</text>
+<text class="t-mut" x="294" y="232">map over a collection</text>
+<rect class="n" x="398" y="196" width="176" height="52" rx="10"/>
+<text class="t-strong" x="486" y="213">SteppedTask</text>
+<text class="t-mut" x="486" y="232">cursor per step</text>
+<rect class="n" x="590" y="196" width="176" height="52" rx="10"/>
+<text class="t-strong" x="678" y="213">StreamTask</text>
+<text class="t-mut" x="678" y="232">flush per window</text>
+</svg>
+</div>
+</div>
 
 <div class="card-stack">
 <div class="card">

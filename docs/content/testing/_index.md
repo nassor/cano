@@ -48,7 +48,7 @@ so the helpers compile only for tests and never ship in your release build:
 
 ```toml
 [dev-dependencies]
-cano = { version = "0.14", features = ["testing"] }
+{{ cano_dep(features=["testing"]) }}
 ```
 
 <p>The <code>testing</code> feature pulls in no extra dependencies and is zero-cost when off.</p>
@@ -61,6 +61,34 @@ into an inspectable <code>Vec&lt;RecordedEvent&gt;</code>. Attach it, drive the 
 assert against the recorded path — or use the <code>assert_path</code> /
 <code>assert_completed_with</code> convenience checks.
 </p>
+
+<div class="diagram-frame">
+<p class="diagram-label">Attach the observer, run the workflow, assert on what it recorded</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 272" role="img">
+<title>A RecordingObserver is attached with with_observer, the workflow under test is orchestrated, every observer hook lands in a Vec of RecordedEvent, and the test asserts against that recording.</title>
+<defs><marker id="harness-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<path class="e" d="M270,68 H466" marker-end="url(#harness-ah)"/>
+<text class="t-code t-mut" x="368" y="56">.with_observer(obs)</text>
+<path class="e" d="M595,92 V162" marker-end="url(#harness-ah)"/>
+<text class="t-code ta-e" x="583" y="118">orchestrate(Start, &hellip;)</text>
+<text class="t-mut ta-e" x="583" y="136">every hook recorded</text>
+<path class="e" d="M466,190 H316" marker-end="url(#harness-ah)"/>
+<text class="t-code t-mut" x="388" y="178">observer.events()</text>
+<rect class="n-hot" x="40" y="44" width="230" height="48" rx="10"/>
+<text class="t-code" x="155" y="69">RecordingObserver</text>
+<rect class="n" x="470" y="44" width="250" height="48" rx="10"/>
+<text class="t-strong" x="595" y="69">Workflow under test</text>
+<rect class="n-cop" x="470" y="166" width="250" height="48" rx="10"/>
+<text class="t-code" x="595" y="191">Vec&lt;RecordedEvent&gt;</text>
+<rect class="n-ok" x="20" y="152" width="290" height="76" rx="10"/>
+<text class="t-code" x="165" y="170">assert_path(&amp;[&hellip;])</text>
+<text class="t-code" x="165" y="190">assert_completed_with</text>
+<text class="t-code" x="165" y="210">assert_registered_states_entered</text>
+<text class="t-mut" x="390" y="254">Fixtures plug into the normal builders; the recording is what the test asserts against.</text>
+</svg>
+</div>
+</div>
 
 ```rust
 use cano::prelude::*;
@@ -118,6 +146,40 @@ you can inspect the gap (<code>?</code>-propagate, <code>.expect(..)</code>, or
 <li><code>assert_all_states_entered(&amp;[..])</code> — check an explicit list of states (compared by their <code>Debug</code> rendering).</li>
 <li><code>assert_registered_states_entered(&amp;workflow)</code> — check <em>every state the workflow registered a handler for</em> (via <a href="../workflows/"><code>Workflow::registered_states</code></a>). Exit-only states added with <code>add_exit_state</code> and no handler are not required.</li>
 </ul>
+
+<div class="diagram-frame">
+<p class="diagram-label">Dead-state check: registered states minus states entered</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 272" role="img">
+<title>assert_registered_states_entered compares the states the workflow registered a handler for against the states the RecordingObserver saw entered; an empty difference is Ok, and anything left over is a dead state reported as Err.</title>
+<defs><marker id="cover-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<path class="e" d="M280,78 H298 Q306,78 306,86 V110 Q306,118 314,118 H326" marker-end="url(#cover-ah)"/>
+<path class="e" d="M280,190 H298 Q306,190 306,182 V148 Q306,140 314,140 H326" marker-end="url(#cover-ah)"/>
+<path class="e" d="M550,120 H562 Q570,120 570,112 V80 Q570,72 578,72 H596" marker-end="url(#cover-ah)"/>
+<text class="t-mut t-ok ta-e" x="556" y="90">all entered</text>
+<path class="e" d="M550,138 H562 Q570,138 570,146 V180 Q570,188 578,188 H596" marker-end="url(#cover-ah)"/>
+<text class="t-mut t-err ta-e" x="556" y="176">missing</text>
+<rect class="n" x="20" y="34" width="260" height="88" rx="10"/>
+<text class="t-code" x="150" y="57">workflow.registered_states()</text>
+<text class="t-strong" x="150" y="78">Start · Worker</text>
+<text class="t-mut" x="150" y="99">exit-only Done excluded</text>
+<rect class="n-cop" x="20" y="146" width="260" height="88" rx="10"/>
+<text class="t-code" x="150" y="169">observer.states_entered()</text>
+<text class="t-strong" x="150" y="190">Start · Done</text>
+<text class="t-mut" x="150" y="211">from StateEntered events</text>
+<rect class="n-hot" x="330" y="100" width="220" height="58" rx="10"/>
+<text class="t-strong" x="440" y="120">compare</text>
+<text class="t-code" x="440" y="138">registered &minus; entered</text>
+<rect class="n-ok" x="600" y="44" width="160" height="56" rx="10"/>
+<text class="t-code" x="680" y="63">Ok(())</text>
+<text class="t-mut" x="680" y="81">no dead states</text>
+<rect class="n-err" x="600" y="160" width="160" height="56" rx="10"/>
+<text class="t-code" x="680" y="179">Err(["Worker"])</text>
+<text class="t-mut t-err" x="680" y="197">dead state</text>
+<text class="t-mut" x="390" y="254">assert_registered_states_entered names every registered state nothing ever routed to.</text>
+</svg>
+</div>
+</div>
 
 ```rust
 use cano::prelude::*;

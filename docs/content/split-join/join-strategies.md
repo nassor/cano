@@ -46,19 +46,37 @@ with staggered task delays so you can see exactly when each one returns.</p>
 
 <div class="diagram-frame">
 <p class="diagram-label">All Strategy</p>
-<div class="mermaid">
-sequenceDiagram
-participant W as Workflow
-participant T1 as Task 1
-participant T2 as Task 2
-participant T3 as Task 3
-W->>T1: Start
-W->>T2: Start
-W->>T3: Start
-T1-->>W: Complete ✓
-T2-->>W: Complete ✓
-T3-->>W: Complete ✓
-Note over W: All Complete → Proceed
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 840 374" role="img" style="max-width: 860px">
+<title>All strategy: the workflow starts three tasks, every one of them reports success, and only when the last result lands does the join fire — nothing is cancelled.</title>
+<defs><marker id="all-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<rect class="n" x="10" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="80" y="28">Workflow</text>
+<rect class="n" x="180" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="250" y="28">Task 1</text>
+<rect class="n" x="350" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="420" y="28">Task 2</text>
+<rect class="n" x="520" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="590" y="28">Task 3</text>
+<line class="lifeline" x1="80" y1="46" x2="80" y2="310"/>
+<line class="lifeline" x1="250" y1="46" x2="250" y2="310"/>
+<line class="lifeline" x1="420" y1="46" x2="420" y2="310"/>
+<line class="lifeline" x1="590" y1="46" x2="590" y2="310"/>
+<text class="t-mut" x="165" y="66">Start</text>
+<path class="e" d="M80,78 H247" marker-end="url(#all-ah)"/>
+<text class="t-mut" x="250" y="110">Start</text>
+<path class="e" d="M80,122 H417" marker-end="url(#all-ah)"/>
+<text class="t-mut" x="335" y="154">Start</text>
+<path class="e" d="M80,166 H587" marker-end="url(#all-ah)"/>
+<text class="t-mut t-ok" x="165" y="198">Complete ✓</text>
+<path class="e e-dash" d="M250,210 H83" marker-end="url(#all-ah)"/>
+<text class="t-mut t-ok" x="250" y="242">Complete ✓</text>
+<path class="e e-dash" d="M420,254 H83" marker-end="url(#all-ah)"/>
+<text class="t-mut t-ok" x="335" y="286">Complete ✓</text>
+<path class="e e-dash" d="M590,298 H83" marker-end="url(#all-ah)"/>
+<rect class="n-hot" x="16" y="318" width="808" height="34" rx="10"/>
+<text class="t-strong" x="420" y="336">All Complete → Proceed</text>
+</svg>
 </div>
 </div>
 
@@ -121,19 +139,37 @@ calls where the fastest response wins.</p>
 
 <div class="diagram-frame">
 <p class="diagram-label">Any Strategy</p>
-<div class="mermaid">
-sequenceDiagram
-participant W as Workflow
-participant T1 as Task 1 (slow)
-participant T2 as Task 2 (fast)
-participant T3 as Task 3 (slow)
-W->>T1: Start
-W->>T2: Start
-W->>T3: Start
-T2-->>W: Complete ✓
-Note over W: First Complete → Proceed
-W->>T1: Cancel
-W->>T3: Cancel
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 840 374" role="img" style="max-width: 860px">
+<title>Any strategy: three redundant tasks start, the fast one reports success first, the join fires on that single result and both slow tasks are cancelled before they finish.</title>
+<defs><marker id="any-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<rect class="n" x="10" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="80" y="28">Workflow</text>
+<rect class="n-ghost" x="180" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="250" y="28">Task 1 (slow)</text>
+<rect class="n" x="350" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="420" y="28">Task 2 (fast)</text>
+<rect class="n-ghost" x="520" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="590" y="28">Task 3 (slow)</text>
+<line class="lifeline" x1="80" y1="46" x2="80" y2="352"/>
+<line class="n-ghost" x1="250" y1="46" x2="250" y2="352"/>
+<line class="lifeline" x1="420" y1="46" x2="420" y2="352"/>
+<line class="n-ghost" x1="590" y1="46" x2="590" y2="352"/>
+<text class="t-mut" x="165" y="66">Start</text>
+<path class="e" d="M80,78 H247" marker-end="url(#any-ah)"/>
+<text class="t-mut" x="250" y="110">Start</text>
+<path class="e" d="M80,122 H417" marker-end="url(#any-ah)"/>
+<text class="t-mut" x="335" y="154">Start</text>
+<path class="e" d="M80,166 H587" marker-end="url(#any-ah)"/>
+<text class="t-mut t-ok" x="250" y="198">Complete ✓</text>
+<path class="e e-dash" d="M420,210 H83" marker-end="url(#any-ah)"/>
+<rect class="n-hot" x="16" y="230" width="808" height="34" rx="10"/>
+<text class="t-strong" x="420" y="248">First Complete → Proceed</text>
+<text class="t-mut t-warn" x="165" y="284">Cancel ⏱</text>
+<path class="e e-dim" d="M80,296 H247" marker-end="url(#any-ah)"/>
+<text class="t-mut t-warn" x="335" y="328">Cancel ⏱</text>
+<path class="e e-dim" d="M80,340 H587" marker-end="url(#any-ah)"/>
+</svg>
 </div>
 </div>
 
@@ -190,22 +226,44 @@ distributed consensus and majority-vote writes.</p>
 
 <div class="diagram-frame">
 <p class="diagram-label">Quorum Strategy</p>
-<div class="mermaid">
-sequenceDiagram
-participant W as Workflow
-participant T1 as Task 1
-participant T2 as Task 2
-participant T3 as Task 3
-participant T4 as Task 4
-W->>T1: Start
-W->>T2: Start
-W->>T3: Start
-W->>T4: Start
-T1-->>W: Complete ✓
-T3-->>W: Complete ✓
-T2-->>W: Complete ✓
-Note over W: Quorum (3/4) Met → Proceed
-W->>T4: Cancel
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 840 462" role="img" style="max-width: 860px">
+<title>Quorum strategy: four tasks start, the join waits for the third success to land in whatever order they arrive, fires as soon as the quorum of 3 of 4 is met, and cancels the task still running.</title>
+<defs><marker id="quorum-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<rect class="n" x="10" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="80" y="28">Workflow</text>
+<rect class="n" x="180" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="250" y="28">Task 1</text>
+<rect class="n" x="350" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="420" y="28">Task 2</text>
+<rect class="n" x="520" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="590" y="28">Task 3</text>
+<rect class="n-ghost" x="690" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="760" y="28">Task 4</text>
+<line class="lifeline" x1="80" y1="46" x2="80" y2="440"/>
+<line class="lifeline" x1="250" y1="46" x2="250" y2="440"/>
+<line class="lifeline" x1="420" y1="46" x2="420" y2="440"/>
+<line class="lifeline" x1="590" y1="46" x2="590" y2="440"/>
+<line class="n-ghost" x1="760" y1="46" x2="760" y2="440"/>
+<text class="t-mut" x="165" y="66">Start</text>
+<path class="e" d="M80,78 H247" marker-end="url(#quorum-ah)"/>
+<text class="t-mut" x="250" y="110">Start</text>
+<path class="e" d="M80,122 H417" marker-end="url(#quorum-ah)"/>
+<text class="t-mut" x="335" y="154">Start</text>
+<path class="e" d="M80,166 H587" marker-end="url(#quorum-ah)"/>
+<text class="t-mut" x="420" y="198">Start</text>
+<path class="e" d="M80,210 H757" marker-end="url(#quorum-ah)"/>
+<text class="t-mut t-ok" x="165" y="242">Complete ✓</text>
+<path class="e e-dash" d="M250,254 H83" marker-end="url(#quorum-ah)"/>
+<text class="t-mut t-ok" x="335" y="286">Complete ✓</text>
+<path class="e e-dash" d="M590,298 H83" marker-end="url(#quorum-ah)"/>
+<text class="t-mut t-ok" x="250" y="330">Complete ✓</text>
+<path class="e e-dash" d="M420,342 H83" marker-end="url(#quorum-ah)"/>
+<rect class="n-hot" x="16" y="362" width="808" height="34" rx="10"/>
+<text class="t-strong" x="420" y="380">Quorum (3/4) Met → Proceed</text>
+<text class="t-mut t-warn" x="420" y="416">Cancel ⏱</text>
+<path class="e e-dim" d="M80,428 H757" marker-end="url(#quorum-ah)"/>
+</svg>
 </div>
 </div>
 
@@ -274,22 +332,44 @@ well when the number of split tasks varies.</p>
 
 <div class="diagram-frame">
 <p class="diagram-label">Percentage Strategy</p>
-<div class="mermaid">
-sequenceDiagram
-participant W as Workflow
-participant T1 as Task 1
-participant T2 as Task 2
-participant T3 as Task 3
-participant T4 as Task 4
-W->>T1: Start
-W->>T2: Start
-W->>T3: Start
-W->>T4: Start
-T1-->>W: Complete ✓
-T2-->>W: Complete ✓
-T4-->>W: Complete ✓
-Note over W: 75% (3/4) Met → Proceed
-W->>T3: Cancel
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 840 462" role="img" style="max-width: 860px">
+<title>Percentage strategy: four tasks start and the join fires the moment the configured fraction of them has succeeded — here 75%, three of four — cancelling the one still in flight.</title>
+<defs><marker id="pct-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<rect class="n" x="10" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="80" y="28">Workflow</text>
+<rect class="n" x="180" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="250" y="28">Task 1</text>
+<rect class="n" x="350" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="420" y="28">Task 2</text>
+<rect class="n-ghost" x="520" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="590" y="28">Task 3</text>
+<rect class="n" x="690" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="760" y="28">Task 4</text>
+<line class="lifeline" x1="80" y1="46" x2="80" y2="440"/>
+<line class="lifeline" x1="250" y1="46" x2="250" y2="440"/>
+<line class="lifeline" x1="420" y1="46" x2="420" y2="440"/>
+<line class="n-ghost" x1="590" y1="46" x2="590" y2="440"/>
+<line class="lifeline" x1="760" y1="46" x2="760" y2="440"/>
+<text class="t-mut" x="165" y="66">Start</text>
+<path class="e" d="M80,78 H247" marker-end="url(#pct-ah)"/>
+<text class="t-mut" x="250" y="110">Start</text>
+<path class="e" d="M80,122 H417" marker-end="url(#pct-ah)"/>
+<text class="t-mut" x="335" y="154">Start</text>
+<path class="e" d="M80,166 H587" marker-end="url(#pct-ah)"/>
+<text class="t-mut" x="420" y="198">Start</text>
+<path class="e" d="M80,210 H757" marker-end="url(#pct-ah)"/>
+<text class="t-mut t-ok" x="165" y="242">Complete ✓</text>
+<path class="e e-dash" d="M250,254 H83" marker-end="url(#pct-ah)"/>
+<text class="t-mut t-ok" x="250" y="286">Complete ✓</text>
+<path class="e e-dash" d="M420,298 H83" marker-end="url(#pct-ah)"/>
+<text class="t-mut t-ok" x="420" y="330">Complete ✓</text>
+<path class="e e-dash" d="M760,342 H83" marker-end="url(#pct-ah)"/>
+<rect class="n-hot" x="16" y="362" width="808" height="34" rx="10"/>
+<text class="t-strong" x="420" y="380">75% (3/4) Met → Proceed</text>
+<text class="t-mut t-warn" x="335" y="416">Cancel ⏱</text>
+<path class="e e-dim" d="M80,428 H587" marker-end="url(#pct-ah)"/>
+</svg>
 </div>
 </div>
 
@@ -354,23 +434,46 @@ walk-through lives in <code>cargo run --example workflow_partial_results</code>.
 
 <div class="diagram-frame">
 <p class="diagram-label">PartialResults Strategy</p>
-<div class="mermaid">
-sequenceDiagram
-participant W as Workflow
-participant T1 as Task 1
-participant T2 as Task 2
-participant T3 as Task 3
-participant T4 as Task 4
-W->>T1: Start
-W->>T2: Start
-W->>T3: Start
-W->>T4: Start
-T1-->>W: Complete ✓
-T2-->>W: Failed ✗
-T3-->>W: Complete ✓
-Note over W: 3 completions → Proceed
-W->>T4: Cancel
-Note over W: Track: 2 success, 1 error, 1 cancelled
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 840 504" role="img" style="max-width: 860px">
+<title>PartialResults strategy: four tasks start and the join counts completions rather than successes, so a failure still counts — three outcomes arrive, the join fires, the last task is cancelled and every outcome is tracked for the downstream task.</title>
+<defs><marker id="partial-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<rect class="n" x="10" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="80" y="28">Workflow</text>
+<rect class="n" x="180" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="250" y="28">Task 1</text>
+<rect class="n" x="350" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="420" y="28">Task 2</text>
+<rect class="n" x="520" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="590" y="28">Task 3</text>
+<rect class="n-ghost" x="690" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="760" y="28">Task 4</text>
+<line class="lifeline" x1="80" y1="46" x2="80" y2="440"/>
+<line class="lifeline" x1="250" y1="46" x2="250" y2="440"/>
+<line class="lifeline" x1="420" y1="46" x2="420" y2="440"/>
+<line class="lifeline" x1="590" y1="46" x2="590" y2="440"/>
+<line class="n-ghost" x1="760" y1="46" x2="760" y2="440"/>
+<text class="t-mut" x="165" y="66">Start</text>
+<path class="e" d="M80,78 H247" marker-end="url(#partial-ah)"/>
+<text class="t-mut" x="250" y="110">Start</text>
+<path class="e" d="M80,122 H417" marker-end="url(#partial-ah)"/>
+<text class="t-mut" x="335" y="154">Start</text>
+<path class="e" d="M80,166 H587" marker-end="url(#partial-ah)"/>
+<text class="t-mut" x="420" y="198">Start</text>
+<path class="e" d="M80,210 H757" marker-end="url(#partial-ah)"/>
+<text class="t-mut t-ok" x="165" y="242">Complete ✓</text>
+<path class="e e-dash" d="M250,254 H83" marker-end="url(#partial-ah)"/>
+<text class="t-mut t-err" x="250" y="286">Failed ✗</text>
+<path class="e e-dash" d="M420,298 H83" marker-end="url(#partial-ah)"/>
+<text class="t-mut t-ok" x="335" y="330">Complete ✓</text>
+<path class="e e-dash" d="M590,342 H83" marker-end="url(#partial-ah)"/>
+<rect class="n-hot" x="16" y="362" width="808" height="34" rx="10"/>
+<text class="t-strong" x="420" y="380">3 completions → Proceed</text>
+<text class="t-mut t-warn" x="420" y="416">Cancel ⏱</text>
+<path class="e e-dim" d="M80,428 H757" marker-end="url(#partial-ah)"/>
+<rect class="n-hot" x="16" y="448" width="808" height="34" rx="10"/>
+<text class="t-strong" x="420" y="466">Track: <tspan class="t-ok">2 success</tspan>, <tspan class="t-err">1 error</tspan>, <tspan class="t-warn">1 cancelled</tspan></text>
+</svg>
 </div>
 </div>
 
@@ -438,23 +541,46 @@ remaining tasks are cancelled. The go-to strategy for hard SLAs. Requires <code>
 
 <div class="diagram-frame">
 <p class="diagram-label">PartialTimeout Strategy</p>
-<div class="mermaid">
-sequenceDiagram
-participant W as Workflow
-participant T1 as Task 1
-participant T2 as Task 2
-participant T3 as Task 3
-participant T4 as Task 4
-W->>T1: Start
-W->>T2: Start
-W->>T3: Start
-W->>T4: Start
-T1-->>W: Complete ✓
-T3-->>W: Complete ✓
-Note over W: Timeout Reached
-W->>T2: Cancel
-W->>T4: Cancel
-Note over W: Proceed with 2 results
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 840 504" role="img" style="max-width: 860px">
+<title>PartialTimeout strategy: four tasks start, two report success before the deadline, and the timeout itself fires the join — the two tasks still running are cancelled and the workflow proceeds with the results it has.</title>
+<defs><marker id="ptimeout-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<rect class="n" x="10" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="80" y="28">Workflow</text>
+<rect class="n" x="180" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="250" y="28">Task 1</text>
+<rect class="n-ghost" x="350" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="420" y="28">Task 2</text>
+<rect class="n" x="520" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="590" y="28">Task 3</text>
+<rect class="n-ghost" x="690" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="760" y="28">Task 4</text>
+<line class="lifeline" x1="80" y1="46" x2="80" y2="440"/>
+<line class="lifeline" x1="250" y1="46" x2="250" y2="440"/>
+<line class="n-ghost" x1="420" y1="46" x2="420" y2="440"/>
+<line class="lifeline" x1="590" y1="46" x2="590" y2="440"/>
+<line class="n-ghost" x1="760" y1="46" x2="760" y2="440"/>
+<text class="t-mut" x="165" y="66">Start</text>
+<path class="e" d="M80,78 H247" marker-end="url(#ptimeout-ah)"/>
+<text class="t-mut" x="250" y="110">Start</text>
+<path class="e" d="M80,122 H417" marker-end="url(#ptimeout-ah)"/>
+<text class="t-mut" x="335" y="154">Start</text>
+<path class="e" d="M80,166 H587" marker-end="url(#ptimeout-ah)"/>
+<text class="t-mut" x="420" y="198">Start</text>
+<path class="e" d="M80,210 H757" marker-end="url(#ptimeout-ah)"/>
+<text class="t-mut t-ok" x="165" y="242">Complete ✓</text>
+<path class="e e-dash" d="M250,254 H83" marker-end="url(#ptimeout-ah)"/>
+<text class="t-mut t-ok" x="335" y="286">Complete ✓</text>
+<path class="e e-dash" d="M590,298 H83" marker-end="url(#ptimeout-ah)"/>
+<rect class="n-hot" x="16" y="318" width="808" height="34" rx="10"/>
+<text class="t-strong" x="420" y="336">Timeout Reached</text>
+<text class="t-mut t-warn" x="250" y="372">Cancel ⏱</text>
+<path class="e e-dim" d="M80,384 H417" marker-end="url(#ptimeout-ah)"/>
+<text class="t-mut t-warn" x="420" y="416">Cancel ⏱</text>
+<path class="e e-dim" d="M80,428 H757" marker-end="url(#ptimeout-ah)"/>
+<rect class="n-hot" x="16" y="448" width="808" height="34" rx="10"/>
+<text class="t-strong" x="420" y="466">Proceed with 2 results</text>
+</svg>
 </div>
 </div>
 

@@ -56,6 +56,41 @@ to an inherent <code>impl</code> block — the macro synthesises the
 <code>register</code> if you ever want the checkpoint-recording behaviour back.
 </p>
 
+<div class="diagram-frame">
+<p class="diagram-label">route() reads, decides, and returns &mdash; nothing else</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 330" role="img">
+<title>A router dispatch: the Classify state calls route(&amp;Resources), which reads the config out of Resources without writing anything and returns TaskResult::Single — Step::FastPath when the flag is set, Step::SlowPath otherwise; because the decision has no side effects the engine writes no CheckpointRow for the state.</title>
+<defs><marker id="route-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<path class="e" d="M393,70 V112" marker-end="url(#route-ah)"/>
+<text class="t-mut ta-e" x="383" y="93">reads, never writes</text>
+<path class="e" d="M156,143 H296" marker-end="url(#route-ah)"/>
+<text class="t-code t-mut" x="226" y="127">register_router</text>
+<path class="e" d="M486,143 H536 Q544,143 544,135 V75 Q544,67 552,67 H586" marker-end="url(#route-ah)"/>
+<text class="t-code t-mut ta-s" x="554" y="110">Single(Step::FastPath)</text>
+<path class="e" d="M486,143 H536 Q544,143 544,151 V211 Q544,219 552,219 H586" marker-end="url(#route-ah)"/>
+<text class="t-code t-mut ta-s" x="554" y="176">Single(Step::SlowPath)</text>
+<path class="e e-dash e-dim" d="M393,170 V248" marker-end="url(#route-ah)"/>
+<text class="t-mut ta-s" x="403" y="205">no side effects</text>
+<rect class="n-cop" x="298" y="16" width="190" height="54" rx="10"/>
+<text class="t-strong" x="393" y="34">Resources</text>
+<text class="t-code" x="393" y="53">config.use_fast_path</text>
+<rect class="n" x="16" y="120" width="140" height="46" rx="10"/>
+<text class="t-code" x="86" y="144">Step::Classify</text>
+<rect class="n-hot" x="300" y="116" width="186" height="54" rx="10"/>
+<text class="t-code t-strong" x="393" y="134">route(&amp;Resources)</text>
+<text class="t-code t-mut" x="393" y="153">&#8594; TaskResult&lt;Step&gt;</text>
+<rect class="n" x="590" y="44" width="170" height="46" rx="10"/>
+<text class="t-code" x="675" y="68">Step::FastPath</text>
+<rect class="n" x="590" y="196" width="170" height="46" rx="10"/>
+<text class="t-code" x="675" y="220">Step::SlowPath</text>
+<rect class="n-ghost" x="298" y="252" width="190" height="54" rx="10"/>
+<text class="t-code t-warn" x="393" y="270">CheckpointRow</text>
+<text class="t-mut t-warn" x="393" y="289">no row, no sequence</text>
+</svg>
+</div>
+</div>
+
 <div class="code-block">
 <span class="code-block-label"><span class="label-icon">&#9889;</span> Inference form — <code>#[task::router(state = ...)]</code> on an inherent impl</span>
 
@@ -85,12 +120,14 @@ impl Classifier {
 ```
 </div>
 
-<div class="callout callout-tip">
-<div class="callout-label">Tip</div>
+<div class="callout callout-warning">
+<div class="callout-label">Heads-up</div>
 <p>
-<code>route</code> may return <code>TaskResult::Split</code> as well as <code>TaskResult::Single</code>,
-so a router can fan a workflow out into parallel states. See <a href="../split-join/">Split &amp; Join</a>
-for what happens next.
+<code>route</code> must return <code>TaskResult::Single</code> — a router state is dispatched through
+the single-task path, and returning <code>TaskResult::Split</code> from it fails at run time with
+<code>CanoError::Workflow</code> (&ldquo;use <code>register_split()</code> for split tasks&rdquo;). To fan
+out into parallel states, route <em>to</em> a state registered with
+<a href="../split-join/"><code>register_split()</code></a> instead.
 </p>
 </div>
 
@@ -129,6 +166,41 @@ inside <code>FastProcessor</code>, <code>resume_from</code> re-enters at <code>F
 never needed to "remember" the routing decision — it just runs the router again on the way through if
 the resume point happens to land before it.
 </p>
+</div>
+
+<div class="diagram-frame">
+<p class="diagram-label">Recovery footprint of a run that passes through a router</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 236" role="img">
+<title>A Start to Classify to FastPath to Done run: the checkpoint log holds one row per state entered — sequence 0 for Start, 1 for FastPath, 2 for Done — while the Classify router state writes no row and consumes no sequence number.</title>
+<defs><marker id="rrec-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<path class="e" d="M178,63 H214" marker-end="url(#rrec-ah)"/>
+<path class="e" d="M370,63 H406" marker-end="url(#rrec-ah)"/>
+<path class="e" d="M562,63 H598" marker-end="url(#rrec-ah)"/>
+<path class="e e-dash" d="M102,86 V142" marker-end="url(#rrec-ah)"/>
+<path class="e e-dash e-dim" d="M294,86 V142" marker-end="url(#rrec-ah)"/>
+<path class="e e-dash" d="M486,86 V142" marker-end="url(#rrec-ah)"/>
+<path class="e e-dash" d="M678,86 V142" marker-end="url(#rrec-ah)"/>
+<text class="t-mut" x="294" y="18">router state</text>
+<rect class="n" x="26" y="40" width="152" height="46" rx="10"/>
+<text class="t-strong" x="102" y="64">Start</text>
+<rect class="n-hot" x="218" y="40" width="152" height="46" rx="10"/>
+<text class="t-strong" x="294" y="64">Classify</text>
+<rect class="n" x="410" y="40" width="152" height="46" rx="10"/>
+<text class="t-strong" x="486" y="64">FastPath</text>
+<rect class="n-ok" x="602" y="40" width="152" height="46" rx="10"/>
+<text class="t-strong" x="678" y="64">Done</text>
+<rect class="n-cop" x="26" y="146" width="152" height="46" rx="10"/>
+<text class="t-code" x="102" y="170">seq 0 &#183; Start</text>
+<rect class="n-ghost" x="218" y="146" width="152" height="46" rx="10"/>
+<text class="t-mut t-warn" x="294" y="170">no row written</text>
+<rect class="n-cop" x="410" y="146" width="152" height="46" rx="10"/>
+<text class="t-code" x="486" y="170">seq 1 &#183; FastPath</text>
+<rect class="n-cop" x="602" y="146" width="152" height="46" rx="10"/>
+<text class="t-code" x="678" y="170">seq 2 &#183; Done</text>
+<text class="t-mut ta-s" x="26" y="212">Checkpoint log: one row per state entered &#8212; Classify writes none and burns no sequence number.</text>
+</svg>
+</div>
 </div>
 
 <!-- Section: Explicit form -->

@@ -337,7 +337,7 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cano"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "axum",
  "cano-macros",
@@ -365,7 +365,7 @@ dependencies = [
 
 [[package]]
 name = "cano-e2e"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "cano",
@@ -379,7 +379,7 @@ dependencies = [
 
 [[package]]
 name = "cano-macros"
-version = "0.14.0"
+version = "0.15.0"
 dependencies = [
  "cano",
  "futures-util",
@@ -3923,9 +3923,9 @@ dependencies = [
 
 [[package]]
 name = "wide"
-version = "1.6.0"
+version = "1.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "be99e8317aa9f08e7d16e13033ca43faab59ab582b1d0feab7b385424c42f8b1"
+checksum = "de2aaf408e58689c2096682331b1f42bb2d9f2ed6b11560407d023cd0a6c634e"
 dependencies = [
  "bytemuck",
  "safe_arch",

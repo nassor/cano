@@ -159,6 +159,55 @@ Lifecycle Events</a> for the full hook reference.
 </p>
 
 <h3 id="workflow-total-timeout-vs"><a href="#workflow-total-timeout-vs" class="anchor-link" aria-hidden="true">#</a>The two timeout knobs</h3>
+<div class="diagram-frame">
+<p class="diagram-label">Two knobs, two scopes — the total budget wins</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 232" role="img">
+<title>A workflow with a 7 second total budget: State A finishes in 1s, then State B retries three times under a 2 second per-attempt timeout — attempts 1 and 2 each blow their own deadline and are retried, and the total budget fires at 7s, aborting attempt 3 mid-flight before its own 8s deadline could.</title>
+<path class="e e-dim e-dash" d="M664,34 V148"/>
+<text class="t-code t-err" x="664" y="22">WorkflowTimeout</text>
+<text class="t-strong ta-s" x="16" y="54">Total budget</text>
+<rect class="band" x="132" y="40" width="532" height="26" rx="6"/>
+<text class="t-code t-mut" x="398" y="54">with_total_timeout(7s)</text>
+<text class="t-strong ta-s" x="16" y="108">Workflow</text>
+<text class="t-code t-err" x="360" y="80">Timeout</text>
+<text class="t-code t-err" x="550" y="80">Timeout</text>
+<text class="t-mut" x="626" y="80">attempt 3</text>
+<text class="t-mut t-warn" x="702" y="80">cut short</text>
+<rect class="band-hot" x="132" y="94" width="76" height="26" rx="6"/>
+<text class="t-mut" x="170" y="108">State A</text>
+<rect class="band-hot" x="208" y="94" width="152" height="26" rx="6"/>
+<text class="t-mut" x="284" y="108">attempt 1</text>
+<rect class="band" x="360" y="94" width="38" height="26" rx="6"/>
+<rect class="band-hot" x="398" y="94" width="152" height="26" rx="6"/>
+<text class="t-mut" x="474" y="108">attempt 2</text>
+<rect class="band" x="550" y="94" width="38" height="26" rx="6"/>
+<rect class="band-hot" x="588" y="94" width="76" height="26" rx="6"/>
+<rect class="n-ghost" x="664" y="94" width="76" height="26" rx="6"/>
+<line class="axis" x1="132" y1="140" x2="740" y2="140"/>
+<line class="tick" x1="132" y1="140" x2="132" y2="146"/>
+<line class="tick" x1="208" y1="140" x2="208" y2="146"/>
+<line class="tick" x1="284" y1="140" x2="284" y2="146"/>
+<line class="tick" x1="360" y1="140" x2="360" y2="146"/>
+<line class="tick" x1="436" y1="140" x2="436" y2="146"/>
+<line class="tick" x1="512" y1="140" x2="512" y2="146"/>
+<line class="tick" x1="588" y1="140" x2="588" y2="146"/>
+<line class="tick" x1="664" y1="140" x2="664" y2="146"/>
+<line class="tick" x1="740" y1="140" x2="740" y2="146"/>
+<text class="t-mut" x="132" y="164">0s</text>
+<text class="t-mut" x="208" y="164">1s</text>
+<text class="t-mut" x="284" y="164">2s</text>
+<text class="t-mut" x="360" y="164">3s</text>
+<text class="t-mut" x="436" y="164">4s</text>
+<text class="t-mut" x="512" y="164">5s</text>
+<text class="t-mut" x="588" y="164">6s</text>
+<text class="t-mut" x="664" y="164">7s</text>
+<text class="t-mut" x="740" y="164">8s</text>
+<text class="t-mut" x="436" y="192">attempt_timeout(2s) fires twice and is retried; the 7s budget then aborts attempt 3 mid-flight</text>
+<text class="t-mut" x="436" y="210">the total budget wins — no retry policy can outlive it</text>
+</svg>
+</div>
+</div>
 <table class="styled-table">
 <thead><tr><th>API</th><th>Scope</th><th>On expiry</th><th>Compensation drain</th></tr></thead>
 <tbody>
@@ -316,6 +365,55 @@ demo: <code>cargo run --example scheduler_backoff --features scheduler</code>).
 <p>
 These stack cleanly. A typical "talk to a flaky external service" state:
 </p>
+<div class="diagram-frame">
+<p class="diagram-label">One dispatch, four nested layers — and the CanoError each one surfaces</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 392" role="img">
+<title>One task dispatch passes through four nested layers: the workflow total timeout wraps the retry loop, the retry loop checks the circuit breaker before each attempt, and the per-attempt timeout wraps the attempt — your task body, where the rate limiter permit is taken before the upstream call. An open breaker leaves immediately with CircuitOpen; a Timeout or RateLimited is retried; exhausting the attempts returns RetryExhausted.</title>
+<defs><marker id="layers-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<rect class="n-ghost" x="22" y="12" width="736" height="278" rx="14"/>
+<text class="t-strong ta-s" x="36" y="34">Workflow total timeout</text>
+<text class="t-code t-mut ta-s" x="228" y="34">timeout_at(start + limit)</text>
+<text class="t-code t-err ta-s" x="432" y="34">→ WorkflowTimeout</text>
+<text class="t-mut ta-s" x="572" y="34">aborts mid-flight</text>
+<rect class="n-ghost" x="44" y="48" width="700" height="222" rx="12"/>
+<text class="t-strong ta-s" x="58" y="70">retry loop</text>
+<text class="t-code t-mut ta-s" x="152" y="70">run_with_retries — attempts 1..max_attempts</text>
+<rect class="n-ghost" x="280" y="84" width="444" height="112" rx="12"/>
+<text class="t-code t-mut ta-s" x="298" y="104">tokio::time::timeout(attempt_timeout)</text>
+<text class="t-mut ta-e" x="712" y="104">your task body</text>
+<circle class="n" cx="10" cy="151" r="5"/>
+<path class="e" d="M17,151 H64" marker-end="url(#layers-ah)"/>
+<path class="e" d="M240,151 H300" marker-end="url(#layers-ah)"/>
+<path class="e" d="M480,151 H516" marker-end="url(#layers-ah)"/>
+<path class="e e-dim" d="M502,196 V238 Q502,246 494,246 H162 Q154,246 154,238 V182" marker-end="url(#layers-ah)"/>
+<text class="t-code t-err" x="328" y="212">Timeout · RateLimited · any task Err</text>
+<text class="t-mut" x="328" y="234">retried per RetryMode, then a backoff sleep</text>
+<path class="e" d="M110,178 V308" marker-end="url(#layers-ah)"/>
+<path class="e" d="M305,246 V308" marker-end="url(#layers-ah)"/>
+<path class="e e-hot" d="M610,178 V308" marker-end="url(#layers-ah)"/>
+<text class="t-mut t-hot ta-s" x="622" y="250">success</text>
+<rect class="n" x="68" y="124" width="172" height="54" rx="10"/>
+<text class="t-strong" x="154" y="145">circuit breaker</text>
+<text class="t-code t-mut" x="154" y="165">try_acquire()</text>
+<rect class="n" x="304" y="124" width="176" height="54" rx="10"/>
+<text class="t-strong" x="392" y="145">rate limiter</text>
+<text class="t-code t-mut" x="392" y="165">acquire()</text>
+<rect class="n-hot" x="520" y="124" width="180" height="54" rx="10"/>
+<text class="t-strong" x="610" y="145">upstream call</text>
+<text class="t-mut" x="610" y="165">the flaky thing</text>
+<rect class="n-err" x="30" y="312" width="160" height="44" rx="10"/>
+<text class="t-code" x="110" y="335">CircuitOpen</text>
+<text class="t-mut" x="110" y="374">no attempt, no retry burned</text>
+<rect class="n-err" x="220" y="312" width="170" height="44" rx="10"/>
+<text class="t-code" x="305" y="335">RetryExhausted</text>
+<text class="t-mut" x="305" y="374">after max_attempts</text>
+<rect class="n-ok" x="530" y="312" width="160" height="44" rx="10"/>
+<text class="t-code" x="610" y="335">Ok(next state)</text>
+<text class="t-mut" x="610" y="374">workflow advances</text>
+</svg>
+</div>
+</div>
 <ul>
 <li><strong>Circuit breaker</strong> (shared across every task hitting that service) — bail fast when it's down.</li>
 <li><strong>Rate limiter</strong> (also shared) — stay under the service's quota when it's up.</li>

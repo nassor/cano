@@ -149,7 +149,7 @@ pub enum TaskResult<TState> {
 ///
 /// # Example
 ///
-/// ```rust,ignore
+/// ```rust
 /// use cano::prelude::*;
 ///
 /// struct DataProcessor {

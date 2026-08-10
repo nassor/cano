@@ -46,6 +46,50 @@ use a single workflow that pulls a batch, splits it into per-item processors via
 <code>TaskResult::Split</code>, and loops until the queue drains.
 </p>
 
+<div class="diagram-frame">
+<p class="diagram-label">Queue consumer: pull, split, drain</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 720 416" role="img">
+<title>Queue consumer pattern: PullBatch pops a batch off the external queue, ProcessBatch returns TaskResult::Split with one Complete branch per item, and the outer loop calls orchestrate again until the queue drains.</title>
+<defs><marker id="queue-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<path class="e e-dim" d="M360,342 V372 Q360,380 352,380 H40 Q32,380 32,372 V160 Q32,152 40,152 H302 Q310,152 310,144" marker-end="url(#queue-ah)"/>
+<text class="t-mut" x="376" y="400">outer loop — orchestrate(PullBatch) again until the queue drains</text>
+<rect class="n-cop" x="280" y="16" width="160" height="46" rx="10"/>
+<text class="t-strong" x="360" y="40">Queue</text>
+<text class="t-mut ta-s" x="452" y="44">SQS · Redis · Kafka</text>
+<path class="e" d="M360,62 V90" marker-end="url(#queue-ah)"/>
+<text class="t-mut ta-s" x="372" y="82">pop up to batch_size items</text>
+<path class="e e-dim" d="M280,102 H232 Q224,102 224,110 V122 Q224,130 232,130 H276" marker-end="url(#queue-ah)"/>
+<text class="t-mut ta-e" x="212" y="110">empty batch</text>
+<text class="t-mut ta-e" x="212" y="126">sleep 1s, retry</text>
+<rect class="n" x="280" y="94" width="160" height="46" rx="10"/>
+<text class="t-strong" x="360" y="118">PullBatch</text>
+<text class="t-code t-mut ta-s" x="452" y="122">QueuePuller</text>
+<path class="e" d="M360,140 V168" marker-end="url(#queue-ah)"/>
+<text class="t-code t-mut ta-s" x="372" y="160">store.put("current_batch")</text>
+<rect class="n-hot" x="260" y="172" width="200" height="56" rx="10"/>
+<text class="t-strong" x="360" y="194">ProcessBatch</text>
+<text class="t-code t-mut" x="360" y="214">TaskResult::Split</text>
+<text class="t-code t-mut ta-s" x="472" y="204">BatchSplitter</text>
+<path class="e" d="M360,228 V248"/>
+<path class="e" d="M130,248 H590"/>
+<path class="e" d="M130,248 V286" marker-end="url(#queue-ah)"/>
+<path class="e" d="M360,248 V286" marker-end="url(#queue-ah)"/>
+<path class="e" d="M590,248 V286" marker-end="url(#queue-ah)"/>
+<text class="t-mut" x="245" y="266">one Complete branch per item</text>
+<rect class="n-ok" x="60" y="290" width="140" height="52" rx="10"/>
+<text class="t-strong" x="130" y="311">item 1</text>
+<text class="t-code t-mut" x="130" y="331">Complete</text>
+<rect class="n-ok" x="290" y="290" width="140" height="52" rx="10"/>
+<text class="t-strong" x="360" y="311">item 2</text>
+<text class="t-code t-mut" x="360" y="331">Complete</text>
+<rect class="n-ok" x="520" y="290" width="140" height="52" rx="10"/>
+<text class="t-strong" x="590" y="311">item n</text>
+<text class="t-code t-mut" x="590" y="331">Complete</text>
+</svg>
+</div>
+</div>
+
 ```rust
 use cano::prelude::*;
 use std::collections::VecDeque;
@@ -220,6 +264,64 @@ Cap parallelism when a downstream resource (API keys, connections) is scarce. Th
 below shows the manual alternative — a shared <code>tokio::sync::Semaphore</code> acquired inside each
 task — for cases where you need the limit to span more than one split.
 </p>
+
+<div class="diagram-frame">
+<p class="diagram-label">Resource-limited fan-out: 20 tasks, 5 permits</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 296" role="img">
+<title>Resource-limited fan-out: 20 split tasks share 5 permits, so at most 5 run concurrently and the fan-out completes in four waves of five.</title>
+<defs><marker id="bulk-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<text class="t-code t-hot ta-s" x="16" y="30">Semaphore::new(5)</text>
+<text class="t-mut ta-s" x="16" y="50">= with_bulkhead(5)</text>
+<text class="t-strong" x="188" y="30">wave 1</text>
+<text class="t-strong" x="343" y="30">wave 2</text>
+<text class="t-strong" x="498" y="30">wave 3</text>
+<text class="t-strong" x="653" y="30">wave 4</text>
+<text class="t-mut" x="188" y="50">tasks 0-4</text>
+<text class="t-mut" x="343" y="50">tasks 5-9</text>
+<text class="t-mut" x="498" y="50">tasks 10-14</text>
+<text class="t-mut" x="653" y="50">tasks 15-19</text>
+<text class="t-mut ta-e" x="100" y="84">permit 1</text>
+<text class="t-mut ta-e" x="100" y="114">permit 2</text>
+<text class="t-mut ta-e" x="100" y="144">permit 3</text>
+<text class="t-mut ta-e" x="100" y="174">permit 4</text>
+<text class="t-mut ta-e" x="100" y="204">permit 5</text>
+<rect class="band-hot" x="113" y="68" width="149" height="22" rx="5"/>
+<rect class="band-hot" x="268" y="68" width="149" height="22" rx="5"/>
+<rect class="band-hot" x="423" y="68" width="149" height="22" rx="5"/>
+<rect class="band-hot" x="578" y="68" width="149" height="22" rx="5"/>
+<rect class="band-hot" x="113" y="98" width="149" height="22" rx="5"/>
+<rect class="band-hot" x="268" y="98" width="149" height="22" rx="5"/>
+<rect class="band-hot" x="423" y="98" width="149" height="22" rx="5"/>
+<rect class="band-hot" x="578" y="98" width="149" height="22" rx="5"/>
+<rect class="band-hot" x="113" y="128" width="149" height="22" rx="5"/>
+<rect class="band-hot" x="268" y="128" width="149" height="22" rx="5"/>
+<rect class="band-hot" x="423" y="128" width="149" height="22" rx="5"/>
+<rect class="band-hot" x="578" y="128" width="149" height="22" rx="5"/>
+<rect class="band-hot" x="113" y="158" width="149" height="22" rx="5"/>
+<rect class="band-hot" x="268" y="158" width="149" height="22" rx="5"/>
+<rect class="band-hot" x="423" y="158" width="149" height="22" rx="5"/>
+<rect class="band-hot" x="578" y="158" width="149" height="22" rx="5"/>
+<rect class="band-hot" x="113" y="188" width="149" height="22" rx="5"/>
+<rect class="band-hot" x="268" y="188" width="149" height="22" rx="5"/>
+<rect class="band-hot" x="423" y="188" width="149" height="22" rx="5"/>
+<rect class="band-hot" x="578" y="188" width="149" height="22" rx="5"/>
+<line class="axis" x1="110" y1="224" x2="730" y2="224"/>
+<path class="e e-dim" d="M730,224 H752" marker-end="url(#bulk-ah)"/>
+<line class="tick" x1="110" y1="224" x2="110" y2="230"/>
+<line class="tick" x1="265" y1="224" x2="265" y2="230"/>
+<line class="tick" x1="420" y1="224" x2="420" y2="230"/>
+<line class="tick" x1="575" y1="224" x2="575" y2="230"/>
+<line class="tick" x1="730" y1="224" x2="730" y2="230"/>
+<text class="t-mut" x="110" y="246">0</text>
+<text class="t-mut" x="265" y="246">T</text>
+<text class="t-mut" x="420" y="246">2T</text>
+<text class="t-mut" x="575" y="246">3T</text>
+<text class="t-mut" x="730" y="246">4T</text>
+<text class="t-mut" x="420" y="276">T = one task duration — 5 permits gate 20 tasks, so the fan-out completes in 4 waves of 5</text>
+</svg>
+</div>
+</div>
 
 ```rust
 use cano::prelude::*;

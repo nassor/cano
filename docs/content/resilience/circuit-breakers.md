@@ -46,13 +46,34 @@ acquires from split tasks are safe.
 <h3 id="cb-state-machine"><a href="#cb-state-machine" class="anchor-link" aria-hidden="true">#</a>The state machine</h3>
 <div class="diagram-frame">
 <p class="diagram-label">CircuitBreaker state machine</p>
-<div class="mermaid">
-stateDiagram-v2
-    [*] --> Closed
-    Closed --> Open: failure_threshold consecutive failures
-    Open --> HalfOpen: reset_timeout elapsed (lazy, on next acquire)
-    HalfOpen --> Closed: half_open_max_calls consecutive successes
-    HalfOpen --> Open: any failure (fresh cool-down)
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 740 316" role="img">
+<title>CircuitBreaker state machine: Closed trips to Open after failure_threshold consecutive failures; Open becomes HalfOpen lazily once reset_timeout has elapsed; HalfOpen closes after half_open_max_calls consecutive successes, or re-opens with a fresh cool-down on any failure.</title>
+<defs><marker id="cb-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<circle class="n" cx="24" cy="85" r="5"/>
+<path class="e" d="M31,85 H44" marker-end="url(#cb-ah)"/>
+<path class="e" d="M244,85 H484" marker-end="url(#cb-ah)"/>
+<text class="t-code t-mut" x="364" y="58">failure_threshold</text>
+<text class="t-mut" x="364" y="74">consecutive failures</text>
+<path class="e e-dash" d="M572,114 V228" marker-end="url(#cb-ah)"/>
+<text class="t-code t-mut ta-e" x="558" y="158">reset_timeout</text>
+<text class="t-mut ta-e" x="558" y="174">elapsed — lazy, on next acquire</text>
+<path class="e" d="M600,232 V118" marker-end="url(#cb-ah)"/>
+<text class="t-mut ta-s" x="612" y="158">any failure</text>
+<text class="t-mut ta-s" x="612" y="174">fresh cool-down</text>
+<path class="e e-hot" d="M488,261 H154 Q146,261 146,253 V118" marker-end="url(#cb-ah)"/>
+<text class="t-code t-hot" x="320" y="232">half_open_max_calls</text>
+<text class="t-mut t-hot" x="320" y="248">consecutive successes → close</text>
+<rect class="n-ok" x="48" y="56" width="196" height="58" rx="12"/>
+<text class="t-strong" x="146" y="81">Closed</text>
+<text class="t-mut" x="146" y="101">calls flow through</text>
+<rect class="n-err" x="488" y="56" width="196" height="58" rx="12"/>
+<text class="t-strong" x="586" y="81">Open { until }</text>
+<text class="t-code t-mut" x="586" y="101">CircuitOpen · no call</text>
+<rect class="n-warn" x="488" y="232" width="196" height="58" rx="12"/>
+<text class="t-strong" x="586" y="257">HalfOpen</text>
+<text class="t-mut" x="586" y="277">trial calls admitted</text>
+</svg>
 </div>
 </div>
 <p>

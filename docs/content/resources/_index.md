@@ -47,6 +47,56 @@ Define a resource, register it, retrieve it by typed key in any task. The engine
 <code>setup</code> / <code>teardown</code> automatically.
 </p>
 
+<div class="diagram-frame">
+<p class="diagram-label">insert(key, value) at build time &rarr; res.get::&lt;R, _&gt;(key) inside tasks</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 316" role="img">
+<title>Resources is a typed map: every build-time insert stores one value under a key, and inside a task res.get names both the key and the resource type to pull an Arc handle back out, so one entry can be handed to several tasks.</title>
+<defs><marker id="res-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<text class="t-strong" x="107" y="24">Build time</text>
+<text class="t-code t-mut" x="107" y="43">.insert(key, value)</text>
+<text class="t-strong" x="386" y="24">Typed map</text>
+<text class="t-code t-mut" x="386" y="43">Resources::&lt;Key&gt;::new()</text>
+<text class="t-strong" x="669" y="24">In tasks</text>
+<text class="t-code t-mut" x="669" y="43">res.get::&lt;R, _&gt;(key)?</text>
+<path class="e" d="M200,96 H262" marker-end="url(#res-ah)"/>
+<path class="e" d="M200,166 H262" marker-end="url(#res-ah)"/>
+<path class="e" d="M200,236 H262" marker-end="url(#res-ah)"/>
+<path class="e e-hot" d="M506,96 H572" marker-end="url(#res-ah)"/>
+<path class="e e-hot" d="M506,108 H524 Q536,108 536,120 V133 Q536,145 548,145 H572" marker-end="url(#res-ah)"/>
+<path class="e" d="M506,166 H572" marker-end="url(#res-ah)"/>
+<path class="e" d="M506,236 H572" marker-end="url(#res-ah)"/>
+<rect class="n" x="14" y="72" width="186" height="48" rx="10"/>
+<text class="t-code" x="107" y="87">Key::Store</text>
+<text class="t-code t-mut" x="107" y="107">MemoryStore::new()</text>
+<rect class="n" x="14" y="142" width="186" height="48" rx="10"/>
+<text class="t-code" x="107" y="157">Key::Config</text>
+<text class="t-code t-mut" x="107" y="177">AppConfig { .. }</text>
+<rect class="n" x="14" y="212" width="186" height="48" rx="10"/>
+<text class="t-code" x="107" y="227">Key::Params</text>
+<text class="t-code t-mut" x="107" y="247">WorkflowParams { .. }</text>
+<rect class="n-cop" x="266" y="56" width="240" height="216" rx="12"/>
+<rect class="n-hot" x="282" y="76" width="208" height="40" rx="6"/>
+<text class="t-code" x="386" y="97">Store &rarr; MemoryStore</text>
+<rect class="n" x="282" y="146" width="208" height="40" rx="6"/>
+<text class="t-code" x="386" y="167">Config &rarr; AppConfig</text>
+<rect class="n" x="282" y="216" width="208" height="40" rx="6"/>
+<text class="t-code" x="386" y="237">Params &rarr; WorkflowParams</text>
+<rect class="n" x="576" y="69" width="186" height="54" rx="10"/>
+<text class="t-strong" x="669" y="86">InitTask</text>
+<text class="t-code t-mut" x="669" y="108">Arc&lt;MemoryStore&gt;</text>
+<rect class="n" x="576" y="133" width="186" height="66" rx="10"/>
+<text class="t-strong" x="669" y="149">ProcessTask</text>
+<text class="t-code t-mut" x="669" y="169">Arc&lt;MemoryStore&gt;</text>
+<text class="t-code t-mut" x="669" y="186">Arc&lt;AppConfig&gt;</text>
+<rect class="n" x="576" y="209" width="186" height="54" rx="10"/>
+<text class="t-strong" x="669" y="226">ReportTask</text>
+<text class="t-code t-mut" x="669" y="248">Arc&lt;WorkflowParams&gt;</text>
+<text class="t-mut" x="390" y="296">One entry, many readers: get matches on both key and type, and returns an Arc clone.</text>
+</svg>
+</div>
+</div>
+
 <div class="code-block">
 <span class="code-block-label"><span class="label-icon">&#9889;</span> End-to-end example</span>
 

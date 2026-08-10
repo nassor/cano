@@ -27,12 +27,6 @@ use cano_macros::checkpoint_store;
 /// `(workflow_id, sequence) -> postcard(StoredRow)`.
 const CHECKPOINTS: TableDefinition<(&str, u64), &[u8]> = TableDefinition::new("cano_checkpoints");
 
-/// Upper bound of the sequence key range — the largest valid `sequence` value.
-const SEQUENCE_MAX: u64 = u64::MAX;
-
-/// Lower bound of the sequence key range — the smallest valid `sequence` value.
-const SEQUENCE_MIN: u64 = u64::MIN;
-
 /// The payload half of a [`CheckpointRow`]: everything except `sequence`, which
 /// is carried by the redb key. Kept private — callers only ever see `CheckpointRow`.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -56,7 +50,7 @@ struct StoredRowV0 {
 
 /// The key range covering every row for `workflow_id`, in ascending `sequence` order.
 fn workflow_range(workflow_id: &str) -> RangeInclusive<(&str, u64)> {
-    (workflow_id, SEQUENCE_MIN)..=(workflow_id, SEQUENCE_MAX)
+    (workflow_id, u64::MIN)..=(workflow_id, u64::MAX)
 }
 
 /// Wrap any `redb` error (they all implement [`Display`](std::fmt::Display)) as a

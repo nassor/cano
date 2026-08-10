@@ -142,6 +142,52 @@ sequence order" — which is exactly what <code>CheckpointStore::load_run</code>
 <code>Workflow::resume_from(workflow_id)</code> loads the run via <code>load_run</code> and routes by
 each row's <code>kind</code>:
 </p>
+
+<div class="diagram-frame">
+<p class="diagram-label">Run 1 appends a row per state and crashes; run 2 resumes from the last row</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 566" role="img">
+<title>A run appends one StateEntry row per state entered, before that state's task runs; the process crashes mid-Work, and resume_from loads the log, re-enters at the highest-sequence row's state and continues the same sequence.</title>
+<defs><marker id="rec-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<line class="lifeline" x1="150" y1="46" x2="150" y2="206"/>
+<line class="lifeline" x1="400" y1="46" x2="400" y2="526"/>
+<line class="lifeline" x1="650" y1="46" x2="650" y2="526"/>
+<rect class="band" x="142" y="94" width="16" height="34" rx="5"/>
+<rect class="band" x="142" y="162" width="16" height="32" rx="5"/>
+<rect class="band" x="642" y="462" width="16" height="30" rx="5"/>
+<rect class="n" x="70" y="8" width="160" height="38" rx="8"/>
+<text class="t-strong" x="150" y="28">Engine (run 1)</text>
+<rect class="n-cop" x="315" y="8" width="170" height="38" rx="8"/>
+<text class="t-strong" x="400" y="28">CheckpointStore</text>
+<rect class="n" x="570" y="8" width="160" height="38" rx="8"/>
+<text class="t-strong" x="650" y="28">Engine (run 2)</text>
+<path class="e" d="M154,82 H396" marker-end="url(#rec-ah)"/>
+<text class="t-code" x="275" y="70">append #0 · StateEntry · Start</text>
+<text class="t-mut ta-e" x="134" y="112">StartTask runs</text>
+<path class="e" d="M154,150 H396" marker-end="url(#rec-ah)"/>
+<text class="t-code" x="275" y="138">append #1 · StateEntry · Work</text>
+<text class="t-mut ta-e" x="134" y="179">WorkTask starts</text>
+<text class="t-strong t-err" x="150" y="226">✗ crash</text>
+<text class="t-mut" x="150" y="244">process dies mid-WorkTask</text>
+<text class="t-mut ta-s" x="414" y="234">rows #0&ndash;#1 are durable</text>
+<rect class="n" x="550" y="252" width="200" height="40" rx="10"/>
+<text class="t-code" x="650" y="273">resume_from("run-42")</text>
+<path class="e" d="M646,322 H404" marker-end="url(#rec-ah)"/>
+<text class="t-code" x="525" y="310">load_run("run-42")</text>
+<path class="e e-dash" d="M404,356 H646" marker-end="url(#rec-ah)"/>
+<text class="t-code t-mut" x="525" y="344">[#0 Start, #1 Work]</text>
+<rect class="n-hot" x="542" y="374" width="216" height="48" rx="10"/>
+<text class="t-strong" x="650" y="390">re-enter at Work</text>
+<text class="t-mut" x="650" y="407">last StateEntry row wins</text>
+<path class="e" d="M646,452 H404" marker-end="url(#rec-ah)"/>
+<text class="t-code" x="525" y="440">append #2 · StateEntry · Work</text>
+<text class="t-mut t-warn ta-e" x="634" y="478">WorkTask re-runs &mdash; idempotent</text>
+<path class="e" d="M646,512 H404" marker-end="url(#rec-ah)"/>
+<text class="t-code" x="525" y="500">append #3 · StateEntry · Done</text>
+<text class="t-mut" x="390" y="546">Every row is appended before its task runs, so the resumed state runs again.</text>
+</svg>
+</div>
+</div>
 <ul>
 <li><code>StateEntry</code> rows drive the <strong>state replay</strong> — it takes the highest-<code>sequence</code>
 <code>StateEntry</code> row, maps its label back to a state, and re-enters the FSM loop from there,
@@ -218,6 +264,34 @@ compares the highest-sequence row's <code>workflow_version</code> against
 runs. A mismatch returns <code>CanoError::WorkflowVersionMismatch { stored, expected }</code>
 immediately — no task re-runs, no partial side effects.
 </p>
+
+<div class="diagram-frame">
+<p class="diagram-label">The <code>workflow_version</code> gate on <code>resume_from</code></p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 250" role="img">
+<title>On resume_from the engine compares the highest-sequence row's workflow_version with the version configured on this workflow: equal versions resume the run, a mismatch returns WorkflowVersionMismatch before any state is re-entered.</title>
+<defs><marker id="recver-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<path class="e" d="M170,113 H246" marker-end="url(#recver-ah)"/>
+<text class="t-mut" x="208" y="101">latest row</text>
+<path class="e" d="M480,104 H492 Q500,104 500,96 V58 Q500,50 508,50 H516" marker-end="url(#recver-ah)"/>
+<text class="t-mut t-ok ta-e" x="492" y="76">equal</text>
+<path class="e" d="M480,122 H492 Q500,122 500,130 V168 Q500,176 508,176 H516" marker-end="url(#recver-ah)"/>
+<text class="t-mut t-err ta-e" x="492" y="158">differs</text>
+<rect class="n" x="20" y="90" width="150" height="46" rx="10"/>
+<text class="t-code" x="95" y="114">resume_from(id)</text>
+<rect class="n-hot" x="250" y="84" width="230" height="58" rx="10"/>
+<text class="t-strong" x="365" y="105">workflow_version gate</text>
+<text class="t-code t-mut" x="365" y="123">stored vs expected</text>
+<rect class="n-ok" x="520" y="22" width="240" height="56" rx="10"/>
+<text class="t-strong" x="640" y="41">resume the run</text>
+<text class="t-mut" x="640" y="59">re-enter at the last state</text>
+<rect class="n-err" x="520" y="148" width="240" height="56" rx="10"/>
+<text class="t-strong" x="640" y="167">refuse the resume</text>
+<text class="t-code t-err" x="640" y="185">WorkflowVersionMismatch</text>
+<text class="t-mut" x="390" y="232">The check runs before any state is re-entered &mdash; no task re-runs, no partial side effects.</text>
+</svg>
+</div>
+</div>
 
 <p>
 <strong>Operator guidance:</strong> bump the version whenever a deploy changes the FSM in a way

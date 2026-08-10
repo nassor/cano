@@ -57,12 +57,30 @@ configuration, or clients), or <code>Workflow::bare()</code> when every task is 
 </p>
 <div class="diagram-frame">
 <p class="diagram-label">Workflow State Transitions</p>
-<div class="mermaid">
-graph TD
-A[Start] --> B[Validate]
-B -->|Valid| C[Process]
-B -->|Invalid| D[Failed]
-C --> E[Complete]
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 660 368" role="img">
+<title>Workflow state transitions: Start moves to Validate, which branches to Process when the input is valid or to Failed when it is not; Process finishes at Complete.</title>
+<defs><marker id="wfstate-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<path class="e" d="M150,68 V106" marker-end="url(#wfstate-ah)"/>
+<path class="e" d="M150,156 V194" marker-end="url(#wfstate-ah)"/>
+<path class="e" d="M215,133 H497 Q505,133 505,141 V194" marker-end="url(#wfstate-ah)"/>
+<path class="e" d="M150,244 V282" marker-end="url(#wfstate-ah)"/>
+<text class="t-mut t-ok ta-s" x="162" y="175">Valid</text>
+<text class="t-mut t-err" x="356" y="121">Invalid</text>
+<rect class="n" x="85" y="22" width="130" height="46" rx="10"/>
+<text x="150" y="46">Start</text>
+<rect class="n-hot" x="85" y="110" width="130" height="46" rx="10"/>
+<text class="t-strong" x="150" y="134">Validate</text>
+<rect class="n" x="85" y="198" width="130" height="46" rx="10"/>
+<text x="150" y="222">Process</text>
+<rect class="n-ok" x="85" y="286" width="130" height="46" rx="10"/>
+<text x="150" y="310">Complete</text>
+<rect class="n-err" x="440" y="198" width="130" height="46" rx="10"/>
+<text x="505" y="222">Failed</text>
+<text class="t-mut" x="505" y="262">exit state</text>
+<text class="t-mut ta-s" x="228" y="309">exit state</text>
+<text class="t-mut" x="330" y="348">Each task returns the next state; the workflow stops at an exit state.</text>
+</svg>
 </div>
 </div>
 
@@ -325,19 +343,39 @@ concurrent requests.
 
 <div class="diagram-frame">
 <p class="diagram-label">Workflow per Request</p>
-<div class="mermaid">
-sequenceDiagram
-participant Client
-participant Handler as HTTP Handler
-participant Store as MemoryStore
-participant WF as Workflow FSM
-Client->>Handler: POST /process {text}
-Handler->>Store: put("input_text", text)
-Handler->>WF: orchestrate(Parse)
-WF->>Store: get / put during tasks
-WF-->>Handler: Ok(Done)
-Handler->>Store: get("word_count"), get("uppercased")
-Handler-->>Client: 200 JSON response
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 730 428" role="img">
+<title>One HTTP request: the handler writes the request data into a fresh store, orchestrates the workflow to its exit state, reads the results back out of the store, and returns the response.</title>
+<defs><marker id="wfreq-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<line class="lifeline" x1="70" y1="46" x2="70" y2="364"/>
+<line class="lifeline" x1="258" y1="46" x2="258" y2="364"/>
+<line class="lifeline" x1="448" y1="46" x2="448" y2="364"/>
+<line class="lifeline" x1="638" y1="46" x2="638" y2="364"/>
+<rect class="n" x="15" y="8" width="110" height="38" rx="8"/>
+<text class="t-strong" x="70" y="28">Client</text>
+<rect class="n" x="188" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="258" y="28">HTTP Handler</text>
+<rect class="n-cop" x="378" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="448" y="28">MemoryStore</text>
+<rect class="n" x="568" y="8" width="140" height="38" rx="8"/>
+<text class="t-strong" x="638" y="28">Workflow FSM</text>
+<path class="e" d="M76,90 H252" marker-end="url(#wfreq-ah)"/>
+<text class="t-code" x="164" y="78">POST /process {text}</text>
+<path class="e" d="M264,134 H442" marker-end="url(#wfreq-ah)"/>
+<text class="t-code" x="353" y="122">put("input_text", text)</text>
+<path class="e" d="M264,178 H632" marker-end="url(#wfreq-ah)"/>
+<text class="t-code" x="545" y="166">orchestrate(Parse)</text>
+<path class="e" d="M632,222 H454" marker-end="url(#wfreq-ah)"/>
+<text class="t-mut" x="545" y="210">get / put during tasks</text>
+<path class="e e-dash" d="M632,266 H264" marker-end="url(#wfreq-ah)"/>
+<text class="t-code t-ok" x="510" y="254">Ok(Done)</text>
+<path class="e" d="M264,310 H442" marker-end="url(#wfreq-ah)"/>
+<text class="t-code" x="353" y="298">get("word_count"), get("uppercased")</text>
+<path class="e e-dash" d="M252,354 H76" marker-end="url(#wfreq-ah)"/>
+<text class="t-code t-ok" x="164" y="342">200 JSON response</text>
+<rect class="n-hot" x="14" y="374" width="702" height="34" rx="10"/>
+<text class="t-strong" x="365" y="392">One fresh store and one workflow per request — no leaks between requests.</text>
+</svg>
 </div>
 </div>
 

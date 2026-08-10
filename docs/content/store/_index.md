@@ -46,13 +46,29 @@ the full <code>insert</code> / <code>get</code> API.
 
 <div class="diagram-frame">
 <p class="diagram-label">One shared map, many readers and writers</p>
-<div class="mermaid">
-graph LR
-S["Arc&lt;RwLock&lt;HashMap&gt;&gt;"]
-S --> R1["Task A (read)"]
-S --> R2["Task B (read)"]
-S --> W1["Task C (write)"]
-style S fill:#1e293b,stroke:#38bdf8
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 770 280" role="img">
+<title>One MemoryStore — an Arc&lt;RwLock&lt;HashMap&gt;&gt; — shared by three tasks: Task A and Task B hold the read lock concurrently while Task C takes the write lock exclusively.</title>
+<defs><marker id="store-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<path class="e" d="M242,124 H330 Q342,124 342,112 V88 Q342,76 354,76 H494" marker-end="url(#store-ah)"/>
+<text class="t-code t-mut" x="424" y="59">.get()</text>
+<path class="e" d="M242,132 H494" marker-end="url(#store-ah)"/>
+<text class="t-code t-mut" x="424" y="115">.get()</text>
+<path class="e" d="M242,140 H330 Q342,140 342,152 V210 Q342,222 354,222 H494" marker-end="url(#store-ah)"/>
+<text class="t-code t-mut" x="424" y="205">.put()</text>
+<rect class="n-ghost" x="468" y="40" width="252" height="128" rx="12"/>
+<rect class="n-hot" x="28" y="96" width="214" height="72" rx="10"/>
+<text class="t-strong" x="135" y="121">MemoryStore</text>
+<text class="t-code t-mut" x="135" y="145">Arc&lt;RwLock&lt;HashMap&gt;&gt;</text>
+<rect class="n" x="498" y="54" width="192" height="44" rx="10"/>
+<text x="594" y="77">Task A (read)</text>
+<rect class="n" x="498" y="110" width="192" height="44" rx="10"/>
+<text x="594" y="133">Task B (read)</text>
+<text class="t-mut" x="594" y="186">shared read lock — concurrent</text>
+<rect class="n" x="498" y="200" width="192" height="44" rx="10"/>
+<text x="594" y="223">Task C (write)</text>
+<text class="t-mut" x="594" y="264">exclusive write lock — readers wait</text>
+</svg>
 </div>
 </div>
 

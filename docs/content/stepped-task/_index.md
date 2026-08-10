@@ -86,15 +86,39 @@ the step at and after the resume point may re-run.
 
 <div class="diagram-frame">
 <p class="diagram-label">The step loop, with a crash &amp; resume from the last cursor</p>
-<div class="mermaid">
-graph LR
-A["step(None)"] -->|"More(c1)"| P1[persist cursor c1]
-P1 --> B["step(Some c1)"]
-B -->|"More(c2)"| P2[persist cursor c2]
-P2 --> C[…]
-C -->|"Done(result)"| D[Next State]
-P2 -. crash .-> R["resume_from"]
-R -->|"step(Some c2)"| C
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 748 226" role="img">
+<title>The step loop: each step returns More(cursor), the engine persists that cursor to the checkpoint store and calls step again with it; after a crash, resume_from reads the last persisted cursor and re-enters the loop at that step, while Done(result) leaves for the next state.</title>
+<defs><marker id="stepped-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<path class="e" d="M68,90 V110 Q68,118 76,118 H120 Q128,118 128,126 V141" marker-end="url(#stepped-ah)"/>
+<text class="t-code" x="108" y="104">More(c1)</text>
+<path class="e" d="M188,146 V126 Q188,118 196,118 H237 Q245,118 245,110 V95" marker-end="url(#stepped-ah)"/>
+<path class="e" d="M273,90 V110 Q273,118 281,118 H322 Q330,118 330,126 V141" marker-end="url(#stepped-ah)"/>
+<text class="t-code" x="312" y="104">More(c2)</text>
+<path class="e" d="M390,146 V126 Q390,118 398,118 H439 Q447,118 447,110 V95" marker-end="url(#stepped-ah)"/>
+<path class="e" d="M520,67 H620" marker-end="url(#stepped-ah)"/>
+<text class="t-code" x="572" y="50">Done(result)</text>
+<path class="e e-dash" d="M444,168 H516" marker-end="url(#stepped-ah)"/>
+<text class="t-mut t-err" x="480" y="154">crash</text>
+<path class="e e-hot e-dash" d="M566,146 V120 Q566,112 558,112 H513 Q505,112 505,104 V95" marker-end="url(#stepped-ah)"/>
+<text class="t-code t-hot ta-s" x="578" y="130">step(Some c2)</text>
+<text class="t-mut" x="461" y="26">&hellip; repeats until Done</text>
+<rect class="n" x="20" y="44" width="96" height="46" rx="10"/>
+<text class="t-code" x="68" y="68">step(None)</text>
+<rect class="n" x="200" y="44" width="118" height="46" rx="10"/>
+<text class="t-code" x="259" y="68">step(Some c1)</text>
+<rect class="n" x="402" y="44" width="118" height="46" rx="10"/>
+<text class="t-code" x="461" y="68">step(Some c2)</text>
+<rect class="n-ok" x="624" y="44" width="104" height="46" rx="10"/>
+<text x="676" y="68">Next State</text>
+<rect class="n-cop" x="74" y="146" width="168" height="44" rx="10"/>
+<text x="158" y="169">persist cursor c1</text>
+<rect class="n-cop" x="276" y="146" width="168" height="44" rx="10"/>
+<text x="360" y="169">persist cursor c2</text>
+<rect class="n-hot" x="520" y="146" width="118" height="44" rx="10"/>
+<text class="t-code t-strong" x="579" y="169">resume_from</text>
+<text class="t-mut" x="259" y="206">written to the checkpoint store</text>
+</svg>
 </div>
 </div>
 

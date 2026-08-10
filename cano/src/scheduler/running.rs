@@ -829,6 +829,30 @@ mod tests {
             .add_exit_state(TestState::Error)
     }
 
+    /// Poll `running.status(id)` until `pred(&snapshot)` holds or `budget` elapses,
+    /// returning the last observed snapshot either way.
+    ///
+    /// Fixed `sleep`-then-assert races the scheduler's dispatch loop: a duration that's
+    /// "surely long enough" on an idle machine can be too short once hundreds of other
+    /// tests share the runtime's thread pool. Polling waits for the real condition and
+    /// still fails loudly — the caller's outer `tokio::time::timeout` bounds the total
+    /// test runtime regardless of what `budget` is passed here.
+    async fn wait_for_status(
+        running: &RunningScheduler<TestState>,
+        id: &str,
+        budget: Duration,
+        mut pred: impl FnMut(&FlowInfo) -> bool,
+    ) -> FlowInfo {
+        let deadline = tokio::time::Instant::now() + budget;
+        loop {
+            let snap = running.status(id).await.unwrap();
+            if pred(&snap) || tokio::time::Instant::now() >= deadline {
+                return snap;
+            }
+            sleep(Duration::from_millis(5)).await;
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn test_backoff_progression_extends_interval() {
         // Base interval (50ms) is small; backoff should grow above it. With
@@ -936,7 +960,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_reset_flow_clears_trip_and_resumes() {
-        let timeout = Duration::from_secs(5);
+        let timeout = Duration::from_secs(10);
         let result = tokio::time::timeout(timeout, async {
             let mut scheduler: Scheduler<TestState> = Scheduler::<TestState>::new();
             // Succeeds on attempt 5, after 4 failures. With streak_limit=2 it
@@ -969,8 +993,10 @@ mod tests {
             let running = scheduler.start().await.unwrap();
 
             // Wait for trip.
-            sleep(Duration::from_millis(300)).await;
-            let snap = running.status("reset_me").await.unwrap();
+            let snap = wait_for_status(&running, "reset_me", Duration::from_secs(3), |s| {
+                matches!(s.status, Status::Tripped { .. })
+            })
+            .await;
             assert!(
                 matches!(snap.status, Status::Tripped { .. }),
                 "expected trip, got: {:?}",
@@ -986,12 +1012,17 @@ mod tests {
             assert!(snap_after_reset.next_eligible.is_none());
 
             // Loop trips again (failures 3,4 → trip). Reset once more.
-            sleep(Duration::from_millis(200)).await;
+            wait_for_status(&running, "reset_me", Duration::from_secs(3), |s| {
+                matches!(s.status, Status::Tripped { .. })
+            })
+            .await;
             running.reset_flow("reset_me").await.unwrap();
 
             // Attempt 5 succeeds → status Completed, streak 0.
-            sleep(Duration::from_millis(200)).await;
-            let snap_done = running.status("reset_me").await.unwrap();
+            let snap_done = wait_for_status(&running, "reset_me", Duration::from_secs(3), |s| {
+                s.status == Status::Completed
+            })
+            .await;
             assert_eq!(snap_done.status, Status::Completed);
             assert_eq!(snap_done.failure_streak, 0);
             assert!(snap_done.next_eligible.is_none());
@@ -1034,8 +1065,10 @@ mod tests {
 
             let running = scheduler.start().await.unwrap();
 
-            sleep(Duration::from_millis(400)).await;
-            let snap = running.status("recover").await.unwrap();
+            let snap = wait_for_status(&running, "recover", Duration::from_secs(4), |s| {
+                s.status == Status::Completed
+            })
+            .await;
             assert_eq!(
                 snap.failure_streak, 0,
                 "streak must reset on success, got {snap:?}"

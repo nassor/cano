@@ -124,6 +124,46 @@ compensatable step that ran before it.
 <hr class="section-divider">
 
 <h2 id="stack"><a href="#stack" class="anchor-link" aria-hidden="true">#</a>The Compensation Stack</h2>
+
+<div class="diagram-frame">
+<p class="diagram-label">Forward run pushes; a terminal failure drains the stack LIFO</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 320" role="img">
+<title>Reserve and Charge each push (task name, serialized output) onto the compensation stack; when the plain Ship task fails the engine drains the stack last-in first-out, so Charge compensates before Reserve, and each compensate receives back the Output its own run produced.</title>
+<defs><marker id="saga-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<path class="e e-hot" d="M670,98 V144 Q670,152 662,152 H438 Q430,152 430,160 V190" marker-end="url(#saga-ah)"/>
+<text class="t-mut t-err" x="550" y="126">terminal failure</text>
+<text class="t-strong t-hot" x="550" y="143">drain stack LIFO</text>
+<path class="e e-dash" d="M70,98 V190" marker-end="url(#saga-ah)"/>
+<text class="t-code t-mut ta-s" x="80" y="132">Reservation</text>
+<path class="e e-dash" d="M350,98 V190" marker-end="url(#saga-ah)"/>
+<text class="t-code t-mut ta-s" x="360" y="132">Charge</text>
+<rect class="n" x="25" y="40" width="170" height="58" rx="10"/>
+<text class="t-strong" x="110" y="65">Reserve</text>
+<text class="t-mut" x="110" y="85">push 1 · Reservation</text>
+<rect class="n" x="305" y="40" width="170" height="58" rx="10"/>
+<text class="t-strong" x="390" y="65">Charge</text>
+<text class="t-mut" x="390" y="85">push 2 · Charge</text>
+<rect class="n-err" x="585" y="40" width="170" height="58" rx="10"/>
+<text class="t-strong" x="670" y="65">Ship</text>
+<text class="t-mut" x="670" y="85">plain task — fails</text>
+<path class="e" d="M199,69 H301" marker-end="url(#saga-ah)"/>
+<text class="t-mut t-ok" x="250" y="57">success</text>
+<path class="e" d="M479,69 H581" marker-end="url(#saga-ah)"/>
+<text class="t-mut t-ok" x="530" y="57">success</text>
+<rect class="n" x="25" y="196" width="170" height="58" rx="10"/>
+<text class="t-code" x="110" y="221">compensate()</text>
+<text class="t-mut" x="110" y="241">pop 2 · release hold</text>
+<rect class="n" x="305" y="196" width="170" height="58" rx="10"/>
+<text class="t-code" x="390" y="221">compensate()</text>
+<text class="t-mut" x="390" y="241">pop 1 · refund</text>
+<path class="e e-hot" d="M301,225 H199" marker-end="url(#saga-ah)"/>
+<text class="t-mut" x="250" y="213">next entry</text>
+<rect class="n-hot" x="25" y="274" width="730" height="34" rx="10"/>
+<text class="t-strong" x="390" y="296">Rollback clean → orchestrate returns the original error, not CompensationFailed</text>
+</svg>
+</div>
+</div>
 <ul>
 <li>Each <strong>successful</strong> compensatable task pushes <code>(task name, serialized output)</code>
 onto the run's stack.</li>
@@ -197,6 +237,40 @@ resume point must likewise be idempotent.</p>
 With a <a href="../recovery/">checkpoint store</a> attached
 (<code>with_checkpoint_store</code> + <code>with_workflow_id</code>):
 </p>
+
+<div class="diagram-frame">
+<p class="diagram-label">The compensation stack survives a crash inside the checkpoint log</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 780 358" role="img">
+<title>Each successful compensatable state appends a CompensationCompletion row carrying its serialized output; after the process crashes, resume_from reloads those rows in sequence order and rebuilds the LIFO compensation stack in the new process.</title>
+<defs><marker id="sagaresume-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<line class="lifeline" x1="110" y1="46" x2="110" y2="160"/>
+<line class="lifeline" x1="390" y1="46" x2="390" y2="300"/>
+<line class="lifeline" x1="670" y1="46" x2="670" y2="300"/>
+<rect class="band" x="385" y="94" width="10" height="186" rx="5"/>
+<rect class="n" x="20" y="8" width="180" height="38" rx="8"/>
+<text class="t-strong" x="110" y="28">Process 1</text>
+<rect class="n-cop" x="300" y="8" width="180" height="38" rx="8"/>
+<text class="t-strong" x="390" y="28">Checkpoint store</text>
+<rect class="n" x="580" y="8" width="180" height="38" rx="8"/>
+<text class="t-strong" x="670" y="28">Process 2</text>
+<path class="e" d="M110,94 H386" marker-end="url(#sagaresume-ah)"/>
+<text class="t-mut" x="248" y="82">Reserve ✓ — append completion row</text>
+<path class="e" d="M110,138 H386" marker-end="url(#sagaresume-ah)"/>
+<text class="t-mut" x="248" y="126">Charge ✓ — append completion row</text>
+<rect class="n-ghost" x="20" y="160" width="180" height="40" rx="10"/>
+<text class="t-strong t-warn" x="110" y="178">✗ crash</text>
+<text class="t-mut t-warn" x="110" y="194">in-memory stack lost</text>
+<path class="e" d="M670,228 H394" marker-end="url(#sagaresume-ah)"/>
+<text class="t-code" x="532" y="216">Workflow::resume_from</text>
+<path class="e e-dash" d="M396,280 H666" marker-end="url(#sagaresume-ah)"/>
+<text class="t-code t-mut" x="528" y="252">RowKind::CompensationCompletion</text>
+<text class="t-mut" x="528" y="268">rows in sequence order → LIFO stack</text>
+<rect class="n-hot" x="20" y="312" width="740" height="34" rx="10"/>
+<text class="t-strong" x="390" y="334">A failure after the resume point still rolls back what the crashed process did</text>
+</svg>
+</div>
+</div>
 <ul>
 <li>A successful compensatable state writes a second <em>completion</em>
 <a href="../recovery/"><code>CheckpointRow</code></a> — <code>kind == RowKind::CompensationCompletion</code>,
