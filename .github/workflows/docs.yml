@@ -22,10 +22,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
+      # Pin the version: an unpinned `tool: zola` resolves to whatever the
+      # action's manifest currently offers, so a zola release can break the
+      # docs build without a repo change. 0.22.1 is the version the site is
+      # developed and verified against — notably its handling of shortcodes
+      # (`cano_dep`) inside fenced code blocks, which an unpinned build got
+      # wrong with `Unknown function 'cano_dep'`.
       - name: Install Zola
         uses: taiki-e/install-action@v2
         with:
-          tool: zola
+          tool: zola@0.22.1
 
       - name: Build site
         working-directory: docs
