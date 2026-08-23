@@ -37,6 +37,13 @@ jobs:
         working-directory: docs
         run: zola build
 
+      # Reads the rendered pages, so it has to follow the build. Every docs
+      # page is hand-authored HTML inside its markdown body, which Zola's own
+      # search index never sees.
+      - name: Build search index
+        working-directory: docs
+        run: python3 search-index.py public
+
       - name: Setup Pages
         uses: actions/configure-pages@v6
 

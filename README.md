@@ -46,74 +46,182 @@ For how the *resilient, self-healing* tagline maps to concrete primitives — re
 
 ## Simple Example: Parallel Processing
 
-Here is a real-world example showing how to split execution into parallel tasks and join them back together.
+Here is a real-world example: fan a price lookup out across four exchanges, each returning a
+batch of quotes, tolerate one of them being down, pool every quote that landed into a single
+reference price, then stream a live tick feed against it. It combines **Split/Join** with a
+**quorum** join strategy, **per-task retries**, **resource injection**, and a windowed
+**`StreamTask`**.
 
-```mermaid
-graph TD
-    Start([Start]) --> Split{Split}
-    Split -->|Source 1| T1[FetchSourceTask 1]
-    Split -->|Source 2| T2[FetchSourceTask 2]
-    Split -->|Source 3| T3[FetchSourceTask 3]
-    T1 --> Join{Join All}
-    T2 --> Join
-    T3 --> Join
-    Join --> Aggregate[AggregateTask]
-    Aggregate --> Complete([Complete])
-```
+<div align="center">
+  <img src="https://raw.githubusercontent.com/nassor/cano/main/docs/static/split-join-quorum.svg" alt="Four FetchPriceTask instances run in parallel from Start, each returning a batch of quotes: alpha sends 2 averaging 101.28, beta 4 averaging 101.43, gamma 6 averaging 101.00, and delta retries twice and still fails. JoinStrategy::Quorum(3) proceeds on the three that reported. Aggregate pools all 12 quotes into a single quote-weighted reference of 101.19, so the deeper books pull it further than the thin one. A StreamTask then consumes the trade-tick feed, flushing one window of three ticks at a time and looping until the feed is exhausted, at which point on_close moves the workflow to Complete. Fewer than three reporting exchanges would instead return Err(CanoError::Workflow)." width="760">
+</div>
 
 ```rust
 use cano::prelude::*;
+use futures_util::{Stream, stream}; // StreamTask sources are plain `futures` streams
+use std::pin::Pin;
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum FlowState {
     Start,
     Aggregate,
+    Monitor,
     Complete,
 }
 
-// A task that simulates fetching a numeric value from a source.
+// One row per exchange: its name, the batch of quotes it returns, and whether it's
+// simulated as unreachable (e.g. down for maintenance). Exchanges return different
+// numbers of quotes, and every quote counts toward the reference price — so a deeper
+// book pulls it further than a thin one.
+const EXCHANGES: &[(&str, &[f64], bool)] = &[
+    ("alpha", &[101.20, 101.36], false),
+    ("beta", &[101.45, 101.30, 101.55, 101.42], false),
+    ("gamma", &[100.95, 101.10, 100.85, 101.05, 100.90, 101.15], false),
+    ("delta", &[], true), // unreachable — every attempt fails
+];
+
+// Fetches a batch of quotes from one exchange. Real networks are flaky, so each task
+// carries its own retry budget: exponential backoff, up to 2 retries.
 #[derive(Clone)]
-struct FetchSourceTask {
-    source_id: u32,
+struct FetchPriceTask {
+    exchange: &'static str,
+    quotes: &'static [f64],
+    unreachable: bool,
 }
 
 #[task(state = FlowState)]
-impl FetchSourceTask {
+impl FetchPriceTask {
+    fn config(&self) -> TaskConfig {
+        TaskConfig::new().with_exponential_retry(2)
+    }
+
     async fn run(&self, res: &Resources) -> Result<TaskResult<FlowState>, CanoError> {
         // Look up the shared store from the workflow's resources.
         let store = res.get::<MemoryStore, _>("store")?;
 
-        // Simulate async work.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Simulate the network round-trip.
+        tokio::time::sleep(Duration::from_millis(20)).await;
 
-        // Each source contributes a value; downstream aggregation will sum them.
-        let value: u64 = (self.source_id as u64) * 10;
-        let key = format!("source_{}", self.source_id);
-        store.put(&key, value)?;
+        if self.unreachable {
+            // Retries are applied by the engine; after they're exhausted this task
+            // is simply one of the split's failures.
+            return Err(CanoError::task_execution(format!(
+                "{}: connection refused",
+                self.exchange
+            )));
+        }
 
+        store.put(&format!("quotes_{}", self.exchange), self.quotes.to_vec())?;
         Ok(TaskResult::Single(FlowState::Aggregate))
     }
 }
 
-// Runs after the split: reads each per-source value back out and sums them.
-struct AggregateTask {
-    source_ids: Vec<u32>,
+// Runs once the join is satisfied: pools every quote that landed. Flattening the batches
+// means the reference is quote-weighted, not exchange-weighted.
+struct AggregatePricesTask {
+    exchanges: Vec<&'static str>,
 }
 
 #[task(state = FlowState)]
-impl AggregateTask {
+impl AggregatePricesTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<FlowState>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
 
-        let mut total: u64 = 0;
-        for id in &self.source_ids {
-            let value: u64 = store.get(&format!("source_{}", id))?;
-            total += value;
-        }
-        store.put("total", total)?;
-        println!("Aggregated total: {total}");
+        let batches: Vec<Vec<f64>> = self
+            .exchanges
+            .iter()
+            .filter_map(|exchange| store.get::<Vec<f64>>(&format!("quotes_{exchange}")).ok())
+            .collect();
+        let reporting = batches.len();
+        let total = self.exchanges.len();
 
+        let quotes: Vec<f64> = batches.into_iter().flatten().collect();
+        let reference = quotes.iter().sum::<f64>() / quotes.len() as f64;
+        store.put("average_price", reference)?;
+        println!(
+            "Reference {reference:.2} from {} quotes across {reporting}/{total} exchanges",
+            quotes.len()
+        );
+
+        Ok(TaskResult::Single(FlowState::Monitor))
+    }
+}
+
+// A bounded feed of trade ticks arriving after the reference price is known.
+const TICKS: &[f64] = &[101.30, 101.05, 103.90, 101.10, 100.80, 98.20, 101.35];
+
+// Flag a tick once it strays this far from the aggregated reference price.
+const ALERT_PCT: f64 = 1.0;
+
+#[derive(Clone, Copy)]
+struct Tick {
+    seq: u64,
+    price: f64,
+}
+
+// Consumes the tick feed continuously, emitting once per window instead of once at the
+// end. The feed is bounded here so the example terminates; a real source (Kafka, a
+// WebSocket) would run until the CancellationToken fires.
+struct MonitorTicksTask;
+
+#[task::stream(state = FlowState)]
+impl MonitorTicksTask {
+    fn window(&self) -> StreamWindow {
+        StreamWindow::Count(3)
+    }
+
+    // `cursor` is the last committed position, so a resumed run skips what it already saw.
+    async fn open(
+        &self,
+        _res: &Resources,
+        cursor: Option<u64>,
+    ) -> Result<Pin<Box<dyn Stream<Item = Tick> + Send>>, CanoError> {
+        let resume_at = cursor.map_or(0, |seq| seq + 1);
+        let ticks: Vec<Tick> = TICKS
+            .iter()
+            .enumerate()
+            .map(|(i, &price)| Tick { seq: i as u64, price })
+            .filter(|tick| tick.seq >= resume_at)
+            .collect();
+        let feed: Pin<Box<dyn Stream<Item = Tick> + Send>> = Box::pin(stream::iter(ticks));
+        Ok(feed)
+    }
+
+    // Per-item work: how far this tick strays from the reference the split produced.
+    // The returned cursor is the position to commit once this item's window flushes.
+    async fn process_item(&self, res: &Resources, item: Tick) -> Result<(f64, u64), CanoError> {
+        let reference: f64 = res.get::<MemoryStore, _>("store")?.get("average_price")?;
+        Ok(((item.price - reference) / reference * 100.0, item.seq))
+    }
+
+    // Per-window emission: downstream sees progress before the feed ends.
+    async fn flush_window(
+        &self,
+        res: &Resources,
+        deviations: Vec<f64>,
+    ) -> Result<WindowSignal<FlowState>, CanoError> {
+        let store = res.get::<MemoryStore, _>("store")?;
+        let outliers = deviations.iter().filter(|d| d.abs() >= ALERT_PCT).count();
+        let worst = deviations.iter().fold(0.0f64, |acc, d| acc.max(d.abs()));
+        println!(
+            "  window of {}: worst {worst:.2}% — {outliers} outlier(s)",
+            deviations.len()
+        );
+
+        let seen: usize = store.get("outliers").unwrap_or(0);
+        store.put("outliers", seen + outliers)?;
+        Ok(WindowSignal::Continue)
+    }
+
+    // The feed ran dry: the partial window is flushed, then this picks the next state.
+    async fn on_close(
+        &self,
+        res: &Resources,
+        reason: CloseReason,
+    ) -> Result<TaskResult<FlowState>, CanoError> {
+        let total: usize = res.get::<MemoryStore, _>("store")?.get("outliers").unwrap_or(0);
+        println!("Tick feed closed ({reason:?}): {total} outlier(s) beyond {ALERT_PCT:.0}%");
         Ok(TaskResult::Single(FlowState::Complete))
     }
 }
@@ -123,27 +231,38 @@ async fn main() -> Result<(), CanoError> {
     // 1. Register shared resources (the store is one resource among many).
     let resources = Resources::new().insert("store", MemoryStore::new());
 
-    // 2. Define parallel tasks.
-    let source_ids = vec![1, 2, 3];
-    let sources: Vec<FetchSourceTask> = source_ids
+    // 2. Build one fetch task per exchange, each carrying its own retry budget.
+    let exchanges: Vec<&'static str> = EXCHANGES.iter().map(|&(name, _, _)| name).collect();
+    let fetchers: Vec<FetchPriceTask> = EXCHANGES
         .iter()
-        .map(|&source_id| FetchSourceTask { source_id })
+        .map(|&(exchange, quotes, unreachable)| FetchPriceTask {
+            exchange,
+            quotes,
+            unreachable,
+        })
         .collect();
 
     // 3. Configure the join strategy.
-    // Wait for ALL fetches to succeed, then transition to Aggregate.
-    let join_config = JoinConfig::new(JoinStrategy::All, FlowState::Aggregate)
+    // Tolerate one exchange being down: proceed once 3 of the 4 report quotes. Fewer
+    // than 3 successes returns `Err(CanoError::Workflow(..))` from `orchestrate` rather
+    // than advancing on incomplete data.
+    let join_config = JoinConfig::new(JoinStrategy::Quorum(3), FlowState::Aggregate)
         .with_timeout(Duration::from_secs(5));
 
-    // 4. Build the workflow: Start -> Split fetches -> Aggregate -> Complete.
+    // 4. Build the workflow: Start -> Split fetches -> Aggregate -> Monitor -> Complete.
+    //    `register_stream` is the durable, cancellable path; plain `register` would run a
+    //    non-persistent in-memory companion loop instead.
     let workflow = Workflow::new(resources)
-        .register_split(FlowState::Start, sources, join_config)
-        .register(FlowState::Aggregate, AggregateTask { source_ids })
+        .register_split(FlowState::Start, fetchers, join_config)
+        .register(FlowState::Aggregate, AggregatePricesTask { exchanges })
+        .register_stream(FlowState::Monitor, MonitorTicksTask)
         .add_exit_state(FlowState::Complete);
 
     // 5. Run.
-    let result = workflow.orchestrate(FlowState::Start, CancellationToken::disabled()).await?;
-    println!("Workflow finished: {:?}", result);
+    let result = workflow
+        .orchestrate(FlowState::Start, CancellationToken::disabled())
+        .await?;
+    println!("Workflow finished: {result:?}");
 
     Ok(())
 }

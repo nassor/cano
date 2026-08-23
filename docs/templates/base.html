@@ -5,162 +5,199 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}{{ config.title }}{% endblock title %}</title>
     <meta name="description" content="{% block description %}{{ config.description }}{% endblock description %}">
+    <meta name="color-scheme" content="light dark">
+    <meta property="og:type" content="website">
     <meta property="og:title" content="{% block og_title %}{{ config.title }}{% endblock og_title %}">
     <meta property="og:description" content="{% block og_description %}{{ config.description }}{% endblock og_description %}">
-    <meta property="og:type" content="website">
     <meta property="og:image" content="{{ get_url(path='logo.png') }}">
     <link rel="icon" href="{{ get_url(path='favicon.svg') }}" type="image/svg+xml">
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+
+    {# Both classes are set before the stylesheet so nothing flashes. `js` gates
+       every selector that starts at opacity 0, so with scripting off the reveal
+       animations never hide content. `data-theme` is only written when the
+       reader has chosen a theme; otherwise the stylesheet follows the system
+       through `light-dark()`. #}
+    <script>
+        document.documentElement.classList.add('js');
+        try {
+            var t = localStorage.getItem('cano:theme');
+            if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+        } catch (e) {}
+    </script>
+
     <link rel="stylesheet" href="{{ get_url(path='styles.css') }}">
-    {% block head_extra %}
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css">
-    {% endblock head_extra %}
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;700&family=Fira+Code&display=swap" rel="stylesheet">
     {% block scripts_head %}
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" data-manual></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-rust.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-toml.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-rust.min.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-toml.min.js" defer></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-bash.min.js" defer></script>
     {% endblock scripts_head %}
-    <script src="{{ get_url(path='swup.umd.js') }}" defer></script>
     <script src="{{ get_url(path='script.js') }}" defer></script>
 </head>
 <body>
-    <button id="menu-toggle" class="menu-toggle" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
-    <div class="sidebar-overlay"></div>
+    <a class="skip-link" href="#content">Skip to content</a>
 
-    <nav class="sidebar" role="navigation" aria-label="Main navigation">
-        <a href="{{ get_url(path='@/_index.md') }}" class="logo">
-            <img src="{{ get_url(path='logo.png') }}" alt="">
-            Cano
-        </a>
-        <ul class="nav-links nav-top">
-            <li><a href="{{ get_url(path='@/_index.md') }}">Home</a></li>
-        </ul>
-        <details class="nav-section" id="nav-concepts" open>
-            <summary class="nav-section-label">Concepts</summary>
-            <ul class="nav-links">
-                <li>
-                    <a href="{{ get_url(path='@/task/_index.md') }}">Tasks</a>
-                    <ul class="nav-links nav-sublinks">
-                        <li><a href="{{ get_url(path='@/task/configuration.md') }}">Configuration</a></li>
-                    </ul>
-                </li>
-                <li>
-                    <a href="{{ get_url(path='@/resources/_index.md') }}">Resources</a>
-                    <ul class="nav-links nav-sublinks">
-                        <li><a href="{{ get_url(path='@/resources/lifecycle-and-concurrency.md') }}">Lifecycle &amp; Concurrency</a></li>
-                        <li><a href="{{ get_url(path='@/store/_index.md') }}">MemoryStore</a></li>
-                    </ul>
-                </li>
-                <li>
-                    <a href="{{ get_url(path='@/workflows/_index.md') }}">Workflows</a>
-                    <ul class="nav-links nav-sublinks">
-                        <li><a href="{{ get_url(path='@/workflows/validation-and-errors.md') }}">Validation &amp; Errors</a></li>
-                    </ul>
-                </li>
-                <li>
-                    <a href="{{ get_url(path='@/scheduler/_index.md') }}">Scheduler</a>
-                    <ul class="nav-links nav-sublinks">
-                        <li><a href="{{ get_url(path='@/scheduler/backoff-and-trip.md') }}">Backoff &amp; Trip</a></li>
-                    </ul>
-                </li>
-            </ul>
-        </details>
-        <details class="nav-section" id="nav-processing-model">
-            <summary class="nav-section-label">Processing Models</summary>
-            <ul class="nav-links">
-                <li><a href="{{ get_url(path='@/router-task/_index.md') }}">RouterTask</a></li>
-                <li><a href="{{ get_url(path='@/poll-task/_index.md') }}">PollTask</a></li>
-                <li><a href="{{ get_url(path='@/timer-task/_index.md') }}">TimerTask</a></li>
-                <li><a href="{{ get_url(path='@/batch-task/_index.md') }}">BatchTask</a></li>
-                <li><a href="{{ get_url(path='@/stepped-task/_index.md') }}">SteppedTask</a></li>
-                <li><a href="{{ get_url(path='@/stream-task/_index.md') }}">StreamTask</a></li>
-            </ul>
-        </details>
-        <details class="nav-section" id="nav-advanced-workflows">
-            <summary class="nav-section-label">Advanced Workflows</summary>
-            <ul class="nav-links">
-                <li>
-                    <a href="{{ get_url(path='@/split-join/_index.md') }}">Split &amp; Join</a>
-                    <ul class="nav-links nav-sublinks">
-                        <li><a href="{{ get_url(path='@/split-join/join-strategies.md') }}">Join Strategies</a></li>
-                        <li><a href="{{ get_url(path='@/split-join/parallel-patterns.md') }}">Parallel Patterns</a></li>
-                    </ul>
-                </li>
-                <li>
-                    <a href="{{ get_url(path='@/resilience/_index.md') }}">Resilience</a>
-                    <ul class="nav-links nav-sublinks">
-                        <li><a href="{{ get_url(path='@/resilience/circuit-breakers.md') }}">Circuit Breakers</a></li>
-                        <li><a href="{{ get_url(path='@/resilience/rate-limiting.md') }}">Rate Limiting</a></li>
-                    </ul>
-                </li>
-                <li><a href="{{ get_url(path='@/recovery/_index.md') }}">Recovery</a></li>
-                <li><a href="{{ get_url(path='@/saga/_index.md') }}">Saga</a></li>
-            </ul>
-        </details>
-        <details class="nav-section" id="nav-observability">
-            <summary class="nav-section-label">Observability</summary>
-            <ul class="nav-links">
-                <li><a href="{{ get_url(path='@/tracing/_index.md') }}">Tracing</a></li>
-                <li><a href="{{ get_url(path='@/metrics/_index.md') }}">Metrics</a></li>
-                <li><a href="{{ get_url(path='@/observers/_index.md') }}">Observers</a></li>
-            </ul>
-        </details>
-        <details class="nav-section" id="nav-testing">
-            <summary class="nav-section-label">Testing</summary>
-            <ul class="nav-links">
-                <li><a href="{{ get_url(path='@/testing/_index.md') }}">Testing</a></li>
-            </ul>
-        </details>
-        <div class="sidebar-footer">
-            <span class="version-badge">v{{ config.extra.version }}</span>
-            <div class="sidebar-links">
-                <a href="{{ config.extra.github_url | safe }}" title="GitHub Repository" aria-label="GitHub">GitHub</a>
-                <a href="{{ config.extra.crates_url | safe }}" title="Crates.io" aria-label="Crates.io">Crates.io</a>
-                <a href="{{ config.extra.docsrs_url | safe }}" title="API Documentation" aria-label="API Docs">Docs.rs</a>
+{# One walk over the nav data fills the breadcrumb group and the pager, so the
+   sidebar, the trail and the previous/next links can never disagree.
+
+   A nav item may carry `children` — a sub-page nested under it in both the
+   sidebar tree and the reading order. The walk below visits every item and
+   then its children in document order, so a child participates in nav_prev /
+   nav_next exactly like a top-level item.
+
+   Trailing slashes are trimmed on both sides: `get_url(path='/')` returns the
+   bare base URL while `current_url` for the same page carries the slash, and
+   the home page would otherwise match nothing. Tera cannot compare a function
+   call directly, so every URL is bound to a variable first. #}
+{%- set here = current_url | default(value="") | trim_end_matches(pat="/") -%}
+{%- set home = get_url(path='/') -%}
+{%- set home_key = home | trim_end_matches(pat="/") -%}
+{%- set_global nav_group = "" -%}
+{%- set_global nav_prev = false -%}
+{%- set_global nav_prev_group = "" -%}
+{%- set_global nav_next = false -%}
+{%- set_global nav_next_group = "" -%}
+{%- set_global nav_seen = false -%}
+{%- set_global nav_last = false -%}
+{%- set_global nav_last_group = "" -%}
+{%- for group in config.extra.nav -%}
+    {%- for item in group.items -%}
+        {%- set_global nav_walk = [item] | concat(with=item.children | default(value=[])) -%}
+        {%- for stop in nav_walk -%}
+            {%- set stop_url = get_url(path=stop.path) | trim_end_matches(pat="/") -%}
+            {%- if nav_seen and not nav_next -%}
+                {%- set_global nav_next = stop -%}
+                {%- set_global nav_next_group = group.label -%}
+            {%- endif -%}
+            {%- if stop_url == here -%}
+                {%- set_global nav_seen = true -%}
+                {%- set_global nav_group = group.label -%}
+                {%- set_global nav_prev = nav_last -%}
+                {%- set_global nav_prev_group = nav_last_group -%}
+            {%- endif -%}
+            {%- set_global nav_last = stop -%}
+            {%- set_global nav_last_group = group.label -%}
+        {%- endfor -%}
+    {%- endfor -%}
+{%- endfor -%}
+
+    <header class="site-header">
+        <div class="header-bar">
+            <button id="nav-toggle" class="icon-btn nav-toggle" aria-label="Open navigation" aria-expanded="false" aria-controls="site-nav">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+            </button>
+
+            <a href="{{ home | safe }}" class="brand">
+                <img src="{{ get_url(path='logo.png') }}" alt="">
+                <span>Cano</span>
+            </a>
+            <a class="version-badge" href="{{ config.extra.docsrs_url | safe }}" title="API documentation">v{{ config.extra.version }}</a>
+
+            <div class="header-actions">
+                <button type="button" id="search-open" class="search-trigger" aria-label="Search documentation">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+                    <span>Search documentation</span>
+                    <kbd class="kbd">Ctrl K</kbd>
+                </button>
+
+                <a class="icon-btn" href="{{ config.extra.github_url | safe }}" aria-label="Cano on GitHub">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" class="icon-fill"><path d="M12 .5A11.5 11.5 0 0 0 .5 12a11.5 11.5 0 0 0 7.86 10.92c.58.1.79-.25.79-.56v-2c-3.2.7-3.88-1.37-3.88-1.37-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.7.08-.7 1.16.08 1.77 1.2 1.77 1.2 1.03 1.77 2.7 1.26 3.36.96.1-.75.4-1.26.73-1.55-2.56-.29-5.25-1.28-5.25-5.7 0-1.26.45-2.29 1.19-3.1-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.18 1.18a11 11 0 0 1 5.79 0c2.2-1.5 3.17-1.18 3.17-1.18.63 1.59.24 2.76.12 3.05.74.81 1.19 1.84 1.19 3.1 0 4.43-2.7 5.4-5.27 5.69.41.36.78 1.06.78 2.14v3.17c0 .31.21.67.8.56A11.5 11.5 0 0 0 23.5 12 11.5 11.5 0 0 0 12 .5z"/></svg>
+                </a>
+
+                <button type="button" id="theme-toggle" class="icon-btn" aria-label="Switch theme">
+                    <svg viewBox="0 0 24 24" aria-hidden="true" class="icon-sun"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.2 5.2l1.4 1.4M17.4 17.4l1.4 1.4M18.8 5.2l-1.4 1.4M6.6 17.4l-1.4 1.4"/></svg>
+                    <svg viewBox="0 0 24 24" aria-hidden="true" class="icon-moon"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></svg>
+                </button>
             </div>
         </div>
-    </nav>
-    <script>
-        /* Pre-paint: paint the sidebar in its final state so it never visibly jumps
-           on first load / hard refresh. Runs synchronously (parser-blocking) after
-           the nav is parsed and styles.css has resolved layout. Only SETS state —
-           the toggle-writer listener lives in script.js. Mirror of script.js's
-           setActiveLinks(); keep the two in sync. */
-        (function () {
-            var nav = document.querySelector('.sidebar');
-            if (!nav) return;
-            var norm = function (p) { return p.replace(/\/+$/, '') || '/'; };
-            var here = norm(location.pathname);
-            try {
-                var secs = nav.querySelectorAll('details.nav-section');
-                for (var i = 0; i < secs.length; i++) {
-                    var s = secs[i], v = null;
-                    try { v = localStorage.getItem('nav-section:' + s.id); } catch (e) {}
-                    if (v === 'open') s.open = true;
-                    else if (v === 'closed') s.open = false;
-                }
-                var links = nav.querySelectorAll('.nav-links a');
-                for (var j = 0; j < links.length; j++) {
-                    var a = links[j];
-                    if (norm(new URL(a.href, location.origin).pathname) !== here) continue;
-                    a.classList.add('active');
-                    a.setAttribute('aria-current', 'page');
-                    var el = a.parentElement;
-                    while (el) {
-                        if (el.tagName === 'DETAILS') {
-                            var st = null;
-                            try { st = localStorage.getItem('nav-section:' + el.id); } catch (e) {}
-                            if (st !== 'closed') el.open = true;
-                        }
-                        el = el.parentElement;
-                    }
-                }
-            } catch (e) {}
-        })();
-    </script>
+    </header>
 
-    <main id="swup" class="main-content transition-main">
-        {% block content %}{% endblock content %}
-    </main>
+    <div class="sidebar-overlay"></div>
+
+    <div class="shell">
+        <nav class="sidebar" id="site-nav" aria-label="Documentation">
+            <div class="sidebar-inner">
+                {% for group in config.extra.nav %}
+                <div class="nav-group">
+                    <div class="nav-group-label">{{ group.label }}</div>
+                    <ul class="nav-links">
+                        {% for item in group.items %}
+                        <li>
+                            <a href="{{ get_url(path=item.path) }}">{{ item.title }}</a>
+                            {% if item.children %}
+                            <ul class="nav-links nav-sublinks">
+                                {% for child in item.children %}
+                                <li><a href="{{ get_url(path=child.path) }}">{{ child.title }}</a></li>
+                                {% endfor %}
+                            </ul>
+                            {% endif %}
+                        </li>
+                        {% endfor %}
+                    </ul>
+                </div>
+                {% endfor %}
+
+                <p class="nav-note">
+                    <a href="{{ config.extra.github_url | safe }}">GitHub</a> &middot;
+                    <a href="{{ config.extra.crates_url | safe }}">Crates.io</a> &middot;
+                    <a href="{{ config.extra.docsrs_url | safe }}">Docs.rs</a>
+                </p>
+            </div>
+        </nav>
+
+        <aside class="toc" id="page-toc" hidden></aside>
+
+        <main class="content" id="content">
+            {% if nav_group and here != home_key %}
+            <nav class="breadcrumb" aria-label="Breadcrumb">
+                <a href="{{ home | safe }}">Docs</a>
+                <span aria-hidden="true">/</span>
+                <span>{{ nav_group }}</span>
+            </nav>
+            {% endif %}
+
+            {% block content %}{% endblock content %}
+
+            {% if nav_prev or nav_next %}
+            <nav class="pager" aria-label="Pagination">
+                {% if nav_prev %}
+                <a class="pager-link pager-prev" href="{{ get_url(path=nav_prev.path) }}" rel="prev">
+                    <span class="pager-dir">Previous{% if nav_prev_group != nav_group %} &middot; {{ nav_prev_group }}{% endif %}</span>
+                    <span class="pager-title">{{ nav_prev.title }}</span>
+                </a>
+                {% else %}<span></span>{% endif %}
+                {% if nav_next %}
+                <a class="pager-link pager-next" href="{{ get_url(path=nav_next.path) }}" rel="next">
+                    <span class="pager-dir">Next{% if nav_next_group != nav_group %} &middot; {{ nav_next_group }}{% endif %}</span>
+                    <span class="pager-title">{{ nav_next.title }}</span>
+                </a>
+                {% endif %}
+            </nav>
+            {% endif %}
+        </main>
+    </div>
+
+    <button class="back-to-top" aria-label="Back to top">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    </button>
+
+    <dialog id="search-dialog" class="cmdk" aria-label="Search documentation" data-index="{{ get_url(path='search-index.json') }}">
+        <div class="cmdk-head">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg>
+            <input type="text" id="search-input" class="cmdk-input" placeholder="Search documentation" autocomplete="off" spellcheck="false"
+                   role="combobox" aria-expanded="false" aria-controls="search-results" aria-autocomplete="list">
+            <button type="button" class="cmdk-close" aria-label="Close search">Esc</button>
+        </div>
+        <div class="cmdk-results" id="search-results" role="listbox" aria-label="Results"></div>
+        <div class="cmdk-foot">
+            <span><kbd class="kbd">&uarr;</kbd><kbd class="kbd">&darr;</kbd> to navigate</span>
+            <span><kbd class="kbd">&crarr;</kbd> to open</span>
+            <span><kbd class="kbd">esc</kbd> to close</span>
+        </div>
+    </dialog>
 </body>
 </html>

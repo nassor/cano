@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 712" width="760" height="712" role="img">
+<title>Four FetchPriceTask instances run in parallel from Start, each returning a batch of quotes: alpha sends 2 averaging 101.28, beta 4 averaging 101.43, gamma 6 averaging 101.00, and delta retries twice and still fails. JoinStrategy::Quorum(3) proceeds on the three that reported. Aggregate pools all 12 quotes into a single quote-weighted reference of 101.19, so the deeper books pull it further than the thin one. A StreamTask then consumes the trade-tick feed, flushing one window of three ticks at a time and looping until the feed is exhausted, at which point on_close moves the workflow to Complete. Fewer than three reporting exchanges would instead return Err(CanoError::Workflow).</title>
+<g font-family="-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif">
+<rect x="0.5" y="0.5" width="759" height="711" rx="14" fill="#fafafa" stroke="#e4e4e7" stroke-width="1"/>
+<text x="24" y="29.9" fill="#71717a" font-size="11" font-weight="600" font-family="ui-monospace,'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace">PRICE FETCH — SPLIT / JOIN → STREAM</text>
+<defs>
+<marker id="arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#456487"/></marker>
+<marker id="arrow-hot" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#c9520d"/></marker>
+</defs>
+<rect x="285" y="60" width="190" height="46" rx="10" fill="#4570a1" fill-opacity="0.07" stroke="#456487" stroke-width="1.4"/>
+<text x="380" y="88.2" fill="#0d0d10" font-size="15" font-weight="600" text-anchor="middle">Start</text>
+<text x="736" y="128" fill="#71717a" font-size="11.5" font-family="ui-monospace,'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace" text-anchor="end">register_split — one task per exchange</text>
+<path d="M380,106 V140 Q380,148 372,148 H115 Q107,148 107,156 V190" fill="none" stroke="#456487" stroke-width="1.6" marker-end="url(#arrow)"/>
+<path d="M380,106 V140 Q380,148 372,148 H297 Q289,148 289,156 V190" fill="none" stroke="#456487" stroke-width="1.6" marker-end="url(#arrow)"/>
+<path d="M380,106 V140 Q380,148 388,148 H463 Q471,148 471,156 V190" fill="none" stroke="#456487" stroke-width="1.6" marker-end="url(#arrow)"/>
+<path d="M380,106 V140 Q380,148 388,148 H645 Q653,148 653,156 V190" fill="none" stroke="#456487" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="29" y="190" width="156" height="56" rx="10" fill="#4570a1" fill-opacity="0.07" stroke="#456487" stroke-width="1.4"/>
+<text x="107" y="216.2" fill="#0d0d10" font-size="14" font-weight="600" text-anchor="middle">alpha</text>
+<text x="107" y="234.3" fill="#158e66" font-size="11.5" font-family="ui-monospace,'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace" text-anchor="middle">2 quotes · 101.28</text>
+<rect x="211" y="190" width="156" height="56" rx="10" fill="#4570a1" fill-opacity="0.07" stroke="#456487" stroke-width="1.4"/>
+<text x="289" y="216.2" fill="#0d0d10" font-size="14" font-weight="600" text-anchor="middle">beta</text>
+<text x="289" y="234.3" fill="#158e66" font-size="11.5" font-family="ui-monospace,'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace" text-anchor="middle">4 quotes · 101.43</text>
+<rect x="393" y="190" width="156" height="56" rx="10" fill="#4570a1" fill-opacity="0.07" stroke="#456487" stroke-width="1.4"/>
+<text x="471" y="216.2" fill="#0d0d10" font-size="14" font-weight="600" text-anchor="middle">gamma</text>
+<text x="471" y="234.3" fill="#158e66" font-size="11.5" font-family="ui-monospace,'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace" text-anchor="middle">6 quotes · 101.00</text>
+<rect x="575" y="190" width="156" height="56" rx="10" fill="#4570a1" fill-opacity="0.07" stroke="#456487" stroke-width="1.4"/>
+<text x="653" y="216.2" fill="#0d0d10" font-size="14" font-weight="600" text-anchor="middle">delta</text>
+<text x="653" y="234.3" fill="#ca2121" font-size="11.5" font-family="ui-monospace,'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace" text-anchor="middle">retry ×2 → down</text>
+<path d="M107,246 V268 Q107,276 115,276 H348 Q356,276 356,284 V328" fill="none" stroke="#456487" stroke-width="1.6" marker-end="url(#arrow)"/>
+<path d="M289,246 V288 Q289,296 297,296 H364 Q372,296 372,304 V323.3" fill="none" stroke="#456487" stroke-width="1.6" marker-end="url(#arrow)"/>
+<path d="M471,246 V288 Q471,296 463,296 H396 Q388,296 388,304 V323.3" fill="none" stroke="#456487" stroke-width="1.6" marker-end="url(#arrow)"/>
+<path d="M653,246 V268 Q653,276 645,276 H412 Q404,276 404,284 V328" fill="none" stroke="#456487" stroke-width="1.6" marker-end="url(#arrow)"/>
+<path d="M380,318 L510,356 L380,394 L250,356 Z" fill="#c9520d" fill-opacity="0.09" stroke="#c9520d" stroke-width="1.6"/>
+<text x="380" y="351.9" fill="#0d0d10" font-size="14" font-weight="600" text-anchor="middle">Quorum(3)</text>
+<text x="380" y="371" fill="#71717a" font-size="11.5" text-anchor="middle">of 4 exchanges</text>
+<path d="M250,356 V412 Q250,420 242,420 H238 Q230,420 230,428 V450" fill="none" stroke="#c9520d" stroke-width="1.6" marker-end="url(#arrow-hot)"/>
+<text x="240" y="336" fill="#c9520d" font-size="11.5" font-family="ui-monospace,'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace" text-anchor="end">3 of 4 succeeded</text>
+<path d="M510,356 V412 Q510,420 518,420 H567 Q575,420 575,428 V450" fill="none" stroke="#456487" stroke-width="1.6" marker-end="url(#arrow)"/>
+<text x="520" y="336" fill="#71717a" font-size="11.5" font-family="ui-monospace,'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace">&lt; 3 succeeded</text>
+<rect x="135" y="450" width="190" height="56" rx="10" fill="#4570a1" fill-opacity="0.07" stroke="#456487" stroke-width="1.4"/>
+<text x="230" y="476.2" fill="#0d0d10" font-size="14" font-weight="600" text-anchor="middle">Aggregate</text>
+<text x="230" y="494.3" fill="#71717a" font-size="11.5" font-family="ui-monospace,'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace" text-anchor="middle">12 quotes → 101.19</text>
+<path d="M230,506 V536" fill="none" stroke="#456487" stroke-width="1.6" marker-end="url(#arrow)"/>
+<rect x="115" y="536" width="230" height="56" rx="10" fill="#4570a1" fill-opacity="0.07" stroke="#456487" stroke-width="1.4"/>
+<text x="230" y="562.2" fill="#0d0d10" font-size="14" font-weight="600" text-anchor="middle">Monitor ticks</text>
+<text x="230" y="580.3" fill="#71717a" font-size="11.5" font-family="ui-monospace,'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace" text-anchor="middle">stream · window of 3</text>
+<path d="M345,564.0 H384 Q392,564.0 392,556.0 V528 Q392,520 384,520 H276 Q268,520 268,528 V536" fill="none" stroke="#456487" stroke-width="1.6" marker-end="url(#arrow)"/>
+<text x="400" y="546" fill="#71717a" font-size="11.5" font-family="ui-monospace,'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace">next window</text>
+<path d="M230,592 V622" fill="none" stroke="#456487" stroke-width="1.6" marker-end="url(#arrow)"/>
+<text x="246" y="611" fill="#71717a" font-size="11.5" font-family="ui-monospace,'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace">on_close(Exhausted)</text>
+<rect x="145" y="622" width="170" height="46" rx="10" fill="#158e66" fill-opacity="0.10" stroke="#158e66" stroke-width="1.4"/>
+<text x="230" y="650.2" fill="#158e66" font-size="15" font-weight="600" text-anchor="middle">Complete</text>
+<rect x="450" y="450" width="250" height="56" rx="10" fill="#ca2121" fill-opacity="0.10" stroke="#ca2121" stroke-width="1.4"/>
+<text x="575" y="475.8" fill="#ca2121" font-size="13" font-weight="600" font-family="ui-monospace,'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace" text-anchor="middle">Err(CanoError::Workflow)</text>
+<text x="575" y="494.3" fill="#71717a" font-size="11.5" text-anchor="middle">orchestrate() returns early</text>
+<text x="380" y="696.2" fill="#71717a" font-size="12" text-anchor="middle">Every quote counts: 12 quotes from 3 exchanges set the reference, so gamma's 6 pull harder than alpha's 2.</text>
+</g>
+</svg>
