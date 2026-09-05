@@ -321,7 +321,7 @@ fn expand_inherent_impl(
 fn extract_state_key_paths_and_prefix(
     item_impl: &ItemImpl,
 ) -> syn::Result<(Type, Option<Type>, Path, Path, ModulePrefix)> {
-    let (_, trait_path, _) = item_impl
+    let (trait_path, _) = item_impl
         .trait_
         .as_ref()
         .ok_or_else(|| syn::Error::new(item_impl.span(), "expected a trait impl block"))?;
@@ -466,7 +466,7 @@ fn synthesise_task_impl(
     let where_clause = &batch_impl.generics.where_clause;
     let self_ty = &batch_impl.self_ty;
 
-    let (_, batch_trait_path, _) = batch_impl.trait_.as_ref().ok_or_else(|| {
+    let (batch_trait_path, _) = batch_impl.trait_.as_ref().ok_or_else(|| {
         syn::Error::new(batch_impl.span(), "expected a BatchTask trait impl block")
     })?;
 

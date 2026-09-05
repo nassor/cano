@@ -264,7 +264,7 @@ fn expand_inherent_impl(
 fn extract_state_key_task_path_and_prefix(
     item_impl: &ItemImpl,
 ) -> syn::Result<(Type, Option<Type>, Path, ModulePrefix)> {
-    let (_, trait_path, _) = item_impl
+    let (trait_path, _) = item_impl
         .trait_
         .as_ref()
         .ok_or_else(|| syn::Error::new(item_impl.span(), "expected a trait impl block"))?;
@@ -362,7 +362,7 @@ fn synthesise_task_impl(
     let self_ty = &router_impl.self_ty;
 
     // The RouterTask path is the trait path from the impl header — used for UFCS calls.
-    let (_, router_trait_path, _) = router_impl.trait_.as_ref().ok_or_else(|| {
+    let (router_trait_path, _) = router_impl.trait_.as_ref().ok_or_else(|| {
         syn::Error::new(router_impl.span(), "expected a RouterTask trait impl block")
     })?;
 
