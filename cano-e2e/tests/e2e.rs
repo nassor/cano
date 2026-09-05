@@ -18,9 +18,9 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use cano_e2e::{UNITS, events, ledger_balance};
+use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
-use testcontainers_modules::postgres::Postgres;
 use tokio_postgres::{Client, NoTls};
 
 const APP_IMAGE: &str = "cano-workflow-app";
@@ -62,10 +62,26 @@ fn unique(prefix: &str) -> String {
 
 /// A scenario fixture: a Postgres container plus a private network app containers join.
 struct Fixture {
-    _pg: ContainerAsync<Postgres>,
+    _pg: ContainerAsync<GenericImage>,
     network: String,
     pg_host_port: u16,
     pg_name: String,
+}
+
+/// The Postgres image the fixture runs — an inline reproduction of what
+/// `testcontainers_modules::postgres::Postgres::default()` used to provide (that crate
+/// hard-pins `testcontainers ^0.27`, so it can't come along to 0.28).
+fn postgres_image() -> GenericImage {
+    // The official entrypoint logs this line twice: once for the throwaway server
+    // `initdb` runs (which then shuts down) and again for the real server. Waiting for a
+    // single occurrence would hand us a server that is about to stop, so wait for both —
+    // one per stream, exactly as the modules image did. `with_wait_for` appends to the
+    // list of ready conditions rather than replacing it, so both are honoured.
+    const READY: &str = "database system is ready to accept connections";
+    GenericImage::new("postgres", "11-alpine")
+        .with_exposed_port(5432.tcp())
+        .with_wait_for(WaitFor::message_on_stderr(READY))
+        .with_wait_for(WaitFor::message_on_stdout(READY))
 }
 
 impl Fixture {
@@ -73,7 +89,12 @@ impl Fixture {
         ensure_app_image();
         let network = unique("cano-e2e-net");
         let pg_name = unique("cano-e2e-pg");
-        let pg = Postgres::default()
+        let pg = postgres_image()
+            .with_env_var("POSTGRES_DB", "postgres")
+            .with_env_var("POSTGRES_USER", "postgres")
+            .with_env_var("POSTGRES_PASSWORD", "postgres")
+            // `fsync=off`: the modules image's default — these containers are throwaway.
+            .with_cmd(["-c", "fsync=off"])
             .with_network(&network)
             .with_container_name(&pg_name)
             .start()
@@ -114,7 +135,7 @@ impl Fixture {
         let mut cmd: Vec<String> = vec![self.container_dsn()];
         cmd.extend(args.iter().map(|s| s.to_string()));
         GenericImage::new(APP_IMAGE, APP_TAG)
-            .with_wait_for(testcontainers::core::WaitFor::message_on_stdout(wait_for))
+            .with_wait_for(WaitFor::message_on_stdout(wait_for))
             .with_startup_timeout(Duration::from_secs(90))
             .with_network(&self.network)
             .with_container_name(unique("cano-e2e-app"))
