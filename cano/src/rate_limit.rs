@@ -58,8 +58,57 @@ use crate::error::CanoError;
 use crate::resource::Resource;
 use cano_macros::resource;
 use parking_lot::Mutex;
+use smallvec::SmallVec;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// Park-until-admitted loop shared by the single-meter limiters
+/// ([`RateLimiter::acquire_n`] and [`FixedWindow::acquire_n`]).
+///
+/// Each iteration calls `admit`, which must lock the limiter's mutex (never held
+/// across an await), refill/roll state, and return `Ok(value)` after debiting
+/// when the cost is admitted, or `Err(wait)` with how long until the cost could
+/// be admitted. The loop sleeps `wait` and retries.
+///
+/// Metrics: `rate_limiter_acquired` + `rate_limiter_tokens_consumed(cost)` on
+/// admission, `rate_limiter_throttled` per park, and one `rate_limiter_wait`
+/// histogram when the call actually parked (so it measures blocked time rather
+/// than every successful acquisition).
+pub(crate) async fn park_until_admitted<T, F>(cost: u64, mut admit: F) -> T
+where
+    F: FnMut() -> Result<T, Duration>,
+{
+    // `cost` feeds the metrics below; keep it referenced on no-metrics builds.
+    #[cfg(not(feature = "metrics"))]
+    let _ = cost;
+    #[cfg(feature = "metrics")]
+    let start = Instant::now();
+    #[cfg(feature = "metrics")]
+    let mut waited = false;
+    loop {
+        match admit() {
+            Ok(value) => {
+                #[cfg(feature = "metrics")]
+                {
+                    crate::metrics::rate_limiter_acquired();
+                    crate::metrics::rate_limiter_tokens_consumed(cost);
+                    if waited {
+                        crate::metrics::rate_limiter_wait(start.elapsed());
+                    }
+                }
+                return value;
+            }
+            Err(wait) => {
+                #[cfg(feature = "metrics")]
+                {
+                    crate::metrics::rate_limiter_throttled("waited");
+                    waited = true;
+                }
+                tokio::time::sleep(wait).await;
+            }
+        }
+    }
+}
 
 /// Policy parameters controlling a [`RateLimiter`]'s token bucket.
 ///
@@ -233,61 +282,33 @@ impl RateLimiter {
     /// lock-free, allocation-free wait path. Reach for [`try_acquire_n`](Self::try_acquire_n)
     /// plus your own backoff if you need strict ordering.
     pub async fn acquire_n(self: &Arc<Self>, cost: u64) -> Permit {
-        #[cfg(feature = "metrics")]
-        let start = Instant::now();
-        #[cfg(feature = "metrics")]
-        let mut waited = false;
         let cost_f = cost as f64;
         let capacity = self.policy.capacity() as f64;
-        loop {
-            let wait = {
-                let mut st = self.inner.lock();
-                self.refill_locked(&mut st);
-                if st.tokens >= cost_f {
-                    st.tokens -= cost_f;
-                    None
-                } else if cost_f > capacity {
-                    // Never satisfiable — park on a single MAX sleep rather than busy-looping
-                    // on a finite deficit that the cap never lets the bucket reach.
-                    Some(Duration::MAX)
-                } else {
-                    let deficit = cost_f - st.tokens;
-                    // `try_from_secs_f64` clamps an astronomically slow refill (a wait that
-                    // would overflow `Duration`) to `Duration::MAX` instead of panicking.
-                    Some(
-                        Duration::try_from_secs_f64(
-                            (deficit / self.policy.refill_per_sec()).max(0.0),
-                        )
+        // Shared park-until-admitted loop (also used by `FixedWindow::acquire_n`);
+        // the closure owns the token-bucket-specific admit/refill decision.
+        park_until_admitted(cost, || {
+            let mut st = self.inner.lock();
+            self.refill_locked(&mut st);
+            if st.tokens >= cost_f {
+                st.tokens -= cost_f;
+                Ok(Permit {
+                    _limiter: Arc::clone(self),
+                })
+            } else if cost_f > capacity {
+                // Never satisfiable — park on a single MAX sleep rather than busy-looping
+                // on a finite deficit that the cap never lets the bucket reach.
+                Err(Duration::MAX)
+            } else {
+                let deficit = cost_f - st.tokens;
+                // `try_from_secs_f64` clamps an astronomically slow refill (a wait that
+                // would overflow `Duration`) to `Duration::MAX` instead of panicking.
+                Err(
+                    Duration::try_from_secs_f64((deficit / self.policy.refill_per_sec()).max(0.0))
                         .unwrap_or(Duration::MAX),
-                    )
-                }
-            };
-            match wait {
-                None => {
-                    #[cfg(feature = "metrics")]
-                    {
-                        crate::metrics::rate_limiter_acquired();
-                        crate::metrics::rate_limiter_tokens_consumed(cost);
-                        // Only record the wait histogram when this call actually parked, so it
-                        // measures blocked time rather than every successful acquisition.
-                        if waited {
-                            crate::metrics::rate_limiter_wait(start.elapsed());
-                        }
-                    }
-                    return Permit {
-                        _limiter: Arc::clone(self),
-                    };
-                }
-                Some(dur) => {
-                    #[cfg(feature = "metrics")]
-                    {
-                        crate::metrics::rate_limiter_throttled("waited");
-                        waited = true;
-                    }
-                    tokio::time::sleep(dur).await;
-                }
+                )
             }
-        }
+        })
+        .await
     }
 
     /// Whole tokens currently available (after a lazy refill). For observability.
@@ -609,47 +630,23 @@ impl WindowedRateLimiter {
     /// Consume `cost` units, parking until the window has room (until the next reset if the
     /// window is currently full). A `cost` larger than `limit` parks indefinitely.
     pub async fn acquire_n(self: &Arc<Self>, cost: u64) -> WindowPermit {
-        #[cfg(feature = "metrics")]
-        let start = Instant::now();
-        #[cfg(feature = "metrics")]
-        let mut waited = false;
-        loop {
-            let wait = {
-                let mut st = self.inner.lock();
-                self.roll_locked(&mut st);
-                if st.used.saturating_add(cost) <= self.policy.limit {
-                    st.used += cost;
-                    None
-                } else if cost > self.policy.limit {
-                    Some(Duration::MAX)
-                } else {
-                    Some(self.time_until_reset(&st))
-                }
-            };
-            match wait {
-                None => {
-                    #[cfg(feature = "metrics")]
-                    {
-                        crate::metrics::rate_limiter_acquired();
-                        crate::metrics::rate_limiter_tokens_consumed(cost);
-                        if waited {
-                            crate::metrics::rate_limiter_wait(start.elapsed());
-                        }
-                    }
-                    return WindowPermit {
-                        _limiter: Arc::clone(self),
-                    };
-                }
-                Some(dur) => {
-                    #[cfg(feature = "metrics")]
-                    {
-                        crate::metrics::rate_limiter_throttled("waited");
-                        waited = true;
-                    }
-                    tokio::time::sleep(dur).await;
-                }
+        // Shared park-until-admitted loop (also used by `RateLimiter::acquire_n`);
+        // the closure owns the fixed-window-specific admit/roll decision.
+        park_until_admitted(cost, || {
+            let mut st = self.inner.lock();
+            self.roll_locked(&mut st);
+            if st.used.saturating_add(cost) <= self.policy.limit {
+                st.used += cost;
+                Ok(WindowPermit {
+                    _limiter: Arc::clone(self),
+                })
+            } else if cost > self.policy.limit {
+                Err(Duration::MAX)
+            } else {
+                Err(self.time_until_reset(&st))
             }
-        }
+        })
+        .await
     }
 
     /// Units consumed in the current window (after a lazy reset).
@@ -911,7 +908,11 @@ impl MultiRateLimiter {
     /// Reserve every applicable tier atomically. `Ok(permit)` if all admit; `Err((tier, retry))`
     /// for the first that rejects, after refunding the reservations gathered before it.
     fn reserve_all(&self, only: &[&str]) -> Result<MultiPermit, (&'static str, Duration)> {
-        let mut held: Vec<Reservation> = Vec::with_capacity(self.tiers.len());
+        // Inline buffer: the common tier count is small (2-5), so a `SmallVec`
+        // keeps the reservation list on the stack and avoids a heap allocation
+        // per acquire on the multi-limiter hot path (the paced `acquire_for`
+        // loop re-runs this on every retry).
+        let mut held: SmallVec<[Reservation; 8]> = SmallVec::new();
         for tier in &self.tiers {
             if (!only.is_empty() && !only.contains(&tier.name)) || tier.cost == 0 {
                 continue;
@@ -951,7 +952,7 @@ impl Resource for MultiRateLimiter {}
 /// refills or resets on its own clock).
 #[must_use = "the permit marks the rate-limited call's scope"]
 pub struct MultiPermit {
-    _reservations: Vec<Reservation>,
+    _reservations: SmallVec<[Reservation; 8]>,
 }
 
 impl std::fmt::Debug for MultiPermit {

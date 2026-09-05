@@ -476,12 +476,20 @@ where
         outcome
     }
 
+    /// Iterate over every registered state followed by every exit state.
+    ///
+    /// Shared by [`state_from_label`](Self::state_from_label) and the
+    /// `label_index` construction in `resume_from` — both map checkpoint state
+    /// labels (the `Debug` rendering of each state) back to a `TState` and used
+    /// to duplicate this exact chain.
+    fn all_states(&self) -> impl Iterator<Item = &TState> {
+        self.states.keys().chain(self.exit_states.iter())
+    }
+
     /// Map a checkpoint state label (the `Debug` rendering of a `TState`) back to
     /// the matching registered or exit state, or `None` if no state has that label.
     fn state_from_label(&self, label: &str) -> Option<TState> {
-        self.states
-            .keys()
-            .chain(self.exit_states.iter())
+        self.all_states()
             .find(|s| format!("{s:?}") == label)
             .cloned()
     }
@@ -526,6 +534,9 @@ where
     ///   this workflow (e.g. resuming against a different workflow definition).
     /// - [`CanoError::Cancelled`] — the resumed run was cancelled via `token`.
     /// - Any [`CanoError`] propagated from a task during the resumed execution.
+    /// - The error from a failed resource `teardown` after a *successful* run —
+    ///   the run's own error (if any) always takes precedence, and teardown
+    ///   errors on a failed run are logged but not surfaced.
     pub async fn resume_from(
         &self,
         workflow_id: impl Into<Arc<str>>,
@@ -571,10 +582,21 @@ where
         // `teardown_range` call at the bottom handles every path uniformly.
         let result: Result<TState, CanoError> =
             self.execute_resume_inner(workflow_id, store, token).await;
-        self.resources
-            .teardown_range(0..self.resources.lifecycle_len())
+        let teardown_result = self
+            .resources
+            .teardown_range_result(0..self.resources.lifecycle_len())
             .await;
-        result
+        match (result, teardown_result) {
+            // The run itself failed — that error is the primary signal; the
+            // teardown error was already logged by `teardown_range_result`.
+            (Err(e), _) => Err(e),
+            // The run succeeded but resources could not be torn down. Surface
+            // the teardown error so the caller knows the cleanup was incomplete
+            // (leaked connections, locks, files, ...) instead of silently
+            // treating a half-torn-down world as clean.
+            (Ok(_), Err(e)) => Err(e),
+            (Ok(state), Ok(())) => Ok(state),
+        }
     }
 
     /// The body of `resume_from` between `setup_all` and the unconditional
@@ -633,9 +655,7 @@ where
         // instead of the O(rows × states) `format!` scan a per-row
         // `state_from_label` would do.
         let label_index: HashMap<String, TState> = self
-            .states
-            .keys()
-            .chain(self.exit_states.iter())
+            .all_states()
             .map(|s| (format!("{s:?}"), s.clone()))
             .collect();
 
@@ -713,6 +733,17 @@ mod tests {
 
     use crate::recovery::{CheckpointRow, CheckpointStore};
     use std::sync::Mutex;
+
+    // A task `Output` type whose `Serialize` impl always errors, so the saga
+    // adapter cannot persist it and must run `compensate` inline instead. Used by
+    // the inline-compensate tests below.
+    #[derive(Debug, serde::Deserialize)]
+    struct NeverSerialize;
+    impl serde::Serialize for NeverSerialize {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("intentional serialize failure"))
+        }
+    }
 
     #[tokio::test]
     async fn checkpoint_row_written_for_each_state_entered() {
@@ -3402,16 +3433,6 @@ mod tests {
         // inline compensate runs to completion and the operator gets a
         // coherent rollback, bounded by the workflow-level total timeout if
         // they want a wall-clock cap.
-        use serde::{Deserialize, Serialize, Serializer};
-
-        #[derive(Debug, Deserialize)]
-        struct NeverSerialize;
-        impl Serialize for NeverSerialize {
-            fn serialize<S: Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
-                Err(serde::ser::Error::custom("intentional"))
-            }
-        }
-
         #[derive(Clone)]
         struct CountingCompensate {
             ran: Arc<std::sync::atomic::AtomicBool>,
@@ -3477,16 +3498,6 @@ mod tests {
         // A panicking `compensate` called inline must not abort the workflow,
         // and must NOT lose the serialize_err that explains why the inline
         // path triggered.
-        use serde::{Deserialize, Serialize, Serializer};
-
-        #[derive(Debug, Deserialize)]
-        struct NeverSerialize;
-        impl Serialize for NeverSerialize {
-            fn serialize<S: Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
-                Err(serde::ser::Error::custom("intentional"))
-            }
-        }
-
         #[derive(Clone)]
         struct PanickyCompensate;
         #[saga::task]
@@ -3544,16 +3555,6 @@ mod tests {
         // the FSM in WithStateContext". The constructor now wraps
         // `errors[0]` so the invariant holds regardless of which path
         // produced the aggregate.
-        use serde::{Deserialize, Serialize, Serializer};
-
-        #[derive(Debug, Deserialize)]
-        struct NeverSerialize;
-        impl Serialize for NeverSerialize {
-            fn serialize<S: Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
-                Err(serde::ser::Error::custom("intentional"))
-            }
-        }
-
         #[derive(Clone)]
         struct InlineFailingCompensate;
         #[saga::task]
@@ -3708,18 +3709,6 @@ mod tests {
         // is on the wire. The adapter therefore calls `compensate(output)`
         // inline with the typed value before surfacing the failure, so the
         // rollback still happens even when persistence isn't possible.
-        use serde::{Deserialize, Serialize, Serializer};
-
-        // A type whose Serialize impl ALWAYS errors. serde_json::to_vec
-        // therefore cannot persist a CompensatableTask whose Output is this.
-        #[derive(Debug, Deserialize)]
-        struct NeverSerialize;
-        impl Serialize for NeverSerialize {
-            fn serialize<S: Serializer>(&self, _ser: S) -> Result<S::Ok, S::Error> {
-                Err(serde::ser::Error::custom("intentional serialize failure"))
-            }
-        }
-
         type SideEffect = Arc<Mutex<Vec<&'static str>>>;
 
         #[derive(Clone)]
@@ -4507,9 +4496,13 @@ mod rehydrated_run_tests {
         assert_eq!(rh.resume_state_entry_cutoff, 9_999);
         // prior_transitions = every row at seq < 9999 → 9999 entries.
         assert_eq!(rh.prior_transitions.len(), 9_999);
+        // Smoke check, not a benchmark: the assert exists to catch accidental
+        // quadratic regressions (an O(n²) scan over 10k rows would blow far past
+        // this), not to time-box legitimate debug-build variance on slow CI
+        // machines — hence the generous 500ms ceiling.
         assert!(
-            elapsed < std::time::Duration::from_millis(50),
-            "10k-row rehydration should be sub-50ms even in a debug build, took {elapsed:?}"
+            elapsed < std::time::Duration::from_millis(500),
+            "10k-row rehydration should stay linear, took {elapsed:?}"
         );
     }
 }

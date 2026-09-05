@@ -119,6 +119,69 @@ pub use cano_macros::stepped_task as stepped;
 pub use cano_macros::stream_task as stream;
 pub use cano_macros::timer_task as timer;
 
+// ---------------------------------------------------------------------------
+// Shared task-model defaults
+// ---------------------------------------------------------------------------
+
+/// The default [`TaskConfig`] shared by the plain task models (`Task`,
+/// `BatchTask`, `SteppedTask`, `RouterTask`, `CompensatableTask`): exponential
+/// backoff with 3 retries — see [`TaskConfig::default`].
+pub(crate) fn default_task_config() -> TaskConfig {
+    TaskConfig::default()
+}
+
+/// The default [`TaskConfig`] shared by the polling-style models (`PollTask`,
+/// `TimerTask`, `StreamTask`): no retries, no timeout — see [`TaskConfig::minimal`].
+pub(crate) fn minimal_task_config() -> TaskConfig {
+    TaskConfig::minimal()
+}
+
+/// The default task name shared by every task model: [`std::any::type_name`] of
+/// the implementing type, e.g. `"my_crate::tasks::FetchTask"`.
+pub(crate) fn default_task_name<T: ?Sized>() -> Cow<'static, str> {
+    Cow::Borrowed(std::any::type_name::<T>())
+}
+
+/// One iteration of a step-style task loop ([`run_task_loop`]).
+///
+/// The loop skeleton is deliberately dumb — it only re-invokes the step closure
+/// until the closure says it is done. All model-specific bookkeeping (delays,
+/// error policies, cursors) lives in the closure, so `run_poll_loop` and
+/// `run_stepped` share the same driver instead of each re-spelling the loop.
+pub(crate) enum TaskLoopStep<T> {
+    /// Stop the loop and return this outcome.
+    Done(Result<TaskResult<T>, CanoError>),
+    /// Run the step closure again.
+    Continue,
+}
+
+/// Drive a step-style task loop: call `step` until it returns [`TaskLoopStep::Done`].
+///
+/// `state` is threaded between iterations **by value**: the step closure takes
+/// the current state, returns `(new_state, outcome)` after its future resolves,
+/// and the driver feeds `new_state` back in. The step future owns its state, so
+/// it needs no borrows of the closure's captures (which would fight the borrow
+/// checker) and no boxing. All model-specific bookkeeping (delays, error
+/// policies, cursors) lives in `state` and the closure body, so `run_poll_loop`
+/// and `run_stepped` share the same driver instead of each re-spelling the loop.
+pub(crate) async fn run_task_loop<T, S, F, Fut>(
+    mut state: S,
+    mut step: F,
+) -> Result<TaskResult<T>, CanoError>
+where
+    F: FnMut(S) -> Fut,
+    Fut: std::future::Future<Output = (S, TaskLoopStep<T>)>,
+{
+    loop {
+        let (new_state, outcome) = step(state).await;
+        state = new_state;
+        match outcome {
+            TaskLoopStep::Done(outcome) => return outcome,
+            TaskLoopStep::Continue => {}
+        }
+    }
+}
+
 /// Result type for task execution that supports both single and split transitions
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TaskResult<TState> {
@@ -195,7 +258,7 @@ where
     /// - Use `TaskConfig::new().with_fixed_retry(n, duration)` for custom retry behavior
     /// - Return a custom configuration with specific retry/parameter settings
     fn config(&self) -> TaskConfig {
-        TaskConfig::default()
+        default_task_config()
     }
 
     /// Human-readable identifier for this task, reported to
@@ -206,7 +269,7 @@ where
     /// stable, friendlier name — useful when the type name is long or when
     /// several workflow states share one task type.
     fn name(&self) -> Cow<'static, str> {
-        Cow::Borrowed(std::any::type_name::<Self>())
+        default_task_name::<Self>()
     }
 
     /// Execute the task with access to shared resources.

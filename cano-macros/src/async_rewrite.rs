@@ -72,14 +72,11 @@ fn rewrite_trait_method(mut method: TraitItemFn) -> TraitItemFn {
         return method;
     }
 
-    let (new_sig, lifetimes_added) = transform_signature(&method.sig);
-    method.sig = new_sig;
+    method.sig = transform_signature(&method.sig);
 
     if let Some(body) = method.default.take() {
-        let lifetime_bounds = lifetime_bounds_stmts(&lifetimes_added);
         method.default = Some(syn::parse_quote! {
             {
-                #lifetime_bounds
                 ::std::boxed::Box::pin(async move #body)
             }
         });
@@ -110,14 +107,11 @@ fn rewrite_impl_method(mut method: ImplItemFn) -> ImplItemFn {
         return method;
     }
 
-    let (new_sig, lifetimes_added) = transform_signature(&method.sig);
-    method.sig = new_sig;
+    method.sig = transform_signature(&method.sig);
 
     let body = &method.block;
-    let lifetime_bounds = lifetime_bounds_stmts(&lifetimes_added);
     method.block = syn::parse_quote! {
         {
-            #lifetime_bounds
             ::std::boxed::Box::pin(async move #body)
         }
     };
@@ -136,7 +130,7 @@ struct SynthLifetime {
 
 /// Transform an `async fn` signature into a non-async `fn` returning
 /// `Pin<Box<dyn Future<Output = ...> + Send + 'async_trait>>`.
-fn transform_signature(sig: &Signature) -> (Signature, Vec<SynthLifetime>) {
+fn transform_signature(sig: &Signature) -> Signature {
     let mut new_sig = sig.clone();
     new_sig.asyncness = None;
 
@@ -216,7 +210,7 @@ fn transform_signature(sig: &Signature) -> (Signature, Vec<SynthLifetime>) {
         >>
     };
 
-    (new_sig, synth_lifetimes)
+    new_sig
 }
 
 fn rewrite_arg(arg: &FnArg, acc: &mut Vec<SynthLifetime>) -> FnArg {
@@ -264,11 +258,4 @@ fn make_lifetime(acc: &mut Vec<SynthLifetime>) -> syn::Lifetime {
     let lt = syn::Lifetime::new(&name, Span::call_site());
     acc.push(SynthLifetime { name: lt.clone() });
     lt
-}
-
-/// `async-trait` does not emit any statements inside the body — the
-/// `async move { body }` closure captures everything; lifetime constraints live
-/// in the where clause only. We replicate this with an empty token stream.
-fn lifetime_bounds_stmts(_lifetimes: &[SynthLifetime]) -> TokenStream2 {
-    quote! {}
 }

@@ -120,6 +120,15 @@ pub enum StreamWindow {
     /// contains items, the cursor committed is the `Cursor` of the last item processed
     /// during that interval. Unlike [`Count`](StreamWindow::Count), buffering is bounded
     /// only by what the source yields during the interval.
+    ///
+    /// **Item-loss caveat for state-owning sources:** when the deadline wins the race
+    /// against a slow source, the driver drops the in-flight `stream.next()` future. For
+    /// sources whose `poll_next` future owns the read state — e.g.
+    /// `stream::unfold(rx, |rx| async move { rx.recv().await })`, where dropping the
+    /// future drops the receiver and closes the channel — that queued item is silently
+    /// lost. Prefer sources whose `poll_next` borrows state (e.g. `StreamExt::map` over a
+    /// borrowed receiver) so dropping the in-flight future is harmless, or ensure the
+    /// window is large relative to the source's cadence.
     Duration(std::time::Duration),
 }
 
@@ -201,13 +210,13 @@ where
     /// The per-item error policy, the `CancellationToken`, and the window loop are the
     /// resilience surface.
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
+        crate::task::minimal_task_config()
     }
 
     /// Human-readable identifier, reported to
     /// [`WorkflowObserver`](crate::observer::WorkflowObserver) hooks.
     fn name(&self) -> Cow<'static, str> {
-        Cow::Borrowed(std::any::type_name::<Self>())
+        crate::task::default_task_name::<Self>()
     }
 
     /// Open (or resume) the source stream. `cursor` is the last committed position, or
@@ -256,6 +265,18 @@ where
     /// path), panics in `on_close` are caught and converted to [`CanoError`]. When
     /// registered via plain [`Workflow::register`] (in-memory companion), panics propagate.
     /// Always use `register_stream` for production workloads.
+    ///
+    /// **Not called on error exits.** If the loop terminates because an item failed
+    /// ([`FailFast`](StreamErrorPolicy::FailFast) or a [`RetryOnError`](StreamErrorPolicy::RetryOnError)
+    /// overrun) or a [`flush_window`](StreamTask::flush_window) returned an error, the
+    /// partial window is dropped and `on_close` is **not** invoked — the run fails as
+    /// `Err` and any resources the session opened are released by the stream's own
+    /// `Drop`. The cancel path is the exception: it always runs `on_close(Cancelled)`
+    /// (best-effort) so a cooperative shutdown can commit final offsets / release
+    /// resources. Treat `on_close(Exhausted)` as "the source ended cleanly", not as a
+    /// universal cleanup hook for every exit; for error exits, rely on
+    /// [`open`](StreamTask::open) / [`process_item`](StreamTask::process_item) being
+    /// idempotent and on the at-least-once resume contract to replay the lost window.
     async fn on_close(
         &self,
         res: &Resources<TResourceKey>,
@@ -338,10 +359,19 @@ where
         StreamWindow::Count(n) => (Some((*n).max(1)), None),
         StreamWindow::Duration(d) => (None, Some((*d).max(MIN_DURATION_WINDOW))),
     };
-    let mut deadline = duration_len.map(|len| tokio::time::Instant::now() + len);
 
     let mut buf: Vec<T::Output> = Vec::new();
     let mut last_cursor: Option<T::Cursor> = None;
+
+    // The duration-window deadline future, created once and reused across loop
+    // iterations. `tokio::select!` drops losing branch futures, so recreating
+    // a `Sleep` inside the loop would register + deregister a timer-wheel
+    // entry on *every* item of a continuously-ready source, even though the
+    // absolute deadline never changes. Pinning a single future here and only
+    // re-arming it on flush (below) keeps the per-item cost to the stream poll
+    // alone. `None` for count windows — the tick branch then never resolves.
+    let mut tick: Option<Pin<Box<tokio::time::Sleep>>> = duration_len
+        .map(|len| Box::pin(tokio::time::sleep_until(tokio::time::Instant::now() + len)));
 
     loop {
         // Count-window flush.
@@ -351,14 +381,6 @@ where
             return flush_full_window(task, res, std::mem::take(&mut buf), last_cursor).await;
         }
 
-        // Resolves at the duration-window deadline, or never (count windows).
-        let tick = async {
-            match deadline {
-                Some(d) => tokio::time::sleep_until(d).await,
-                None => std::future::pending::<()>().await,
-            }
-        };
-
         tokio::select! {
             biased;
             _ = token.cancelled() => {
@@ -367,10 +389,7 @@ where
                 // cancel-drain flush is ignored — honouring `Stop` here would contradict
                 // that a cancelled run always surfaces `CanoError::Cancelled`.
                 if !buf.is_empty() {
-                    #[cfg(feature = "metrics")]
-                    crate::metrics::stream_window();
-
-                    let drain_flush = task.flush_window(res, std::mem::take(&mut buf)).await;
+                    let drain_flush = flush_partial_window(task, res, std::mem::take(&mut buf)).await;
                     if let Err(e) = drain_flush {
                         // The drain flush failed: `on_close(Cancelled)` still gets its
                         // cleanup shot (best-effort — its own error is dropped in favour
@@ -387,11 +406,20 @@ where
                 let _ = task.on_close(res, CloseReason::Cancelled).await?;
                 return Ok(WindowStep::Cancelled { final_cursor: last_cursor });
             }
-            _ = tick => {
+            _ = async {
+                // Resolves at the duration-window deadline, or never (count windows).
+                // The pinned future is borrowed here and re-armed in the empty-window
+                // arm below, so no new `Sleep` is registered per item.
+                match tick.as_mut() {
+                    Some(sleep) => sleep.as_mut().await,
+                    None => std::future::pending::<()>().await,
+                }
+            } => {
                 // Duration window elapsed.
                 if buf.is_empty() {
                     // Empty tumbling window: re-arm the deadline and keep waiting.
-                    deadline = duration_len.map(|len| tokio::time::Instant::now() + len);
+                    tick = duration_len
+                        .map(|len| Box::pin(tokio::time::sleep_until(tokio::time::Instant::now() + len)));
                     continue;
                 }
                 return flush_full_window(task, res, std::mem::take(&mut buf), last_cursor).await;
@@ -442,9 +470,7 @@ where
                         // here (transition to it) just like a full window; on `Continue`
                         // fall through to `on_close(Exhausted)` for the terminal transition.
                         if !buf.is_empty() {
-                            #[cfg(feature = "metrics")]
-                            crate::metrics::stream_window();
-                            match task.flush_window(res, std::mem::take(&mut buf)).await? {
+                            match flush_partial_window(task, res, std::mem::take(&mut buf)).await? {
                                 WindowSignal::Stop(result) => {
                                     return Ok(WindowStep::Done {
                                         final_cursor: last_cursor,
@@ -461,6 +487,28 @@ where
             }
         }
     }
+}
+
+/// Emit the window metric and flush a non-empty partial window, returning the task's
+/// [`WindowSignal`]. Shared by the cancel-drain and source-exhausted arms of
+/// [`drive_window`] — the two partial flushes with *different* signal semantics (the
+/// cancel drain ignores `Stop` because a cancelled run always surfaces
+/// `CanoError::Cancelled`; the exhausted path honors it). The count- and
+/// duration-window arms use [`flush_full_window`] instead, which maps the signal onto a
+/// terminal [`WindowStep`].
+async fn flush_partial_window<T, S, K>(
+    task: &T,
+    res: &Resources<K>,
+    outputs: Vec<T::Output>,
+) -> Result<WindowSignal<S>, CanoError>
+where
+    T: StreamTask<S, K> + ?Sized,
+    S: Clone + fmt::Debug + Send + Sync + 'static,
+    K: Hash + Eq + Send + Sync + 'static,
+{
+    #[cfg(feature = "metrics")]
+    crate::metrics::stream_window();
+    task.flush_window(res, outputs).await
 }
 
 /// Flush one non-empty window and map the task's [`WindowSignal`] onto the terminal

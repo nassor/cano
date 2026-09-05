@@ -104,13 +104,13 @@ where
     /// Retry / timeout / circuit configuration for the forward [`run`](Self::run).
     /// Defaults to the standard exponential-backoff policy (same as [`Task::config`](crate::task::Task::config)).
     fn config(&self) -> TaskConfig {
-        TaskConfig::default()
+        crate::task::default_task_config()
     }
 
     /// Stable identifier for this task: the compensation-stack key, and what shows up in
     /// observer events. Defaults to [`std::any::type_name`] of the implementing type.
     fn name(&self) -> Cow<'static, str> {
-        Cow::Borrowed(std::any::type_name::<Self>())
+        crate::task::default_task_name::<Self>()
     }
 
     /// Run the forward action. On success, return the next state **and** the output
@@ -228,18 +228,19 @@ pub type CompensateFuture<'a> = Pin<Box<dyn Future<Output = Result<(), CanoError
 /// (which cancels the entire FSM, not just compensate, so the operator gets
 /// a single coherent error).
 ///
-/// Returns a flat `Result<(TState, Vec<u8>), CanoError>` — the caller treats
-/// the `Err` as the FSM forward-failure for this state. On `Ok(())` from
-/// compensate (rollback succeeded), the surfaced error is `original_err`; on
-/// `Err`/panic from compensate, both are collected into a `CompensationFailed`
-/// (the existing constructor flattens nested CompensationFailed values, so a
-/// later drain that aggregates won't produce a doubly-nested error).
+/// Returns the error to surface — this helper only ever runs on a failure path
+/// (the adapter rejected the forward result), so its `Ok` variant was dead code.
+/// On `Ok(())` from compensate (rollback succeeded), the surfaced error is
+/// `original_err`; on `Err`/panic from compensate, both are collected into a
+/// `CompensationFailed` (the existing constructor flattens nested
+/// `CompensationFailed` values, so a later drain that aggregates won't produce
+/// a doubly-nested error).
 async fn run_inline_compensate<TState, TResourceKey, T>(
     task: &T,
     res: &Resources<TResourceKey>,
     output: T::Output,
     original_err: CanoError,
-) -> Result<(TaskResult<TState>, Vec<u8>), CanoError>
+) -> CanoError
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
     TResourceKey: Hash + Eq + Send + Sync + 'static,
@@ -260,7 +261,7 @@ where
     let outcome = AssertUnwindSafe(compensate_fut).catch_unwind().await;
 
     match outcome {
-        Ok(Ok(())) => Err(original_err),
+        Ok(Ok(())) => original_err,
         Ok(Err(compensate_err)) => {
             #[cfg(feature = "tracing")]
             tracing::error!(
@@ -268,21 +269,18 @@ where
                 error = %compensate_err,
                 "inline compensate failed"
             );
-            Err(CanoError::compensation_failed(vec![
-                original_err,
-                compensate_err,
-            ]))
+            CanoError::compensation_failed(vec![original_err, compensate_err])
         }
         Err(payload) => {
             let panic_msg = crate::workflow::panic_payload_message(&*payload);
             #[cfg(feature = "tracing")]
             tracing::error!(task = %task_name, panic = %panic_msg, "inline compensate panicked");
-            Err(CanoError::compensation_failed(vec![
+            CanoError::compensation_failed(vec![
                 original_err,
                 CanoError::task_execution(format!(
                     "inline compensate for `{task_name}` panicked: {panic_msg}"
                 )),
-            ]))
+            ])
         }
     }
 }
@@ -337,7 +335,7 @@ where
                     "Compensatable task `{}` returned a split result — split states cannot be compensatable",
                     self.0.name()
                 ));
-                return run_inline_compensate(self.0.as_ref(), res, output, split_err).await;
+                return Err(run_inline_compensate(self.0.as_ref(), res, output, split_err).await);
             }
             match serde_json::to_vec(&output) {
                 Ok(blob) => Ok((state, blob)),
@@ -352,7 +350,7 @@ where
                         "serialize compensation output for `{}`: {serialize_err}",
                         self.0.name()
                     ));
-                    run_inline_compensate(self.0.as_ref(), res, output, serialize_err).await
+                    Err(run_inline_compensate(self.0.as_ref(), res, output, serialize_err).await)
                 }
             }
         })
@@ -662,9 +660,8 @@ mod tests {
         let task = Comp::ok(42, &l);
         let res = Resources::new();
         let original = CanoError::task_execution("the real failure");
-        let out: Result<(TaskResult<S>, Vec<u8>), CanoError> =
-            run_inline_compensate(&task, &res, 42, original).await;
-        assert!(out.unwrap_err().to_string().contains("the real failure"));
+        let out = run_inline_compensate(&task, &res, 42, original).await;
+        assert!(out.to_string().contains("the real failure"));
         assert_eq!(*l.lock().unwrap(), vec![42]);
     }
 

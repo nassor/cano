@@ -208,7 +208,7 @@ where
     /// Defaults to [`TaskConfig::minimal()`] (no retries, no timeout). Override to attach a
     /// per-attempt timeout that bounds the wait.
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
+        crate::task::minimal_task_config()
     }
 
     /// Human-readable identifier for this timer, reported to [`WorkflowObserver`] hooks.
@@ -218,7 +218,7 @@ where
     ///
     /// [`WorkflowObserver`]: crate::observer::WorkflowObserver
     fn name(&self) -> Cow<'static, str> {
-        Cow::Borrowed(std::any::type_name::<Self>())
+        crate::task::default_task_name::<Self>()
     }
 
     /// Decide how long to wait. Called once, before the engine sleeps.

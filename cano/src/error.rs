@@ -29,7 +29,8 @@
 //! | `RetryExhausted` | All retries exhausted | Inspect `source` for the underlying cause; increase retries if transient |
 //! | `Timeout` | Per-attempt timeout reached | Increase `attempt_timeout` or speed up the task |
 //! | `WorkflowTimeout` | Workflow total budget exceeded (`Workflow::with_total_timeout`) | Increase the total timeout or speed up the workflow |
-//! | `CircuitOpen` | Circuit breaker rejected the call | Wait for the breaker's `reset_timeout` or fix the upstream dependency |
+//! | `CircuitOpen` | Circuit breaker rejected the call while open | Wait for the breaker's `reset_timeout` or fix the upstream dependency |
+//! | `CircuitHalfOpenBusy` | Breaker is probing the dependency but every trial slot is occupied | Retry shortly — a slot frees when an in-flight trial completes |
 //! | `CheckpointStore` | Checkpoint persistence failed | Check the recovery store backend (disk, permissions, encoding) |
 //! | `CompensationFailed` | A `compensate` run failed during rollback | Inspect the aggregated errors; the original failure is `errors[0]` |
 //! | `WithStateContext` | A task failed during `Workflow::orchestrate` / `resume_from` | Read `state`, `attempt`, and `transitions_so_far`; inspect `source` for the underlying cause |
@@ -132,7 +133,7 @@
 /// Marked `#[non_exhaustive]`: external `match` arms over `CanoError` must
 /// include a wildcard so that future variants do not break downstream code at
 /// compile time.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CanoError {
     /// Error during task execution
@@ -223,6 +224,19 @@ pub enum CanoError {
     /// short-circuits the retry loop: the breaker is signalling that the underlying
     /// dependency is unhealthy, and immediate retries would only add load.
     CircuitOpen(String),
+
+    /// A call was rejected because the circuit breaker is `HalfOpen` and every
+    /// trial slot is already occupied by in-flight calls.
+    ///
+    /// Emitted by [`crate::circuit::CircuitBreaker::try_acquire`] in place of
+    /// [`CanoError::CircuitOpen`] when the breaker's cool-down has elapsed (so it is
+    /// probing the dependency again) but `half_open_max_calls` trials are already
+    /// running. Match on this variant to distinguish "breaker is still open — back
+    /// off until `reset_timeout`" from "breaker is probing — a trial slot frees as
+    /// soon as an in-flight call completes". Like `CircuitOpen` it short-circuits
+    /// the retry loop in [`crate::task::run_with_retries`]: an immediate retry
+    /// would only re-hit the same exhausted slots.
+    CircuitHalfOpenBusy(String),
 
     /// A call was rejected because a rate-limit tier lacked capacity.
     ///
@@ -403,6 +417,12 @@ impl CanoError {
         CanoError::CircuitOpen(msg.into())
     }
 
+    /// Create a new circuit half-open-busy error — the breaker is `HalfOpen` but
+    /// every trial slot is occupied by in-flight calls.
+    pub fn circuit_half_open_busy<S: Into<String>>(msg: S) -> Self {
+        CanoError::CircuitHalfOpenBusy(msg.into())
+    }
+
     /// Create a new rate-limited error from the blocking tier and its retry delay.
     pub fn rate_limited<S: Into<String>>(tier: S, retry_after: std::time::Duration) -> Self {
         CanoError::RateLimited {
@@ -528,6 +548,7 @@ impl CanoError {
             CanoError::WorkflowTimeout { .. } => "workflow total timeout exceeded",
             CanoError::Cancelled => "workflow cancelled",
             CanoError::CircuitOpen(msg) => msg,
+            CanoError::CircuitHalfOpenBusy(msg) => msg,
             CanoError::RateLimited { .. } => "rate limited",
             CanoError::CheckpointStore(msg) => msg,
             CanoError::CompensationFailed { errors } => errors
@@ -607,6 +628,7 @@ impl CanoError {
             CanoError::WorkflowTimeout { .. } => "workflow_timeout",
             CanoError::Cancelled => "cancelled",
             CanoError::CircuitOpen(_) => "circuit_open",
+            CanoError::CircuitHalfOpenBusy(_) => "circuit_half_open_busy",
             CanoError::RateLimited { .. } => "rate_limited",
             CanoError::CheckpointStore(_) => "checkpoint_store",
             CanoError::CompensationFailed { .. } => "compensation_failed",
@@ -638,6 +660,7 @@ impl std::fmt::Display for CanoError {
             ),
             CanoError::Cancelled => write!(f, "Workflow cancelled"),
             CanoError::CircuitOpen(msg) => write!(f, "Circuit open: {msg}"),
+            CanoError::CircuitHalfOpenBusy(msg) => write!(f, "Circuit half-open busy: {msg}"),
             CanoError::RateLimited { tier, retry_after } => {
                 write!(
                     f,
@@ -703,96 +726,6 @@ impl std::error::Error for CanoError {
         }
     }
 }
-
-impl PartialEq for CanoError {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (CanoError::TaskExecution(a), CanoError::TaskExecution(b)) => a == b,
-            (CanoError::Store(a), CanoError::Store(b)) => a == b,
-            (CanoError::Workflow(a), CanoError::Workflow(b)) => a == b,
-            (CanoError::Configuration(a), CanoError::Configuration(b)) => a == b,
-            (
-                CanoError::RetryExhausted {
-                    attempts: a_attempts,
-                    source: a_source,
-                },
-                CanoError::RetryExhausted {
-                    attempts: b_attempts,
-                    source: b_source,
-                },
-            ) => a_attempts == b_attempts && a_source == b_source,
-            (CanoError::Timeout(a), CanoError::Timeout(b)) => a == b,
-            (
-                CanoError::WorkflowTimeout {
-                    elapsed: e1,
-                    limit: l1,
-                },
-                CanoError::WorkflowTimeout {
-                    elapsed: e2,
-                    limit: l2,
-                },
-            ) => e1 == e2 && l1 == l2,
-            (CanoError::Cancelled, CanoError::Cancelled) => true,
-            (CanoError::CircuitOpen(a), CanoError::CircuitOpen(b)) => a == b,
-            (
-                CanoError::RateLimited {
-                    tier: t1,
-                    retry_after: r1,
-                },
-                CanoError::RateLimited {
-                    tier: t2,
-                    retry_after: r2,
-                },
-            ) => t1 == t2 && r1 == r2,
-            (CanoError::CheckpointStore(a), CanoError::CheckpointStore(b)) => a == b,
-            (
-                CanoError::CompensationFailed { errors: a },
-                CanoError::CompensationFailed { errors: b },
-            ) => a == b,
-            (CanoError::Generic(a), CanoError::Generic(b)) => a == b,
-            (CanoError::ResourceNotFound(a), CanoError::ResourceNotFound(b)) => a == b,
-            (CanoError::ResourceTypeMismatch(a), CanoError::ResourceTypeMismatch(b)) => a == b,
-            (CanoError::ResourceDuplicateKey(a), CanoError::ResourceDuplicateKey(b)) => a == b,
-            (
-                CanoError::WorkflowVersionMismatch {
-                    stored: s1,
-                    expected: e1,
-                },
-                CanoError::WorkflowVersionMismatch {
-                    stored: s2,
-                    expected: e2,
-                },
-            ) => s1 == s2 && e1 == e2,
-            (
-                CanoError::OrphanedCompensation {
-                    task_id: t1,
-                    output_blob: b1,
-                },
-                CanoError::OrphanedCompensation {
-                    task_id: t2,
-                    output_blob: b2,
-                },
-            ) => t1 == t2 && b1 == b2,
-            (
-                CanoError::WithStateContext {
-                    state: s1,
-                    attempt: a1,
-                    transitions_so_far: t1,
-                    source: src1,
-                },
-                CanoError::WithStateContext {
-                    state: s2,
-                    attempt: a2,
-                    transitions_so_far: t2,
-                    source: src2,
-                },
-            ) => s1 == s2 && a1 == a2 && t1 == t2 && src1 == src2,
-            _ => false,
-        }
-    }
-}
-
-impl Eq for CanoError {}
 
 // Conversion traits for ergonomic error handling
 

@@ -478,6 +478,19 @@ pub(crate) fn circuit_outcome(outcome: &'static str) {
 
 // ----- processing loops -----
 
+/// Increment a split ok/err counter, skipping zero counts so a label never
+/// appears in the snapshot until the first actual event (keeps absent labels
+/// out of dashboards that aggregate on the label). Shared by the batch and
+/// stream item counters, which are identical apart from the metric name.
+fn increment_split_counter(name: &'static str, ok: usize, err: usize) {
+    if ok > 0 {
+        counter!(name, "result" => "ok").increment(ok as u64);
+    }
+    if err > 0 {
+        counter!(name, "result" => "err").increment(err as u64);
+    }
+}
+
 pub(crate) fn poll_iteration(ready: bool) {
     counter!(POLL_ITERATIONS_TOTAL, "outcome" => if ready { "ready" } else { "pending" })
         .increment(1);
@@ -486,12 +499,7 @@ pub(crate) fn batch_run(ok: bool) {
     counter!(BATCH_RUNS_TOTAL, "outcome" => if ok { "completed" } else { "failed" }).increment(1);
 }
 pub(crate) fn batch_items(ok: usize, err: usize) {
-    if ok > 0 {
-        counter!(BATCH_ITEMS_TOTAL, "result" => "ok").increment(ok as u64);
-    }
-    if err > 0 {
-        counter!(BATCH_ITEMS_TOTAL, "result" => "err").increment(err as u64);
-    }
+    increment_split_counter(BATCH_ITEMS_TOTAL, ok, err);
 }
 pub(crate) fn step_iteration(done: bool) {
     counter!(STEP_ITERATIONS_TOTAL, "outcome" => if done { "done" } else { "more" }).increment(1);
@@ -504,12 +512,7 @@ pub(crate) fn stream_window() {
     counter!(STREAM_WINDOWS_TOTAL).increment(1);
 }
 pub(crate) fn stream_items(ok: usize, err: usize) {
-    if ok > 0 {
-        counter!(STREAM_ITEMS_TOTAL, "result" => "ok").increment(ok as u64);
-    }
-    if err > 0 {
-        counter!(STREAM_ITEMS_TOTAL, "result" => "err").increment(err as u64);
-    }
+    increment_split_counter(STREAM_ITEMS_TOTAL, ok, err);
 }
 
 // ----- recovery / saga -----

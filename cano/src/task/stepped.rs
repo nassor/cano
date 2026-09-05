@@ -199,7 +199,7 @@ where
     ///
     /// Defaults to [`TaskConfig::default()`] (exponential backoff with 3 retries).
     fn config(&self) -> TaskConfig {
-        TaskConfig::default()
+        crate::task::default_task_config()
     }
 
     /// Human-readable identifier for this stepper, reported to [`WorkflowObserver`] hooks.
@@ -209,7 +209,7 @@ where
     ///
     /// [`WorkflowObserver`]: crate::observer::WorkflowObserver
     fn name(&self) -> Cow<'static, str> {
-        Cow::Borrowed(std::any::type_name::<Self>())
+        crate::task::default_task_name::<Self>()
     }
 
     /// Execute one step of the task.
@@ -257,23 +257,26 @@ where
     S2: Clone + fmt::Debug + Send + Sync + 'static,
     K: Hash + Eq + Send + Sync + 'static,
 {
-    let mut cursor: Option<S::Cursor> = None;
-
-    loop {
-        match s.step(res, cursor).await {
-            Err(e) => return Err(e),
+    // The loop skeleton (re-invoke until the step says done) is shared with
+    // `run_poll_loop` via `run_task_loop`; the state is the cursor threaded
+    // between `More` iterations.
+    crate::task::run_task_loop(None::<S::Cursor>, |mut cursor| async move {
+        match s.step(res, cursor.take()).await {
+            Err(e) => (cursor, crate::task::TaskLoopStep::Done(Err(e))),
             Ok(StepOutcome::More(new_cursor)) => {
                 #[cfg(feature = "metrics")]
                 crate::metrics::step_iteration(false);
                 cursor = Some(new_cursor);
+                (cursor, crate::task::TaskLoopStep::Continue)
             }
             Ok(StepOutcome::Done(result)) => {
                 #[cfg(feature = "metrics")]
                 crate::metrics::step_iteration(true);
-                return Ok(result);
+                (cursor, crate::task::TaskLoopStep::Done(Ok(result)))
             }
         }
-    }
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------------

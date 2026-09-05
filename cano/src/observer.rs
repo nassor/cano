@@ -313,7 +313,10 @@ impl WorkflowObserver for MetricsObserver {
         crate::metrics::observed_cancellation();
     }
     fn on_checkpoint_clear_failed(&self, _workflow_id: &str, _error: &CanoError) {
-        crate::metrics::checkpoint_clear(false);
+        // No metric emission here: `Workflow::clear_checkpoint_log` already counts
+        // every clear attempt (success and failure) exactly once via
+        // `metrics::checkpoint_clear(ok)`. Emitting `false` again on the failure
+        // hook would double-count every failed clear.
     }
     fn on_unknown_resume_state(
         &self,
