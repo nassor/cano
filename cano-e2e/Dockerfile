@@ -6,7 +6,7 @@
 #
 #   docker build -t cano-workflow-app:e2e -f cano-e2e/Dockerfile .
 
-FROM rust:1.95-slim AS build
+FROM rust:1.98-slim AS build
 WORKDIR /src
 COPY . .
 RUN cargo build --release -p cano-e2e --bin cano_workflow_app
