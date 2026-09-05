@@ -493,13 +493,31 @@ impl<TResourceKey: Hash + Eq + Send + Sync + 'static> Resources<TResourceKey> {
     }
 
     pub(crate) async fn teardown_range(&self, range: Range<usize>) {
+        let _ = self.teardown_range_result(range).await;
+    }
+
+    /// Like [`teardown_range`](Self::teardown_range), but returns the first
+    /// teardown error so callers that must surface teardown failures (e.g.
+    /// `resume_from`, where a leaked resource after a successful run is a real
+    /// problem for the caller to know about) can propagate it. Every resource in
+    /// the range is still torn down — an error never aborts the sequence — and
+    /// each error is still logged, exactly as in the swallowing variant.
+    pub(crate) async fn teardown_range_result(&self, range: Range<usize>) -> Result<(), CanoError> {
+        let mut first_error: Option<CanoError> = None;
         for resource in self.lifecycle[range].iter().rev() {
             if let Err(e) = resource.teardown().await {
                 #[cfg(feature = "tracing")]
                 tracing::error!("resource teardown failed: {e}");
                 #[cfg(not(feature = "tracing"))]
                 eprintln!("cano: resource teardown error: {e}");
+                if first_error.is_none() {
+                    first_error = Some(e);
+                }
             }
+        }
+        match first_error {
+            Some(e) => Err(e),
+            None => Ok(()),
         }
     }
 

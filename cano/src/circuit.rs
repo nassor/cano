@@ -178,6 +178,35 @@ pub struct CircuitBreaker {
 /// it's a configuration mistake, so we reject it at construction.
 const HALF_OPEN_MAX_CALLS_LIMIT: u32 = u32::MAX / 2;
 
+/// Compute the `Open` cool-down deadline, saturating on overflow.
+///
+/// `Instant + Duration` panics when the addition would overflow the platform's
+/// time representation, so a pathological `reset_timeout` (e.g. `Duration::MAX`)
+/// must never take the process down. On overflow we fall back to the longest
+/// representable offset *below* the requested timeout, which keeps the breaker
+/// open for all practical purposes.
+fn open_deadline(reset_timeout: Duration) -> Instant {
+    let now = Instant::now();
+    match now.checked_add(reset_timeout) {
+        Some(until) => until,
+        None => {
+            // Bisect the timeout to find the longest prefix that still fits the
+            // platform's time representation. Runs only on the overflow path;
+            // normal operation pays nothing.
+            let mut fit = Duration::ZERO;
+            let mut probe = reset_timeout;
+            while !probe.is_zero() {
+                let candidate = fit.saturating_add(probe);
+                if candidate <= reset_timeout && now.checked_add(candidate).is_some() {
+                    fit = candidate;
+                }
+                probe /= 2;
+            }
+            now + fit
+        }
+    }
+}
+
 impl CircuitBreaker {
     /// Construct a breaker in the `Closed` state.
     ///
@@ -239,8 +268,9 @@ impl CircuitBreaker {
     /// # Errors
     ///
     /// Returns [`CanoError::CircuitOpen`] when the breaker is `Open` (and the cool-down
-    /// has not elapsed) or when `HalfOpen` already has `half_open_max_calls` trials in
-    /// flight.
+    /// has not elapsed), or [`CanoError::CircuitHalfOpenBusy`] when `HalfOpen` already
+    /// has `half_open_max_calls` trials in flight — the breaker has recovered but every
+    /// probe slot is occupied, so callers can distinguish the two back-off strategies.
     pub fn try_acquire(self: &Arc<Self>) -> Result<Permit, CanoError> {
         let mut inner = self.inner.lock().expect("circuit breaker mutex poisoned");
 
@@ -269,7 +299,7 @@ impl CircuitBreaker {
             )),
             CircuitState::HalfOpen => {
                 if inner.half_open_in_flight >= self.policy.half_open_max_calls {
-                    Err(CanoError::circuit_open(
+                    Err(CanoError::circuit_half_open_busy(
                         "circuit breaker half-open: trial slot exhausted",
                     ))
                 } else {
@@ -297,16 +327,17 @@ impl CircuitBreaker {
     /// have been observed.
     pub fn record_success(&self, mut permit: Permit) {
         permit.consumed = true;
-        #[cfg(feature = "metrics")]
-        crate::metrics::circuit_outcome("success");
         let mut inner = self.inner.lock().expect("circuit breaker mutex poisoned");
 
         // Stale outcome from a prior epoch: the in-flight slot, if any, was
         // already wiped by `reset_half_open()` at the transition. Skip both
-        // counter accounting and the in-flight decrement.
+        // counter accounting and the in-flight decrement — and do NOT emit the
+        // outcome metric, so a stale permit can't inflate the totals.
         if permit.epoch != inner.epoch {
             return;
         }
+        #[cfg(feature = "metrics")]
+        crate::metrics::circuit_outcome("success");
 
         if permit.was_half_open && inner.half_open_in_flight > 0 {
             inner.half_open_in_flight -= 1;
@@ -352,14 +383,15 @@ impl CircuitBreaker {
     }
 
     fn do_record_failure(&self, was_half_open: bool, permit_epoch: u64) {
-        #[cfg(feature = "metrics")]
-        crate::metrics::circuit_outcome("failure");
         let mut inner = self.inner.lock().expect("circuit breaker mutex poisoned");
 
         // Stale outcome from a prior epoch — see `record_success` for rationale.
+        // Skip the metric too, so stale permits can't inflate the totals.
         if permit_epoch != inner.epoch {
             return;
         }
+        #[cfg(feature = "metrics")]
+        crate::metrics::circuit_outcome("failure");
 
         if was_half_open && inner.half_open_in_flight > 0 {
             inner.half_open_in_flight -= 1;
@@ -370,7 +402,7 @@ impl CircuitBreaker {
                 inner.consecutive_failures = inner.consecutive_failures.saturating_add(1);
                 if inner.consecutive_failures >= self.policy.failure_threshold {
                     inner.transition(CircuitState::Open {
-                        until: Instant::now() + self.policy.reset_timeout,
+                        until: open_deadline(self.policy.reset_timeout),
                     });
                     #[cfg(feature = "tracing")]
                     info!(
@@ -386,7 +418,7 @@ impl CircuitBreaker {
                 // `consecutive_failures` is only read in the Closed arm; the path back
                 // to Closed (via HalfOpen -> Closed) resets it. No write needed here.
                 inner.transition(CircuitState::Open {
-                    until: Instant::now() + self.policy.reset_timeout,
+                    until: open_deadline(self.policy.reset_timeout),
                 });
                 #[cfg(feature = "tracing")]
                 info!(
@@ -567,7 +599,10 @@ mod tests {
         let p1 = breaker.try_acquire().unwrap();
         let p2 = breaker.try_acquire().unwrap();
         let err = breaker.try_acquire().unwrap_err();
-        assert_eq!(err.category(), "circuit_open");
+        // Distinct variant from a hard-open rejection: the breaker has recovered
+        // but every trial slot is occupied.
+        assert_eq!(err.category(), "circuit_half_open_busy");
+        assert!(matches!(err, CanoError::CircuitHalfOpenBusy(_)));
         breaker.record_success(p1);
         breaker.record_success(p2);
     }
@@ -806,7 +841,7 @@ mod tests {
         assert_eq!(breaker.state(), CircuitState::HalfOpen);
         assert_eq!(
             breaker.try_acquire().unwrap_err().category(),
-            "circuit_open" // fourth rejected — slots exhausted
+            "circuit_half_open_busy" // fourth rejected — slots exhausted
         );
 
         breaker.record_success(p1); // frees a slot; successes 1 of 3 -> still HalfOpen
@@ -822,6 +857,28 @@ mod tests {
         // p4 is now stale (the close bumped the epoch); consuming it is a no-op.
         breaker.record_success(p4);
         assert_eq!(breaker.state(), CircuitState::Closed);
+    }
+
+    #[tokio::test]
+    async fn pathological_reset_timeout_does_not_panic_and_keeps_breaker_open() {
+        // `Instant + Duration` panics on overflow, so a pathological reset_timeout
+        // (Duration::MAX) must saturate instead of crashing the process — and the
+        // saturated deadline must still keep the breaker open.
+        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+            failure_threshold: 1,
+            reset_timeout: Duration::MAX,
+            half_open_max_calls: 1,
+        }));
+        let p = breaker.try_acquire().unwrap();
+        breaker.record_failure(p);
+        assert!(matches!(breaker.state(), CircuitState::Open { .. }));
+
+        // Still open after a generous sleep — the saturated deadline is far in the future.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            matches!(breaker.try_acquire(), Err(CanoError::CircuitOpen(_))),
+            "saturated deadline must keep the breaker open"
+        );
     }
 
     #[tokio::test]

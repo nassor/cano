@@ -8,11 +8,18 @@
 //! ## Storage layout
 //!
 //! A single table, `cano_checkpoints`, maps `(workflow_id, sequence)` to a
-//! [`postcard`]-encoded [`StoredRow`] (the [`CheckpointRow`] fields *other than*
-//! `sequence` — which is already the second key component, so there's no need to
-//! store it twice). redb orders composite keys element by element, so within one
-//! `workflow_id` the rows are stored — and range-scanned — in ascending
-//! `sequence` order, which is exactly what [`CheckpointStore::load_run`] returns.
+//! version-tagged, [`postcard`]-encoded [`StoredRow`] (the [`CheckpointRow`]
+//! fields *other than* `sequence` — which is already the second key component, so
+//! there's no need to store it twice). Every row written by this version of the
+//! store is prefixed with the two-byte magic [`ROW_TAG_V1`] (`b"CV"`) so
+//! `load_run` can tell versioned rows apart from legacy rows written before
+//! tagging *without guessing from decode success*: a corrupt versioned row fails
+//! loudly instead of being silently misread as a plausible-looking legacy row.
+//! Untagged values (pre-tagging databases) are decoded with the old heuristic —
+//! current shape first, then the pre-`workflow_version` shape. redb orders
+//! composite keys element by element, so within one `workflow_id` the rows are
+//! stored — and range-scanned — in ascending `sequence` order, which is exactly
+//! what [`CheckpointStore::load_run`] returns.
 
 use std::ops::RangeInclusive;
 use std::path::Path;
@@ -20,12 +27,23 @@ use std::sync::Arc;
 
 use redb::{Database, ReadableDatabase, TableDefinition};
 
-use super::{CheckpointRow, CheckpointStore};
+use super::{CheckpointRow, CheckpointStore, RowKind};
 use crate::error::CanoError;
 use cano_macros::checkpoint_store;
 
-/// `(workflow_id, sequence) -> postcard(StoredRow)`.
+/// `(workflow_id, sequence) -> [ROW_TAG_V1][postcard(StoredRow)]` (or an untagged
+/// legacy payload for databases written before version tagging).
 const CHECKPOINTS: TableDefinition<(&str, u64), &[u8]> = TableDefinition::new("cano_checkpoints");
+
+/// Magic prefix stamped on every row this version of the store writes.
+///
+/// A legacy (untagged) row's first bytes are the postcard length-prefix of its
+/// `state` string, so a single tag byte could collide with real legacy rows (e.g.
+/// `0x01` = a one-character state label, which the test suites use liberally).
+/// Two printable bytes make the collision vanishingly unlikely — a legacy row
+/// would need a 67-character state label whose first UTF-8 byte is `V` — and even
+/// then the misread is a loud decode error, never silent corruption.
+const ROW_TAG_V1: [u8; 2] = *b"CV";
 
 /// The payload half of a [`CheckpointRow`]: everything except `sequence`, which
 /// is carried by the redb key. Kept private — callers only ever see `CheckpointRow`.
@@ -59,6 +77,30 @@ fn redb_err(e: impl std::fmt::Display) -> CanoError {
     CanoError::CheckpointStore(format!("redb: {e}"))
 }
 
+/// Assemble a [`CheckpointRow`] from the decoded stored fields.
+///
+/// Every decode path in `load_run` produces the same five fields; only
+/// `workflow_version` differs (`0` for pre-versioning rows). Kept as one
+/// function so the field-order contract between the on-disk shape and the
+/// public row lives in a single place.
+fn stored_to_row(
+    sequence: u64,
+    state: String,
+    task_id: String,
+    output_blob: Option<Vec<u8>>,
+    kind: RowKind,
+    workflow_version: u32,
+) -> CheckpointRow {
+    CheckpointRow {
+        sequence,
+        state,
+        task_id,
+        output_blob,
+        kind,
+        workflow_version,
+    }
+}
+
 /// An embedded, ACID [`CheckpointStore`] backed by a single `redb` database file.
 ///
 /// Cheap to clone — the database handle is held behind an `Arc`, so every clone
@@ -90,9 +132,9 @@ impl RedbCheckpointStore {
 impl CheckpointStore for RedbCheckpointStore {
     async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
         let sequence = row.sequence;
-        // Serialize *before* acquiring the write lock so heap allocation does
-        // not hold the transaction open. On failure the transaction is never
-        // begun, avoiding unnecessary lock contention.
+        // Serialize *before* handing off to the blocking thread so heap
+        // allocation does not hold the redb write lock open. On failure the
+        // transaction is never begun, avoiding unnecessary lock contention.
         let payload = StoredRow {
             state: row.state,
             task_id: row.task_id,
@@ -102,86 +144,145 @@ impl CheckpointStore for RedbCheckpointStore {
         };
         let bytes = postcard::to_stdvec(&payload)
             .map_err(|e| CanoError::CheckpointStore(format!("encode checkpoint row: {e}")))?;
+        // Stamp the row with the version tag so `load_run` never has to guess the
+        // on-disk shape from decode success — a corrupt tagged row is reported
+        // loudly instead of being misread as a legacy row (see `ROW_TAG_V1`).
+        let mut tagged = Vec::with_capacity(bytes.len() + ROW_TAG_V1.len());
+        tagged.extend_from_slice(&ROW_TAG_V1);
+        tagged.extend_from_slice(&bytes);
 
-        let tx = self.db.begin_write().map_err(redb_err)?;
-        {
-            let mut table = tx.open_table(CHECKPOINTS).map_err(redb_err)?;
-            // Reject a duplicate `(workflow_id, sequence)`: `insert` would silently
-            // overwrite the existing row. That only happens when two runs share a
-            // `workflow_id` (a misuse — `resume_from` the existing run, or `clear` it
-            // first), so surface it instead of corrupting the log. The uncommitted write
-            // is rolled back when `tx` drops on the early return. (`resume_from` always
-            // appends *new* sequences, so a legitimate resume never trips this.)
-            if table
-                .insert((workflow_id, sequence), bytes.as_slice())
-                .map_err(redb_err)?
-                .is_some()
+        // redb is a synchronous embedded store: `begin_write` + `insert` + `commit`
+        // (a full fsync at the default `Durability::Immediate`) block the calling
+        // thread. Running the transaction on a blocking thread keeps the fsync and
+        // the single global write lock off the Tokio worker that awaits us from the
+        // FSM loop (once per state entry) — otherwise every checkpoint transition
+        // stalls a runtime worker and serializes concurrent appends onto it.
+        let db = Arc::clone(&self.db);
+        let wf_id = workflow_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<(), CanoError> {
+            let tx = db.begin_write().map_err(redb_err)?;
             {
-                return Err(CanoError::CheckpointStore(format!(
-                    "checkpoint conflict: workflow {workflow_id:?} already has a row at \
-                     sequence {sequence}; resume the existing run or clear it before starting \
-                     a new one"
-                )));
+                let mut table = tx.open_table(CHECKPOINTS).map_err(redb_err)?;
+                // Reject a duplicate `(workflow_id, sequence)`: `insert` would silently
+                // overwrite the existing row. That only happens when two runs share a
+                // `workflow_id` (a misuse — `resume_from` the existing run, or `clear` it
+                // first), so surface it instead of corrupting the log. The uncommitted write
+                // is rolled back when `tx` drops on the early return. (`resume_from` always
+                // appends *new* sequences, so a legitimate resume never trips this.)
+                if table
+                    .insert((wf_id.as_str(), sequence), tagged.as_slice())
+                    .map_err(redb_err)?
+                    .is_some()
+                {
+                    return Err(CanoError::CheckpointStore(format!(
+                        "checkpoint conflict: workflow {wf_id:?} already has a row at \
+                         sequence {sequence}; resume the existing run or clear it before starting \
+                         a new one"
+                    )));
+                }
             }
-        }
-        tx.commit().map_err(redb_err)?;
-        Ok(())
+            tx.commit().map_err(redb_err)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| CanoError::CheckpointStore(format!("checkpoint append task panicked: {e}")))?
     }
 
     async fn load_run(&self, workflow_id: &str) -> Result<Vec<CheckpointRow>, CanoError> {
-        let tx = self.db.begin_read().map_err(redb_err)?;
-        let table = tx.open_table(CHECKPOINTS).map_err(redb_err)?;
+        // Range scan + decode on a blocking thread — same rationale as
+        // `append`: redb's read transaction is synchronous, and a long log
+        // would otherwise pin a Tokio worker for the whole scan.
+        let db = Arc::clone(&self.db);
+        let wf_id = workflow_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Vec<CheckpointRow>, CanoError> {
+            let tx = db.begin_read().map_err(redb_err)?;
+            let table = tx.open_table(CHECKPOINTS).map_err(redb_err)?;
 
-        // Fixed capacity heuristic: 64 rows covers typical runs (one state-entry row
-        // per state plus a handful of cursor rows); longer runs just reallocate.
-        let mut rows = Vec::with_capacity(64);
-        for entry in table.range(workflow_range(workflow_id)).map_err(redb_err)? {
-            let (key, value) = entry.map_err(redb_err)?;
-            let sequence = key.value().1;
-            let bytes = value.value();
-            let row = match postcard::from_bytes::<StoredRow>(bytes) {
-                Ok(payload) => CheckpointRow {
-                    sequence,
-                    state: payload.state,
-                    task_id: payload.task_id,
-                    output_blob: payload.output_blob,
-                    kind: payload.kind,
-                    workflow_version: payload.workflow_version,
-                },
-                Err(new_err) => match postcard::from_bytes::<StoredRowV0>(bytes) {
-                    Ok(legacy) => CheckpointRow {
+            // Fixed capacity heuristic: 64 rows covers typical runs (one state-entry row
+            // per state plus a handful of cursor rows); longer runs just reallocate.
+            let mut rows = Vec::with_capacity(64);
+            for entry in table.range(workflow_range(&wf_id)).map_err(redb_err)? {
+                let (key, value) = entry.map_err(redb_err)?;
+                let sequence = key.value().1;
+                let bytes = value.value();
+                let row = if bytes.starts_with(&ROW_TAG_V1) {
+                    // Explicitly versioned row. A decode failure here is genuine
+                    // corruption — surface it instead of falling back to the legacy
+                    // shape (the V0 fallback would silently mask a corrupt V1 row
+                    // as a plausible-looking legacy one).
+                    let payload = postcard::from_bytes::<StoredRow>(&bytes[ROW_TAG_V1.len()..])
+                        .map_err(|e| {
+                            CanoError::CheckpointStore(format!(
+                                "decode checkpoint row at workflow_id={wf_id:?} sequence={sequence}: {e}"
+                            ))
+                        })?;
+                    stored_to_row(
                         sequence,
-                        state: legacy.state,
-                        task_id: legacy.task_id,
-                        output_blob: legacy.output_blob,
-                        kind: legacy.kind,
-                        workflow_version: 0,
-                    },
-                    Err(_) => {
-                        // Surface both workflow id and sequence so an operator
-                        // can locate the bad row directly via redb CLI or repair
-                        // tooling — the postcard error alone leaves no anchor.
-                        return Err(CanoError::CheckpointStore(format!(
-                            "decode checkpoint row at workflow_id={workflow_id:?} sequence={sequence}: {new_err}"
-                        )));
+                        payload.state,
+                        payload.task_id,
+                        payload.output_blob,
+                        payload.kind,
+                        payload.workflow_version,
+                    )
+                } else {
+                    // Untagged row written before version tagging: try the current
+                    // shape, then the pre-`workflow_version` shape. Only this legacy
+                    // path keeps the heuristic fallback.
+                    match postcard::from_bytes::<StoredRow>(bytes) {
+                        Ok(payload) => stored_to_row(
+                            sequence,
+                            payload.state,
+                            payload.task_id,
+                            payload.output_blob,
+                            payload.kind,
+                            payload.workflow_version,
+                        ),
+                        Err(new_err) => match postcard::from_bytes::<StoredRowV0>(bytes) {
+                            Ok(legacy) => stored_to_row(
+                                sequence,
+                                legacy.state,
+                                legacy.task_id,
+                                legacy.output_blob,
+                                legacy.kind,
+                                0,
+                            ),
+                            Err(_) => {
+                                // Surface both workflow id and sequence so an operator
+                                // can locate the bad row directly via redb CLI or repair
+                                // tooling — the postcard error alone leaves no anchor.
+                                return Err(CanoError::CheckpointStore(format!(
+                                    "decode checkpoint row at workflow_id={wf_id:?} sequence={sequence}: {new_err}"
+                                )));
+                            }
+                        },
                     }
-                },
-            };
-            rows.push(row);
-        }
-        Ok(rows)
+                };
+                rows.push(row);
+            }
+            Ok(rows)
+        })
+        .await
+        .map_err(|e| {
+            CanoError::CheckpointStore(format!("checkpoint load task panicked: {e}"))
+        })?
     }
 
     async fn clear(&self, workflow_id: &str) -> Result<(), CanoError> {
-        let tx = self.db.begin_write().map_err(redb_err)?;
-        {
-            let mut table = tx.open_table(CHECKPOINTS).map_err(redb_err)?;
-            table
-                .retain_in(workflow_range(workflow_id), |_, _| false)
-                .map_err(redb_err)?;
-        }
-        tx.commit().map_err(redb_err)?;
-        Ok(())
+        let db = Arc::clone(&self.db);
+        let wf_id = workflow_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<(), CanoError> {
+            let tx = db.begin_write().map_err(redb_err)?;
+            {
+                let mut table = tx.open_table(CHECKPOINTS).map_err(redb_err)?;
+                table
+                    .retain_in(workflow_range(&wf_id), |_, _| false)
+                    .map_err(redb_err)?;
+            }
+            tx.commit().map_err(redb_err)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| CanoError::CheckpointStore(format!("checkpoint clear task panicked: {e}")))?
     }
 }
 
@@ -260,6 +361,79 @@ mod tests {
         let msg = err.message();
         assert!(msg.contains("\"run\""), "missing workflow_id in {msg:?}");
         assert!(msg.contains("sequence=1"), "missing sequence in {msg:?}");
+    }
+
+    #[tokio::test]
+    async fn legacy_untagged_rows_still_load_with_version_zero() {
+        // Databases written before version tagging store raw postcard(StoredRowV0)
+        // bytes with no tag byte. They must keep loading, with workflow_version 0.
+        let dir = tempdir().unwrap();
+        let store = RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap();
+
+        // Mirror of the pre-versioning on-disk shape with the same field order
+        // and types, so `StoredRowV0` (intentionally Deserialize-only, it exists
+        // solely as a decode fallback) stays that way.
+        #[derive(serde::Serialize)]
+        struct LegacyRow {
+            state: String,
+            task_id: String,
+            output_blob: Option<Vec<u8>>,
+            kind: crate::recovery::RowKind,
+        }
+        let legacy = LegacyRow {
+            state: "Start".to_string(),
+            task_id: "t0".to_string(),
+            output_blob: None,
+            kind: crate::recovery::RowKind::StateEntry,
+        };
+        let bytes = postcard::to_stdvec(&legacy).unwrap();
+        assert!(!bytes.starts_with(&ROW_TAG_V1), "fixture must be untagged");
+        {
+            let tx = store.db.begin_write().unwrap();
+            {
+                let mut table = tx.open_table(CHECKPOINTS).unwrap();
+                table
+                    .insert(("legacy-run", 0u64), bytes.as_slice())
+                    .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        let rows = store.load_run("legacy-run").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].state, "Start");
+        assert_eq!(rows[0].workflow_version, 0);
+    }
+
+    #[tokio::test]
+    async fn corrupt_tagged_row_errors_loudly_instead_of_masking_as_v0() {
+        // A row stamped with ROW_TAG_V1 but holding a garbage payload must surface
+        // corruption, never silently fall back to the legacy V0 shape — that mask
+        // is the exact hazard the version tag exists to close.
+        let dir = tempdir().unwrap();
+        let store = RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap();
+
+        let corrupt: Vec<u8> = ROW_TAG_V1
+            .iter()
+            .copied()
+            .chain([0xDE, 0xAD, 0xBE, 0xEF])
+            .collect();
+        {
+            let tx = store.db.begin_write().unwrap();
+            {
+                let mut table = tx.open_table(CHECKPOINTS).unwrap();
+                table
+                    .insert(("corrupt-run", 0u64), corrupt.as_slice())
+                    .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        let err = store.load_run("corrupt-run").await.unwrap_err();
+        assert!(
+            err.message().contains("decode checkpoint row"),
+            "expected a loud decode error, got: {err}"
+        );
     }
 
     #[tokio::test]

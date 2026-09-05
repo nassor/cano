@@ -90,11 +90,16 @@ impl RetryMode {
     }
 
     /// Get the maximum number of attempts (initial + retries)
+    ///
+    /// Saturates at `usize::MAX` so pathological direct constructions (the
+    /// fields are `pub`) can't overflow: `retries + 1` on `usize::MAX` would
+    /// panic in debug and wrap to `0` in release — the wrapped value would
+    /// make the first error fail the task with zero retries.
     pub fn max_attempts(&self) -> usize {
         match self {
             Self::None => 1,
-            Self::Fixed { retries, .. } => retries + 1,
-            Self::ExponentialBackoff { max_retries, .. } => max_retries + 1,
+            Self::Fixed { retries, .. } => retries.saturating_add(1),
+            Self::ExponentialBackoff { max_retries, .. } => max_retries.saturating_add(1),
         }
     }
 
@@ -301,12 +306,16 @@ impl TaskConfig {
     /// # Short-circuit behavior
     ///
     /// An `Open` breaker short-circuits the call with [`CanoError::CircuitOpen`] —
-    /// no retries are consumed, the task body is not invoked. A breaker tripped
-    /// **mid-loop** ends the retry loop immediately even when remaining retry
-    /// attempts could outlast the breaker's `reset_timeout`; recovery requires a
-    /// fresh `run_with_retries` call after the cool-down. This is intentional:
-    /// retries against an open breaker would only add load to a dependency the
-    /// breaker is already protecting.
+    /// no retries are consumed, the task body is not invoked. A `HalfOpen` breaker
+    /// whose trial slots are all occupied short-circuits with
+    /// [`CanoError::CircuitHalfOpenBusy`] instead, so callers can tell "still
+    /// cooling down" apart from "probing the dependency right now". Either way the
+    /// loop returns immediately without retrying. A breaker tripped **mid-loop**
+    /// ends the retry loop immediately even when remaining retry attempts could
+    /// outlast the breaker's `reset_timeout`; recovery requires a fresh
+    /// `run_with_retries` call after the cool-down. This is intentional: retries
+    /// against an open (or fully busy) breaker would only add load to a dependency
+    /// the breaker is already protecting.
     pub fn with_circuit_breaker(mut self, breaker: Arc<CircuitBreaker>) -> Self {
         self.circuit_breaker = Some(breaker);
         self
@@ -323,6 +332,60 @@ fn notify_observers(config: &TaskConfig, f: impl Fn(&dyn WorkflowObserver, &str)
         let name = config.task_name.as_deref().unwrap_or("<task>");
         for observer in observers {
             f(observer.as_ref(), name);
+        }
+    }
+}
+
+/// One step of the shared retry loop ([`run_retry_loop`]).
+///
+/// The loop itself is deliberately dumb — it only counts attempts, sleeps the
+/// configured backoff between retryable failures, and stops when told to. Each
+/// caller decides what *its* errors mean: the batch task helper treats every
+/// failure as retryable, while `run_with_retries` uses [`RetryStep::Done`] for
+/// circuit-breaker short-circuits (retrying an open breaker would only add load)
+/// and for the final exhausted attempt (which is wrapped in `RetryExhausted`).
+pub(crate) enum RetryStep<T> {
+    /// Stop the loop and return this outcome verbatim.
+    Done(Result<T, CanoError>),
+    /// The attempt failed retryably — back off (per `RetryMode`) and run again.
+    Retry(CanoError),
+}
+
+/// Drive a retry loop shared by `run_with_retries` and the batch task's per-item
+/// retry helper.
+///
+/// Runs `run_attempt(attempt)` with the 0-based attempt index until it returns
+/// [`RetryStep::Done`], or `max_attempts` retryable failures have accumulated
+/// (the last failure's error is returned). Between retryable failures the loop
+/// sleeps for `retry_mode.delay_for_attempt(failed_attempt_index)`, skipping
+/// zero delays so a configured-but-zero backoff (possibly collapsed by jitter)
+/// doesn't re-register a timer for nothing.
+pub(crate) async fn run_retry_loop<T, F, Fut>(
+    retry_mode: &RetryMode,
+    mut run_attempt: F,
+) -> Result<T, CanoError>
+where
+    F: FnMut(usize) -> Fut,
+    Fut: std::future::Future<Output = RetryStep<T>>,
+{
+    let max_attempts = retry_mode.max_attempts();
+    let mut attempt = 0usize;
+    loop {
+        match run_attempt(attempt).await {
+            RetryStep::Done(outcome) => return outcome,
+            RetryStep::Retry(e) => {
+                attempt += 1;
+                if attempt >= max_attempts {
+                    return Err(e);
+                }
+                // `delay_for_attempt` takes the 0-based index of the attempt
+                // that just failed — `attempt - 1` after the increment above.
+                if let Some(delay) = retry_mode.delay_for_attempt(attempt - 1)
+                    && delay.as_millis() > 0
+                {
+                    tokio::time::sleep(delay).await;
+                }
+            }
         }
     }
 }
@@ -345,7 +408,6 @@ where
     Fut: std::future::Future<Output = Result<TState, CanoError>>,
 {
     let max_attempts = config.retry_mode.max_attempts();
-    let mut attempt = 0;
     // Hoisted: the breaker reference is immutable for the lifetime of this call,
     // so re-reading the `Option` every iteration is wasted work on the hot path.
     let breaker = config.circuit_breaker.as_ref();
@@ -353,95 +415,111 @@ where
     #[cfg(feature = "tracing")]
     info!(max_attempts, "Starting task execution with retry logic");
 
-    loop {
-        #[cfg(feature = "tracing")]
-        let attempt_span = info_span!("task_attempt", attempt = attempt + 1, max_attempts);
+    // The attempt/backoff accounting lives in `run_retry_loop`; this closure
+    // supplies the per-attempt work and decides, per failure, whether the loop
+    // may retry (`RetryStep::Retry`) or must stop (`RetryStep::Done`).
+    run_retry_loop(&config.retry_mode, |attempt| {
+        // `F: Fn` can be invoked through a shared reference, so reborrow instead
+        // of moving the non-Copy `run_fn` into the per-attempt future (an `FnMut`
+        // closure cannot move non-Copy captures out). `breaker` is a Copy
+        // `Option<&Arc<_>>`, captured directly by the async block.
+        let run_fn = &run_fn;
+        async move {
+            #[cfg(feature = "tracing")]
+            let attempt_span = info_span!("task_attempt", attempt = attempt + 1, max_attempts);
 
-        #[cfg(feature = "tracing")]
-        let _span_guard = attempt_span.enter();
+            #[cfg(feature = "tracing")]
+            let _span_guard = attempt_span.enter();
 
-        #[cfg(feature = "tracing")]
-        debug!(attempt = attempt + 1, "Executing task attempt");
+            #[cfg(feature = "tracing")]
+            debug!(attempt = attempt + 1, "Executing task attempt");
 
-        // An open breaker short-circuits the entire retry loop: we do not invoke
-        // the task and we do not consume a retry attempt — immediate retries
-        // would only add load to a dependency the breaker is already protecting.
-        let permit = match breaker {
-            Some(b) => match b.try_acquire() {
-                Ok(p) => Some(p),
-                Err(e) => {
-                    #[cfg(feature = "tracing")]
-                    warn!(error = %e, "Circuit breaker open; short-circuiting task");
-                    notify_observers(config, |o, name| o.on_circuit_open(name));
-                    #[cfg(feature = "metrics")]
-                    crate::metrics::circuit_rejection();
-                    return Err(e);
-                }
-            },
-            None => None,
-        };
-
-        let attempt_outcome = match config.attempt_timeout {
-            Some(d) => match tokio::time::timeout(d, run_fn()).await {
-                Ok(inner) => inner,
-                Err(_) => Err(CanoError::timeout("task attempt exceeded attempt_timeout")),
-            },
-            None => run_fn().await,
-        };
-
-        if let (Some(b), Some(p)) = (breaker, permit) {
-            match &attempt_outcome {
-                Ok(_) => b.record_success(p),
-                Err(_) => b.record_failure(p),
-            }
-        }
-
-        #[cfg(feature = "metrics")]
-        crate::metrics::task_attempt(attempt_outcome.is_ok());
-
-        match attempt_outcome {
-            Ok(result) => {
-                #[cfg(feature = "tracing")]
-                info!(attempt = attempt + 1, "Task execution successful");
-                return Ok(result);
-            }
-            Err(e) => {
-                attempt += 1;
-
-                #[cfg(feature = "tracing")]
-                if attempt >= max_attempts {
-                    error!(
-                        error = %e,
-                        final_attempt = attempt,
-                        max_attempts,
-                        "Task execution failed after all retry attempts"
-                    );
-                } else {
-                    warn!(
-                        error = %e,
-                        attempt,
-                        max_attempts,
-                        "Task execution failed, will retry"
-                    );
-                }
-
-                if attempt >= max_attempts {
-                    if max_attempts <= 1 {
-                        return Err(e);
-                    }
-                    return Err(CanoError::retry_exhausted(attempt as u32, e));
-                } else {
-                    notify_observers(config, |o, name| o.on_retry(name, attempt as u32));
-                    if let Some(delay) = config.retry_mode.delay_for_attempt(attempt - 1) {
+            // An open breaker short-circuits the entire retry loop: we do not invoke
+            // the task and we do not consume a retry attempt — immediate retries
+            // would only add load to a dependency the breaker is already protecting.
+            let permit = match breaker {
+                Some(b) => match b.try_acquire() {
+                    Ok(p) => Some(p),
+                    Err(e) => {
                         #[cfg(feature = "tracing")]
-                        debug!(delay_ms = delay.as_millis(), "Waiting before retry");
-
-                        tokio::time::sleep(delay).await;
+                        warn!(error = %e, "Circuit breaker open; short-circuiting task");
+                        notify_observers(config, |o, name| o.on_circuit_open(name));
+                        #[cfg(feature = "metrics")]
+                        crate::metrics::circuit_rejection();
+                        return RetryStep::Done(Err(e));
                     }
+                },
+                None => None,
+            };
+
+            let attempt_outcome = match config.attempt_timeout {
+                Some(d) => match tokio::time::timeout(d, run_fn()).await {
+                    Ok(inner) => inner,
+                    Err(_) => Err(CanoError::timeout("task attempt exceeded attempt_timeout")),
+                },
+                None => run_fn().await,
+            };
+
+            if let (Some(b), Some(p)) = (breaker, permit) {
+                match &attempt_outcome {
+                    Ok(_) => b.record_success(p),
+                    Err(_) => b.record_failure(p),
+                }
+            }
+
+            #[cfg(feature = "metrics")]
+            crate::metrics::task_attempt(attempt_outcome.is_ok());
+
+            match attempt_outcome {
+                Ok(result) => {
+                    #[cfg(feature = "tracing")]
+                    info!(attempt = attempt + 1, "Task execution successful");
+                    RetryStep::Done(Ok(result))
+                }
+                Err(e) => {
+                    // `attempt` is 0-based, so the 1-based count of attempts made
+                    // so far (including this failure) is `attempt + 1`.
+                    let attempts_made = attempt + 1;
+
+                    #[cfg(feature = "tracing")]
+                    if attempts_made >= max_attempts {
+                        error!(
+                            error = %e,
+                            final_attempt = attempts_made,
+                            max_attempts,
+                            "Task execution failed after all retry attempts"
+                        );
+                    } else {
+                        warn!(
+                            error = %e,
+                            attempt = attempts_made,
+                            max_attempts,
+                            "Task execution failed, will retry"
+                        );
+                    }
+
+                    if attempts_made >= max_attempts {
+                        return RetryStep::Done(Err(if max_attempts <= 1 {
+                            // No retries configured: surface the raw error.
+                            e
+                        } else {
+                            CanoError::retry_exhausted(attempts_made as u32, e)
+                        }));
+                    }
+                    notify_observers(config, |o, name| o.on_retry(name, attempts_made as u32));
+                    #[cfg(feature = "tracing")]
+                    if let Some(delay) = config.retry_mode.delay_for_attempt(attempt) {
+                        debug!(delay_ms = delay.as_millis(), "Waiting before retry");
+                    }
+                    // Guard zero delays (a legitimately configured zero base delay,
+                    // possibly collapsed by jitter) so the loop doesn't re-register a
+                    // timer for nothing — `run_retry_loop` applies that guard.
+                    RetryStep::Retry(e)
                 }
             }
         }
-    }
+    })
+    .await
 }
 
 #[cfg(test)]

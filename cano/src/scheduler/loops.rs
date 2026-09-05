@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use cron::Schedule as CronSchedule;
-use tokio::sync::{Notify, RwLock, mpsc, watch};
+use tokio::sync::{RwLock, mpsc, watch};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Duration, sleep};
 
@@ -22,53 +22,37 @@ use tracing::Instrument;
 
 use super::{BackoffPolicy, FlowData, FlowInfo, SchedulerCommand, Status};
 
-/// Maximum chunk size used by [`sleep_unless_stopped`]. Bounds the delay
-/// between a `running = false` flip and the loop observing it, regardless of
-/// the schedule's interval.
-const SHUTDOWN_POLL_CHUNK: Duration = Duration::from_millis(250);
-
-/// Sleep for up to `wait`, returning early if `running` flips to `false` or if
-/// `stop_notify.notified()` fires. Returns `true` when the full duration
-/// elapsed (continue the loop), `false` when shutdown was observed.
+/// Sleep for up to `wait`, returning early when the scheduler driver signals
+/// shutdown by sending `false` on the `running` watch channel. Returns `true`
+/// when the full duration elapsed (continue the loop), `false` when shutdown
+/// was observed.
 ///
-/// `Notify::notify_waiters()` only wakes waiters that are already parked on
-/// `notified()` at the instant of the call — a loop sleeping when the driver
-/// fires the signal would otherwise miss it and stall for up to `wait`. By
-/// breaking the wait into `SHUTDOWN_POLL_CHUNK`-sized pieces and re-checking
-/// `running` between each chunk, the worst-case delay between a stop signal
-/// and shutdown observation is bounded by that chunk size.
-async fn sleep_unless_stopped(
-    wait: Duration,
-    running: &Arc<RwLock<bool>>,
-    stop_notify: &Arc<Notify>,
-) -> bool {
+/// `watch` is used instead of `Notify::notified()` because a `Notify` signal
+/// only wakes waiters already parked at the instant of the call — a loop that
+/// was between `select!` iterations would miss it and stall for up to `wait`.
+/// `watch::Receiver::changed()` returns immediately whenever an unseen version
+/// exists (the receiver remembers the last value it observed), so a shutdown
+/// send is never lost, and the loop parks exactly once per wait instead of
+/// re-checking a boolean every 250ms.
+async fn sleep_unless_stopped(wait: Duration, running: &mut watch::Receiver<bool>) -> bool {
     // Always honor a shutdown signal — even when `wait == 0` (cron tick whose
     // `next` already elapsed, backoff window that ended exactly now). Without
     // this up-front read the zero-wait path short-circuits the loop and
     // returns `true`, letting the caller dispatch one extra workflow after
     // `running` was flipped to `false`.
-    if !*running.read().await {
+    if !*running.borrow() {
         return false;
     }
-    let mut remaining = wait;
-    while !remaining.is_zero() {
-        // Re-check `running` BEFORE subscribing to the next `notified()`.
-        // `Notify::notify_waiters()` only wakes waiters currently parked, so a
-        // signal that fires between two select! iterations is silently lost —
-        // without this pre-check the loop would sleep another full chunk before
-        // observing the flip. With the pre-check the worst-case shutdown
-        // latency is bounded by one `SHUTDOWN_POLL_CHUNK`, not two.
-        if !*running.read().await {
-            return false;
+    tokio::select! {
+        _ = sleep(wait) => true,
+        res = running.changed() => {
+            // `Ok(())` — the driver sent a new value (shutdown flip, or any
+            // other update); `Err(_)` — the driver's sender was dropped (the
+            // scheduler is gone). Either way, stop.
+            let _ = res;
+            false
         }
-        let chunk = remaining.min(SHUTDOWN_POLL_CHUNK);
-        tokio::select! {
-            _ = sleep(chunk) => {}
-            _ = stop_notify.notified() => return false,
-        }
-        remaining = remaining.saturating_sub(chunk);
     }
-    true
 }
 
 /// Per-flow `Every`-schedule loop body. Lives outside `start` so the driver
@@ -81,66 +65,46 @@ pub(super) async fn spawn_every_loop<TState, TResourceKey>(
     info: Arc<RwLock<FlowInfo>>,
     policy: Arc<BackoffPolicy>,
     cancel: Arc<RwLock<Option<CancellationHandle>>>,
-    running: Arc<RwLock<bool>>,
-    stop_notify: Arc<Notify>,
+    mut running: watch::Receiver<bool>,
     interval: Duration,
 ) where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
     TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
-    if !*running.read().await {
+    if !*running.borrow() {
         return;
     }
 
     // Check if previous run is still active before executing. Tripped flows
     // skip dispatch entirely; backoff flows fall through to the loop where
     // the sleep math accounts for `next_eligible`.
-    if dispatchable_now(&info).await {
-        execute_flow(
-            Arc::clone(&workflow),
-            initial_state.clone(),
-            Arc::clone(&info),
-            &policy,
-            Arc::clone(&cancel),
-        )
-        .await;
-    }
+    dispatch_flow_if_eligible(&workflow, &initial_state, &info, &policy, &cancel).await;
 
     loop {
         // Check `running` at the top of the iteration, mirroring
-        // `spawn_cron_loop`. The driver's `notify_waiters()` only wakes loops
-        // parked on `notified()` at the instant of the call — a loop that was
+        // `spawn_cron_loop`. The driver's `send(false)` bumps the watch
+        // version, and `borrow()` reads the latest value — a loop that was
         // inside `execute_flow` (or between `wait_until_eligible` and the
-        // `select!`) misses it and would otherwise sleep a full `interval`
-        // before the post-sleep check fires, stalling shutdown by up to one
-        // schedule period. The sticky `running` flag closes that gap here.
-        if !*running.read().await {
+        // `select!`) still sees the flip here, so it can't sleep a full
+        // `interval` after shutdown. The versioned `changed()` in
+        // `sleep_unless_stopped` closes the same gap for a loop already
+        // parked.
+        if !*running.borrow() {
             break;
         }
 
         // Sleep at least `interval`, but if a backoff window pushes us further
-        // out, sleep until that instant. The helper bounds the worst-case
-        // shutdown delay to `SHUTDOWN_POLL_CHUNK` (250ms) by chunking the
-        // sleep and re-checking `running` between chunks — `Notify` alone
-        // would silently drop a signal that fired while sleep was already
-        // running, leaving the loop blocked for the full schedule interval.
+        // out, sleep until that instant. The helper parks exactly once on the
+        // watch channel; a shutdown `send(false)` wakes it immediately (no
+        // polling).
         let wait = wait_until_eligible(&info, interval).await;
-        if !sleep_unless_stopped(wait, &running, &stop_notify).await {
+        if !sleep_unless_stopped(wait, &mut running).await {
             break;
         }
 
-        if !dispatchable_now(&info).await {
+        if !dispatch_flow_if_eligible(&workflow, &initial_state, &info, &policy, &cancel).await {
             continue;
         }
-
-        execute_flow(
-            Arc::clone(&workflow),
-            initial_state.clone(),
-            Arc::clone(&info),
-            &policy,
-            Arc::clone(&cancel),
-        )
-        .await;
     }
 }
 
@@ -153,15 +117,14 @@ pub(super) async fn spawn_cron_loop<TState, TResourceKey>(
     info: Arc<RwLock<FlowInfo>>,
     policy: Arc<BackoffPolicy>,
     cancel: Arc<RwLock<Option<CancellationHandle>>>,
-    running: Arc<RwLock<bool>>,
-    stop_notify: Arc<Notify>,
+    mut running: watch::Receiver<bool>,
     schedule: Box<CronSchedule>,
 ) where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
     TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     loop {
-        if !*running.read().await {
+        if !*running.borrow() {
             break;
         }
 
@@ -171,12 +134,12 @@ pub(super) async fn spawn_cron_loop<TState, TResourceKey>(
             break;
         };
         let wait_duration = (next - now).to_std().unwrap_or(Duration::from_secs(0));
-        // Chunked sleep — same rationale as in spawn_every_loop: ensures
-        // shutdown is observed within `SHUTDOWN_POLL_CHUNK` even if `Notify`
-        // dropped the signal because the loop wasn't parked at the instant
-        // of the call. Also: re-validate that we're actually past `next`
-        // after waking (handles wall-clock jumps backwards from NTP / suspend).
-        if !sleep_unless_stopped(wait_duration, &running, &stop_notify).await {
+        // Single-park sleep — same rationale as in spawn_every_loop: the watch
+        // channel's versioned `changed()` can't lose a shutdown signal sent
+        // while the loop wasn't parked, so no chunked polling is needed. Also:
+        // re-validate that we're actually past `next` after waking (handles
+        // wall-clock jumps backwards from NTP / suspend).
+        if !sleep_unless_stopped(wait_duration, &mut running).await {
             break;
         }
         // Wall-clock jumped back? Sleep again until we're past `next`.
@@ -184,7 +147,7 @@ pub(super) async fn spawn_cron_loop<TState, TResourceKey>(
         let now2 = Utc::now();
         if now2 < next {
             let extra = (next - now2).to_std().unwrap_or(Duration::from_secs(0));
-            if !sleep_unless_stopped(extra, &running, &stop_notify).await {
+            if !sleep_unless_stopped(extra, &mut running).await {
                 break;
             }
         }
@@ -206,18 +169,9 @@ pub(super) async fn spawn_cron_loop<TState, TResourceKey>(
         }
         drop(info_snapshot);
 
-        if !dispatchable_now(&info).await {
+        if !dispatch_flow_if_eligible(&workflow, &initial_state, &info, &policy, &cancel).await {
             continue;
         }
-
-        execute_flow(
-            Arc::clone(&workflow),
-            initial_state.clone(),
-            Arc::clone(&info),
-            &policy,
-            Arc::clone(&cancel),
-        )
-        .await;
     }
 }
 
@@ -232,8 +186,7 @@ pub(super) async fn driver_task<TState, TResourceKey>(
     mut rx: mpsc::Receiver<SchedulerCommand>,
     workflows: HashMap<Arc<str>, FlowData<TState, TResourceKey>>,
     flow_order: Vec<Arc<str>>,
-    running: Arc<RwLock<bool>>,
-    stop_notify: Arc<Notify>,
+    running: watch::Sender<bool>,
     scheduler_tasks: Arc<RwLock<Vec<JoinHandle<()>>>>,
     in_flight_drain: Arc<RwLock<Option<AbortHandle>>>,
     result_tx: watch::Sender<Option<CanoResult<()>>>,
@@ -340,12 +293,13 @@ pub(super) async fn driver_task<TState, TResourceKey>(
 
     // Shutdown phase. Reached either via explicit Stop or via rx-closed (all
     // RunningScheduler clones dropped without stop). Either way we proceed
-    // through the same graceful drain.
-    *running.write().await = false;
-    // Wake any Every/Cron loop currently parked on its sleep so they observe
-    // `running == false` and exit immediately, bounding shutdown latency by
-    // how long an in-flight workflow takes — not by the schedule interval.
-    stop_notify.notify_waiters();
+    // through the same graceful drain. Sending `false` on the watch channel
+    // wakes every Every/Cron loop — whether it is currently parked in
+    // `sleep_unless_stopped` (via `changed()`) or about to park (via
+    // `borrow()`/`changed()`'s version check) — so shutdown latency is bounded
+    // by how long an in-flight workflow takes, not by the schedule interval
+    // and with no polling.
+    let _ = running.send(false);
 
     // Cooperatively cancel every in-flight run so shutdown latency is bounded by
     // the time to the next await + the saga drain, not by how long the workflow
@@ -372,6 +326,15 @@ pub(super) async fn driver_task<TState, TResourceKey>(
     // `JoinHandle` only detaches the spawned task, it doesn't abort it. The
     // slot is cleared as soon as the await returns (or is cancelled), so the
     // window where Drop's abort applies is exactly the duration of the await.
+    //
+    // Each `handle.await` is bounded by `DRAIN_TIMEOUT` so a single
+    // non-cooperating flow (e.g. a tight CPU loop or a blocking call that
+    // never reaches a cancellation point) can't make `stop()`/`wait()` hang
+    // forever — cancellation is cooperative and `total_timeout` defaults to
+    // `None`. On timeout the task is aborted as a last resort; the same 30s
+    // budget the post-drain `'wait:` poll loop applies to in-flight
+    // workflows.
+    const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
     loop {
         let handle = {
             let mut tasks = scheduler_tasks.write().await;
@@ -380,8 +343,12 @@ pub(super) async fn driver_task<TState, TResourceKey>(
         match handle {
             Some(h) => {
                 let abort = h.abort_handle();
-                *in_flight_drain.write().await = Some(abort);
-                let _ = h.await;
+                *in_flight_drain.write().await = Some(abort.clone());
+                if tokio::time::timeout(DRAIN_TIMEOUT, h).await.is_err() {
+                    // The task ignored cooperative cancellation for the whole
+                    // budget — force-stop it so shutdown can proceed.
+                    abort.abort();
+                }
                 *in_flight_drain.write().await = None;
             }
             None => break,
@@ -607,6 +574,37 @@ async fn dispatchable_now(info: &Arc<RwLock<FlowInfo>>) -> bool {
     !matches!(guard.status, Status::Running | Status::Tripped { .. })
 }
 
+/// Execute one flow dispatch if the flow is currently dispatchable.
+///
+/// Shared by `spawn_every_loop` and `spawn_cron_loop`, which both gate
+/// `execute_flow` behind `dispatchable_now` — the same block in three places.
+/// Returns whether a dispatch actually happened so callers can `continue` the
+/// loop when it didn't.
+async fn dispatch_flow_if_eligible<TState, TResourceKey>(
+    workflow: &Arc<Workflow<TState, TResourceKey>>,
+    initial_state: &TState,
+    info: &Arc<RwLock<FlowInfo>>,
+    policy: &Arc<BackoffPolicy>,
+    cancel: &Arc<RwLock<Option<CancellationHandle>>>,
+) -> bool
+where
+    TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
+    TResourceKey: Hash + Eq + Send + Sync + 'static,
+{
+    if !dispatchable_now(info).await {
+        return false;
+    }
+    execute_flow(
+        Arc::clone(workflow),
+        initial_state.clone(),
+        Arc::clone(info),
+        policy,
+        Arc::clone(cancel),
+    )
+    .await;
+    true
+}
+
 /// Compute how long the Every loop should sleep before the next dispatch.
 /// Returns `max(interval, next_eligible - now)` so a backoff window pushes the
 /// next attempt out without affecting flows that are healthy.
@@ -632,40 +630,32 @@ mod tests {
 
     #[tokio::test]
     async fn sleep_unless_stopped_returns_early_when_running_flips() {
-        // Even if `Notify::notified()` was never reached (e.g. the signal
-        // arrived just before the loop subscribed), the chunked re-check
-        // must observe `running == false` within `SHUTDOWN_POLL_CHUNK`.
-        let running = Arc::new(RwLock::new(true));
-        let stop = Arc::new(Notify::new());
-
-        // Spawn the helper for a 10-second wait — if the chunked re-check
-        // were removed it would sleep the full 10s because the notify was
-        // never observed.
-        let running_clone = Arc::clone(&running);
-        let stop_clone = Arc::clone(&stop);
+        // A shutdown send observed via the watch channel must interrupt the
+        // sleep immediately — even if the loop wasn't parked at the instant of
+        // the send (the receiver remembers the last seen version, so
+        // `changed()` resolves on the next poll). This is the property the old
+        // chunked-polling design existed to provide.
+        let (tx, rx) = watch::channel(true);
+        let mut rx = rx.clone();
         let start = tokio::time::Instant::now();
-        let task = tokio::spawn(async move {
-            sleep_unless_stopped(Duration::from_secs(10), &running_clone, &stop_clone).await
-        });
+        let task =
+            tokio::spawn(
+                async move { sleep_unless_stopped(Duration::from_secs(10), &mut rx).await },
+            );
 
-        // Yield briefly so the helper has parked in its first chunk sleep,
-        // then flip `running` *without* calling notify_waiters() at all.
-        // The race scenario in the bug: signal was lost or never sent.
+        // Yield briefly so the helper has parked in its select, then flip
+        // `running` via the watch sender.
         tokio::time::sleep(Duration::from_millis(50)).await;
-        *running.write().await = false;
+        tx.send(false).unwrap();
 
         let returned_full = task.await.unwrap();
         let elapsed = start.elapsed();
         assert!(!returned_full, "helper must report early-exit");
-        // The flip happens ~50ms after the helper enters its first chunk
-        // sleep. Worst-case shutdown latency is one SHUTDOWN_POLL_CHUNK
-        // (250 ms) — the in-progress sleep finishes, then the pre-select
-        // re-check catches the flag and exits. Bound the assertion tightly
-        // (under 1× chunk + slack) so a regression that drops the pre-check
-        // (worst case → 2× chunk) is caught by this test.
+        // The flip happens ~50ms after the helper parks; the watch `changed()`
+        // wakes it within a scheduler tick — far under 1s.
         assert!(
-            elapsed < SHUTDOWN_POLL_CHUNK + Duration::from_millis(150),
-            "helper must observe `running=false` within ~1 chunk, got {elapsed:?}"
+            elapsed < Duration::from_secs(1),
+            "helper must observe `running=false` promptly, got {elapsed:?}"
         );
     }
 
@@ -676,10 +666,9 @@ mod tests {
         // check entirely because the `while !remaining.is_zero()` body never
         // ran — the helper returned `true` and the caller dispatched one extra
         // workflow after shutdown was requested.
-        let running = Arc::new(RwLock::new(false));
-        let stop = Arc::new(Notify::new());
-
-        let returned_full = sleep_unless_stopped(Duration::ZERO, &running, &stop).await;
+        let (tx, rx) = watch::channel(false);
+        let _tx = tx; // keep the sender alive so `changed()` stays well-formed
+        let returned_full = sleep_unless_stopped(Duration::ZERO, &mut rx.clone()).await;
         assert!(
             !returned_full,
             "zero-duration sleep must surface running=false instead of short-circuiting to true"
@@ -687,21 +676,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sleep_unless_stopped_observes_notify() {
-        // Sanity: the helper still responds to notify_waiters when it does
-        // arrive while the loop is parked.
-        let running = Arc::new(RwLock::new(true));
-        let stop = Arc::new(Notify::new());
-
-        let r = Arc::clone(&running);
-        let s = Arc::clone(&stop);
+    async fn sleep_unless_stopped_observes_shutdown_send() {
+        // Sanity: the helper still responds to a shutdown send while parked.
+        let (tx, rx) = watch::channel(true);
+        let mut rx = rx.clone();
         let task =
             tokio::spawn(
-                async move { sleep_unless_stopped(Duration::from_secs(10), &r, &s).await },
+                async move { sleep_unless_stopped(Duration::from_secs(10), &mut rx).await },
             );
         tokio::time::sleep(Duration::from_millis(20)).await;
-        stop.notify_waiters();
+        tx.send(false).unwrap();
         let returned_full = task.await.unwrap();
-        assert!(!returned_full, "notify must trigger early-exit");
+        assert!(!returned_full, "shutdown send must trigger early-exit");
     }
 }

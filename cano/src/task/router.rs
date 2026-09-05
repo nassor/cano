@@ -167,7 +167,7 @@ where
     /// Returns the `TaskConfig` that determines how this router should be executed
     /// (retry policy, circuit-breaker, etc.). The default returns `TaskConfig::default()`.
     fn config(&self) -> TaskConfig {
-        TaskConfig::default()
+        crate::task::default_task_config()
     }
 
     /// Human-readable identifier for this router, reported to [`WorkflowObserver`] hooks.
@@ -177,7 +177,7 @@ where
     ///
     /// [`WorkflowObserver`]: crate::observer::WorkflowObserver
     fn name(&self) -> Cow<'static, str> {
-        Cow::Borrowed(std::any::type_name::<Self>())
+        crate::task::default_task_name::<Self>()
     }
 
     /// Inspect resources and return the next workflow state.

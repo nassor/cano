@@ -203,6 +203,12 @@ where
 /// ```rust,ignore
 /// let workflow = Workflow::<MyState, MyKeyType>::new(resources);
 /// ```
+///
+/// Immutable observer snapshot: `None` = no observers attached (the zero-cost
+/// common case), `Some(slice)` = the workflow's observer list frozen into an
+/// `Arc` slice so `observer_slice()` allocates once and clones cheaply.
+type ObserverSlice = Arc<[Arc<dyn WorkflowObserver>]>;
+
 #[must_use]
 pub struct Workflow<TState, TResourceKey = Cow<'static, str>>
 where
@@ -233,6 +239,14 @@ where
     /// Observers notified of lifecycle and failure events. Empty by default;
     /// each event is delivered to every observer in registration order.
     observers: Vec<Arc<dyn WorkflowObserver>>,
+    /// Cached `Arc` slice snapshot of [`observers`](Self::observers), built on
+    /// first use. `observer_slice()` allocates an `Arc<[...]>` on every call,
+    /// so without this cache each state transition / split task with observers
+    /// attached paid one heap allocation; the slice is immutable once
+    /// `orchestrate` starts (observers are only added via the builder), so a
+    /// `OnceLock` is sound. `None` inside means "no observers" (the common
+    /// case — zero overhead, no allocation).
+    observer_slice_cache: OnceLock<Option<ObserverSlice>>,
     /// Compensators for every state registered via [`register_with_compensation`](Self::register_with_compensation),
     /// keyed by the task's [`name`](crate::saga::CompensatableTask::name). Used to look a
     /// compensator up by id when draining the compensation stack — including a stack
@@ -273,6 +287,7 @@ where
             exit_states: Vec::new(),
             validated: OnceLock::new(),
             observers: Vec::new(),
+            observer_slice_cache: OnceLock::new(),
             compensators: HashMap::new(),
             checkpoint_store: None,
             workflow_id: None,
@@ -740,14 +755,19 @@ where
 
     /// A shareable snapshot of the registered observers, or `None` when none are
     /// attached. The `None` fast path keeps observer-free workflows allocation-free
-    /// per dispatch; with observers attached this allocates one small slice per
+    /// per dispatch. The snapshot is cached in a `OnceLock` so observer-attached
+    /// workflows pay the `Arc<[...]>` allocation exactly once instead of once per
     /// state transition / split task.
-    fn observer_slice(&self) -> Option<Arc<[Arc<dyn WorkflowObserver>]>> {
-        if self.observers.is_empty() {
-            None
-        } else {
-            Some(Arc::from(self.observers.as_slice()))
-        }
+    fn observer_slice(&self) -> Option<ObserverSlice> {
+        self.observer_slice_cache
+            .get_or_init(|| {
+                if self.observers.is_empty() {
+                    None
+                } else {
+                    Some(Arc::from(self.observers.as_slice()))
+                }
+            })
+            .clone()
     }
 
     /// Return `base` unchanged when no observers are attached; otherwise a cloned
@@ -755,17 +775,23 @@ where
     /// can emit `on_retry` / `on_circuit_open`.
     ///
     /// [`run_with_retries`]: crate::task::run_with_retries
+    // `&Cow<'static, str>` is deliberate here: cloning a borrowed type-name
+    // stays zero-alloc on the per-dispatch hot path, which `&str` + `to_owned`
+    // would forfeit.
+    #[allow(clippy::ptr_arg)]
     fn config_with_observers(
         base: &Arc<crate::task::TaskConfig>,
-        observers: &Option<Arc<[Arc<dyn WorkflowObserver>]>>,
-        task_name: &str,
+        observers: &Option<ObserverSlice>,
+        task_name: &Cow<'static, str>,
     ) -> Arc<crate::task::TaskConfig> {
         match observers {
             None => Arc::clone(base),
             Some(slice) => {
                 let mut cfg = (**base).clone();
                 cfg.observers = Some(Arc::clone(slice));
-                cfg.task_name = Some(Cow::Owned(task_name.to_owned()));
+                // Reuse the caller's `Cow` directly: borrowed type-names clone
+                // without allocating, and owned overrides are already owned.
+                cfg.task_name = Some(task_name.clone());
                 Arc::new(cfg)
             }
         }
@@ -1036,6 +1062,9 @@ where
             // Fresh OnceLock: cloned workflows re-validate on first orchestrate.
             validated: OnceLock::new(),
             observers: self.observers.clone(),
+            // Fresh OnceLock: the observer slice is rebuilt on first use (the
+            // observers Vec is copied above, so the cache can't be shared).
+            observer_slice_cache: OnceLock::new(),
             compensators: self.compensators.clone(),
             checkpoint_store: self.checkpoint_store.clone(),
             workflow_id: self.workflow_id.clone(),

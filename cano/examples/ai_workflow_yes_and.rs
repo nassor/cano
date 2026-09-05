@@ -19,9 +19,9 @@
 
 use cano::prelude::*;
 use rand::RngExt;
-use rig::client::{CompletionClient, Nothing};
-use rig::completion::Prompt;
-use rig::providers::ollama::Client;
+use rig_core::client::{CompletionClient, Nothing};
+use rig_core::completion::{AssistantContent, CompletionModel};
+use rig_core::providers::ollama::Client;
 
 // Configuration constants
 const CONTEXT: &str = r#"
@@ -88,13 +88,28 @@ impl OllamaResource {
         })
     }
 
-    /// Build a fresh agent for one prompt round.
-    fn agent(&self) -> rig::agent::Agent<rig::providers::ollama::CompletionModel<reqwest::Client>> {
-        self.client
-            .agent(MODEL)
-            .preamble(CONTEXT)
+    /// Run one completion round against the shared client.
+    async fn complete(&self, prompt: &str) -> Result<String, CanoError> {
+        let model = self.client.completion_model(MODEL);
+        let request = model
+            .completion_request(prompt)
+            .preamble(CONTEXT.to_string())
             .max_tokens(MAX_TOKEN)
-            .build()
+            .build();
+        let response = model
+            .completion(request)
+            .await
+            .map_err(|e| CanoError::Generic(format!("Ollama completion error: {e}")))?;
+
+        Ok(response
+            .choice
+            .into_iter()
+            .filter_map(|content| match content {
+                AssistantContent::Text(text) => Some(text.text),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(""))
     }
 }
 
@@ -204,7 +219,7 @@ impl Actor1Task {
             history
         };
 
-        let response = match ollama.agent().prompt(&prompt).await {
+        let response = match ollama.complete(&prompt).await {
             Ok(r) => filter_think_tags(&r),
             Err(e) => {
                 eprintln!("Actor1Task AI error: {e:?}");
@@ -266,7 +281,7 @@ impl Actor2Task {
         let ollama = res.get::<OllamaResource, _>("ollama")?;
         let history = get_conversation_history(&store)?;
 
-        let response = match ollama.agent().prompt(&history).await {
+        let response = match ollama.complete(&history).await {
             Ok(r) => Self::ensure_yes_and_format(&r),
             Err(e) => {
                 eprintln!("Actor2Task AI error: {e:?}");

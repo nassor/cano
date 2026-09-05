@@ -874,9 +874,10 @@ where
 
     /// Compute the attempt number that produced `err`.
     ///
-    /// `RetryExhausted` carries the structural count. `CircuitOpen` and
-    /// `WorkflowTimeout` return 0 because they short-circuit (or cancel) the
-    /// in-flight future *before* an attempt body runs to completion — surfacing
+    /// `RetryExhausted` carries the structural count. `CircuitOpen`,
+    /// `CircuitHalfOpenBusy`, and `WorkflowTimeout` return 0 because they
+    /// short-circuit (or cancel) the in-flight future *before* an attempt body
+    /// runs to completion — surfacing
     /// `attempt = 1` would be indistinguishable from "completed one full
     /// attempt then failed", which misleads alerting that buckets on the
     /// attempt count. `WithStateContext` is unwrapped so a nested cause still
@@ -886,6 +887,7 @@ where
         match err {
             CanoError::RetryExhausted { attempts, .. } => *attempts,
             CanoError::CircuitOpen(_)
+            | CanoError::CircuitHalfOpenBusy(_)
             | CanoError::WorkflowTimeout { .. }
             | CanoError::Cancelled => 0,
             CanoError::WithStateContext { source, .. } => Self::attempts_from_error(source),

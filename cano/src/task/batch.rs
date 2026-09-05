@@ -284,7 +284,7 @@ where
     ///
     /// Defaults to [`TaskConfig::default()`] (exponential backoff with 3 retries).
     fn config(&self) -> TaskConfig {
-        TaskConfig::default()
+        crate::task::default_task_config()
     }
 
     /// Human-readable identifier for this batch task, reported to
@@ -292,7 +292,7 @@ where
     ///
     /// Defaults to [`std::any::type_name`] of the implementing type.
     fn name(&self) -> Cow<'static, str> {
-        Cow::Borrowed(std::any::type_name::<Self>())
+        crate::task::default_task_name::<Self>()
     }
 
     /// Produce the work items.
@@ -403,12 +403,16 @@ where
     result
 }
 
-/// Inline per-item retry loop that only requires `ItemOutput: Send` (not `Sync`).
+/// Per-item retry driven by the shared [`run_retry_loop`] from `task::retry`.
 ///
-/// `run_with_retries` from `task::retry` has a `TState: Send + Sync` bound (needed
-/// because task results are shared across workflow state transitions), but per-item
-/// results are never shared — they are collected into a `Vec` and passed to `finish`.
-/// This helper avoids the unnecessary `Sync` bound.
+/// `run_with_retries` has a `TState: Send + Sync` bound (needed because task
+/// results are shared across workflow state transitions), but per-item results
+/// are never shared — they are collected into a `Vec` and passed to `finish`.
+/// The shared loop is generic over the output type, so this helper only needs
+/// `ItemOutput` to be whatever `process_item` returns, avoiding the unnecessary
+/// `Sync` bound.
+///
+/// [`run_retry_loop`]: crate::task::retry::run_retry_loop
 async fn run_item_with_retry<B, S, K>(
     b: &B,
     item: &B::Item,
@@ -419,28 +423,14 @@ where
     S: Clone + fmt::Debug + Send + Sync + 'static,
     K: Hash + Eq + Send + Sync + 'static,
 {
-    let max_attempts = retry_mode.max_attempts();
-    let mut attempt = 0usize;
-    loop {
+    use crate::task::retry::{RetryStep, run_retry_loop};
+    run_retry_loop(retry_mode, |_attempt: usize| async move {
         match b.process_item(item).await {
-            Ok(output) => return Ok(output),
-            Err(e) => {
-                attempt += 1;
-                if attempt >= max_attempts {
-                    return Err(e);
-                }
-                // Sleep before retry (fixed or exponential back-off).
-                // `delay_for_attempt` takes the 0-based index of the attempt
-                // that just failed — i.e. `attempt - 1` after the increment
-                // above. This mirrors `run_with_retries` in `task/retry.rs`.
-                if let Some(delay) = retry_mode.delay_for_attempt(attempt - 1)
-                    && delay.as_millis() > 0
-                {
-                    tokio::time::sleep(delay).await;
-                }
-            }
+            Ok(output) => RetryStep::Done(Ok(output)),
+            Err(e) => RetryStep::Retry(e),
         }
-    }
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------------

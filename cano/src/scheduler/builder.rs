@@ -8,7 +8,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use cron::Schedule as CronSchedule;
-use tokio::sync::{Notify, RwLock, mpsc, watch};
+use tokio::sync::{RwLock, mpsc, watch};
 use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
@@ -76,6 +76,15 @@ where
         initial_state: TState,
         interval: Duration,
     ) -> CanoResult<()> {
+        // A zero interval would make the per-flow loop dispatch as fast as it
+        // can — a pure spin with no cooperative sleep between runs — so reject
+        // it at registration time instead of discovering the hot loop at
+        // runtime.
+        if interval.is_zero() {
+            return Err(CanoError::Configuration(format!(
+                "Flow '{id}': every() interval must be non-zero"
+            )));
+        }
         self.add_flow_internal(id, workflow, initial_state, ParsedSchedule::Every(interval))
     }
 
@@ -290,11 +299,11 @@ where
         // fills up rather than growing without bound.
         let (command_tx, command_rx) = mpsc::channel::<SchedulerCommand>(64);
 
-        // Loop tasks clone the Notify and race the timer against `notified()`
-        // so `stop()` interrupts long sleeps immediately instead of waiting
-        // for the cron / interval to fire.
-        let stop_notify = Arc::new(Notify::new());
-        let running = Arc::new(RwLock::new(true));
+        // The driver owns the `running` watch sender; every per-flow loop gets
+        // a receiver. `stop()` sends `false` once, waking every loop
+        // immediately (whether parked on `changed()` or about to park) instead
+        // of waiting for the cron / interval to fire — with no polling.
+        let (running, running_rx) = watch::channel(true);
         let scheduler_tasks: Arc<RwLock<Vec<JoinHandle<()>>>> = Arc::new(RwLock::new(Vec::new()));
         // See `RunningScheduler::in_flight_drain` and the driver's drain loop:
         // a slot the driver fills with the `AbortHandle` of the per-flow task
@@ -325,8 +334,6 @@ where
                 let info = Arc::clone(&fd.info);
                 let policy = fd.policy.clone();
                 let cancel = Arc::clone(&fd.cancel);
-                let running_clone = Arc::clone(&running);
-                let notify_clone = Arc::clone(&stop_notify);
 
                 match &fd.schedule {
                     ParsedSchedule::Every(interval) => {
@@ -337,8 +344,7 @@ where
                             info,
                             policy,
                             cancel,
-                            running_clone,
-                            notify_clone,
+                            running_rx.clone(),
                             interval,
                         ));
                         tasks.push(handle);
@@ -351,8 +357,7 @@ where
                             info,
                             policy,
                             cancel,
-                            running_clone,
-                            notify_clone,
+                            running_rx.clone(),
                             cron_schedule,
                         ));
                         tasks.push(handle);
@@ -372,8 +377,7 @@ where
             command_rx,
             workflows,
             flow_order,
-            Arc::clone(&running),
-            Arc::clone(&stop_notify),
+            running,
             Arc::clone(&scheduler_tasks),
             Arc::clone(&in_flight_drain),
             result_tx,

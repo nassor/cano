@@ -213,7 +213,7 @@ where
     /// Defaults to [`TaskConfig::minimal()`] (no retries, no timeout). Override to
     /// attach a circuit-breaker or per-attempt timeout if needed.
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
+        crate::task::minimal_task_config()
     }
 
     /// Human-readable identifier for this poller, reported to [`WorkflowObserver`] hooks.
@@ -223,7 +223,7 @@ where
     ///
     /// [`WorkflowObserver`]: crate::observer::WorkflowObserver
     fn name(&self) -> Cow<'static, str> {
-        Cow::Borrowed(std::any::type_name::<Self>())
+        crate::task::default_task_name::<Self>()
     }
 
     /// Policy for handling errors returned by [`poll`](PollTask::poll).
@@ -295,34 +295,56 @@ where
     K: Hash + Eq + Send + Sync + 'static,
 {
     let policy = p.on_poll_error();
-    let mut consecutive_errors: u32 = 0;
 
-    loop {
+    // The loop skeleton (re-invoke until the step says done) is shared with
+    // `run_stepped` via `run_task_loop`; the state tuple carries the
+    // poll-specific bookkeeping: the error policy and the consecutive-error
+    // counter.
+    crate::task::run_task_loop((0u32, policy), |(mut errors, policy)| async move {
         match p.poll(res).await {
             Ok(PollOutcome::Ready(result)) => {
                 #[cfg(feature = "metrics")]
                 crate::metrics::poll_iteration(true);
-                return Ok(result);
+                (
+                    (errors, policy),
+                    crate::task::TaskLoopStep::Done(Ok(result)),
+                )
             }
             Ok(PollOutcome::Pending { delay_ms }) => {
                 #[cfg(feature = "metrics")]
                 crate::metrics::poll_iteration(false);
-                consecutive_errors = 0;
+                errors = 0;
                 if delay_ms > 0 {
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                } else {
+                    // Zero-delay `Pending` must still yield so the loop can never
+                    // busy-spin the executor thread when the poll body completes
+                    // synchronously (the common in-memory / DB-flag check). Without
+                    // this, on a `current_thread` runtime the task that would flip
+                    // the polled condition can never be scheduled — a livelock.
+                    tokio::task::yield_now().await;
                 }
+                ((errors, policy), crate::task::TaskLoopStep::Continue)
             }
             Err(e) => match &policy {
-                PollErrorPolicy::FailFast => return Err(e),
+                PollErrorPolicy::FailFast => {
+                    ((errors, policy), crate::task::TaskLoopStep::Done(Err(e)))
+                }
                 PollErrorPolicy::RetryOnError { max_errors } => {
-                    consecutive_errors += 1;
-                    if consecutive_errors > *max_errors {
-                        return Err(e);
+                    errors += 1;
+                    if errors > *max_errors {
+                        ((errors, policy), crate::task::TaskLoopStep::Done(Err(e)))
+                    } else {
+                        // Yield before the next poll so a synchronously-erroring poll
+                        // body can't spin the executor either.
+                        tokio::task::yield_now().await;
+                        ((errors, policy), crate::task::TaskLoopStep::Continue)
                     }
                 }
             },
         }
-    }
+    })
+    .await
 }
 
 // ---------------------------------------------------------------------------
