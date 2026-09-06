@@ -27,7 +27,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: 1.89.0
+          toolchain: 1.98.0
 
       - name: Cache cargo
         uses: actions/cache@v6
@@ -50,8 +50,10 @@ jobs:
         run: |
           set -uo pipefail
 
-          # `ai_workflow_yes_and` needs a running Ollama daemon — nothing to talk
-          # to in CI, so it is intentionally skipped.
+          # `ai_workflow_yes_and` needs an OpenAI-compatible LLM server (LM Studio
+          # or equivalent) on port 1234 serving `google/gemma-4-12b-qat`, pointed at
+          # via `CUCA_BASE_URL` / `CUCA_MODEL`. There is no such server in CI, so
+          # the example is intentionally skipped.
           SKIP=("ai_workflow_yes_and")
           # `workflow_on_request` is an HTTP server: it never exits on its own,
           # so it gets the dedicated smoke test below instead of the run loop.
@@ -69,7 +71,7 @@ jobs:
           for path in cano/examples/*.rs; do
             ex="$(basename "$path" .rs)"
             if contains "$ex" "${SKIP[@]}"; then
-              echo "::notice::skipping example '$ex' (requires an external Ollama daemon)"
+              echo "::notice::skipping example '$ex' (needs an OpenAI-compatible LLM server on port 1234 serving google/gemma-4-12b-qat; configure with CUCA_BASE_URL / CUCA_MODEL)"
               continue
             fi
             contains "$ex" "${SERVERS[@]}" && continue

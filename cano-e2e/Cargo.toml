@@ -9,15 +9,14 @@ license.workspace = true
 
 [dependencies]
 cano = { path = "../cano" }
-tokio = { version = "1.52.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tokio-postgres = "0.7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
 
 [dev-dependencies]
-testcontainers = "0.27.3"
-testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
+testcontainers = "0.28.0"
 
 # The "custom software" the e2e tests drive: a small Cano app over a Postgres-backed
 # CheckpointStore. Built into the Docker image (see `Dockerfile`) and also runnable

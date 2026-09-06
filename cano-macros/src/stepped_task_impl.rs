@@ -259,7 +259,7 @@ fn expand_inherent_impl(
 fn extract_state_key_task_path_and_prefix(
     item_impl: &ItemImpl,
 ) -> syn::Result<(Type, Option<Type>, Path, ModulePrefix)> {
-    let (_, trait_path, _) = item_impl
+    let (trait_path, _) = item_impl
         .trait_
         .as_ref()
         .ok_or_else(|| syn::Error::new(item_impl.span(), "expected a trait impl block"))?;
@@ -362,7 +362,7 @@ fn synthesise_task_impl(
     let where_clause = &stepped_impl.generics.where_clause;
     let self_ty = &stepped_impl.self_ty;
 
-    let (_, stepped_trait_path, _) = stepped_impl.trait_.as_ref().ok_or_else(|| {
+    let (stepped_trait_path, _) = stepped_impl.trait_.as_ref().ok_or_else(|| {
         syn::Error::new(
             stepped_impl.span(),
             "expected a SteppedTask trait impl block",

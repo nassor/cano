@@ -35,7 +35,7 @@ It excels at managing complex lifecycles where state transitions matter:
 </p>
 <ul class="animate-in">
 <li><strong>Data Pipelines</strong>: ETL jobs with parallel processing (Split/Join) and aggregation.</li>
-<li><strong>AI Agents</strong>: Multi-step inference chains with shared context and memory — see <code>cargo run --example ai_workflow_yes_and</code> (needs a local Ollama).</li>
+<li><strong>AI Agents</strong>: Multi-step inference chains with shared context and memory — see <code>cargo run --example ai_workflow_yes_and</code> (needs a local OpenAI-compatible inference server).</li>
 <li><strong>Background Systems</strong>: Scheduled maintenance, periodic reporting, and distributed cron jobs.</li>
 </ul>
 </section>
@@ -172,7 +172,7 @@ the FSM dispatch hot path stays allocation-light whether or not you wire any of 
 <p>Full coverage: the <a href="resilience/">Resilience</a>, <a href="recovery/">Recovery</a>, <a href="saga/">Saga</a> and <a href="observers/">Observers</a> guides.</p>
 
 <h2>Getting Started</h2>
-<p>Cano requires <strong>Rust 1.89.0+</strong> (edition 2024). Add it to your <code>Cargo.toml</code>:</p>
+<p>Cano requires <strong>Rust 1.98.0+</strong> (edition 2024). Add it to your <code>Cargo.toml</code>:</p>
 
 <div class="getting-started-code">
 

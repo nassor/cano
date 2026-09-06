@@ -4,24 +4,40 @@
 //! - **Actor1Task** opens with a random subject; later turns continue the thread.
 //! - **Actor2Task** continues every other turn with "Yes, and...".
 //!
-//! The example wraps the rig-core Ollama client in an `OllamaResource` so the
-//! HTTP client is built once at workflow setup, shared across both actors via
-//! `Resources`, and torn down in one place. Actors hold no client state.
+//! The example wraps a [`cuca`](https://crates.io/crates/cuca) `CucaClient` in a
+//! `CucaResource` so the HTTP client is built once at workflow setup, shared
+//! across both actors via `Resources`, and torn down in one place. Actors hold
+//! no client state.
 //!
 //! Prerequisites:
-//! - Install Ollama: <https://ollama.ai/>
-//! - `ollama pull gemma4:e2b` and run the daemon
+//! - An OpenAI-compatible local inference server listening on port 1234 —
+//!   [LM Studio](https://lmstudio.ai/) is the default target, but llama.cpp,
+//!   vLLM, or anything else speaking `/v1/chat/completions` works.
+//! - The `google/gemma-4-12b-qat` model loaded and served.
+//! - A context window that holds the transcript plus `MAX_TOKEN` completion
+//!   tokens. The demo model's 8192-token window (LM Studio's default) is
+//!   plenty for both.
+//!
+//! Configuration (both optional, defaults target a local LM Studio server):
+//! - `CUCA_BASE_URL`: server base URL, defaults to `http://127.0.0.1:1234/v1`.
+//! - `CUCA_MODEL`: upstream model id, defaults to `google/gemma-4-12b-qat`.
 //!
 //! Run with:
 //! ```bash
 //! cargo run --example ai_workflow_yes_and
 //! ```
+//!
+//! Or point it at a server on the network:
+//! ```bash
+//! CUCA_BASE_URL=http://192.168.1.10:1234/v1 CUCA_MODEL=google/gemma-4-12b-qat \
+//!   cargo run --example ai_workflow_yes_and
+//! ```
 
 use cano::prelude::*;
+use cuca::types::{MessageContentBlock, ProviderEndpoint};
+use cuca::{CucaClient, ThinkingConfig, ThinkingParams, UnifiedRequest};
+use futures_util::StreamExt;
 use rand::RngExt;
-use rig_core::client::{CompletionClient, Nothing};
-use rig_core::completion::{AssistantContent, CompletionModel};
-use rig_core::providers::ollama::Client;
 
 // Configuration constants
 const CONTEXT: &str = r#"
@@ -34,9 +50,25 @@ Continue talking about the subject using the 'Yes, and...' improv principle:
 - Feel free to use any object from the previous conversation
 "#;
 
-const MODEL: &str = "gemma4:e2b";
-const MAX_TOKEN: u64 = 2048;
+const DEFAULT_BASE_URL: &str = "http://127.0.0.1:1234/v1";
+const DEFAULT_MODEL: &str = "google/gemma-4-12b-qat";
+/// Completion-token budget for one reply.
+///
+/// The visible replies are one-liners of 10-20 words, so this is already
+/// generous. The ceiling is the server's context window (8192 for the demo
+/// model), which has to hold the transcript as well as this budget.
+const MAX_TOKEN: u32 = 2048;
 const MAX_INTERACTIONS: u32 = 12;
+
+/// Server base URL: `CUCA_BASE_URL`, falling back to a local LM Studio server.
+fn base_url() -> String {
+    std::env::var("CUCA_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string())
+}
+
+/// Upstream model id: `CUCA_MODEL`, falling back to the demo model.
+fn model_id() -> String {
+    std::env::var("CUCA_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.to_string())
+}
 
 // Story subjects for random selection
 const SUBJECTS: &[&str] = &[
@@ -68,55 +100,93 @@ const SUBJECTS: &[&str] = &[
 ];
 
 // ============================================================================
-// OllamaResource — shared rig-core client
+// CucaResource — shared cuca client
 // ============================================================================
 
-/// Wraps the rig Ollama `Client` so it lives as a workflow resource.
+/// Wraps a single `CucaClient` so it lives as a workflow resource.
 ///
-/// `setup` is a no-op print today (the rig client is constructed eagerly in
-/// `new`), but real deployments could ping the model endpoint here to fail
-/// fast if Ollama is unreachable.
-struct OllamaResource {
-    client: Client,
+/// `setup` is a no-op print today (the client is constructed eagerly in `new`),
+/// but real deployments could ping the model endpoint here to fail fast if the
+/// inference server is unreachable.
+struct CucaResource {
+    client: CucaClient,
+    model: String,
 }
 
-impl OllamaResource {
+impl CucaResource {
     fn new() -> Result<Self, CanoError> {
         Ok(Self {
-            client: Client::new(Nothing)
-                .map_err(|e| CanoError::Generic(format!("Ollama client error: {e}")))?,
+            client: CucaClient::builder()
+                .with_provider(ProviderEndpoint::LmStudio)
+                .with_base_url(base_url())
+                .build()
+                .map_err(|e| CanoError::Generic(format!("Cuca client error: {e}")))?,
+            model: model_id(),
         })
     }
 
     /// Run one completion round against the shared client.
+    ///
+    /// `generate_stream` is cuca's single generation entry point, so the
+    /// streamed blocks are drained here and the `Text` payloads concatenated
+    /// into one reply. `Thinking` blocks carry the model's reasoning and are
+    /// dropped — no `<think>` tag scraping needed.
+    ///
+    /// The explicit `reasoning_effort: "none"` is deliberate — **do not remove
+    /// it**. `google/gemma-4-12b-qat` reasons by default, and cuca emits
+    /// `reasoning_effort` only when `thinking` is set, so leaving `thinking`
+    /// unset — or setting `ThinkingConfig::disabled()`, which also omits the
+    /// key — lets the server apply its own default and spend the whole
+    /// completion budget on reasoning, ending on `finish_reason: "length"`
+    /// with empty content. This server honours only `"none"` as off
+    /// (`Minimal` and `Low` still reason to exhaustion), so the raw
+    /// `ThinkingParams::OpenAi` override is what buys a plain completion.
     async fn complete(&self, prompt: &str) -> Result<String, CanoError> {
-        let model = self.client.completion_model(MODEL);
-        let request = model
-            .completion_request(prompt)
-            .preamble(CONTEXT.to_string())
-            .max_tokens(MAX_TOKEN)
-            .build();
-        let response = model
-            .completion(request)
-            .await
-            .map_err(|e| CanoError::Generic(format!("Ollama completion error: {e}")))?;
+        let request = UnifiedRequest::new(self.model.clone())
+            .add_system_message(CONTEXT)
+            .add_user_message(prompt)
+            .set_max_tokens(MAX_TOKEN)
+            .with_thinking(ThinkingConfig {
+                enabled: true,
+                effort: None,
+                params: ThinkingParams::OpenAi {
+                    reasoning_effort: Some("none".to_string()),
+                },
+            });
 
-        Ok(response
-            .choice
-            .into_iter()
-            .filter_map(|content| match content {
-                AssistantContent::Text(text) => Some(text.text),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join(""))
+        let mut stream = self
+            .client
+            .generate_stream(request)
+            .await
+            .map_err(|e| CanoError::Generic(format!("Cuca completion error: {e}")))?;
+
+        let mut answer = String::new();
+        while let Some(block) = stream.next().await {
+            let block = block.map_err(|e| CanoError::Generic(format!("Cuca stream error: {e}")))?;
+            if let MessageContentBlock::Text(text) = block {
+                answer.push_str(&text);
+            }
+        }
+
+        if answer.trim().is_empty() {
+            return Err(CanoError::Generic(
+                "model returned no text blocks: the stream ended without a visible reply"
+                    .to_string(),
+            ));
+        }
+
+        Ok(answer)
     }
 }
 
 #[resource]
-impl Resource for OllamaResource {
+impl Resource for CucaResource {
     async fn setup(&self) -> Result<(), CanoError> {
-        println!("OllamaResource: ready (model={MODEL})");
+        println!(
+            "CucaResource: ready (model={}, url={})",
+            self.model,
+            base_url()
+        );
         Ok(())
     }
 }
@@ -125,28 +195,9 @@ impl Resource for OllamaResource {
 // Helpers
 // ============================================================================
 
-/// Removes `<think>...</think>` reasoning blocks and normalizes whitespace.
-fn filter_think_tags(text: &str) -> String {
-    let mut result = text.to_string();
-
-    while let Some(start) = result.to_lowercase().find("<think>") {
-        if let Some(end) = result[start..].to_lowercase().find("</think>") {
-            let end_pos = start + end + "</think>".len();
-            result.replace_range(start..end_pos, "");
-        } else {
-            result.replace_range(start.., "");
-            break;
-        }
-    }
-
-    result = result
-        .replace("<think>", "")
-        .replace("</think>", "")
-        .replace("<THINK>", "")
-        .replace("</THINK>", "");
-
-    result
-        .lines()
+/// Collapse a streamed reply into a single trimmed line.
+fn normalize(text: &str) -> String {
+    text.lines()
         .map(|line| line.trim())
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
@@ -205,7 +256,7 @@ impl Actor1Task {
 impl Actor1Task {
     async fn run(&self, res: &Resources) -> Result<TaskResult<ConversationState>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
-        let ollama = res.get::<OllamaResource, _>("ollama")?;
+        let cuca = res.get::<CucaResource, _>("cuca")?;
         let history = get_conversation_history(&store)?;
 
         let subject = Self::pick_subject();
@@ -219,8 +270,8 @@ impl Actor1Task {
             history
         };
 
-        let response = match ollama.complete(&prompt).await {
-            Ok(r) => filter_think_tags(&r),
+        let response = match cuca.complete(&prompt).await {
+            Ok(r) => normalize(&r),
             Err(e) => {
                 eprintln!("Actor1Task AI error: {e:?}");
                 if is_empty {
@@ -260,8 +311,8 @@ struct Actor2Task;
 
 impl Actor2Task {
     fn ensure_yes_and_format(response: &str) -> String {
-        let cleaned = filter_think_tags(response);
-        if cleaned.trim().to_lowercase().starts_with("yes, and") {
+        let cleaned = normalize(response);
+        if cleaned.to_lowercase().starts_with("yes, and") {
             cleaned
         } else {
             format!(
@@ -278,10 +329,10 @@ impl Actor2Task {
 impl Actor2Task {
     async fn run(&self, res: &Resources) -> Result<TaskResult<ConversationState>, CanoError> {
         let store = res.get::<MemoryStore, _>("store")?;
-        let ollama = res.get::<OllamaResource, _>("ollama")?;
+        let cuca = res.get::<CucaResource, _>("cuca")?;
         let history = get_conversation_history(&store)?;
 
-        let response = match ollama.complete(&history).await {
+        let response = match cuca.complete(&history).await {
             Ok(r) => Self::ensure_yes_and_format(&r),
             Err(e) => {
                 eprintln!("Actor2Task AI error: {e:?}");
@@ -307,11 +358,16 @@ impl Actor2Task {
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
+    let model = model_id();
+    let url = base_url();
+
     println!("Starting 'Yes, and...' Improv Workflow");
     println!("==========================================");
-    println!("Using rig-core with Ollama and {MODEL}");
-    println!("Make sure Ollama is running and you have pulled the {MODEL} model:");
-    println!("  ollama pull {MODEL}");
+    println!("Using cuca against an OpenAI-compatible server");
+    println!("  endpoint: {url}");
+    println!("  model:    {model}");
+    println!("Load {model} in LM Studio (or any server on port 1234) before running.");
+    println!("Override with the CUCA_BASE_URL and CUCA_MODEL environment variables.");
     println!();
     println!("Rules of 'Yes, and...' Improv:");
     println!("   Accept what your partner says (the 'Yes')");
@@ -323,7 +379,7 @@ async fn main() -> Result<(), CanoError> {
     let store = MemoryStore::new();
     let resources = Resources::new()
         .insert("store", store.clone())
-        .insert("ollama", OllamaResource::new()?);
+        .insert("cuca", CucaResource::new()?);
 
     let workflow = Workflow::new(resources)
         .register(ConversationState::Start, Actor1Task)

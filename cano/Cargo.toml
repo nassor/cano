@@ -14,7 +14,7 @@ categories = ["development-tools", "concurrency", "asynchronous"]
 
 [dependencies]
 cano-macros = { version = "0.15", path = "../cano-macros" }
-tokio = { version = "1.52.1", features = ["macros", "sync", "time", "rt-multi-thread"] }
+tokio = { version = "1.53.1", features = ["macros", "sync", "time", "rt-multi-thread"] }
 rand = "0.10"
 chrono = { version = "0.4", features = ["serde"], optional = true }
 cron = { version = "0.17.0", optional = true }
@@ -24,9 +24,9 @@ smallvec = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = { version = "0.1", optional = true }
-redb = { version = "4.1", optional = true }
+redb = { version = "4.2", optional = true }
 postcard = { version = "1", optional = true, features = ["use-std"] }
-metrics = { version = "0.24.5", optional = true }
+metrics = { version = "0.24.6", optional = true }
 
 [features]
 scheduler = ["dep:chrono", "dep:cron", "tokio/signal"]
@@ -39,19 +39,19 @@ all = ["scheduler", "tracing", "recovery", "metrics", "testing"]
 [dev-dependencies]
 axum = "0.8.9"
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
+cuca = { version = "0.3", features = ["provider-lmstudio"] }
 futures-util = "0.3"
 parking_lot = "0.12"
-redb = "4.1"
+redb = "4.2"
 reqwest = { version = "0.13", features = ["json"] }
-rig-core = "0.42.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
-wide = "1.2"
+wide = "1.7"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 chrono = { version = "0.4", features = ["serde"] }
-tokio = { version = "1.52.1", features = ["macros", "sync", "time", "rt-multi-thread", "signal", "test-util"] }
-metrics-util = { version = "0.20.3", features = ["debugging"] }
+tokio = { version = "1.53.1", features = ["macros", "sync", "time", "rt-multi-thread", "signal", "test-util"] }
+metrics-util = { version = "0.20.4", features = ["debugging"] }
 metrics-tracing-context = "0.18.1"
 
 # Subprocess driver for the SIGKILL recovery integration test (tests/recovery_e2e.rs).

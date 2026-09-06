@@ -10,8 +10,8 @@ use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
 use quote::quote;
 use syn::{
-    FnArg, GenericParam, ImplItem, ImplItemFn, ItemImpl, ItemTrait, LifetimeParam, ReturnType,
-    Signature, TraitItem, TraitItemFn, Type, WhereClause, WherePredicate,
+    FnArg, GenericParam, ImplItem, ImplItemFn, ItemImpl, ItemTrait, LifetimeParam, ReceiverKind,
+    ReturnType, Signature, TraitItem, TraitItemFn, Type, WhereClause, WherePredicate,
 };
 
 /// Entry point. Tries to parse `item` as a trait definition first, then an impl
@@ -149,12 +149,12 @@ fn transform_signature(sig: &Signature) -> Signature {
     }
     new_sig.inputs = new_inputs;
 
-    let has_ref_self = sig.inputs.iter().any(
-        |a| matches!(a, FnArg::Receiver(r) if r.reference.is_some() && r.mutability.is_none()),
-    );
-    let has_mut_self = sig.inputs.iter().any(
-        |a| matches!(a, FnArg::Receiver(r) if r.reference.is_some() && r.mutability.is_some()),
-    );
+    let has_ref_self = sig.inputs.iter().any(|a| {
+        matches!(a, FnArg::Receiver(r) if matches!(r.kind, ReceiverKind::Reference(_, _, None)))
+    });
+    let has_mut_self = sig.inputs.iter().any(|a| {
+        matches!(a, FnArg::Receiver(r) if matches!(r.kind, ReceiverKind::Reference(_, _, Some(_))))
+    });
 
     for lt_info in &synth_lifetimes {
         new_sig
@@ -216,9 +216,8 @@ fn transform_signature(sig: &Signature) -> Signature {
 fn rewrite_arg(arg: &FnArg, acc: &mut Vec<SynthLifetime>) -> FnArg {
     match arg {
         FnArg::Receiver(r) => {
-            if r.reference.is_some() {
+            if let ReceiverKind::Reference(_, _, mutability) = r.kind {
                 let lt = make_lifetime(acc);
-                let mutability = r.mutability;
                 let attrs = r.attrs.clone();
                 let self_token = r.self_token;
                 let new_receiver: syn::Receiver = syn::parse_quote! {
