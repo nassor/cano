@@ -16,7 +16,7 @@ output_dir = "public"
 render_emoji = false
 
 [extra]
-version = "0.15.2"
+version = "0.15.3"
 github_url = "https://github.com/nassor/cano"
 crates_url = "https://crates.io/crates/cano"
 docsrs_url = "https://docs.rs/cano"
