@@ -23,7 +23,7 @@ use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 use metrics_util::layers::Layer;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::info_span;
+use tracing::{Instrument, info_span};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
@@ -99,14 +99,12 @@ async fn main() {
         .expect("workflow run");
 
     // Path 2: a user span around orchestrate() — `request_id` flows onto the metrics too.
-    {
-        let span = info_span!("api_request", request_id = "abc");
-        let _enter = span.enter();
-        workflow()
-            .orchestrate(Step::Fetch, CancellationToken::disabled())
-            .await
-            .expect("workflow run");
-    }
+    // Attach it with `.instrument(..)`; holding `span.enter()` across `.await` would leak it.
+    workflow()
+        .orchestrate(Step::Fetch, CancellationToken::disabled())
+        .instrument(info_span!("api_request", request_id = "abc"))
+        .await
+        .expect("workflow run");
 
     // Dump every captured metric, sorted by name — note `workflow_id=` / `request_id=`
     // labels on the `cano_*` metrics, contributed purely by span context.

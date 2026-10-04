@@ -22,7 +22,7 @@ use crate::task::{TaskResult, run_with_retries};
 use super::{Workflow, notify_observers, panic_payload_message};
 
 #[cfg(feature = "tracing")]
-use tracing::{debug, info, info_span};
+use tracing::{Instrument, debug, info, info_span};
 
 /// Resolve the per-drain compensation deadline.
 ///
@@ -450,14 +450,13 @@ where
             .await
         };
 
+        let run = super::catch_panic_to_error(run_future, "Compensatable task");
+        // Attach with `Instrument`, never `Span::enter()`: a guard held across `.await` stays
+        // entered on this thread while other tasks run here (or exits on the wrong thread after
+        // a migration), corrupting every trace on the runtime.
         #[cfg(feature = "tracing")]
-        let result: Result<(TaskResult<TState>, Vec<u8>), CanoError> = {
-            let _enter = task_span.enter();
-            super::catch_panic_to_error(run_future, "Compensatable task").await
-        };
-        #[cfg(not(feature = "tracing"))]
-        let result: Result<(TaskResult<TState>, Vec<u8>), CanoError> =
-            super::catch_panic_to_error(run_future, "Compensatable task").await;
+        let run = run.instrument(task_span);
+        let result: Result<(TaskResult<TState>, Vec<u8>), CanoError> = run.await;
 
         let outcome: Result<(TState, Vec<u8>), CanoError> = match result {
             Ok((TaskResult::Single(next_state), blob)) => Ok((next_state, blob)),
@@ -554,9 +553,23 @@ where
                 tracing::Span::none()
             }
         });
-        #[cfg(feature = "tracing")]
-        let _enter = workflow_span.enter();
 
+        let run = self.resume_from_body(workflow_id, token);
+        // Attach with `Instrument`, never `Span::enter()`: a guard held across `.await` stays
+        // entered on this thread while other tasks run here (or exits on the wrong thread after
+        // a migration), corrupting every trace on the runtime.
+        #[cfg(feature = "tracing")]
+        let run = run.instrument(workflow_span);
+        run.await
+    }
+
+    /// Body of [`resume_from`](Self::resume_from), run inside the workflow span (the
+    /// `with_tracing_span` span if set, else `workflow_resume`).
+    async fn resume_from_body(
+        &self,
+        workflow_id: Arc<str>,
+        token: CancellationToken,
+    ) -> Result<TState, CanoError> {
         let store = self.checkpoint_store.clone().ok_or_else(|| {
             CanoError::configuration(
                 "resume_from requires a checkpoint store (call with_checkpoint_store)",

@@ -67,8 +67,9 @@
 //!     .init();
 //! ```
 //!
-//! With both layers installed, a span you open around [`Workflow::orchestrate`](crate::Workflow::orchestrate)
-//! (e.g. `info_span!("api_request", request_id = …)`) flows `request_id` onto every `cano_*`
+//! With both layers installed, a span you attach to the [`Workflow::orchestrate`](crate::Workflow::orchestrate)
+//! future via `.instrument(span)` (`tracing::Instrument`; never hold `span.enter()` across the
+//! `.await`), e.g. `info_span!("api_request", request_id = …)`, flows `request_id` onto every `cano_*`
 //! metric recorded during that workflow run. Cano's own default `workflow_orchestrate` and
 //! `workflow_resume` spans carry a `workflow_id` field (when one is set via
 //! [`with_workflow_id`](crate::Workflow::with_workflow_id)), so that becomes a metric label

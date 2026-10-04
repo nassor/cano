@@ -359,7 +359,9 @@ tracing_subscriber::registry()
 ```
 
 <p>
-With both layers installed, a span you open around <code>Workflow::orchestrate</code> — e.g.
+With both layers installed, a span you attach to the <code>Workflow::orchestrate</code> future via
+<code>.instrument(span)</code> (<code>tracing::Instrument</code>; never hold <code>span.enter()</code> across
+the <code>.await</code>) — e.g.
 <code>info_span!("api_request", request_id = …)</code> — tags every <code>cano_*</code> metric recorded
 during that run with <code>request_id</code>. Cano's own default <code>workflow_orchestrate</code> and
 <code>workflow_resume</code> spans carry a <code>workflow_id</code> field whenever one is set via

@@ -88,7 +88,7 @@ use crate::task::stream::{ErasedStreamTask, StreamAdapter, StreamTask};
 use crate::task::{RouterTask, Task};
 
 #[cfg(feature = "tracing")]
-use tracing::{Span, info_span};
+use tracing::{Instrument, Span, info_span};
 
 mod compensation;
 mod execution;
@@ -979,9 +979,22 @@ where
             }
         });
 
+        let run = self.orchestrate_body(initial_state, token);
+        // Attach with `Instrument`, never `Span::enter()`: a guard held across `.await` stays
+        // entered on this thread while other tasks run here (or exits on the wrong thread after
+        // a migration), corrupting every trace on the runtime.
         #[cfg(feature = "tracing")]
-        let _enter = workflow_span.enter();
+        let run = run.instrument(workflow_span);
+        run.await
+    }
 
+    /// Body of [`orchestrate`](Self::orchestrate), run inside the workflow span (the
+    /// `with_tracing_span` span if set, else `workflow_orchestrate`).
+    async fn orchestrate_body(
+        &self,
+        initial_state: TState,
+        token: CancellationToken,
+    ) -> Result<TState, CanoError> {
         // Validate once and cache. Subsequent calls return the cached result without
         // re-walking the states + splits tree — workflow shape is immutable post-build.
         let cached_validation = self.validated.get_or_init(|| self.validate());

@@ -368,12 +368,27 @@ crate wired in — a <code>TracingContextLayer</code> around your metrics record
 metric emitted <em>while a span is entered</em> inherits that span's fields as labels.
 </p>
 <p>
-So a custom span you attach with <code>with_tracing_span</code> (or simply open around
-<code>orchestrate()</code>) flows its fields — a <code>request_id</code>, a <code>tenant</code>, … — onto
+So a custom span you attach with <code>with_tracing_span</code> (or wrap the
+<code>orchestrate()</code> future with <code>.instrument(span)</code>, as shown below) flows its
+fields — a <code>request_id</code>, a <code>tenant</code>, … — onto
 the metrics recorded during that run. Cano's own default <code>workflow_orchestrate</code> and
 <code>workflow_resume</code> spans carry a <code>workflow_id</code> field whenever one is set via
 <code>with_workflow_id</code>, so it shows up both in the trace output and as a metric label.
 </p>
+<p>
+To wrap a run in a span of your own, attach it to the <code>orchestrate()</code> future with
+<code>tracing::Instrument</code>. Never hold a <code>span.enter()</code> guard across the
+<code>.await</code>.
+</p>
+
+```rust
+use tracing::Instrument;
+
+workflow
+    .orchestrate(State::Start, CancellationToken::disabled())
+    .instrument(tracing::info_span!("api_request", request_id = "abc"))
+    .await?;
+```
 
 <div class="callout callout-info">
 <span class="callout-label">See also</span>

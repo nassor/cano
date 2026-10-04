@@ -17,7 +17,7 @@ use crate::error::CanoError;
 use crate::observer::WorkflowObserver;
 
 #[cfg(feature = "tracing")]
-use tracing::{debug, error, info, info_span, instrument, warn};
+use tracing::{Instrument, debug, error, info, info_span, instrument, warn};
 
 /// Retry modes for task execution
 ///
@@ -424,13 +424,7 @@ where
         // closure cannot move non-Copy captures out). `breaker` is a Copy
         // `Option<&Arc<_>>`, captured directly by the async block.
         let run_fn = &run_fn;
-        async move {
-            #[cfg(feature = "tracing")]
-            let attempt_span = info_span!("task_attempt", attempt = attempt + 1, max_attempts);
-
-            #[cfg(feature = "tracing")]
-            let _span_guard = attempt_span.enter();
-
+        let attempt_future = async move {
             #[cfg(feature = "tracing")]
             debug!(attempt = attempt + 1, "Executing task attempt");
 
@@ -517,7 +511,17 @@ where
                     RetryStep::Retry(e)
                 }
             }
-        }
+        };
+        // Attach with `Instrument`, never `Span::enter()`: a guard held across `.await` stays
+        // entered on this thread while other tasks run here (or exits on the wrong thread after
+        // a migration), corrupting every trace on the runtime.
+        #[cfg(feature = "tracing")]
+        let attempt_future = attempt_future.instrument(info_span!(
+            "task_attempt",
+            attempt = attempt + 1,
+            max_attempts
+        ));
+        attempt_future
     })
     .await
 }
