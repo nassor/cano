@@ -160,8 +160,9 @@ pub trait WorkflowObserver: Send + Sync + 'static {
 /// → `task_attempt`, etc.). Use it *alongside* that instrumentation, or on its own when you
 /// only want the high-level events.
 ///
-/// To turn `tracing` span context into `metrics` labels (so a span you open around
-/// [`Workflow::orchestrate`](crate::workflow::Workflow::orchestrate) tags the `cano_*`
+/// To turn `tracing` span context into `metrics` labels (so a span you attach to the
+/// [`Workflow::orchestrate`](crate::workflow::Workflow::orchestrate) future via
+/// `.instrument(span)` — never a `span.enter()` guard held across `.await` — tags the `cano_*`
 /// metrics emitted inside it), see the *"Correlating metrics with traces"* section of the
 /// `cano::metrics` module docs (requires the `metrics` feature).
 ///

@@ -70,9 +70,14 @@ jobs:
       run: cargo test --lib
 
     - name: Run tests (all features)
-      # Required to run `tracing_tests` which is `#[cfg(feature = "tracing")]`,
-      # plus full scheduler coverage.
+      # Feature-gated lib tests, including full scheduler coverage.
+      # `--lib` never runs the `cano/tests/*` integration tests; the next step runs the tracing ones.
       run: cargo test --lib --all-features
+
+    - name: Test (tracing integration)
+      # `tracing_span_context` and `tracing_tests` are integration tests gated on
+      # `#[cfg(feature = "tracing")]`, so they need `--all-features`.
+      run: cargo test -p cano --all-features --test tracing_span_context --test tracing_tests
 
     - name: Run doctests
       run: cargo test --doc --all-features

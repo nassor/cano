@@ -27,7 +27,7 @@ use super::join::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult};
 use super::{Workflow, notify_observers, panic_payload_message};
 
 #[cfg(feature = "tracing")]
-use tracing::{debug, info, info_span, warn};
+use tracing::{Instrument, debug, info, info_span, warn};
 
 /// Entry in the workflow state machine
 pub enum StateEntry<TState, TResourceKey = Cow<'static, str>>
@@ -932,13 +932,13 @@ where
             .await
         };
 
+        let run = super::catch_panic_to_error(run_future, "Single task");
+        // Attach with `Instrument`, never `Span::enter()`: a guard held across `.await` stays
+        // entered on this thread while other tasks run here (or exits on the wrong thread after
+        // a migration), corrupting every trace on the runtime.
         #[cfg(feature = "tracing")]
-        let result = {
-            let _enter = task_span.enter();
-            super::catch_panic_to_error(run_future, "Single task").await
-        };
-        #[cfg(not(feature = "tracing"))]
-        let result = super::catch_panic_to_error(run_future, "Single task").await;
+        let run = run.instrument(task_span);
+        let result = run.await;
 
         let outcome: Result<TState, CanoError> = match result {
             Ok(TaskResult::Single(next_state)) => {
@@ -1340,11 +1340,8 @@ where
                 tracing::Span::none()
             };
 
-            join_set.spawn(async move {
+            let branch = async move {
                 let run_future = async {
-                    #[cfg(feature = "tracing")]
-                    let _enter = task_span.enter();
-
                     #[cfg(feature = "tracing")]
                     debug!(task_id = idx, "Executing split task");
 
@@ -1397,7 +1394,13 @@ where
                         )
                     }
                 }
-            });
+            };
+            // Attach with `Instrument`, never `Span::enter()`: a guard held across `.await` stays
+            // entered on this thread while other tasks run here (or exits on the wrong thread after
+            // a migration), corrupting every trace on the runtime.
+            #[cfg(feature = "tracing")]
+            let branch = branch.instrument(task_span);
+            join_set.spawn(branch);
         }
 
         // Collect results using the unified strategy handler
