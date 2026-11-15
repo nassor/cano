@@ -95,7 +95,7 @@ pub(crate) mod test_support;
 
 use execution::Entry;
 pub use execution::StateEntry;
-pub use join::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult};
+pub use join::{JoinConfig, JoinStrategy};
 
 /// A task that [`Workflow::register`] accepts.
 ///
@@ -119,7 +119,10 @@ pub trait Registrable<TState> {
 /// are expected to be infallible, and surfacing the bug to the operator without
 /// coupling it to the workflow's result requires *some* channel.
 #[inline]
-fn notify_observers(observers: &[Arc<dyn WorkflowObserver>], f: impl Fn(&dyn WorkflowObserver)) {
+pub(crate) fn notify_observers(
+    observers: &[Arc<dyn WorkflowObserver>],
+    f: impl Fn(&dyn WorkflowObserver),
+) {
     for observer in observers {
         let observer_ref = observer.as_ref();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(observer_ref)));
@@ -230,12 +233,15 @@ where
     validated: OnceLock<Result<(), CanoError>>,
     /// Observers notified of lifecycle and failure events. Empty by default;
     /// each event is delivered to every observer in registration order.
-    observers: Vec<Arc<dyn WorkflowObserver>>,
+    observers: Arc<[Arc<dyn WorkflowObserver>]>,
     /// Compensators for every state registered via [`register`](Self::register),
     /// keyed by the task's [`name`](crate::saga::CompensatableTask::name). Used to look a
     /// compensator up by id when draining the compensation stack — including a stack
     /// rehydrated from a checkpoint log, where only the `task_id` string is available.
     compensators: HashMap<Arc<str>, Arc<dyn ErasedCompensatable<TState>>>,
+    /// A registration mistake that can only be reported later: [`validate`](Self::validate)
+    /// returns it before its other checks (first one wins).
+    config_error: Option<CanoError>,
     /// Optional append-only checkpoint store. When set (alongside [`workflow_id`](Self::workflow_id)),
     /// every state entry writes a [`CheckpointRow`](crate::recovery::CheckpointRow) before the state's task runs, so a
     /// crashed run can be resumed via [`resume_from`](Self::resume_from). `None` by default —
@@ -269,8 +275,9 @@ where
             compensation_timeout: None,
             exit_states: Vec::new(),
             validated: OnceLock::new(),
-            observers: Vec::new(),
+            observers: Arc::new([]),
             compensators: HashMap::new(),
+            config_error: None,
             checkpoint_store: None,
             workflow_id: None,
             workflow_version: 0,
@@ -323,9 +330,7 @@ where
     /// [`with_compensation_timeout`](Self::with_compensation_timeout)), and the call
     /// returns [`CanoError::WorkflowTimeout`](crate::CanoError::WorkflowTimeout)
     /// — or [`CanoError::CompensationFailed`](crate::CanoError::CompensationFailed)
-    /// if rollback itself fails. Contrast with [`with_timeout`](Self::with_timeout),
-    /// which is a single `tokio::time::timeout` around the whole future and offers
-    /// no graceful compensation, and with
+    /// if rollback itself fails. Contrast with
     /// [`TaskConfig::with_attempt_timeout`](crate::task::TaskConfig::with_attempt_timeout),
     /// which bounds each individual task attempt.
     ///
@@ -437,7 +442,18 @@ where
         self.forget_compensator_for(&state);
         let entry = task.into_entry().0;
         if let Entry::Compensatable { task, name, .. } = &entry {
-            self.compensators.insert(Arc::clone(name), Arc::clone(task));
+            // The compensation stack refers to compensators by name: a second state
+            // with the same name would roll back through the wrong instance.
+            if self.compensators.contains_key(name) {
+                self.config_error.get_or_insert_with(|| {
+                    CanoError::configuration(format!(
+                        "two compensatable states share the task name {name:?}; \
+                         override `name()` on one of them"
+                    ))
+                });
+            } else {
+                self.compensators.insert(Arc::clone(name), Arc::clone(task));
+            }
         }
         self.states.insert(state, Arc::new(entry));
         self
@@ -566,7 +582,7 @@ where
     /// # }
     /// ```
     pub fn with_observer(mut self, observer: Arc<dyn WorkflowObserver>) -> Self {
-        self.observers.push(observer);
+        self.observers = self.observers.iter().cloned().chain([observer]).collect();
         self
     }
 
@@ -652,10 +668,7 @@ where
         self
     }
 
-    fn validate_join_config(
-        join_config: &JoinConfig<TState>,
-        _total_tasks: usize,
-    ) -> Result<(), CanoError> {
+    fn validate_join_config(join_config: &JoinConfig<TState>) -> Result<(), CanoError> {
         if matches!(join_config.strategy, JoinStrategy::PartialTimeout)
             && join_config.timeout.is_none()
         {
@@ -715,6 +728,9 @@ where
     /// assert!(workflow.validate().is_ok());
     /// ```
     pub fn validate(&self) -> Result<(), CanoError> {
+        if let Some(err) = &self.config_error {
+            return Err(err.clone());
+        }
         if self.states.is_empty() {
             return Err(CanoError::configuration(
                 "Workflow has no registered state handlers",
@@ -728,11 +744,8 @@ where
         // Each join_state in a Split entry must either be registered or an exit state;
         // otherwise orchestration will always error at runtime after the split completes.
         for entry in self.states.values() {
-            if let Entry::Split {
-                tasks, join_config, ..
-            } = &**entry
-            {
-                Self::validate_join_config(join_config, tasks.len())?;
+            if let Entry::Split { join_config, .. } = &**entry {
+                Self::validate_join_config(join_config)?;
                 let js = &join_config.join_state;
                 if !self.states.contains_key(js) && !self.exit_states.contains(js) {
                     return Err(CanoError::configuration(format!(
@@ -795,9 +808,12 @@ where
     ///
     /// # Errors
     ///
-    /// - [`CanoError::Workflow`] -- no handler is registered for the current state, the
-    ///   global workflow timeout was exceeded, or a split strategy was misconfigured
+    /// - [`CanoError::Configuration`] -- [`validate`](Self::validate) failed
+    /// - [`CanoError::Workflow`] -- no handler is registered for the current state, or the
+    ///   global workflow timeout was exceeded
     /// - Any [`CanoError`] variant propagated from a task during execution
+    /// - The error from a failed resource `setup`, or from a failed `teardown` after a
+    ///   *successful* run (the run's own error always takes precedence)
     pub async fn orchestrate(&self, initial_state: TState) -> Result<TState, CanoError> {
         self.orchestrate_inner(initial_state, None).await
     }
@@ -872,10 +888,28 @@ where
         // initial_state varies per call; this still runs every time, but it's O(1).
         self.validate_initial_state(&initial_state)?;
 
+        self.with_lifecycle(|| self.run_workflow(initial_state, token))
+            .await
+    }
+
+    /// Set up resources, run `run`, then tear resources down on every exit path.
+    /// The run's error wins; a teardown error is returned only when the run
+    /// succeeded, so a half-torn-down world is never reported as clean.
+    ///
+    /// Takes a closure, not a future, so the (large) FSM future is built in place
+    /// after setup instead of being moved into this one.
+    async fn with_lifecycle<F, Fut>(&self, run: F) -> Result<TState, CanoError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<TState, CanoError>>,
+    {
         self.resources.setup_all().await?;
-        let result = self.run_workflow(initial_state, token).await;
-        self.resources.teardown_all().await;
-        result
+        let result = run().await;
+        let teardown = self.resources.teardown_all_result().await;
+        match (result, teardown) {
+            (Err(e), _) | (Ok(_), Err(e)) => Err(e),
+            (Ok(state), Ok(())) => Ok(state),
+        }
     }
 
     /// Validate (cached) + validate the initial state + run the FSM. No resource
@@ -965,8 +999,9 @@ where
             exit_states: self.exit_states.clone(),
             // Fresh OnceLock: cloned workflows re-validate on first orchestrate.
             validated: OnceLock::new(),
-            observers: self.observers.clone(),
+            observers: Arc::clone(&self.observers),
             compensators: self.compensators.clone(),
+            config_error: self.config_error.clone(),
             checkpoint_store: self.checkpoint_store.clone(),
             workflow_id: self.workflow_id.clone(),
             workflow_version: self.workflow_version,

@@ -344,6 +344,11 @@ struct CompProbe(Probe);
 impl CompProbe {
     type Output = ();
 
+    // Two states run a `CompProbe`; compensators are looked up by name, so each
+    // instance needs its own.
+    fn name(&self) -> std::borrow::Cow<'static, str> {
+        format!("CompProbe->{:?}", self.0.next).into()
+    }
     async fn run(&self, _res: &Resources) -> Result<(S, ()), CanoError> {
         Ok((self.0.body().await?, ()))
     }

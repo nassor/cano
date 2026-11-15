@@ -256,7 +256,8 @@ where
     loop {
         let outcome = match retry {
             Some((config, obs)) => {
-                run_with_retries_observed(config, obs, || task.step(res, cursor.clone())).await?
+                run_with_retries_observed(config, obs.as_ref(), || task.step(res, cursor.clone()))
+                    .await?
             }
             None => task.step(res, cursor.take()).await?,
         };

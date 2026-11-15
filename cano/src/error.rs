@@ -361,7 +361,7 @@ pub enum CanoError {
         state: String,
         /// The 1-based attempt number that produced this failure.
         attempt: u32,
-        /// The states visited so far, in order, ending with `state`.
+        /// The most recent 64 states visited, in order, ending with `state`.
         transitions_so_far: Vec<String>,
         /// The underlying error that triggered this failure.
         source: Box<CanoError>,

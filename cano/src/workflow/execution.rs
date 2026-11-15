@@ -7,7 +7,7 @@
 //! [`compensation`](super::compensation) module.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
@@ -25,13 +25,17 @@ use futures_util::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
 
 use super::compensation::resolve_compensation_deadline;
-use super::join::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult};
+use super::join::{JoinConfig, JoinStrategy};
 use super::{Workflow, notify_observers, panic_payload_message};
 
 #[cfg(feature = "tracing")]
 use tracing::{Instrument, debug, info, info_span, warn};
 
 /// Entry in the workflow state machine
+/// How many of the most recent states `CanoError::WithStateContext::transitions_so_far`
+/// reports.
+const MAX_TRANSITION_PATH: usize = 64;
+
 /// What a state runs, as produced by [`Registrable::into_entry`](super::Registrable::into_entry).
 ///
 /// Opaque: build one through `Workflow::register` (the task macros implement
@@ -185,16 +189,22 @@ where
     }
 }
 
-fn split_error_summary<TState>(errors: &[SplitTaskResult<TState>]) -> String {
+/// What a split's branches did: successful branch indices, failed branches with their
+/// errors (`usize::MAX` = a branch whose `JoinSet` slot panicked or was aborted, index
+/// lost), and how many never completed.
+struct SplitOutcome {
+    successes: Vec<usize>,
+    errors: Vec<(usize, CanoError)>,
+    cancelled: usize,
+}
+
+fn split_error_summary(errors: &[(usize, CanoError)]) -> String {
     const MAX_ERRORS_TO_REPORT: usize = 3;
 
     let mut parts: Vec<String> = errors
         .iter()
         .take(MAX_ERRORS_TO_REPORT)
-        .map(|err| match &err.result {
-            Ok(_) => format!("task {}: unexpected success in error list", err.task_index),
-            Err(e) => format!("task {}: {}", err.task_index, e),
-        })
+        .map(|(idx, e)| format!("task {idx}: {e}"))
         .collect();
 
     if errors.len() > MAX_ERRORS_TO_REPORT {
@@ -265,7 +275,10 @@ where
         // truthful across crashes. Stored as `TState` to avoid per-iteration
         // `format!` allocations on the success path; formatted to `Vec<String>`
         // only when folded into a `WithStateContext` on failure.
-        let mut transitions_so_far: Vec<TState> = prior_transitions;
+        let mut transitions_so_far: VecDeque<TState> = prior_transitions.into();
+        if let Some(excess) = transitions_so_far.len().checked_sub(MAX_TRANSITION_PATH) {
+            transitions_so_far.drain(..excess);
+        }
 
         #[cfg(feature = "tracing")]
         info!(initial_state = ?current_state, "Starting workflow execution");
@@ -314,7 +327,7 @@ where
                         workflow_id.as_deref(),
                         compensation_stack,
                         &current_state,
-                        &transitions_so_far,
+                        transitions_so_far.make_contiguous(),
                         CanoError::cancelled(),
                         total_budget,
                     )
@@ -337,8 +350,13 @@ where
 
             // Record the state being entered for state-context error wrapping.
             // Unconditional — every state entered (including Router and exit
-            // states) appears in `transitions_so_far`.
-            transitions_so_far.push(current_state.clone());
+            // states) appears in `transitions_so_far`, which keeps only the most
+            // recent `MAX_TRANSITION_PATH` states so a cyclic workflow can't grow it
+            // without bound.
+            if transitions_so_far.len() == MAX_TRANSITION_PATH {
+                transitions_so_far.pop_front();
+            }
+            transitions_so_far.push_back(current_state.clone());
 
             // Notify observers of every state entry, including the initial state
             // and any terminal exit state.
@@ -372,7 +390,7 @@ where
                             workflow_id.as_deref(),
                             compensation_stack,
                             &current_state,
-                            &transitions_so_far,
+                            transitions_so_far.make_contiguous(),
                             err,
                             total_budget,
                         )
@@ -391,7 +409,7 @@ where
                             workflow_id.as_deref(),
                             compensation_stack,
                             &current_state,
-                            &transitions_so_far,
+                            transitions_so_far.make_contiguous(),
                             err,
                             total_budget,
                         )
@@ -417,7 +435,7 @@ where
                         workflow_id.as_deref(),
                         compensation_stack,
                         &current_state,
-                        &transitions_so_far,
+                        transitions_so_far.make_contiguous(),
                         err,
                         total_budget,
                     )
@@ -549,7 +567,7 @@ where
                                             workflow_id.as_deref(),
                                             compensation_stack,
                                             &current_state,
-                                            &transitions_so_far,
+                                            transitions_so_far.make_contiguous(),
                                             err,
                                             total_budget,
                                         )
@@ -661,7 +679,7 @@ where
                             workflow_id.as_deref(),
                             compensation_stack,
                             &current_state,
-                            &transitions_so_far,
+                            transitions_so_far.make_contiguous(),
                             e,
                             total_budget,
                         )
@@ -866,7 +884,7 @@ where
         // Split branches apply the same pattern inside each spawned task so their
         // index and panic payload are preserved.
         let resources = &*self.resources;
-        let run_future = run_with_retries_observed(config, obs, || task.run(resources));
+        let run_future = run_with_retries_observed(config, obs.as_ref(), || task.run(resources));
         let run = super::catch_panic_to_error(run_future, "Single task");
         // Attach with `Instrument`, never `Span::enter()`: a guard held across `.await` stays
         // entered on this thread while other tasks run here (or exits on the wrong thread after
@@ -1177,11 +1195,6 @@ where
             "Starting split execution"
         );
 
-        // Validate strategy configuration before spawning tasks. `validate()`
-        // catches these at build/start time; keep the execution-time check as
-        // defense-in-depth for internal callers that bypass public orchestration.
-        Self::validate_join_config(join_config, total_tasks)?;
-
         // Optional bulkhead: gate task bodies on a shared semaphore so at
         // most `n` split tasks execute concurrently.
         let bulkhead = join_config
@@ -1196,8 +1209,7 @@ where
         // of the observer list, and `on_task_success` / `on_task_failure` fire from
         // here once results are collected. Both stay empty / `None` and cost nothing
         // when no observers are attached.
-        let observers: Option<Arc<[Arc<dyn crate::observer::WorkflowObserver>]>> =
-            (!self.observers.is_empty()).then(|| Arc::from(self.observers.as_slice()));
+        let observers = (!self.observers.is_empty()).then(|| Arc::clone(&self.observers));
         let task_ids: Vec<Arc<str>> = if observers.is_some() {
             names
                 .iter()
@@ -1257,7 +1269,8 @@ where
                         .and_then(|(observers, name)| ObserverCtx::new(observers, name));
                     let resources = &*resources_clone;
                     let result =
-                        run_with_retries_observed(&config, obs, || task.run(resources)).await;
+                        run_with_retries_observed(&config, obs.as_ref(), || task.run(resources))
+                            .await;
 
                     #[cfg(feature = "tracing")]
                     match &result {
@@ -1300,7 +1313,7 @@ where
         crate::metrics::split_branch_results(
             split_result.successes.len(),
             split_result.errors.len(),
-            split_result.cancelled.len(),
+            split_result.cancelled,
         );
 
         // Fire per-task observer events for everything that ran to completion.
@@ -1308,13 +1321,13 @@ where
         // aggregated error entry carries `task_index == usize::MAX`, which
         // `task_ids.get` filters out.
         if let Some(ref slice) = observers {
-            for success in &split_result.successes {
-                if let Some(id) = task_ids.get(success.task_index) {
+            for &idx in &split_result.successes {
+                if let Some(id) = task_ids.get(idx) {
                     notify_observers(slice, |o| o.on_task_success(id));
                 }
             }
-            for failure in &split_result.errors {
-                if let (Some(id), Err(err)) = (task_ids.get(failure.task_index), &failure.result) {
+            for (idx, err) in &split_result.errors {
+                if let Some(id) = task_ids.get(*idx) {
                     notify_observers(slice, |o| o.on_task_failure(id, err));
                 }
             }
@@ -1322,7 +1335,7 @@ where
 
         let successful = split_result.successes.len();
         let _failed = split_result.errors.len();
-        let _cancelled = split_result.cancelled.len();
+        let _cancelled = split_result.cancelled;
 
         #[cfg(feature = "tracing")]
         info!(
@@ -1357,7 +1370,7 @@ where
             }
             JoinStrategy::PartialTimeout => {
                 // For PartialTimeout, proceed with whatever completed before timeout
-                if split_result.completed_count() >= 1 {
+                if successful + split_result.errors.len() >= 1 {
                     Ok(join_config.join_state.clone())
                 } else {
                     Err(CanoError::workflow(
@@ -1389,8 +1402,12 @@ where
         mut join_set: tokio::task::JoinSet<(usize, Result<TState, CanoError>)>,
         join_config: &JoinConfig<TState>,
         total_tasks: usize,
-    ) -> Result<SplitResult<TState>, CanoError> {
-        let mut split_result = SplitResult::with_capacity(total_tasks);
+    ) -> Result<SplitOutcome, CanoError> {
+        let mut split_result = SplitOutcome {
+            successes: Vec::with_capacity(total_tasks),
+            errors: Vec::new(),
+            cancelled: 0,
+        };
         // Bitset over task indices; cheaper than HashSet<usize> on cache and alloc.
         let mut completed_indices: Vec<bool> = vec![false; total_tasks];
 
@@ -1420,27 +1437,21 @@ where
             };
 
             match next_result {
-                Some(Ok((index, Ok(task_result)))) => {
+                Some(Ok((index, Ok(_)))) => {
                     completed_indices[index] = true;
-                    split_result.successes.push(SplitTaskResult {
-                        task_index: index,
-                        result: Ok(task_result),
-                    });
+                    split_result.successes.push(index);
                 }
                 Some(Ok((index, Err(e)))) => {
                     completed_indices[index] = true;
-                    split_result.errors.push(SplitTaskResult {
-                        task_index: index,
-                        result: Err(e),
-                    });
+                    split_result.errors.push((index, e));
                 }
                 Some(Err(join_err)) => {
                     // Task panicked or was aborted; index correlation is lost.
                     // Record as anonymous error so caller still sees the failure count.
-                    split_result.errors.push(SplitTaskResult {
-                        task_index: usize::MAX,
-                        result: Err(CanoError::workflow(format!("Task panic: {:?}", join_err))),
-                    });
+                    split_result.errors.push((
+                        usize::MAX,
+                        CanoError::workflow(format!("Task panic: {:?}", join_err)),
+                    ));
                 }
                 None => break, // JoinSet drained
             }
@@ -1461,11 +1472,7 @@ where
 
         // Identify cancelled tasks (those that didn't complete).
         // JoinSet::abort_all() and drop handle cleanup automatically.
-        for (idx, completed) in completed_indices.iter().enumerate() {
-            if !completed {
-                split_result.cancelled.push(idx);
-            }
-        }
+        split_result.cancelled = completed_indices.iter().filter(|done| !**done).count();
 
         Ok(split_result)
     }
@@ -3497,5 +3504,136 @@ mod register_paths_tests {
             .add_exit_state(S::Done);
         assert_eq!(workflow.orchestrate(S::Step).await.unwrap(), S::Done);
         assert_eq!(seen_none.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod engine_contract_tests {
+    use crate::error::CanoError;
+    use crate::observer::WorkflowObserver;
+    use crate::resource::{Resource, Resources};
+    use crate::task::{Task, TaskConfig};
+    use crate::workflow::Workflow;
+    use cano_macros::{resource, task};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    enum S {
+        Loop,
+        Charge,
+        Refund,
+        Done,
+    }
+
+    struct LoopThenFail(AtomicU32);
+    #[task]
+    impl Task<S> for LoopThenFail {
+        async fn run(&self) -> Result<S, CanoError> {
+            if self.0.fetch_add(1, Ordering::SeqCst) < 200 {
+                Ok(S::Loop)
+            } else {
+                Err(CanoError::task_execution("done looping"))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn transition_path_keeps_only_the_most_recent_states() {
+        let workflow = Workflow::bare()
+            .register(S::Loop, LoopThenFail(AtomicU32::new(0)))
+            .add_exit_state(S::Done);
+        match workflow.orchestrate(S::Loop).await.unwrap_err() {
+            CanoError::WithStateContext {
+                transitions_so_far, ..
+            } => assert_eq!(transitions_so_far.len(), super::MAX_TRANSITION_PATH),
+            other => panic!("expected WithStateContext, got {other:?}"),
+        }
+    }
+
+    struct Charge;
+    #[crate::saga::task(state = S)]
+    impl Charge {
+        type Output = ();
+        async fn run(&self) -> Result<(S, ()), CanoError> {
+            Ok((S::Done, ()))
+        }
+        async fn compensate(&self, _output: ()) -> Result<(), CanoError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn one_compensatable_type_at_two_states_fails_validation() {
+        let workflow = Workflow::bare()
+            .register(S::Charge, Charge)
+            .register(S::Refund, Charge)
+            .add_exit_state(S::Done);
+        let err = workflow.validate().unwrap_err();
+        assert!(matches!(err, CanoError::Configuration(_)), "{err:?}");
+        assert!(err.to_string().contains("share the task name"), "{err}");
+    }
+
+    struct BadTeardown;
+    #[resource]
+    impl Resource for BadTeardown {
+        async fn teardown(&self) -> Result<(), CanoError> {
+            Err(CanoError::generic("teardown failed"))
+        }
+    }
+
+    struct Outcome(bool);
+    #[task]
+    impl Task<S> for Outcome {
+        async fn run(&self) -> Result<S, CanoError> {
+            if self.0 {
+                Ok(S::Done)
+            } else {
+                Err(CanoError::task_execution("run failed"))
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn teardown_error_surfaces_only_after_a_successful_run() {
+        for (succeeds, expected) in [(true, "teardown failed"), (false, "run failed")] {
+            let workflow = Workflow::new(Resources::new().insert(BadTeardown))
+                .register(S::Loop, Outcome(succeeds))
+                .add_exit_state(S::Done);
+            let err = workflow.orchestrate(S::Loop).await.unwrap_err();
+            assert!(err.to_string().contains(expected), "{err}");
+        }
+    }
+
+    struct PanicsOnRetry;
+    impl WorkflowObserver for PanicsOnRetry {
+        fn on_retry(&self, _task_id: &str, _attempt: u32) {
+            panic!("observer bug");
+        }
+    }
+
+    struct FailsOnce(AtomicU32);
+    #[task]
+    impl Task<S> for FailsOnce {
+        fn config(&self) -> TaskConfig {
+            TaskConfig::new().with_fixed_retry(1, Duration::ZERO)
+        }
+        async fn run(&self) -> Result<S, CanoError> {
+            if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(CanoError::task_execution("transient"))
+            } else {
+                Ok(S::Done)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn observer_panic_in_on_retry_does_not_fail_the_task() {
+        let workflow = Workflow::bare()
+            .with_observer(Arc::new(PanicsOnRetry))
+            .register(S::Loop, FailsOnce(AtomicU32::new(0)))
+            .add_exit_state(S::Done);
+        assert_eq!(workflow.orchestrate(S::Loop).await.unwrap(), S::Done);
     }
 }

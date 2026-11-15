@@ -2,13 +2,10 @@
 //!
 //! [`Workflow::register_split`] runs several tasks in parallel; a [`JoinConfig`]
 //! decides when the workflow may proceed past them and which state to enter next.
-//! The [`SplitResult`] / [`SplitTaskResult`] types describe what came back.
 //!
 //! [`Workflow::register_split`]: crate::workflow::Workflow::register_split
 
 use std::time::Duration;
-
-use crate::error::CanoError;
 
 /// Strategy for joining parallel tasks
 #[derive(Clone, Debug, PartialEq)]
@@ -23,7 +20,8 @@ pub enum JoinStrategy {
     ///
     /// The value must be in the range `(0.0, 1.0]`. A value of `1.0` means all tasks
     /// must succeed (equivalent to [`All`](JoinStrategy::All)). Values outside this
-    /// range return [`CanoError::Configuration`] when the split executes.
+    /// range make [`Workflow::validate`](crate::workflow::Workflow::validate) (run before every
+    /// `orchestrate` / `resume_from`) return [`CanoError::Configuration`](crate::CanoError::Configuration).
     Percentage(f64),
     /// Accept partial results - continues after minimum tasks complete successfully,
     /// cancels remaining tasks, and returns both successes and errors
@@ -34,14 +32,15 @@ pub enum JoinStrategy {
     /// The join succeeds as long as at least one task (success **or** failure) finished
     /// before the timeout; the workflow continues with [`JoinConfig::join_state`].
     /// If zero tasks complete before the deadline, the workflow errors with
-    /// [`CanoError::Workflow`].
+    /// [`CanoError::Workflow`](crate::CanoError::Workflow).
     ///
     /// Unlike [`PartialResults`](JoinStrategy::PartialResults), which waits for a
     /// minimum number of *successful* completions, `PartialTimeout` is purely
     /// time-bounded and accepts any mixture of successes and failures.
     ///
     /// **Requires** a timeout to be set via [`JoinConfig::with_timeout`]; configuring
-    /// this strategy without a timeout returns [`CanoError::Configuration`] at runtime.
+    /// this strategy without a timeout fails validation with
+    /// [`CanoError::Configuration`](crate::CanoError::Configuration).
     PartialTimeout,
 }
 
@@ -70,63 +69,6 @@ impl JoinStrategy {
     }
 }
 
-/// Result of a single split task execution
-#[derive(Clone, Debug)]
-pub struct SplitTaskResult<TState> {
-    /// Index of the task in the split tasks vector
-    pub task_index: usize,
-    /// Result of the task execution
-    pub result: Result<TState, CanoError>,
-}
-
-/// Collection of split task results with both successes and errors
-#[derive(Clone, Debug)]
-pub struct SplitResult<TState> {
-    /// Successfully completed tasks
-    pub successes: Vec<SplitTaskResult<TState>>,
-    /// Failed tasks
-    pub errors: Vec<SplitTaskResult<TState>>,
-    /// Tasks that were cancelled (not started or aborted)
-    pub cancelled: Vec<usize>,
-}
-
-impl<TState> SplitResult<TState> {
-    /// Create a new empty split result
-    pub fn new() -> Self {
-        Self {
-            successes: Vec::new(),
-            errors: Vec::new(),
-            cancelled: Vec::new(),
-        }
-    }
-
-    /// Create a split result with capacity for `total_tasks` outcomes preallocated.
-    /// Used internally by `collect_results` to avoid Vec resizes during collection.
-    pub fn with_capacity(total_tasks: usize) -> Self {
-        Self {
-            successes: Vec::with_capacity(total_tasks),
-            errors: Vec::with_capacity(total_tasks),
-            cancelled: Vec::with_capacity(total_tasks),
-        }
-    }
-
-    /// Total number of tasks that completed (success or error)
-    pub fn completed_count(&self) -> usize {
-        self.successes.len() + self.errors.len()
-    }
-
-    /// Total number of tasks including cancelled
-    pub fn total_count(&self) -> usize {
-        self.successes.len() + self.errors.len() + self.cancelled.len()
-    }
-}
-
-impl<TState> Default for SplitResult<TState> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Configuration for join behavior after split tasks
 #[must_use]
 #[derive(Clone)]
@@ -141,8 +83,8 @@ pub struct JoinConfig<TState> {
     /// concurrently. When `None` (default) all tasks run as soon as the
     /// runtime can schedule them. When `Some(n)`, a `tokio::sync::Semaphore`
     /// with `n` permits gates each task body, so excess tasks queue until
-    /// a permit is free. `Some(0)` is rejected at execution time with
-    /// [`CanoError::Configuration`].
+    /// a permit is free. `Some(0)` fails validation with
+    /// [`CanoError::Configuration`](crate::CanoError::Configuration).
     pub bulkhead: Option<usize>,
 }
 
@@ -163,12 +105,6 @@ where
     /// Set timeout for the split execution
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
-        self
-    }
-
-    /// Set the state to transition to after the join condition is met
-    pub fn with_join_state(mut self, state: TState) -> Self {
-        self.join_state = state;
         self
     }
 
@@ -246,43 +182,6 @@ mod tests {
         assert!(!JoinStrategy::Percentage(1.0).is_satisfied(0, usize::MAX));
     }
 
-    // ----- edge cases: SplitResult counts -----
-
-    #[test]
-    fn split_result_counts() {
-        let mut r: SplitResult<u8> = SplitResult::new();
-        assert_eq!(r.completed_count(), 0);
-        assert_eq!(r.total_count(), 0);
-
-        r.successes.push(SplitTaskResult {
-            task_index: 0,
-            result: Ok(1),
-        });
-        r.successes.push(SplitTaskResult {
-            task_index: 1,
-            result: Ok(2),
-        });
-        r.errors.push(SplitTaskResult {
-            task_index: 2,
-            result: Err(CanoError::generic("boom")),
-        });
-        r.cancelled.push(3);
-        r.cancelled.push(4);
-
-        assert_eq!(r.completed_count(), 3, "2 successes + 1 error");
-        assert_eq!(r.total_count(), 5, "completed + 2 cancelled");
-    }
-
-    #[test]
-    fn split_result_default_and_with_capacity_start_empty() {
-        let d: SplitResult<u8> = SplitResult::default();
-        assert_eq!(d.total_count(), 0);
-        assert!(d.successes.is_empty() && d.errors.is_empty() && d.cancelled.is_empty());
-
-        let c: SplitResult<u8> = SplitResult::with_capacity(10);
-        assert_eq!(c.total_count(), 0);
-    }
-
     // ----- edge cases: JoinConfig builder -----
 
     #[test]
@@ -295,11 +194,10 @@ mod tests {
 
         let tuned = JoinConfig::new(JoinStrategy::Any, "done")
             .with_timeout(Duration::from_millis(250))
-            .with_join_state("elsewhere")
             .with_bulkhead(4);
         assert_eq!(tuned.strategy, JoinStrategy::Any);
         assert_eq!(tuned.timeout, Some(Duration::from_millis(250)));
-        assert_eq!(tuned.join_state, "elsewhere");
+        assert_eq!(tuned.join_state, "done");
         assert_eq!(tuned.bulkhead, Some(4));
     }
 }

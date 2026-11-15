@@ -69,12 +69,6 @@ pub(super) struct RehydratedRun<TState> {
     pub(super) compensation_stack: Vec<CompensationEntry>,
     pub(super) resume_cursors: HashMap<String, Vec<u8>>,
     pub(super) prior_transitions: Vec<TState>,
-    /// Highest-sequence `StateEntry` row whose `state == resume_label`, or
-    /// `resume_sequence + 1` when no such row exists (F4 fallback). Exposed
-    /// for tests; the caller doesn't need it for `execute_workflow_from`
-    /// since it's only used internally to filter `prior_transitions`.
-    #[allow(dead_code)]
-    pub(super) resume_state_entry_cutoff: u64,
 }
 
 impl<TState> RehydratedRun<TState>
@@ -192,7 +186,6 @@ where
             compensation_stack,
             resume_cursors,
             prior_transitions,
-            resume_state_entry_cutoff: cutoff,
         }
     }
 }
@@ -423,7 +416,7 @@ where
         };
 
         let resources = &*self.resources;
-        let run_future = run_with_retries_observed(config, obs, || task.run(resources));
+        let run_future = run_with_retries_observed(config, obs.as_ref(), || task.run(resources));
 
         let run = super::catch_panic_to_error(run_future, "Compensatable task");
         // Attach with `Instrument`, never `Span::enter()`: a guard held across `.await` stays
@@ -557,32 +550,11 @@ where
 
         self.validate_cached()?;
 
-        // Set up resources before any rehydration work. If `setup_all` fails
-        // we'd otherwise have a fully-rebuilt compensation stack and a fired
-        // `on_resume` event with no way to use them — the rehydrated entries
-        // would be silently dropped. Doing setup first means a failure leaves
-        // the on-disk log unchanged, the observer pipeline un-notified, and
-        // the caller can retry `resume_from` after fixing their resources.
-        self.resources.setup_all().await?;
-
-        // Once setup_all succeeds, EVERY exit path from this function must
-        // run teardown — even the rehydration `?`/`return Err` early-returns
-        // between here and `execute_workflow_from`. Wrap the body so a single
-        // `teardown_all_result` call at the bottom handles every path uniformly.
-        let result: Result<TState, CanoError> =
-            self.execute_resume_inner(workflow_id, store, token).await;
-        let teardown_result = self.resources.teardown_all_result().await;
-        match (result, teardown_result) {
-            // The run itself failed — that error is the primary signal; the
-            // teardown error was already logged.
-            (Err(e), _) => Err(e),
-            // The run succeeded but resources could not be torn down. Surface
-            // the teardown error so the caller knows the cleanup was incomplete
-            // (leaked connections, locks, files, ...) instead of silently
-            // treating a half-torn-down world as clean.
-            (Ok(_), Err(e)) => Err(e),
-            (Ok(state), Ok(())) => Ok(state),
-        }
+        // Resources are set up before any rehydration work, so a setup failure leaves
+        // the on-disk log unchanged and `on_resume` unfired; `with_lifecycle` tears them
+        // down on every exit path of the rehydration + run.
+        self.with_lifecycle(|| self.execute_resume_inner(workflow_id, store, token))
+            .await
     }
 
     /// The body of `resume_from` between `setup_all` and the unconditional
@@ -654,7 +626,6 @@ where
             compensation_stack,
             resume_cursors,
             prior_transitions,
-            resume_state_entry_cutoff: _,
         } = RehydratedRun::<TState>::from_rows(
             &rows,
             &resume_label,
@@ -4018,7 +3989,6 @@ mod rehydrated_run_tests {
         assert!(rh.resume_cursors.is_empty());
         assert!(rh.prior_transitions.is_empty());
         // F4 fallback: resume_sequence + 1 when no StateEntry rows exist.
-        assert_eq!(rh.resume_state_entry_cutoff, 1);
     }
 
     #[test]
@@ -4035,7 +4005,6 @@ mod rehydrated_run_tests {
             "wf",
             resolve_test_state,
         );
-        assert_eq!(rh.resume_state_entry_cutoff, 5);
         assert!(rh.prior_transitions.is_empty());
         assert!(rh.compensation_stack.is_empty());
         assert!(rh.resume_cursors.is_empty());
@@ -4062,7 +4031,6 @@ mod rehydrated_run_tests {
             "wf",
             resolve_test_state,
         );
-        assert_eq!(rh.resume_state_entry_cutoff, 2);
         // The Start StateEntry survives (sequence 0 < cutoff 2).
         assert_eq!(rh.prior_transitions, vec![TestState::Start]);
         // The Process step cursor was rehydrated.
@@ -4087,7 +4055,6 @@ mod rehydrated_run_tests {
             "wf",
             resolve_test_state,
         );
-        assert_eq!(rh.resume_state_entry_cutoff, 1);
         assert_eq!(rh.prior_transitions, vec![TestState::Start]);
     }
 
@@ -4113,7 +4080,6 @@ mod rehydrated_run_tests {
             "wf-rename",
             resolve_test_state,
         );
-        assert_eq!(rh.resume_state_entry_cutoff, 2);
         // Only Start made it (Charge dropped, Process is the resume state).
         assert_eq!(rh.prior_transitions, vec![TestState::Start]);
         let events = recorder.unknown_states();
@@ -4185,7 +4151,6 @@ mod rehydrated_run_tests {
         // Path cutoff = highest Process StateEntry = sequence 2; prior
         // transitions are Start (sequence 0). Sequence 2 itself (the
         // Process StateEntry) sits AT the cutoff so is excluded too.
-        assert_eq!(rh.resume_state_entry_cutoff, 2);
         assert_eq!(rh.prior_transitions, vec![TestState::Start]);
     }
 
@@ -4209,8 +4174,6 @@ mod rehydrated_run_tests {
             resolve_test_state,
         );
         let elapsed = started.elapsed();
-        // Cutoff = the highest Process StateEntry = sequence 9999.
-        assert_eq!(rh.resume_state_entry_cutoff, 9_999);
         // prior_transitions = every row at seq < 9999 → 9999 entries.
         assert_eq!(rh.prior_transitions.len(), 9_999);
         // Smoke check, not a benchmark: the assert exists to catch accidental

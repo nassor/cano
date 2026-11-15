@@ -409,12 +409,17 @@ where
     S: Clone + fmt::Debug + Send + Sync + 'static,
 {
     use crate::task::retry::{RetryStep, run_retry_loop};
-    run_retry_loop(retry_mode, |_attempt: usize| async move {
-        match b.process_item(item).await {
-            Ok(output) => RetryStep::Done(Ok(output)),
-            Err(e) => RetryStep::Retry(e),
-        }
-    })
+    run_retry_loop(
+        retry_mode,
+        |_attempt: usize| async move {
+            match b.process_item(item).await {
+                Ok(output) => RetryStep::Done(Ok(output)),
+                Err(e) => RetryStep::Retry(e),
+            }
+        },
+        |_| {},
+        || {},
+    )
     .await
 }
 

@@ -308,7 +308,7 @@ pub use tokio_util::sync::CancellationToken;
 pub use recovery::RedbCheckpointStore;
 pub use store::MemoryStore;
 pub use task::{RetryMode, Task, TaskConfig};
-pub use workflow::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult, Workflow};
+pub use workflow::{JoinConfig, JoinStrategy, Workflow};
 
 #[cfg(feature = "tracing")]
 pub use observer::TracingObserver;
@@ -382,9 +382,9 @@ pub mod prelude {
         HealthStatus, JoinConfig, JoinStrategy, MemoryStore, Meter, MeterStatus, MultiPermit,
         MultiRateLimiter, PollErrorPolicy, PollOutcome, PollTask, RateLimiter, RateLimiterPermit,
         RateLimiterPolicy, Reservation, Resource, Resources, RetryMode, RouterTask, RowKind,
-        SplitResult, SplitTaskResult, StepOutcome, SteppedTask, StreamErrorPolicy, StreamTask,
-        StreamWindow, Task, TaskConfig, Tier, TimerOutcome, TimerTask, WindowPermit, WindowPolicy,
-        WindowSignal, WindowedRateLimiter, Workflow, WorkflowObserver,
+        StepOutcome, SteppedTask, StreamErrorPolicy, StreamTask, StreamWindow, Task, TaskConfig,
+        Tier, TimerOutcome, TimerTask, WindowPermit, WindowPolicy, WindowSignal,
+        WindowedRateLimiter, Workflow, WorkflowObserver,
     };
 
     #[cfg(feature = "scheduler")]
