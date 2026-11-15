@@ -184,12 +184,12 @@ impl Task<Flow> for RecoverAfter {
 }
 
 struct GuardedTask {
-    breaker: Arc<CircuitBreaker>,
+    breaker: CircuitBreaker,
 }
 #[cano::task]
 impl Task<Flow> for GuardedTask {
     fn config(&self) -> TaskConfig {
-        TaskConfig::new().with_circuit_breaker(Arc::clone(&self.breaker))
+        TaskConfig::new().with_circuit_breaker(self.breaker.clone())
     }
     fn name(&self) -> Cow<'static, str> {
         "guarded".into()
@@ -256,18 +256,18 @@ async fn test_tracing_observer_captures_events() {
     assert!(fail_wf.orchestrate(Flow::A).await.is_err());
 
     // Pre-tripped breaker → on_circuit_open + on_task_failure.
-    let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+    let breaker = CircuitBreaker::new(CircuitPolicy {
         failure_threshold: 1,
         reset_timeout: Duration::from_secs(60),
         half_open_max_calls: 1,
-    }));
+    });
     let permit = breaker.try_acquire().unwrap();
     breaker.record_failure(permit);
     let cb_wf = Workflow::bare()
         .register(
             Flow::B,
             GuardedTask {
-                breaker: Arc::clone(&breaker),
+                breaker: breaker.clone(),
             },
         )
         .add_exit_state(Flow::Done)

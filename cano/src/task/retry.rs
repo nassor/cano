@@ -216,7 +216,7 @@ pub struct TaskConfig {
     /// with [`CanoError::CircuitOpen`] without running the task or burning a
     /// retry slot. Share one breaker across multiple tasks to make a trip from
     /// any caller protect every caller.
-    pub circuit_breaker: Option<Arc<CircuitBreaker>>,
+    pub circuit_breaker: Option<CircuitBreaker>,
 }
 
 impl TaskConfig {
@@ -271,7 +271,7 @@ impl TaskConfig {
     /// outcome **after** it returns, so the breaker observes the call's
     /// success/failure before the workflow propagates it.
     ///
-    /// Pass the same `Arc<CircuitBreaker>` to every task that depends on the same
+    /// Pass clones of the same breaker (cheap: an `Arc` inside) to every task that depends on the same
     /// flaky resource so the breaker protects them collectively.
     ///
     /// # Short-circuit behavior
@@ -287,7 +287,7 @@ impl TaskConfig {
     /// `run_with_retries` call after the cool-down. This is intentional: retries
     /// against an open (or fully busy) breaker would only add load to a dependency
     /// the breaker is already protecting.
-    pub fn with_circuit_breaker(mut self, breaker: Arc<CircuitBreaker>) -> Self {
+    pub fn with_circuit_breaker(mut self, breaker: CircuitBreaker) -> Self {
         self.circuit_breaker = Some(breaker);
         self
     }
@@ -1117,8 +1117,8 @@ mod tests {
 
         // Threshold = 3, no retries, so the first three failing calls trip the breaker
         // and the fourth call must return CircuitOpen *without* invoking the task body.
-        let breaker = Arc::new(CircuitBreaker::new(cb_policy_stable_open(3)));
-        let config = TaskConfig::new().with_circuit_breaker(Arc::clone(&breaker));
+        let breaker = CircuitBreaker::new(cb_policy_stable_open(3));
+        let config = TaskConfig::new().with_circuit_breaker(breaker.clone());
         let counter = Arc::new(AtomicUsize::new(0));
 
         for _ in 0..3 {
@@ -1164,10 +1164,10 @@ mod tests {
         // Even with retries enabled, a CircuitOpen must short-circuit immediately —
         // retries against an open breaker would only add load to the failing
         // dependency. The error should surface raw, not wrapped in RetryExhausted.
-        let breaker = Arc::new(CircuitBreaker::new(cb_policy_stable_open(1)));
+        let breaker = CircuitBreaker::new(cb_policy_stable_open(1));
         let config = TaskConfig::new()
             .with_fixed_retry(5, Duration::from_millis(1))
-            .with_circuit_breaker(Arc::clone(&breaker));
+            .with_circuit_breaker(breaker.clone());
 
         // First call: attempt 1 invokes the closure, fails, and trips the breaker
         // (threshold = 1 reached after a single recorded failure). On the next
@@ -1198,8 +1198,8 @@ mod tests {
     async fn test_circuit_half_open_recovery_via_run_with_retries() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let breaker = Arc::new(CircuitBreaker::new(cb_policy(2)));
-        let config = TaskConfig::new().with_circuit_breaker(Arc::clone(&breaker));
+        let breaker = CircuitBreaker::new(cb_policy(2));
+        let config = TaskConfig::new().with_circuit_breaker(breaker.clone());
 
         // Trip the breaker.
         for _ in 0..2 {
@@ -1233,10 +1233,10 @@ mod tests {
     async fn test_circuit_breaker_shared_across_tasks() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        // Two tasks share one Arc<CircuitBreaker>; failures from task A trip it for B.
-        let breaker = Arc::new(CircuitBreaker::new(cb_policy_stable_open(3)));
-        let config_a = TaskConfig::new().with_circuit_breaker(Arc::clone(&breaker));
-        let config_b = TaskConfig::new().with_circuit_breaker(Arc::clone(&breaker));
+        // Two tasks share one CircuitBreaker; failures from task A trip it for B.
+        let breaker = CircuitBreaker::new(cb_policy_stable_open(3));
+        let config_a = TaskConfig::new().with_circuit_breaker(breaker.clone());
+        let config_b = TaskConfig::new().with_circuit_breaker(breaker.clone());
 
         for _ in 0..3 {
             let _ = run_with_retries::<String, _, _>(&config_a, || async {
@@ -1275,10 +1275,10 @@ mod tests {
         // raw CircuitOpen, not RetryExhausted.
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let breaker = Arc::new(CircuitBreaker::new(cb_policy_stable_open(2)));
+        let breaker = CircuitBreaker::new(cb_policy_stable_open(2));
         let config = TaskConfig::new()
             .with_fixed_retry(5, Duration::from_millis(1))
-            .with_circuit_breaker(Arc::clone(&breaker));
+            .with_circuit_breaker(breaker.clone());
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = Arc::clone(&counter);
 
@@ -1327,10 +1327,10 @@ mod tests {
         // CircuitOpen without ever invoking the task body.
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let breaker = Arc::new(CircuitBreaker::new(cb_policy_stable_open(2)));
+        let breaker = CircuitBreaker::new(cb_policy_stable_open(2));
         let config = TaskConfig::new()
             .with_attempt_timeout(Duration::from_millis(10))
-            .with_circuit_breaker(Arc::clone(&breaker));
+            .with_circuit_breaker(breaker.clone());
         let invocations = Arc::new(AtomicUsize::new(0));
 
         for _ in 0..2 {
@@ -1423,14 +1423,14 @@ mod metrics_tests {
 
     #[test]
     fn open_breaker_records_a_circuit_rejection() {
-        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+        let breaker = CircuitBreaker::new(CircuitPolicy {
             failure_threshold: 1,
             reset_timeout: Duration::from_secs(60),
             half_open_max_calls: 1,
-        }));
+        });
         let p = breaker.try_acquire().unwrap();
         breaker.record_failure(p);
-        let config = TaskConfig::new().with_circuit_breaker(Arc::clone(&breaker));
+        let config = TaskConfig::new().with_circuit_breaker(breaker.clone());
         let (res, rows) = run_with_recorder(move || async move {
             run_with_retries::<u8, _, _>(&config, || async { Ok(1u8) }).await
         });

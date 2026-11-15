@@ -53,7 +53,7 @@ impl FlakyClient {
 }
 
 struct CallTask {
-    breaker: Arc<CircuitBreaker>,
+    breaker: CircuitBreaker,
 }
 
 #[task]
@@ -61,7 +61,7 @@ impl Task<Step> for CallTask {
     fn config(&self) -> TaskConfig {
         // Disable retries so each orchestrate() = exactly one call against the breaker.
         // Real workloads usually keep a small retry budget here; we drop it for clarity.
-        TaskConfig::new().with_circuit_breaker(Arc::clone(&self.breaker))
+        TaskConfig::new().with_circuit_breaker(self.breaker.clone())
     }
 
     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
@@ -76,11 +76,11 @@ impl Task<Step> for CallTask {
 async fn main() -> Result<(), CanoError> {
     println!("=== Circuit breaker demo ===\n");
 
-    let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+    let breaker = CircuitBreaker::new(CircuitPolicy {
         failure_threshold: 3,
         reset_timeout: Duration::from_millis(150),
         half_open_max_calls: 1,
-    }));
+    });
 
     let client = FlakyClient::new();
     let healthy_handle = Arc::clone(&client.healthy);
@@ -91,7 +91,7 @@ async fn main() -> Result<(), CanoError> {
         .register(
             Step::Call,
             CallTask {
-                breaker: Arc::clone(&breaker),
+                breaker: breaker.clone(),
             },
         )
         .add_exit_state(Step::Done);

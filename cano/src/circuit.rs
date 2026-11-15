@@ -29,17 +29,17 @@
 //!    call's success/failure before the workflow propagates it.
 //!
 //! ```rust
-//! use std::sync::Arc;
 //! use std::time::Duration;
 //! use cano::prelude::*;
 //!
-//! let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+//! let breaker = CircuitBreaker::new(CircuitPolicy {
 //!     failure_threshold: 5,
 //!     reset_timeout: Duration::from_secs(30),
 //!     half_open_max_calls: 1,
-//! }));
+//! });
 //!
-//! let config = TaskConfig::new().with_circuit_breaker(Arc::clone(&breaker));
+//! // Clones share one state machine.
+//! let config = TaskConfig::new().with_circuit_breaker(breaker.clone());
 //! # let _ = config;
 //! ```
 //!
@@ -271,7 +271,7 @@ impl CircuitBreaker {
     /// has not elapsed), or [`CanoError::CircuitHalfOpenBusy`] when `HalfOpen` already
     /// has `half_open_max_calls` trials in flight — the breaker has recovered but every
     /// probe slot is occupied, so callers can distinguish the two back-off strategies.
-    pub fn try_acquire(self: &Arc<Self>) -> Result<Permit, CanoError> {
+    pub fn try_acquire(&self) -> Result<Permit, CanoError> {
         let mut inner = self.inner.lock().expect("circuit breaker mutex poisoned");
 
         // Lazy Open -> HalfOpen transition. We only flip when a caller actually
@@ -293,7 +293,7 @@ impl CircuitBreaker {
 
         let epoch = inner.epoch;
         let result = match inner.state {
-            CircuitState::Closed => Ok(Permit::new(Arc::clone(self), false, epoch)),
+            CircuitState::Closed => Ok(Permit::new(self.clone(), false, epoch)),
             CircuitState::Open { .. } => Err(CanoError::circuit_open(
                 "circuit breaker open: rejecting call",
             )),
@@ -304,7 +304,7 @@ impl CircuitBreaker {
                     ))
                 } else {
                     inner.half_open_in_flight += 1;
-                    Ok(Permit::new(Arc::clone(self), true, epoch))
+                    Ok(Permit::new(self.clone(), true, epoch))
                 }
             }
         };
@@ -451,7 +451,7 @@ impl Resource for CircuitBreaker {}
 /// when the caller panics or returns early.
 #[must_use = "drop a Permit only as a deliberate failure signal; pass it to record_success or record_failure to indicate the call outcome"]
 pub struct Permit {
-    breaker: Arc<CircuitBreaker>,
+    breaker: CircuitBreaker,
     was_half_open: bool,
     consumed: bool,
     /// Epoch the permit was issued in. Used at consumption time to ignore
@@ -460,7 +460,7 @@ pub struct Permit {
 }
 
 impl Permit {
-    fn new(breaker: Arc<CircuitBreaker>, was_half_open: bool, epoch: u64) -> Self {
+    fn new(breaker: CircuitBreaker, was_half_open: bool, epoch: u64) -> Self {
         Self {
             breaker,
             was_half_open,
@@ -503,13 +503,13 @@ mod tests {
 
     #[test]
     fn closed_initial_state() {
-        let breaker = Arc::new(CircuitBreaker::new(fast_policy()));
+        let breaker = CircuitBreaker::new(fast_policy());
         assert_eq!(breaker.state(), CircuitState::Closed);
     }
 
     #[test]
     fn opens_after_threshold_failures() {
-        let breaker = Arc::new(CircuitBreaker::new(fast_policy()));
+        let breaker = CircuitBreaker::new(fast_policy());
         for _ in 0..3 {
             let permit = breaker.try_acquire().unwrap();
             breaker.record_failure(permit);
@@ -522,7 +522,7 @@ mod tests {
 
     #[test]
     fn success_resets_consecutive_failures() {
-        let breaker = Arc::new(CircuitBreaker::new(fast_policy()));
+        let breaker = CircuitBreaker::new(fast_policy());
         for _ in 0..2 {
             let p = breaker.try_acquire().unwrap();
             breaker.record_failure(p);
@@ -539,7 +539,7 @@ mod tests {
 
     #[tokio::test]
     async fn open_to_half_open_after_reset_timeout() {
-        let breaker = Arc::new(CircuitBreaker::new(fast_policy()));
+        let breaker = CircuitBreaker::new(fast_policy());
         for _ in 0..3 {
             let p = breaker.try_acquire().unwrap();
             breaker.record_failure(p);
@@ -556,7 +556,7 @@ mod tests {
 
     #[tokio::test]
     async fn half_open_full_success_closes() {
-        let breaker = Arc::new(CircuitBreaker::new(fast_policy()));
+        let breaker = CircuitBreaker::new(fast_policy());
         for _ in 0..3 {
             let p = breaker.try_acquire().unwrap();
             breaker.record_failure(p);
@@ -573,7 +573,7 @@ mod tests {
 
     #[tokio::test]
     async fn half_open_failure_reopens() {
-        let breaker = Arc::new(CircuitBreaker::new(fast_policy()));
+        let breaker = CircuitBreaker::new(fast_policy());
         for _ in 0..3 {
             let p = breaker.try_acquire().unwrap();
             breaker.record_failure(p);
@@ -588,7 +588,7 @@ mod tests {
 
     #[tokio::test]
     async fn half_open_caps_concurrent_trials() {
-        let breaker = Arc::new(CircuitBreaker::new(fast_policy()));
+        let breaker = CircuitBreaker::new(fast_policy());
         for _ in 0..3 {
             let p = breaker.try_acquire().unwrap();
             breaker.record_failure(p);
@@ -609,7 +609,7 @@ mod tests {
 
     #[test]
     fn dropped_permit_counts_as_failure() {
-        let breaker = Arc::new(CircuitBreaker::new(fast_policy()));
+        let breaker = CircuitBreaker::new(fast_policy());
         for _ in 0..3 {
             let _p = breaker.try_acquire().unwrap();
             // _p drops here without consume → treated as failure.
@@ -620,9 +620,9 @@ mod tests {
     #[test]
     fn shared_breaker_trips_for_all_callers() {
         // Two callers share one breaker; failures from caller A trip it for caller B.
-        let breaker = Arc::new(CircuitBreaker::new(fast_policy()));
-        let breaker_a = Arc::clone(&breaker);
-        let breaker_b = Arc::clone(&breaker);
+        let breaker = CircuitBreaker::new(fast_policy());
+        let breaker_a = breaker.clone();
+        let breaker_b = breaker.clone();
 
         for _ in 0..3 {
             let p = breaker_a.try_acquire().unwrap();
@@ -664,11 +664,11 @@ mod tests {
         // was never a probe call. With epoch tracking the stale outcome must
         // be ignored and the HalfOpen probe must still need its own success
         // to close the breaker.
-        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+        let breaker = CircuitBreaker::new(CircuitPolicy {
             failure_threshold: 2,
             reset_timeout: Duration::from_millis(20),
             half_open_max_calls: 1,
-        }));
+        });
 
         // Acquire a permit while still Closed — this is the "slow caller".
         let stale_permit = breaker.try_acquire().unwrap();
@@ -705,7 +705,7 @@ mod tests {
     fn open_state_is_debug_loggable() {
         // Operators typically log breaker state via Debug; pin the format so
         // accidental refactors that drop the `Open { until }` shape are caught.
-        let breaker = Arc::new(CircuitBreaker::new(fast_policy()));
+        let breaker = CircuitBreaker::new(fast_policy());
         for _ in 0..3 {
             let p = breaker.try_acquire().unwrap();
             breaker.record_failure(p);
@@ -734,11 +734,11 @@ mod tests {
     async fn open_half_open_open_round_trip() {
         // Full lifecycle: trip → cool-down → HalfOpen → probe fails → re-Open
         // → cool-down → HalfOpen → probe succeeds → Closed.
-        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+        let breaker = CircuitBreaker::new(CircuitPolicy {
             failure_threshold: 2,
             reset_timeout: Duration::from_millis(20),
             half_open_max_calls: 1,
-        }));
+        });
 
         // 1. Trip from Closed.
         for _ in 0..2 {
@@ -774,7 +774,7 @@ mod tests {
 
     #[test]
     fn policy_accessor_returns_configuration() {
-        let breaker = Arc::new(CircuitBreaker::new(fast_policy()));
+        let breaker = CircuitBreaker::new(fast_policy());
         assert_eq!(breaker.policy().failure_threshold, 3);
         assert_eq!(breaker.policy().half_open_max_calls, 2);
     }
@@ -782,7 +782,7 @@ mod tests {
     #[test]
     fn default_policy_trips_after_five_failures() {
         // Default: failure_threshold 5, reset_timeout 30s, half_open_max_calls 1.
-        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy::default()));
+        let breaker = CircuitBreaker::new(CircuitPolicy::default());
         assert_eq!(breaker.state(), CircuitState::Closed);
         for _ in 0..5 {
             let p = breaker.try_acquire().unwrap();
@@ -793,7 +793,7 @@ mod tests {
 
     #[test]
     fn closed_failures_below_threshold_do_not_trip() {
-        let breaker = Arc::new(CircuitBreaker::new(fast_policy())); // threshold 3
+        let breaker = CircuitBreaker::new(fast_policy()); // threshold 3
         for _ in 0..2 {
             let p = breaker.try_acquire().unwrap();
             breaker.record_failure(p);
@@ -805,11 +805,11 @@ mod tests {
     async fn dropped_half_open_trial_permit_reopens() {
         // An unconsumed trial permit dropped during HalfOpen is treated as a failure -> reopen
         // (the RAII failure path, exercised in HalfOpen rather than Closed).
-        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+        let breaker = CircuitBreaker::new(CircuitPolicy {
             failure_threshold: 1,
             reset_timeout: Duration::from_millis(20),
             half_open_max_calls: 1,
-        }));
+        });
         let p = breaker.try_acquire().unwrap();
         breaker.record_failure(p);
         assert!(matches!(breaker.state(), CircuitState::Open { .. }));
@@ -826,11 +826,11 @@ mod tests {
     async fn consuming_a_half_open_trial_frees_a_slot() {
         // max_calls = 3: fill all three trial slots, the fourth is rejected; consuming one
         // (success) decrements the in-flight count so a fresh trial is admitted into the slot.
-        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+        let breaker = CircuitBreaker::new(CircuitPolicy {
             failure_threshold: 1,
             reset_timeout: Duration::from_millis(20),
             half_open_max_calls: 3,
-        }));
+        });
         let p = breaker.try_acquire().unwrap();
         breaker.record_failure(p);
         tokio::time::sleep(Duration::from_millis(40)).await;
@@ -864,11 +864,11 @@ mod tests {
         // `Instant + Duration` panics on overflow, so a pathological reset_timeout
         // (Duration::MAX) must saturate instead of crashing the process — and the
         // saturated deadline must still keep the breaker open.
-        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+        let breaker = CircuitBreaker::new(CircuitPolicy {
             failure_threshold: 1,
             reset_timeout: Duration::MAX,
             half_open_max_calls: 1,
-        }));
+        });
         let p = breaker.try_acquire().unwrap();
         breaker.record_failure(p);
         assert!(matches!(breaker.state(), CircuitState::Open { .. }));
@@ -885,7 +885,7 @@ mod tests {
     async fn half_open_partial_success_does_not_carry_across_a_reopen() {
         // max_calls = 2: one success then a failure reopens. The prior success must NOT persist,
         // so after the next promotion two FRESH successes are required to close.
-        let breaker = Arc::new(CircuitBreaker::new(fast_policy())); // threshold 3, max_calls 2
+        let breaker = CircuitBreaker::new(fast_policy()); // threshold 3, max_calls 2
         for _ in 0..3 {
             let p = breaker.try_acquire().unwrap();
             breaker.record_failure(p);
@@ -915,11 +915,11 @@ mod tests {
     async fn stale_half_open_permit_ignored_after_reopen() {
         // Two trials in flight; one fails and reopens (epoch bumps). The other, consumed late, is
         // stale and must be ignored — it cannot close or otherwise mutate the reopened breaker.
-        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+        let breaker = CircuitBreaker::new(CircuitPolicy {
             failure_threshold: 1,
             reset_timeout: Duration::from_millis(20),
             half_open_max_calls: 2,
-        }));
+        });
         let p = breaker.try_acquire().unwrap();
         breaker.record_failure(p);
         tokio::time::sleep(Duration::from_millis(40)).await;
@@ -940,11 +940,11 @@ mod tests {
         // A Closed permit consumed *as a failure* after the breaker has already tripped (via other
         // failures) is stale and must be ignored — this also guards the `unreachable` Open-arm
         // debug_assert in do_record_failure from firing on a stale outcome.
-        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+        let breaker = CircuitBreaker::new(CircuitPolicy {
             failure_threshold: 2,
             reset_timeout: Duration::from_secs(60),
             half_open_max_calls: 1,
-        }));
+        });
         let stale = breaker.try_acquire().unwrap(); // Closed, epoch 0
         for _ in 0..2 {
             let p = breaker.try_acquire().unwrap();
@@ -960,14 +960,14 @@ mod tests {
         // Many threads hammer try_acquire + record_failure on one shared breaker. The state
         // machine (a std Mutex) must stay consistent: the breaker ends Open and never panics or
         // deadlocks. Plain threads (the breaker is synchronous) keep the load light.
-        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+        let breaker = CircuitBreaker::new(CircuitPolicy {
             failure_threshold: 5,
             reset_timeout: Duration::from_secs(60),
             half_open_max_calls: 1,
-        }));
+        });
         std::thread::scope(|s| {
             for _ in 0..6 {
-                let b = Arc::clone(&breaker);
+                let b = breaker.clone();
                 s.spawn(move || {
                     for _ in 0..30 {
                         if let Ok(permit) = b.try_acquire() {
@@ -986,17 +986,16 @@ mod tests {
 mod metrics_tests {
     use super::*;
     use crate::metrics::test_support::*;
-    use std::sync::Arc;
     use std::time::Duration;
 
     #[test]
     fn closed_to_open_and_outcomes_are_recorded() {
         let ((), rows) = run_with_recorder(|| async {
-            let b = Arc::new(CircuitBreaker::new(CircuitPolicy {
+            let b = CircuitBreaker::new(CircuitPolicy {
                 failure_threshold: 2,
                 reset_timeout: Duration::from_secs(60),
                 half_open_max_calls: 1,
-            }));
+            });
             let p = b.try_acquire().unwrap();
             b.record_success(p);
             let p = b.try_acquire().unwrap();
@@ -1050,7 +1049,7 @@ mod metrics_tests {
     #[test]
     fn dropped_unconsumed_permit_counts_as_failure() {
         let ((), rows) = run_with_recorder(|| async {
-            let b = Arc::new(CircuitBreaker::new(CircuitPolicy::default()));
+            let b = CircuitBreaker::new(CircuitPolicy::default());
             let _p = b.try_acquire().unwrap();
         });
         assert_eq!(
@@ -1068,11 +1067,11 @@ mod metrics_tests {
         // Exercise the recovery-side transitions the closed_to_open test doesn't reach:
         // open_to_halfopen (lazy promotion) and halfopen_to_closed (successful probe).
         let ((), rows) = run_with_recorder(|| async {
-            let b = Arc::new(CircuitBreaker::new(CircuitPolicy {
+            let b = CircuitBreaker::new(CircuitPolicy {
                 failure_threshold: 1,
                 reset_timeout: Duration::from_millis(20),
                 half_open_max_calls: 1,
-            }));
+            });
             let p = b.try_acquire().unwrap();
             b.record_failure(p); // closed -> open
             tokio::time::sleep(Duration::from_millis(40)).await;

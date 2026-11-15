@@ -80,7 +80,7 @@ struct FlakyTask {
 }
 #[derive(Clone)]
 struct GuardedTask {
-    breaker: Arc<CircuitBreaker>,
+    breaker: CircuitBreaker,
 }
 
 #[task(state = Step)]
@@ -107,7 +107,7 @@ impl FlakyTask {
 #[task(state = Step)]
 impl GuardedTask {
     fn config(&self) -> TaskConfig {
-        TaskConfig::new().with_circuit_breaker(Arc::clone(&self.breaker))
+        TaskConfig::new().with_circuit_breaker(self.breaker.clone())
     }
     async fn run(&self) -> Result<Step, CanoError> {
         Err(CanoError::task_execution("dependency down")) // always fails → trips the breaker
@@ -117,11 +117,11 @@ impl GuardedTask {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metrics = Arc::new(Metrics::default());
-    let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+    let breaker = CircuitBreaker::new(CircuitPolicy {
         failure_threshold: 1,
         reset_timeout: Duration::from_secs(3600), // stays open for the duration of this demo
         half_open_max_calls: 1,
-    }));
+    });
 
     let workflow = Workflow::bare()
         .register(Step::Start, StartTask)
@@ -134,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .register(
             Step::Guarded,
             GuardedTask {
-                breaker: Arc::clone(&breaker),
+                breaker: breaker.clone(),
             },
         )
         .add_exit_state(Step::Done)

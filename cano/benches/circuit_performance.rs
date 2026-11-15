@@ -1,7 +1,6 @@
 use cano::prelude::*;
 use cano::task::run_with_retries;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -20,7 +19,7 @@ fn fast_policy() -> CircuitPolicy {
 /// task body. This is the tightest microbenchmark of the breaker primitive.
 fn bench_acquire_record_closed(c: &mut Criterion) {
     let mut group = c.benchmark_group("circuit_acquire_record_closed");
-    let breaker = Arc::new(CircuitBreaker::new(fast_policy()));
+    let breaker = CircuitBreaker::new(fast_policy());
     group.bench_function("single_thread", |b| {
         b.iter(|| {
             let permit = breaker.try_acquire().unwrap();
@@ -36,11 +35,11 @@ fn bench_acquire_record_closed(c: &mut Criterion) {
 /// `format!` allocation with a `&'static str`. This bench pins the post-fix cost.
 fn bench_try_acquire_open(c: &mut Criterion) {
     let mut group = c.benchmark_group("circuit_try_acquire_open");
-    let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+    let breaker = CircuitBreaker::new(CircuitPolicy {
         failure_threshold: 1,
         reset_timeout: Duration::from_secs(3600),
         half_open_max_calls: 1,
-    }));
+    });
     // Trip it.
     let p = breaker.try_acquire().unwrap();
     breaker.record_failure(p);
@@ -68,8 +67,8 @@ fn bench_run_with_retries_overhead(c: &mut Criterion) {
         });
     });
 
-    let breaker = Arc::new(CircuitBreaker::new(fast_policy()));
-    let with_breaker = TaskConfig::new().with_circuit_breaker(Arc::clone(&breaker));
+    let breaker = CircuitBreaker::new(fast_policy());
+    let with_breaker = TaskConfig::new().with_circuit_breaker(breaker.clone());
     group.bench_function("with_breaker", |b| {
         b.to_async(&rt).iter(|| async {
             let _ = run_with_retries::<u32, _, _>(&with_breaker, || async { Ok(42u32) }).await;
@@ -80,21 +79,21 @@ fn bench_run_with_retries_overhead(c: &mut Criterion) {
 
 /// Concurrent throughput on a shared breaker.
 ///
-/// N parallel tasks share one Arc<CircuitBreaker>. This is the contention
+/// N parallel tasks share one CircuitBreaker. This is the contention
 /// scenario that motivates atomic-fast-path optimization.
 fn bench_shared_breaker_concurrent(c: &mut Criterion) {
     let mut group = c.benchmark_group("circuit_shared_concurrent");
     let rt = tokio::runtime::Runtime::new().unwrap();
 
     for &n in &[16usize, 64, 256] {
-        let breaker = Arc::new(CircuitBreaker::new(fast_policy()));
+        let breaker = CircuitBreaker::new(fast_policy());
         group.bench_with_input(BenchmarkId::new("tasks", n), &n, |b, &n| {
             b.to_async(&rt).iter(|| {
-                let breaker = Arc::clone(&breaker);
+                let breaker = breaker.clone();
                 async move {
                     let mut handles = Vec::with_capacity(n);
                     for _ in 0..n {
-                        let breaker = Arc::clone(&breaker);
+                        let breaker = breaker.clone();
                         handles.push(tokio::spawn(async move {
                             let permit = breaker.try_acquire().unwrap();
                             breaker.record_success(permit);
@@ -158,15 +157,15 @@ fn bench_run_with_retries_open_short_circuit(c: &mut Criterion) {
     let mut group = c.benchmark_group("circuit_run_with_retries_open");
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+    let breaker = CircuitBreaker::new(CircuitPolicy {
         failure_threshold: 1,
         reset_timeout: Duration::from_secs(3600),
         half_open_max_calls: 1,
-    }));
+    });
     let p = breaker.try_acquire().unwrap();
     breaker.record_failure(p);
 
-    let config = TaskConfig::new().with_circuit_breaker(Arc::clone(&breaker));
+    let config = TaskConfig::new().with_circuit_breaker(breaker.clone());
     let calls = AtomicUsize::new(0);
 
     group.bench_function("rejected", |b| {

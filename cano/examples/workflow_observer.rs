@@ -103,13 +103,13 @@ impl Task<Step> for FlakyLoad {
 // ---------------------------------------------------------------------------
 
 struct GuardedProbe {
-    breaker: Arc<CircuitBreaker>,
+    breaker: CircuitBreaker,
 }
 
 #[task]
 impl Task<Step> for GuardedProbe {
     fn config(&self) -> TaskConfig {
-        TaskConfig::new().with_circuit_breaker(Arc::clone(&self.breaker))
+        TaskConfig::new().with_circuit_breaker(self.breaker.clone())
     }
     fn name(&self) -> Cow<'static, str> {
         "probe".into()
@@ -163,11 +163,11 @@ async fn main() -> Result<(), CanoError> {
 
     // -- Scenario B -------------------------------------------------------
     println!("Scenario B — circuit breaker is open, the task is rejected\n");
-    let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+    let breaker = CircuitBreaker::new(CircuitPolicy {
         failure_threshold: 1,
         reset_timeout: Duration::from_secs(60),
         half_open_max_calls: 1,
-    }));
+    });
     // Trip it: one recorded failure at threshold 1.
     let permit = breaker.try_acquire().expect("closed breaker admits");
     breaker.record_failure(permit);
@@ -176,7 +176,7 @@ async fn main() -> Result<(), CanoError> {
         .register(
             Step::Probe,
             GuardedProbe {
-                breaker: Arc::clone(&breaker),
+                breaker: breaker.clone(),
             },
         )
         .add_exit_state(Step::Done)

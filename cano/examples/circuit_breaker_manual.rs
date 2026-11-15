@@ -4,7 +4,7 @@
 //!
 //! Demonstrates driving a [`CircuitBreaker`] **by hand** inside a task body, without
 //! the `TaskConfig::with_circuit_breaker` integration. The task retrieves an
-//! `Arc<CircuitBreaker>` from [`Resources`] and calls:
+//! `CircuitBreaker` from [`Resources`] and calls:
 //!
 //! - [`CircuitBreaker::try_acquire`] — obtain a [`CircuitPermit`] or receive
 //!   [`CanoError::CircuitOpen`] when the breaker is open/saturated.
@@ -128,18 +128,18 @@ impl Task<Step> for ManualTask {
 async fn main() -> Result<(), CanoError> {
     println!("=== Circuit Breaker Manual API Demo ===\n");
 
-    let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+    let breaker = CircuitBreaker::new(CircuitPolicy {
         failure_threshold: 3,
         reset_timeout: Duration::from_millis(150),
         half_open_max_calls: 1,
-    }));
+    });
 
     let client = FlakyClient::new();
     let healthy = Arc::clone(&client.healthy);
     let call_count = Arc::clone(&client.calls);
 
     let resources = Resources::new()
-        .insert((*breaker).clone()) // store the breaker as a Resource
+        .insert(breaker.clone()) // store the breaker as a Resource
         .insert(client);
 
     let workflow = Workflow::new(resources)

@@ -2359,20 +2359,20 @@ mod tests {
 
     #[tokio::test]
     async fn test_split_tasks_share_circuit_breaker() {
-        // N parallel split tasks share one Arc<CircuitBreaker>. They all fail
+        // N parallel split tasks share one CircuitBreaker. They all fail
         // in the same workflow run; the breaker — protected by a std Mutex —
         // must record every failure correctly across the JoinSet workers and
         // end up Open.
         use crate::circuit::{CircuitBreaker, CircuitPolicy, CircuitState};
 
         struct FailingTask {
-            breaker: Arc<CircuitBreaker>,
+            breaker: CircuitBreaker,
         }
 
         #[task]
         impl Task<TestState> for FailingTask {
             fn config(&self) -> crate::task::TaskConfig {
-                crate::task::TaskConfig::new().with_circuit_breaker(Arc::clone(&self.breaker))
+                crate::task::TaskConfig::new().with_circuit_breaker(self.breaker.clone())
             }
 
             async fn run(&self) -> Result<TestState, CanoError> {
@@ -2380,15 +2380,15 @@ mod tests {
             }
         }
 
-        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+        let breaker = CircuitBreaker::new(CircuitPolicy {
             failure_threshold: 4,
             reset_timeout: Duration::from_secs(60),
             half_open_max_calls: 1,
-        }));
+        });
 
         let tasks: Vec<FailingTask> = (0..4)
             .map(|_| FailingTask {
-                breaker: Arc::clone(&breaker),
+                breaker: breaker.clone(),
             })
             .collect();
 

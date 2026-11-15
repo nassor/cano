@@ -371,7 +371,7 @@ mod tests {
     }
 
     struct CircuitTask {
-        breaker: Arc<CircuitBreaker>,
+        breaker: CircuitBreaker,
     }
     #[task]
     impl Task<S> for CircuitTask {
@@ -379,7 +379,7 @@ mod tests {
             Ok(S::Done)
         }
         fn config(&self) -> TaskConfig {
-            TaskConfig::new().with_circuit_breaker(Arc::clone(&self.breaker))
+            TaskConfig::new().with_circuit_breaker(self.breaker.clone())
         }
         fn name(&self) -> Cow<'static, str> {
             "CircuitTask".into()
@@ -463,11 +463,11 @@ mod tests {
     #[tokio::test]
     async fn observer_fires_on_circuit_open() {
         // Trip the breaker before the workflow runs: one failure at threshold 1.
-        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+        let breaker = CircuitBreaker::new(CircuitPolicy {
             failure_threshold: 1,
             reset_timeout: Duration::from_secs(60),
             ..CircuitPolicy::default()
-        }));
+        });
         let permit = breaker.try_acquire().expect("closed breaker admits");
         breaker.record_failure(permit);
 
@@ -476,7 +476,7 @@ mod tests {
             .register(
                 S::Start,
                 CircuitTask {
-                    breaker: Arc::clone(&breaker),
+                    breaker: breaker.clone(),
                 },
             )
             .add_exit_state(S::Done)
