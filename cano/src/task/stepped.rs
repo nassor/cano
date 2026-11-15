@@ -796,7 +796,6 @@ mod metrics_tests {
     use super::*;
     use crate::cancel::CancellationToken;
     use crate::metrics::test_support::*;
-    use crate::task::Task;
     use crate::workflow::Workflow;
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]

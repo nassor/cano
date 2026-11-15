@@ -261,6 +261,9 @@
 //! 2. Read the module docs — each module has detailed documentation and examples
 //! 3. Run benchmarks: `cargo bench --bench workflow_performance`
 
+// Lets macro output use `::cano::…` paths inside this crate too.
+extern crate self as cano;
+
 pub mod cancel;
 pub mod circuit;
 pub mod error;

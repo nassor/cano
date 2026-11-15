@@ -728,7 +728,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PollErrorPolicy;
     use crate::resource::Resources;
     use crate::saga;
     use crate::saga::CompensatableTask;

@@ -2618,7 +2618,6 @@ mod tests {
     // register_stepped tests — no-store path (in-memory loop via engine)
     // ------------------------------------------------------------------
 
-    use crate::TaskConfig;
     use crate::task::stepped::{StepOutcome, SteppedTask};
 
     #[tokio::test]

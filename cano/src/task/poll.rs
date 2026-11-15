@@ -803,7 +803,6 @@ mod tests {
 mod metrics_tests {
     use super::*;
     use crate::metrics::test_support::*;
-    use crate::task::Task;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU32, Ordering};
 

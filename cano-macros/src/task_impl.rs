@@ -8,7 +8,7 @@
 //!    `CanoError::Configuration` trap).
 //! 2. Builds the `impl Task<S [, K]> for T` trait header from the attribute
 //!    args and carries over generics + where-clause from the inherent impl.
-//! 3. Hands the synthesised impl to `async_rewrite::rewrite_impl_block` so
+//! 3. Hands the synthesised impl to `async_rewrite::rewrite_impl` so
 //!    every `async fn` becomes a `Pin<Box<dyn Future + Send>>`-returning
 //!    method.
 //!
@@ -120,5 +120,5 @@ fn expand_inherent_impl(
     };
 
     let synth_impl: ItemImpl = parse2(synth)?;
-    Ok(async_rewrite::rewrite_impl_block(synth_impl))
+    Ok(async_rewrite::rewrite_impl(synth_impl))
 }

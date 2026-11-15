@@ -9,7 +9,7 @@
 //!    that no stray items sneak in).
 //! 2. Builds the `impl CompensatableTask<S [, K]> for T` trait header from the
 //!    attribute args, carrying over generics + where-clause from the inherent impl.
-//! 3. Hands the synthesised impl to `async_rewrite::rewrite_impl_block` so every
+//! 3. Hands the synthesised impl to `async_rewrite::rewrite_impl` so every
 //!    `async fn` becomes a `Pin<Box<dyn Future + Send>>`-returning method.
 //!
 //! The explicit `#[saga::task] impl CompensatableTask<S> for T { ... }`
@@ -129,5 +129,5 @@ pub(crate) fn expand_inherent_impl(
     };
 
     let synth_impl: ItemImpl = parse2(synth)?;
-    Ok(async_rewrite::rewrite_impl_block(synth_impl))
+    Ok(async_rewrite::rewrite_impl(synth_impl))
 }

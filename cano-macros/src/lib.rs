@@ -34,7 +34,7 @@ mod batch_task_impl;
 mod checkpoint_store_impl;
 mod compensatable_task_impl;
 mod from_resources;
-mod path_prefix;
+mod model;
 mod poll_task_impl;
 mod resource_derive;
 mod router_task_impl;
@@ -313,10 +313,8 @@ pub fn poll_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// The default `config()` injected by the inherent form is [`TaskConfig::minimal()`]
 /// (no retries) — a single scheduled sleep needs no outer retry wrapping.
 ///
-/// The **inherent form** routes `Task::run` through `::cano::task::timer::run_timer`, so the user
-/// crate needs no direct `tokio` dependency. The **trait-impl form** inlines the sleep, so a crate
-/// using `#[task::timer] impl TimerTask<S> for T` must depend on `tokio` (feature `time`),
-/// reachable as `::tokio` — the same requirement the sibling `#[task::poll]` macro has.
+/// Both forms route `Task::run` through `::cano::task::timer::run_timer`, so the user crate
+/// needs no direct `tokio` dependency.
 #[proc_macro_attribute]
 pub fn timer_task(attr: TokenStream, item: TokenStream) -> TokenStream {
     timer_task_impl::expand(attr.into(), item.into())
