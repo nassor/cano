@@ -39,7 +39,7 @@ impl DataGeneratorTask {
 #[task(state = WorkflowState)]
 impl DataGeneratorTask {
     async fn run(&self, res: &Resources) -> CanoResult<TaskResult<WorkflowState>> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
 
         println!("DataGeneratorTask: Generating {} data points...", self.size);
 
@@ -54,8 +54,8 @@ impl DataGeneratorTask {
             data.iter().fold(f64::NEG_INFINITY, |a: f64, &b| a.max(b))
         );
 
-        store.put("raw_data", data)?;
-        store.put("generation_time", std::time::SystemTime::now())?;
+        store.put("raw_data", data);
+        store.put("generation_time", std::time::SystemTime::now());
 
         Ok(TaskResult::Single(WorkflowState::ProcessData))
     }
@@ -83,7 +83,7 @@ impl ProcessorTask {
 #[task(state = WorkflowState)]
 impl ProcessorTask {
     async fn run(&self, res: &Resources) -> CanoResult<TaskResult<WorkflowState>> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
 
         println!(
             "ProcessorTask: Processing data with threshold {}...",
@@ -123,8 +123,8 @@ impl ProcessorTask {
 
         println!("   Processed {} points above threshold", stats.count);
 
-        store.put("processed_data", processed_data)?;
-        store.put("stats", stats.clone())?;
+        store.put("processed_data", processed_data);
+        store.put("stats", stats.clone());
 
         if stats.count == 0 {
             println!("   No data survived processing — skipping validation");
@@ -145,7 +145,7 @@ struct ValidatorTask;
 #[task(state = WorkflowState)]
 impl ValidatorTask {
     async fn run(&self, res: &Resources) -> CanoResult<TaskResult<WorkflowState>> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
 
         println!("ValidatorTask: Running validation checks...");
 
@@ -169,7 +169,7 @@ impl ValidatorTask {
             validation_results.push("Invalid values in processed data".to_string());
         }
 
-        store.put("validation_errors", validation_results.clone())?;
+        store.put("validation_errors", validation_results.clone());
 
         if validation_results.is_empty() {
             println!("   All validation checks passed!");
@@ -190,7 +190,7 @@ struct ReportTask;
 #[task(state = WorkflowState)]
 impl ReportTask {
     async fn run(&self, res: &Resources) -> CanoResult<TaskResult<WorkflowState>> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
 
         println!("ReportTask: Generating report...");
 
@@ -219,7 +219,7 @@ impl ReportTask {
             }
         );
 
-        store.put("final_report", report)?;
+        store.put("final_report", report);
         println!("   Report generated successfully!");
 
         Ok(TaskResult::Single(WorkflowState::Complete))
@@ -231,7 +231,7 @@ async fn main() -> CanoResult<()> {
     println!("Starting multi-task workflow example\n");
 
     let store = MemoryStore::new();
-    let resources = Resources::new().insert("store", store.clone());
+    let resources = Resources::new().insert(store.clone());
 
     let workflow = Workflow::new(resources)
         .register(WorkflowState::GenerateData, DataGeneratorTask::new(20))

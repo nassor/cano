@@ -24,7 +24,7 @@ fn bench_store_shared_operations(c: &mut Criterion) {
             &size,
             |b, &_size| {
                 let store = MemoryStore::new();
-                store.put("data", data.clone()).unwrap();
+                store.put("data", data.clone());
 
                 b.iter(|| {
                     let _: Vec<u8> = store.get("data").unwrap();
@@ -37,7 +37,7 @@ fn bench_store_shared_operations(c: &mut Criterion) {
             &size,
             |b, &_size| {
                 let store = MemoryStore::new();
-                store.put("data", data.clone()).unwrap();
+                store.put("data", data.clone());
 
                 b.iter(|| {
                     let _: Arc<Vec<u8>> = store.get_shared("data").unwrap();

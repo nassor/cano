@@ -112,7 +112,6 @@ use serde::de::DeserializeOwned;
 use std::borrow::Cow;
 use std::fmt;
 use std::future::Future;
-use std::hash::Hash;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -141,8 +140,6 @@ pub enum StepOutcome<TCursor, TState> {
 /// # Generic Types
 ///
 /// - **`TState`**: The state enum used by the workflow (`Clone + Debug + Send + Sync`).
-/// - **`TResourceKey`**: The key type used to look up resources (defaults to
-///   [`Cow<'static, str>`]).
 ///
 /// # Associated Types
 ///
@@ -185,10 +182,9 @@ pub enum StepOutcome<TCursor, TState> {
 /// }
 /// ```
 #[crate::task::stepped]
-pub trait SteppedTask<TState, TResourceKey = Cow<'static, str>>: Send + Sync
+pub trait SteppedTask<TState>: Send + Sync
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// The cursor type that tracks progress between steps.
     ///
@@ -225,7 +221,7 @@ where
     /// Returns [`CanoError`] on a non-recoverable error.
     async fn step(
         &self,
-        res: &Resources<TResourceKey>,
+        res: &Resources,
         cursor: Option<Self::Cursor>,
     ) -> Result<StepOutcome<Self::Cursor, TState>, CanoError>;
 }
@@ -251,11 +247,10 @@ where
 /// - `StepOutcome::Done(result)` → return `Ok(result)`.
 /// - `Err(e)` → return `Err(e)` immediately (outer retry wrapping, if any, is applied
 ///   by the workflow dispatcher via `run_with_retries`).
-pub async fn run_stepped<S, S2, K>(s: &S, res: &Resources<K>) -> Result<TaskResult<S2>, CanoError>
+pub async fn run_stepped<S, S2>(s: &S, res: &Resources) -> Result<TaskResult<S2>, CanoError>
 where
-    S: SteppedTask<S2, K> + ?Sized,
+    S: SteppedTask<S2> + ?Sized,
     S2: Clone + fmt::Debug + Send + Sync + 'static,
-    K: Hash + Eq + Send + Sync + 'static,
 {
     // The loop skeleton (re-invoke until the step says done) is shared with
     // `run_poll_loop` via `run_task_loop`; the state is the cursor threaded
@@ -296,12 +291,10 @@ pub type DefaultStepCursor = Vec<u8>;
 /// Type alias for a dynamic [`SteppedTask`] trait object with a `Vec<u8>` cursor.
 ///
 /// Pins `Cursor = Vec<u8>` for object safety — the cursor is an opaque byte buffer.
-pub type DynSteppedTask<TState, TResourceKey = Cow<'static, str>> =
-    dyn SteppedTask<TState, TResourceKey, Cursor = Vec<u8>> + Send + Sync;
+pub type DynSteppedTask<TState> = dyn SteppedTask<TState, Cursor = Vec<u8>> + Send + Sync;
 
 /// Type alias for an `Arc`-wrapped dynamic [`SteppedTask`] trait object.
-pub type SteppedTaskObject<TState, TResourceKey = Cow<'static, str>> =
-    std::sync::Arc<DynSteppedTask<TState, TResourceKey>>;
+pub type SteppedTaskObject<TState> = std::sync::Arc<DynSteppedTask<TState>>;
 
 // ---------------------------------------------------------------------------
 // Type-erased stepped-task infrastructure (for StateEntry::Stepped)
@@ -325,10 +318,9 @@ pub type StepFuture<'a, TState> =
 /// All cursor serialization/deserialization is handled inside the internal
 /// adapter that bridges a concrete `SteppedTask` to this trait; callers work
 /// purely with `Vec<u8>` cursors.
-pub trait ErasedSteppedTask<TState, TResourceKey>: Send + Sync
+pub trait ErasedSteppedTask<TState>: Send + Sync
 where
     TState: Clone + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// Human-readable identifier, forwarded from the underlying [`SteppedTask::name`].
     fn name(&self) -> Cow<'static, str>;
@@ -340,7 +332,7 @@ where
     /// where `bytes` were returned by the previous `step` via [`ErasedStep::More`].
     fn step<'a>(
         &'a self,
-        res: &'a Resources<TResourceKey>,
+        res: &'a Resources,
         cursor_bytes: Option<Vec<u8>>,
     ) -> StepFuture<'a, TState>;
 }
@@ -350,11 +342,10 @@ where
 /// Handles `serde_json` cursor (de)serialization so the engine only sees `Vec<u8>`.
 pub(crate) struct SteppedAdapter<T>(pub Arc<T>);
 
-impl<TState, TResourceKey, T> ErasedSteppedTask<TState, TResourceKey> for SteppedAdapter<T>
+impl<TState, T> ErasedSteppedTask<TState> for SteppedAdapter<T>
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
-    T: SteppedTask<TState, TResourceKey> + 'static,
+    T: SteppedTask<TState> + 'static,
 {
     fn name(&self) -> Cow<'static, str> {
         self.0.name()
@@ -364,7 +355,7 @@ where
     }
     fn step<'a>(
         &'a self,
-        res: &'a Resources<TResourceKey>,
+        res: &'a Resources,
         cursor_bytes: Option<Vec<u8>>,
     ) -> StepFuture<'a, TState> {
         Box::pin(async move {

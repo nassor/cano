@@ -106,7 +106,7 @@ struct Router;
 #[task::router(state = Stage)]
 impl Router {
     async fn route(&self, res: &Resources) -> Result<TaskResult<Stage>, CanoError> {
-        let config = res.get::<Config, _>("config")?;
+        let config = res.get::<Config>()?;
         if config.proceed {
             println!("route      : config.proceed=true → Wait");
             Ok(TaskResult::Single(Stage::Wait))
@@ -129,7 +129,7 @@ struct Waiter;
 #[task::poll(state = Stage)]
 impl Waiter {
     async fn poll(&self, res: &Resources) -> Result<PollOutcome<Stage>, CanoError> {
-        let counter = res.get::<Counter, _>("counter")?;
+        let counter = res.get::<Counter>()?;
         if counter.is_done() {
             println!("wait       : counter reached threshold → Crunch");
             Ok(PollOutcome::Ready(TaskResult::Single(Stage::Crunch)))
@@ -227,8 +227,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- build resources ---
     let resources = Resources::new()
-        .insert("config", Config { proceed: true })
-        .insert("counter", counter);
+        .insert(Config { proceed: true })
+        .insert(counter);
 
     // --- build workflow ---
     println!("=== processing models tour ===\n");

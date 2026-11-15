@@ -16,7 +16,7 @@ const MODEL: Model = Model {
     assoc: &[],
     infer_assoc: no_assoc,
     companion_run: Some(
-        |state, key| quote!(::std::boxed::Box::pin(::cano::task::timer::run_timer::<Self, #state, #key>(self, res))),
+        |state| quote!(::std::boxed::Box::pin(::cano::task::timer::run_timer::<Self, #state>(self, res))),
     ),
 };
 

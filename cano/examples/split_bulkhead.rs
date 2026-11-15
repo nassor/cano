@@ -82,7 +82,7 @@ struct Worker {
 #[task(state = Step)]
 impl Worker {
     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        let log = res.get::<TimestampLog, _>("log")?;
+        let log = res.get::<TimestampLog>()?;
 
         let start = Instant::now();
         println!(
@@ -115,7 +115,7 @@ struct Summarize;
 #[task(state = Step)]
 impl Summarize {
     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        let log = res.get::<TimestampLog, _>("log")?;
+        let log = res.get::<TimestampLog>()?;
         let entries = log.snapshot();
 
         println!("\n  Timeline (task_id | start_ms | finish_ms):");
@@ -158,7 +158,7 @@ async fn main() -> Result<(), CanoError> {
     println!("8 tasks, bulkhead=2: at most 2 run at a time (4 waves expected)\n");
 
     let log = TimestampLog::new();
-    let resources = Resources::new().insert("log", log);
+    let resources = Resources::new().insert(log);
 
     // Eight workers, each taking ~50ms. With bulkhead=2 only 2 run at once,
     // so total time will be roughly 4 × 50ms = 200ms instead of 50ms flat.

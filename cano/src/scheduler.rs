@@ -143,19 +143,17 @@ trait Flow: Send + Sync + 'static {
     fn run<'a>(&'a self, token: &'a CancellationToken) -> BoxFuture<'a, CanoResult<()>>;
 }
 
-struct WorkflowFlow<TState, TResourceKey>
+struct WorkflowFlow<TState>
 where
     TState: Clone + std::fmt::Debug + Hash + Eq + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
-    workflow: Workflow<TState, TResourceKey>,
+    workflow: Workflow<TState>,
     initial_state: TState,
 }
 
-impl<TState, TResourceKey> Flow for WorkflowFlow<TState, TResourceKey>
+impl<TState> Flow for WorkflowFlow<TState>
 where
     TState: Clone + std::fmt::Debug + Hash + Eq + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     fn validate(&self) -> CanoResult<()> {
         self.workflow.validate()?;

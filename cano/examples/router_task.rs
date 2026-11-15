@@ -63,7 +63,7 @@ struct Classifier;
 #[task::router(state = Step)]
 impl Classifier {
     async fn route(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        let config = res.get::<Config, _>("config")?;
+        let config = res.get::<Config>()?;
         if config.use_fast_path {
             println!("classifier : fast path selected");
             Ok(TaskResult::Single(Step::FastPath))
@@ -104,7 +104,7 @@ impl SlowProcessor {
 
 fn build_workflow(use_fast_path: bool) -> Workflow<Step> {
     let config = Config { use_fast_path };
-    let resources = Resources::new().insert("config", config);
+    let resources = Resources::new().insert(config);
 
     Workflow::new(resources)
         // `register_router` stores the task as a Router state entry:

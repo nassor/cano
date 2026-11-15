@@ -95,7 +95,6 @@ use crate::resource::Resources;
 use crate::task::{TaskConfig, TaskResult};
 use std::borrow::Cow;
 use std::fmt;
-use std::hash::Hash;
 
 /// RouterTask trait for side-effect-free workflow branching
 ///
@@ -106,9 +105,6 @@ use std::hash::Hash;
 /// # Generic Types
 ///
 /// - **`TState`**: The state enum used by the workflow (must be `Clone + Debug + Send + Sync`).
-/// - **`TResourceKey`**: The key type used to look up resources (defaults to
-///   [`Cow<'static, str>`] — accepts `&'static str` literals without allocating, plus
-///   owned `String` keys for runtime-built names).
 ///
 /// # Implementing RouterTask
 ///
@@ -126,7 +122,7 @@ use std::hash::Hash;
 /// #[task::router(state = Step)]
 /// impl ThresholdRouter {
 ///     async fn route(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-///         let store = res.get::<MemoryStore, _>("store")?;
+///         let store = res.get::<MemoryStore>()?;
 ///         let value: u32 = store.get("value").unwrap_or(0);
 ///         if value >= self.threshold {
 ///             Ok(TaskResult::Single(Step::Right))
@@ -157,10 +153,9 @@ use std::hash::Hash;
 /// }
 /// ```
 #[crate::task::router]
-pub trait RouterTask<TState, TResourceKey = Cow<'static, str>>: Send + Sync
+pub trait RouterTask<TState>: Send + Sync
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// Get the task configuration that controls execution behaviour.
     ///
@@ -190,21 +185,18 @@ where
     ///
     /// Returns [`CanoError`] if the routing logic encounters an error (e.g. a missing
     /// required resource).
-    async fn route(&self, res: &Resources<TResourceKey>) -> Result<TaskResult<TState>, CanoError>;
+    async fn route(&self, res: &Resources) -> Result<TaskResult<TState>, CanoError>;
 }
 
 /// Type alias for a dynamic [`RouterTask`] trait object.
 ///
 /// Use this when you need to store different router types in the same collection.
-/// `TResourceKey` defaults to [`Cow<'static, str>`] to match [`Resources`].
-pub type DynRouterTask<TState, TResourceKey = Cow<'static, str>> =
-    dyn RouterTask<TState, TResourceKey> + Send + Sync;
+pub type DynRouterTask<TState> = dyn RouterTask<TState> + Send + Sync;
 
 /// Type alias for an `Arc`-wrapped dynamic [`RouterTask`] trait object.
 ///
 /// This alias simplifies working with dynamic router collections.
-pub type RouterTaskObject<TState, TResourceKey = Cow<'static, str>> =
-    std::sync::Arc<DynRouterTask<TState, TResourceKey>>;
+pub type RouterTaskObject<TState> = std::sync::Arc<DynRouterTask<TState>>;
 
 #[cfg(test)]
 mod tests {

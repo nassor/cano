@@ -19,11 +19,6 @@ enum Step {
     Done,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum Key {
-    Store,
-}
-
 // ---------------------------------------------------------------------------
 // 1. Inherent form — inferred `Item` and `ItemOutput`, default `concurrency` / `item_retry`
 // ---------------------------------------------------------------------------
@@ -149,15 +144,15 @@ async fn explicit_types_compile_and_run() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. Inherent form with `key = SomeEnum` — custom `TResourceKey`
+// 3. Inherent form reading a resource by type
 // ---------------------------------------------------------------------------
 
 struct InherentWithKey;
 
-#[task::batch(state = Step, key = Key)]
+#[task::batch(state = Step)]
 impl InherentWithKey {
-    async fn load(&self, res: &Resources<Key>) -> Result<Vec<u32>, CanoError> {
-        let store = res.get::<MemoryStore, _>(&Key::Store)?;
+    async fn load(&self, res: &Resources) -> Result<Vec<u32>, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let items: Vec<u32> = store.get("items")?;
         Ok(items)
     }
@@ -168,7 +163,7 @@ impl InherentWithKey {
 
     async fn finish(
         &self,
-        _res: &Resources<Key>,
+        _res: &Resources,
         outputs: Vec<Result<u32, CanoError>>,
     ) -> Result<TaskResult<Step>, CanoError> {
         let doubled: Vec<u32> = outputs.into_iter().map(|r| r.unwrap()).collect();
@@ -180,8 +175,8 @@ impl InherentWithKey {
 #[tokio::test]
 async fn inherent_with_key_uses_custom_resource_key() {
     let store = MemoryStore::new();
-    store.put("items", vec![1u32, 2, 3]).unwrap();
-    let resources = Resources::<Key>::new().insert(Key::Store, store);
+    store.put("items", vec![1u32, 2, 3]);
+    let resources = Resources::new().insert(store);
 
     let result = Task::run(&InherentWithKey, &resources).await.unwrap();
     assert_eq!(result, TaskResult::Single(Step::Done));
@@ -190,8 +185,8 @@ async fn inherent_with_key_uses_custom_resource_key() {
 #[tokio::test]
 async fn inherent_with_key_integrates_with_workflow() {
     let store = MemoryStore::new();
-    store.put("items", vec![1u32, 2, 3]).unwrap();
-    let resources = Resources::<Key>::new().insert(Key::Store, store);
+    store.put("items", vec![1u32, 2, 3]);
+    let resources = Resources::new().insert(store);
 
     let workflow = Workflow::new(resources)
         .register(Step::Process, InherentWithKey)
@@ -502,7 +497,7 @@ impl LoadStep {
     }
 
     async fn load(&self, res: &Resources) -> Result<Vec<u32>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore>()?;
         let items: Vec<u32> = store.get("input")?;
         Ok(items)
     }
@@ -517,8 +512,8 @@ impl LoadStep {
         outputs: Vec<Result<u32, CanoError>>,
     ) -> Result<TaskResult<Step>, CanoError> {
         let doubled: Vec<u32> = outputs.into_iter().map(|r| r.unwrap()).collect();
-        let store = res.get::<MemoryStore, str>("store")?;
-        store.put("output", doubled)?;
+        let store = res.get::<MemoryStore>()?;
+        store.put("output", doubled);
         Ok(TaskResult::Single(Step::Done))
     }
 }
@@ -526,9 +521,9 @@ impl LoadStep {
 #[tokio::test]
 async fn end_to_end_workflow_load_process_finish() {
     let store = MemoryStore::new();
-    store.put("input", vec![1u32, 2, 3, 4, 5]).unwrap();
+    store.put("input", vec![1u32, 2, 3, 4, 5]);
 
-    let resources = Resources::new().insert("store", store.clone());
+    let resources = Resources::new().insert(store.clone());
 
     let workflow = Workflow::new(resources)
         .register(Step::Process, LoadStep)

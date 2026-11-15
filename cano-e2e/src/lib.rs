@@ -369,7 +369,7 @@ impl Reserve {
         std::borrow::Cow::Borrowed("Reserve")
     }
     async fn run(&self, res: &Resources) -> Result<(TaskResult<Phase>, i64), CanoError> {
-        let db = res.get::<Db, _>("db")?;
+        let db = res.get::<Db>()?;
         db.record_event(&self.wf, "run:Reserve").await?;
         maybe_pause(&self.faults, Phase::Reserve, &db, &self.wf).await;
         if self.faults.fail_at == Some(Phase::Reserve) {
@@ -380,7 +380,7 @@ impl Reserve {
         Ok((TaskResult::Single(Phase::Ship), UNITS))
     }
     async fn compensate(&self, res: &Resources, _output: i64) -> Result<(), CanoError> {
-        let db = res.get::<Db, _>("db")?;
+        let db = res.get::<Db>()?;
         db.record_event(&self.wf, "compensate:Reserve").await?;
         db.ledger_revert(&self.wf, "inventory", "reserve").await
     }
@@ -401,7 +401,7 @@ impl Ship {
         std::borrow::Cow::Borrowed("Ship")
     }
     async fn run(&self, res: &Resources) -> Result<TaskResult<Phase>, CanoError> {
-        let db = res.get::<Db, _>("db")?;
+        let db = res.get::<Db>()?;
         db.record_event(&self.wf, "run:Ship").await?;
         maybe_pause(&self.faults, Phase::Ship, &db, &self.wf).await;
         if self.faults.fail_at == Some(Phase::Ship) {
@@ -427,7 +427,7 @@ pub fn build_workflow(
     workflow_id: &str,
     faults: Faults,
 ) -> Workflow<Phase> {
-    let resources = Resources::new().insert("db", Db(store.client()));
+    let resources = Resources::new().insert(Db(store.client()));
     Workflow::new(resources)
         .register_with_compensation(
             Phase::Reserve,

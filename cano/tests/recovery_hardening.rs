@@ -51,25 +51,22 @@ struct WorkTask;
 #[task(state = St)]
 impl StartTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<St>, CanoError> {
-        res.get::<SideEffects, _>("sidefx")?.record("Start");
+        res.get::<SideEffects>()?.record("Start");
         Ok(TaskResult::Single(St::Work))
     }
 }
 #[task(state = St)]
 impl WorkTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<St>, CanoError> {
-        res.get::<SideEffects, _>("sidefx")?.record("Work");
+        res.get::<SideEffects>()?.record("Work");
         Ok(TaskResult::Single(St::Done))
     }
 }
 
 fn build(store: Arc<dyn CheckpointStore>, id: &str, sidefx: &Path) -> Workflow<St> {
-    Workflow::new(Resources::new().insert(
-        "sidefx",
-        SideEffects {
-            path: sidefx.to_path_buf(),
-        },
-    ))
+    Workflow::new(Resources::new().insert(SideEffects {
+        path: sidefx.to_path_buf(),
+    }))
     .register(St::Start, StartTask)
     .register(St::Work, WorkTask)
     .add_exit_state(St::Done)

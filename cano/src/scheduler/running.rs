@@ -1794,7 +1794,7 @@ mod tests {
         }
         let teardowns = Arc::new(AtomicU32::new(0));
         let wf = Workflow::new(
-            crate::resource::Resources::new().insert("counted", Counted(Arc::clone(&teardowns))),
+            crate::resource::Resources::new().insert(Counted(Arc::clone(&teardowns))),
         )
         .register(TestState::Start, TestTask::new())
         .add_exit_state(TestState::Complete);

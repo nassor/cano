@@ -28,7 +28,7 @@ struct GeneratorTask;
 #[task(state = Action)]
 impl GeneratorTask {
     async fn run(&self, res: &Resources) -> CanoResult<TaskResult<Action>> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
 
         println!("GeneratorTask: Creating random numbers...");
 
@@ -39,7 +39,7 @@ impl GeneratorTask {
         let even_numbers: Vec<u32> = numbers.into_iter().filter(|&n| n % 2 == 0).collect();
         println!("Filtered to even numbers: {:?}", even_numbers);
 
-        store.put("even_numbers", even_numbers)?;
+        store.put("even_numbers", even_numbers);
         println!("GeneratorTask: Stored even numbers, moving to Count\n");
 
         Ok(TaskResult::Single(Action::Count))
@@ -52,7 +52,7 @@ struct CounterTask;
 #[task(state = Action)]
 impl CounterTask {
     async fn run(&self, res: &Resources) -> CanoResult<TaskResult<Action>> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
 
         println!("CounterTask: Counting numbers...");
 
@@ -62,8 +62,8 @@ impl CounterTask {
 
         println!("Found {} even numbers with sum: {}", count, sum);
 
-        store.put("count", count)?;
-        store.put("sum", sum)?;
+        store.put("count", count);
+        store.put("sum", sum);
         println!("CounterTask: Processing complete!\n");
 
         Ok(TaskResult::Single(Action::Complete))
@@ -75,7 +75,7 @@ async fn main() -> CanoResult<()> {
     println!("Starting Task-based workflow example\n");
 
     let store = MemoryStore::new();
-    let resources = Resources::new().insert("store", store.clone());
+    let resources = Resources::new().insert(store.clone());
 
     let workflow = Workflow::new(resources)
         .register(Action::Generate, GeneratorTask)

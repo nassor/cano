@@ -86,7 +86,7 @@ impl CalmMode {
         res: &Resources,
         _cursor: Option<u64>,
     ) -> Result<Pin<Box<dyn Stream<Item = Reading> + Send>>, CanoError> {
-        Ok(open_source(res.get::<Source, _>("source")?))
+        Ok(open_source(res.get_arc::<Source>()?))
     }
 
     async fn process_item(&self, _res: &Resources, item: Reading) -> Result<(i32, u64), CanoError> {
@@ -136,7 +136,7 @@ impl AlertMode {
         res: &Resources,
         _cursor: Option<u64>,
     ) -> Result<Pin<Box<dyn Stream<Item = Reading> + Send>>, CanoError> {
-        Ok(open_source(res.get::<Source, _>("source")?))
+        Ok(open_source(res.get_arc::<Source>()?))
     }
 
     async fn process_item(&self, _res: &Resources, item: Reading) -> Result<(i32, u64), CanoError> {
@@ -183,12 +183,9 @@ async fn main() -> CanoResult<()> {
         })
         .collect();
 
-    let resources = Resources::new().insert(
-        "source",
-        Source {
-            queue: Mutex::new(readings),
-        },
-    );
+    let resources = Resources::new().insert(Source {
+        queue: Mutex::new(readings),
+    });
 
     let workflow = Workflow::new(resources)
         .register_stream(Mode::Calm, CalmMode)

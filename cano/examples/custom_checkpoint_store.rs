@@ -131,7 +131,7 @@ impl ProcessTask {
 
     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
         let n = res
-            .get::<CrashOnce, _>("crash")?
+            .get::<CrashOnce>()?
             .attempts
             .fetch_add(1, Ordering::SeqCst)
             + 1;
@@ -163,7 +163,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let checkpoint_store = Arc::new(MapStore::default());
     let run_id = "demo-custom-store";
 
-    let workflow = Workflow::new(Resources::new().insert("crash", CrashOnce::default()))
+    let workflow = Workflow::new(Resources::new().insert(CrashOnce::default()))
         .register(Step::Init, InitTask)
         .register(Step::Process, ProcessTask)
         .register(Step::Finalize, FinalizeTask)

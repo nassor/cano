@@ -88,17 +88,15 @@ struct ParseTask;
 #[task(state = TextPipelineState)]
 impl ParseTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<TextPipelineState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
-        let params = res.get::<RequestParams, _>("request")?;
+        let store = res.get::<MemoryStore>()?;
+        let params = res.get::<RequestParams>()?;
 
         if params.text.trim().is_empty() {
             return Err(CanoError::task_execution("input text is empty"));
         }
 
         // Store the validated text for the next stage
-        store
-            .put("validated_text", params.text.clone())
-            .map_err(|e| CanoError::store(format!("{e}")))?;
+        store.put("validated_text", params.text.clone());
 
         Ok(TaskResult::Single(TextPipelineState::Transform))
     }
@@ -112,7 +110,7 @@ struct TransformTask;
 #[task(state = TextPipelineState)]
 impl TransformTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<TextPipelineState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
 
         let text: String = store
             .get("validated_text")
@@ -121,12 +119,8 @@ impl TransformTask {
         let word_count = text.split_whitespace().count();
         let uppercased = text.to_uppercase();
 
-        store
-            .put("word_count", word_count)
-            .map_err(|e| CanoError::store(format!("{e}")))?;
-        store
-            .put("uppercased", uppercased)
-            .map_err(|e| CanoError::store(format!("{e}")))?;
+        store.put("word_count", word_count);
+        store.put("uppercased", uppercased);
 
         Ok(TaskResult::Single(TextPipelineState::Done))
     }
@@ -154,12 +148,11 @@ async fn process_handler(
 ) -> Result<Json<ProcessResponse>, StatusCode> {
     // Each request gets its own store and resources — full isolation.
     let store = MemoryStore::new();
-    let resources = Resources::new().insert("store", store.clone()).insert(
-        "request",
-        RequestParams {
+    let resources = Resources::new()
+        .insert(store.clone())
+        .insert(RequestParams {
             text: payload.text.clone(),
-        },
-    );
+        });
 
     let workflow = build_workflow(resources);
 

@@ -15,7 +15,7 @@ const MODEL: Model = Model {
     assoc: &[],
     infer_assoc: no_assoc,
     companion_run: Some(
-        |state, key| quote!(::std::boxed::Box::pin(::cano::task::poll::run_poll_loop::<Self, #state, #key>(self, res))),
+        |state| quote!(::std::boxed::Box::pin(::cano::task::poll::run_poll_loop::<Self, #state>(self, res))),
     ),
 };
 

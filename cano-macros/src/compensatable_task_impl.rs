@@ -2,12 +2,12 @@
 //! `impl T { ... }` blocks.
 //!
 //! When the user writes
-//! `#[saga::task(state = S [, key = K])] impl T { type Output = O; ... }`,
+//! `#[saga::task(state = S)] impl T { type Output = O; ... }`,
 //! this pass:
 //!
 //! 1. Enforces that `type Output`, `run`, and `compensate` are all present (and
 //!    that no stray items sneak in).
-//! 2. Builds the `impl CompensatableTask<S [, K]> for T` trait header from the
+//! 2. Builds the `impl CompensatableTask<S> for T` trait header from the
 //!    attribute args, carrying over generics + where-clause from the inherent impl.
 //! 3. Hands the synthesised impl to `async_rewrite::rewrite_impl` so every
 //!    `async fn` becomes a `Pin<Box<dyn Future + Send>>`-returning method.
@@ -29,9 +29,9 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     if item_impl.trait_.is_some() {
         return Err(syn::Error::new(
             item_impl.span(),
-            "#[cano::saga::task]: `state` / `key` args only apply to inherent \
+            "#[cano::saga::task]: `state` only applies to inherent \
              `impl T { ... }` blocks; when writing `impl CompensatableTask<...> for T` the \
-             trait header already specifies them",
+             trait header already specifies it",
         ));
     }
 
@@ -42,15 +42,13 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
              `state = T` (e.g. `#[saga::task(state = MyState)]`)",
         )
     })?;
-    expand_inherent_impl(item_impl, state_ty, args.key)
+    expand_inherent_impl(item_impl, state_ty)
 }
 
-/// Build `impl CompensatableTask<#state_ty [, #key_ty]> for #self_ty` from an inherent
-/// `impl` block. Shared by `#[compensatable_task(state = …)]` and `#[task(state = …, compensatable)]`.
+/// Build `impl CompensatableTask<#state_ty> for #self_ty` from an inherent `impl` block.
 pub(crate) fn expand_inherent_impl(
     item_impl: ItemImpl,
     state_ty: Type,
-    key_ty: Option<Type>,
 ) -> syn::Result<TokenStream> {
     let mut output_ty: Option<&ImplItemType> = None;
     let mut run_fn: Option<&ImplItemFn> = None;
@@ -94,14 +92,14 @@ pub(crate) fn expand_inherent_impl(
     if run_fn.is_none() {
         errors.push(syn::Error::new(
             item_impl.span(),
-            "a compensatable-task impl requires `async fn run(&self, res: &Resources<_>) \
+            "a compensatable-task impl requires `async fn run(&self, res: &Resources) \
              -> Result<(TaskResult<_>, Self::Output), CanoError>`",
         ));
     }
     if compensate_fn.is_none() {
         errors.push(syn::Error::new(
             item_impl.span(),
-            "a compensatable-task impl requires `async fn compensate(&self, res: &Resources<_>, \
+            "a compensatable-task impl requires `async fn compensate(&self, res: &Resources, \
              output: Self::Output) -> Result<(), CanoError>`",
         ));
     }
@@ -109,10 +107,7 @@ pub(crate) fn expand_inherent_impl(
         return Err(combine_errors(errors));
     }
 
-    let trait_ref: syn::Path = match key_ty {
-        Some(k) => syn::parse_quote!(::cano::CompensatableTask<#state_ty, #k>),
-        None => syn::parse_quote!(::cano::CompensatableTask<#state_ty>),
-    };
+    let trait_ref: syn::Path = syn::parse_quote!(::cano::CompensatableTask<#state_ty>);
 
     let attrs = &item_impl.attrs;
     let unsafety = &item_impl.unsafety;

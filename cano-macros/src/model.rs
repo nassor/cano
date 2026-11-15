@@ -8,11 +8,11 @@
 //! 1. **Trait definition** — async rewrite only.
 //! 2. **`impl Trait for T` for an unrelated trait** — async rewrite only (the
 //!    attribute doubles as a plain async-fn-in-trait rewriter).
-//! 3. **`impl {Model}<S [, K]> for T`** — async rewrite plus the companion
-//!    `impl Task<S [, K]> for T`.
-//! 4. **Inherent `impl T { ... }`** with `state = S [, key = K]` — the driver
+//! 3. **`impl {Model}<S> for T`** — async rewrite plus the companion
+//!    `impl Task<S> for T`.
+//! 4. **Inherent `impl T { ... }`** with `state = S` — the driver
 //!    validates the method set, infers omitted associated types, builds the
-//!    `impl ::cano::{Model}<S [, K]> for T` header, and emits the same companion.
+//!    `impl ::cano::{Model}<S> for T` header, and emits the same companion.
 //!
 //! ## Why a companion `impl Task` (not a blanket impl)
 //!
@@ -56,22 +56,13 @@ pub(crate) struct Model {
     pub infer_assoc: fn(&ItemImpl) -> syn::Result<Vec<ImplItem>>,
     /// Expression producing the companion `Task::run` boxed future; `None` = no
     /// companion impl.
-    pub companion_run: Option<fn(state: &Type, key: &Type) -> TokenStream>,
+    pub companion_run: Option<fn(state: &Type) -> TokenStream>,
 }
 
-/// `::cano::{ident}<S [, K]>`.
-pub(crate) fn trait_path(ident: &str, state: &Type, key: Option<&Type>) -> TokenStream {
+/// `::cano::{ident}<S>`.
+pub(crate) fn trait_path(ident: &str, state: &Type) -> TokenStream {
     let ident = format_ident!("{ident}");
-    match key {
-        Some(k) => quote!(::cano::#ident<#state, #k>),
-        None => quote!(::cano::#ident<#state>),
-    }
-}
-
-/// The resource-key type spelled explicitly (the trait default when omitted).
-fn key_or_default(key: Option<&Type>) -> Type {
-    key.cloned()
-        .unwrap_or_else(|| syn::parse_quote!(::std::borrow::Cow<'static, str>))
+    quote!(::cano::#ident<#state>)
 }
 
 /// Find the method `name` in an impl block.
@@ -122,13 +113,13 @@ pub(crate) fn expand(
 
     match &item_impl.trait_ {
         Some((path, _)) => {
-            if args.state.is_some() || args.key.is_some() {
+            if args.state.is_some() {
                 return Err(syn::Error::new(
                     item_impl.span(),
                     format!(
-                        "#[cano::{attr_name}]: `state` / `key` args only apply to inherent \
+                        "#[cano::{attr_name}]: `state` only applies to inherent \
                          `impl T {{ ... }}` blocks; when writing `impl {}<...> for T` the \
-                         trait header already specifies them",
+                         trait header already specifies it",
                         model.trait_ident
                     ),
                 ));
@@ -139,8 +130,8 @@ pub(crate) fn expand(
             if last.ident != model.trait_ident {
                 return Ok(async_rewrite::rewrite_impl(item_impl));
             }
-            let (state, key) = trait_args(model, &item_impl, &last.arguments)?;
-            let companion = companion(model, &item_impl, &state, key.as_ref());
+            let state = trait_state(model, &item_impl, &last.arguments)?;
+            let companion = companion(model, &item_impl, &state);
             let rewritten = async_rewrite::rewrite_impl(item_impl);
             Ok(quote! { #rewritten #companion })
         }
@@ -154,17 +145,17 @@ pub(crate) fn expand(
                     ),
                 )
             })?;
-            expand_inherent(model, item_impl, state, args.key)
+            expand_inherent(model, item_impl, state)
         }
     }
 }
 
-/// Read `S` and optional `K` from `{Model}<S [, K]>`.
-fn trait_args(
+/// Read `S` from `{Model}<S>`.
+fn trait_state(
     model: &Model,
     item_impl: &ItemImpl,
     arguments: &PathArguments,
-) -> syn::Result<(Type, Option<Type>)> {
+) -> syn::Result<Type> {
     let trait_ident = model.trait_ident;
     let PathArguments::AngleBracketed(args) = arguments else {
         return Err(syn::Error::new(
@@ -175,24 +166,24 @@ fn trait_args(
             ),
         ));
     };
-    let mut types = args.args.iter().filter_map(|a| match a {
-        GenericArgument::Type(t) => Some(t.clone()),
-        _ => None,
-    });
-    let state = types.next().ok_or_else(|| {
-        syn::Error::new(
-            item_impl.span(),
-            format!("{trait_ident} impl requires at least one type argument (the state type)"),
-        )
-    })?;
-    Ok((state, types.next()))
+    args.args
+        .iter()
+        .find_map(|a| match a {
+            GenericArgument::Type(t) => Some(t.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            syn::Error::new(
+                item_impl.span(),
+                format!("{trait_ident} impl requires a type argument (the state type)"),
+            )
+        })
 }
 
 fn expand_inherent(
     model: &Model,
     mut item_impl: ItemImpl,
     state: Type,
-    key: Option<Type>,
 ) -> syn::Result<TokenStream> {
     let attr_name = model.attr;
     let mut errors = Vec::new();
@@ -260,30 +251,29 @@ fn expand_inherent(
 
     let inferred = (model.infer_assoc)(&item_impl)?;
     item_impl.items.splice(0..0, inferred);
-    let path = trait_path(model.trait_ident, &state, key.as_ref());
+    let path = trait_path(model.trait_ident, &state);
     item_impl.trait_ = Some((parse2(path)?, Default::default()));
 
-    let companion = companion(model, &item_impl, &state, key.as_ref());
+    let companion = companion(model, &item_impl, &state);
     let rewritten = async_rewrite::rewrite_impl(item_impl);
     Ok(quote! { #rewritten #companion })
 }
 
-/// `impl ::cano::Task<S, K> for T` forwarding `config` / `name` to the model trait and
+/// `impl ::cano::Task<S> for T` forwarding `config` / `name` to the model trait and
 /// returning `companion_run(..)` from a hand-desugared `run`.
-fn companion(model: &Model, item_impl: &ItemImpl, state: &Type, key: Option<&Type>) -> TokenStream {
+fn companion(model: &Model, item_impl: &ItemImpl, state: &Type) -> TokenStream {
     let Some(run) = model.companion_run else {
         return TokenStream::new();
     };
-    let key = key_or_default(key);
-    let model_trait = trait_path(model.trait_ident, state, Some(&key));
-    let body = run(state, &key);
+    let model_trait = trait_path(model.trait_ident, state);
+    let body = run(state);
     let attrs = &item_impl.attrs;
     let generics = &item_impl.generics;
     let where_clause = &item_impl.generics.where_clause;
     let self_ty = &item_impl.self_ty;
     quote! {
         #(#attrs)*
-        impl #generics ::cano::Task<#state, #key> for #self_ty #where_clause {
+        impl #generics ::cano::Task<#state> for #self_ty #where_clause {
             fn config(&self) -> ::cano::TaskConfig {
                 <Self as #model_trait>::config(self)
             }
@@ -292,7 +282,7 @@ fn companion(model: &Model, item_impl: &ItemImpl, state: &Type, key: Option<&Typ
             }
             fn run<'life0, 'life1, 'async_trait>(
                 &'life0 self,
-                res: &'life1 ::cano::Resources<#key>,
+                res: &'life1 ::cano::Resources,
             ) -> ::core::pin::Pin<::std::boxed::Box<
                 dyn ::core::future::Future<
                     Output = ::std::result::Result<::cano::TaskResult<#state>, ::cano::CanoError>

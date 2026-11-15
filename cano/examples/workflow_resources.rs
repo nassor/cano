@@ -33,22 +33,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 // ============================================================================
-// Resource key type
-// ============================================================================
-
-/// Typed key enum used to identify resources stored in `Resources<Key>`.
-///
-/// Using an enum instead of string literals gives compile-time safety —
-/// a typo in a key is a compile error, not a runtime panic.
-#[derive(Debug, Hash, Eq, PartialEq)]
-enum Key {
-    Store,
-    Counter,
-    Params,
-    Db,
-}
-
-// ============================================================================
 // Custom resource: CounterResource
 // ============================================================================
 
@@ -187,14 +171,14 @@ enum Step {
 /// Reads `WorkflowParams` and writes an initial value to the in-memory store.
 struct InitTask;
 
-#[task(state = Step, key = Key)]
+#[task(state = Step)]
 impl InitTask {
-    async fn run(&self, res: &Resources<Key>) -> Result<TaskResult<Step>, CanoError> {
-        let store = res.get::<MemoryStore, _>(&Key::Store)?;
-        let params = res.get::<WorkflowParams, _>(&Key::Params)?;
+    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+        let store = res.get::<MemoryStore>()?;
+        let params = res.get::<WorkflowParams>()?;
 
         let value = 10u32 * params.multiplier;
-        store.put("value", value)?;
+        store.put("value", value);
         println!("InitTask: stored value = {value}");
 
         Ok(TaskResult::Single(Step::Process))
@@ -205,15 +189,15 @@ impl InitTask {
 /// and stores the combined result back into the in-memory store.
 struct ProcessTask;
 
-#[task(state = Step, key = Key)]
+#[task(state = Step)]
 impl ProcessTask {
-    async fn run(&self, res: &Resources<Key>) -> Result<TaskResult<Step>, CanoError> {
-        let store = res.get::<MemoryStore, _>(&Key::Store)?;
-        let counter = res.get::<CounterResource, _>(&Key::Counter)?;
+    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+        let store = res.get::<MemoryStore>()?;
+        let counter = res.get::<CounterResource>()?;
 
         let value: u32 = store.get("value")?;
         let result = value + counter.get_setup_count();
-        store.put("result", result)?;
+        store.put("result", result);
         println!("ProcessTask: result = {result}");
 
         Ok(TaskResult::Single(Step::Persist))
@@ -223,11 +207,11 @@ impl ProcessTask {
 /// Persists the final result to redb inside an ACID write transaction.
 struct PersistTask;
 
-#[task(state = Step, key = Key)]
+#[task(state = Step)]
 impl PersistTask {
-    async fn run(&self, res: &Resources<Key>) -> Result<TaskResult<Step>, CanoError> {
-        let store = res.get::<MemoryStore, _>(&Key::Store)?;
-        let redb = res.get::<RedbResource, _>(&Key::Db)?;
+    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+        let store = res.get::<MemoryStore>()?;
+        let redb = res.get::<RedbResource>()?;
 
         let result: u32 = store.get("result")?;
         let db = redb.db()?;
@@ -256,10 +240,10 @@ impl PersistTask {
 /// Demonstrates that the previous write is durable across transactions.
 struct VerifyTask;
 
-#[task(state = Step, key = Key)]
+#[task(state = Step)]
 impl VerifyTask {
-    async fn run(&self, res: &Resources<Key>) -> Result<TaskResult<Step>, CanoError> {
-        let redb = res.get::<RedbResource, _>(&Key::Db)?;
+    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+        let redb = res.get::<RedbResource>()?;
         let db = redb.db()?;
 
         let read_tx = db
@@ -306,11 +290,11 @@ async fn main() -> Result<(), CanoError> {
         let _ = std::fs::remove_file(&db_path);
     }
 
-    let resources = Resources::<Key>::new()
-        .insert(Key::Store, store.clone())
-        .insert(Key::Counter, counter)
-        .insert(Key::Params, WorkflowParams { multiplier: 3 })
-        .insert(Key::Db, RedbResource::new(db_path));
+    let resources = Resources::new()
+        .insert(store.clone())
+        .insert(counter)
+        .insert(WorkflowParams { multiplier: 3 })
+        .insert(RedbResource::new(db_path));
 
     let workflow = Workflow::new(resources)
         .register(Step::Init, InitTask)

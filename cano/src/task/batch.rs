@@ -176,7 +176,6 @@ use crate::resource::Resources;
 use crate::task::{RetryMode, TaskConfig, TaskResult};
 use std::borrow::Cow;
 use std::fmt;
-use std::hash::Hash;
 
 // ---------------------------------------------------------------------------
 // Default associated-type aliases
@@ -202,8 +201,6 @@ pub type DefaultBatchItemOutput = Box<dyn std::any::Any + Send>;
 /// # Generic Types
 ///
 /// - **`TState`**: The state enum used by the workflow (`Clone + Debug + Send + Sync`).
-/// - **`TResourceKey`**: The key type used to look up resources (defaults to
-///   [`Cow<'static, str>`]).
 ///
 /// # Error semantics
 ///
@@ -248,10 +245,9 @@ pub type DefaultBatchItemOutput = Box<dyn std::any::Any + Send>;
 /// }
 /// ```
 #[crate::task::batch]
-pub trait BatchTask<TState, TResourceKey = Cow<'static, str>>: Send + Sync
+pub trait BatchTask<TState>: Send + Sync
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// One work item produced by [`load`](BatchTask::load) and consumed by
     /// [`process_item`](BatchTask::process_item).
@@ -299,7 +295,7 @@ where
     ///
     /// Called once per batch task dispatch. If this returns `Err`, the batch is aborted
     /// and [`finish`](BatchTask::finish) is never called.
-    async fn load(&self, res: &Resources<TResourceKey>) -> Result<Vec<Self::Item>, CanoError>;
+    async fn load(&self, res: &Resources) -> Result<Vec<Self::Item>, CanoError>;
 
     /// Process one item.
     ///
@@ -321,7 +317,7 @@ where
     /// presence of per-item errors if the policy allows partial success.
     async fn finish(
         &self,
-        res: &Resources<TResourceKey>,
+        res: &Resources,
         outputs: Vec<Result<Self::ItemOutput, CanoError>>,
     ) -> Result<TaskResult<TState>, CanoError>;
 }
@@ -348,11 +344,10 @@ where
 ///
 /// Items whose `process_item` returns `Err` (after exhausting per-item retries) are
 /// placed in the `Err` slot of `outputs` — they do not abort the batch.
-pub async fn run_batch<B, S, K>(b: &B, res: &Resources<K>) -> Result<TaskResult<S>, CanoError>
+pub async fn run_batch<B, S>(b: &B, res: &Resources) -> Result<TaskResult<S>, CanoError>
 where
-    B: BatchTask<S, K> + ?Sized,
+    B: BatchTask<S> + ?Sized,
     S: Clone + fmt::Debug + Send + Sync + 'static,
-    K: Hash + Eq + Send + Sync + 'static,
 {
     use futures_util::StreamExt as _;
     use std::sync::Arc;
@@ -413,15 +408,14 @@ where
 /// `Sync` bound.
 ///
 /// [`run_retry_loop`]: crate::task::retry::run_retry_loop
-async fn run_item_with_retry<B, S, K>(
+async fn run_item_with_retry<B, S>(
     b: &B,
     item: &B::Item,
     retry_mode: &RetryMode,
 ) -> Result<B::ItemOutput, CanoError>
 where
-    B: BatchTask<S, K> + ?Sized,
+    B: BatchTask<S> + ?Sized,
     S: Clone + fmt::Debug + Send + Sync + 'static,
-    K: Hash + Eq + Send + Sync + 'static,
 {
     use crate::task::retry::{RetryStep, run_retry_loop};
     run_retry_loop(retry_mode, |_attempt: usize| async move {
@@ -441,15 +435,14 @@ where
 /// object safety.
 ///
 /// Both `Item` and `ItemOutput` are pinned to heap-erased boxes so that
-/// `dyn BatchTask<TState, TResourceKey>` can exist without knowing the concrete
-/// associated types. Prefer `dyn Task<TState, TResourceKey>` for ordinary workflow use.
-pub type DynBatchTask<TState, TResourceKey = Cow<'static, str>> = dyn BatchTask<TState, TResourceKey, Item = DefaultBatchItem, ItemOutput = DefaultBatchItemOutput>
+/// `dyn BatchTask<TState>` can exist without knowing the concrete
+/// associated types. Prefer `dyn Task<TState>` for ordinary workflow use.
+pub type DynBatchTask<TState> = dyn BatchTask<TState, Item = DefaultBatchItem, ItemOutput = DefaultBatchItemOutput>
     + Send
     + Sync;
 
 /// Type alias for an `Arc`-wrapped dynamic [`BatchTask`] trait object.
-pub type BatchTaskObject<TState, TResourceKey = Cow<'static, str>> =
-    std::sync::Arc<DynBatchTask<TState, TResourceKey>>;
+pub type BatchTaskObject<TState> = std::sync::Arc<DynBatchTask<TState>>;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -873,9 +866,7 @@ mod tests {
         let task = SimpleBatch;
         let res = Resources::new();
         // Can call run_batch via a reference to the trait object
-        let result = run_batch::<SimpleBatch, Step, _>(&task, &res)
-            .await
-            .unwrap();
+        let result = run_batch::<SimpleBatch, Step>(&task, &res).await.unwrap();
         assert_eq!(result, TaskResult::Single(Step::Done));
     }
 }

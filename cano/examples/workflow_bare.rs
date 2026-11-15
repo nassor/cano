@@ -67,10 +67,10 @@ struct PersistTask;
 #[task(state = Stage)]
 impl PersistTask {
     async fn run(&self, res: &Resources) -> CanoResult<TaskResult<Stage>> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
         println!("PersistTask: writing result to store...");
         let result: i32 = 42_i32.clamp(0, 100);
-        store.put("sanitized_value", result)?;
+        store.put("sanitized_value", result);
         println!("  stored sanitized_value={result}");
         Ok(TaskResult::Single(Stage::Done))
     }
@@ -99,7 +99,7 @@ async fn main() -> CanoResult<()> {
 
     // Bare tasks work in any workflow — the default run() delegates to run_bare().
     let store = MemoryStore::new();
-    let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let workflow = Workflow::new(Resources::new().insert(store.clone()))
         .register(Stage::Validate, ValidateTask) // bare task
         .register(Stage::Sanitize, SanitizeTask) // bare task
         .register(Stage::Persist, PersistTask) // resource task

@@ -65,7 +65,7 @@ impl Task<Step> for CallTask {
     }
 
     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        let client = res.get::<FlakyClient, _>("client")?;
+        let client = res.get::<FlakyClient>()?;
         let payload = client.fetch().await?;
         println!("    → got: {payload}");
         Ok(TaskResult::Single(Step::Done))
@@ -86,7 +86,7 @@ async fn main() -> Result<(), CanoError> {
     let healthy_handle = Arc::clone(&client.healthy);
     let call_count = Arc::clone(&client.call_count);
 
-    let resources = Resources::new().insert("client", client);
+    let resources = Resources::new().insert(client);
     let workflow = Workflow::new(resources)
         .register(
             Step::Call,

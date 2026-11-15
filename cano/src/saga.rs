@@ -36,7 +36,6 @@
 use std::borrow::Cow;
 use std::fmt;
 use std::future::Future;
-use std::hash::Hash;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -90,10 +89,9 @@ use crate::task::{TaskConfig, TaskResult};
 /// execute in different processes after a [crash-recovery](crate::recovery) resume, so
 /// `compensate` must work purely from `(res, output)`.
 #[crate::saga::task]
-pub trait CompensatableTask<TState, TResourceKey = Cow<'static, str>>: Send + Sync
+pub trait CompensatableTask<TState>: Send + Sync
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// Data describing what [`run`](Self::run) did, handed back to
     /// [`compensate`](Self::compensate). Serialized with `serde_json` onto the
@@ -130,10 +128,7 @@ where
     /// let auth = self.commit_charge(prepared).await?;        // side effect
     /// Ok((TaskResult::Single(NextState), auth))              // entry pushed
     /// ```
-    async fn run(
-        &self,
-        res: &Resources<TResourceKey>,
-    ) -> Result<(TaskResult<TState>, Self::Output), CanoError>;
+    async fn run(&self, res: &Resources) -> Result<(TaskResult<TState>, Self::Output), CanoError>;
 
     /// Undo the effects of a successful [`run`](Self::run), given its `output`. Must be
     /// **idempotent** — it may run more than once (for example after a resume that re-ran
@@ -154,11 +149,7 @@ where
     /// Make `compensate` either short enough to fit any configured budget,
     /// or structurally cancellation-safe (RAII guards, idempotent transitions
     /// over external resources).
-    async fn compensate(
-        &self,
-        res: &Resources<TResourceKey>,
-        output: Self::Output,
-    ) -> Result<(), CanoError>;
+    async fn compensate(&self, res: &Resources, output: Self::Output) -> Result<(), CanoError>;
 }
 
 /// One entry on a run's compensation stack: which compensatable task ran, and the
@@ -179,10 +170,9 @@ pub(crate) struct CompensationEntry {
 /// compensations without naming the task's concrete `Output` type. **You should not need
 /// to implement or name this directly** — it's the saga analogue of
 /// [`TaskObject`](crate::task::TaskObject).
-pub trait ErasedCompensatable<TState, TResourceKey>: Send + Sync
+pub trait ErasedCompensatable<TState>: Send + Sync
 where
     TState: Clone + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// The underlying task's [`name`](CompensatableTask::name).
     fn name(&self) -> Cow<'static, str>;
@@ -190,13 +180,9 @@ where
     fn config(&self) -> TaskConfig;
     /// Run the forward action; on success return the next state and the
     /// `serde_json`-serialized output.
-    fn run<'a>(&'a self, res: &'a Resources<TResourceKey>) -> ForwardRunFuture<'a, TState>;
+    fn run<'a>(&'a self, res: &'a Resources) -> ForwardRunFuture<'a, TState>;
     /// Deserialize `output_blob` and run the task's [`compensate`](CompensatableTask::compensate).
-    fn compensate<'a>(
-        &'a self,
-        res: &'a Resources<TResourceKey>,
-        output_blob: &'a [u8],
-    ) -> CompensateFuture<'a>;
+    fn compensate<'a>(&'a self, res: &'a Resources, output_blob: &'a [u8]) -> CompensateFuture<'a>;
 }
 
 /// Future returned by [`ErasedCompensatable::run`] — yields the next state and the
@@ -235,16 +221,15 @@ pub type CompensateFuture<'a> = Pin<Box<dyn Future<Output = Result<(), CanoError
 /// `CompensationFailed` (the existing constructor flattens nested
 /// `CompensationFailed` values, so a later drain that aggregates won't produce
 /// a doubly-nested error).
-async fn run_inline_compensate<TState, TResourceKey, T>(
+async fn run_inline_compensate<TState, T>(
     task: &T,
-    res: &Resources<TResourceKey>,
+    res: &Resources,
     output: T::Output,
     original_err: CanoError,
 ) -> CanoError
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
-    T: CompensatableTask<TState, TResourceKey> + ?Sized + 'static,
+    T: CompensatableTask<TState> + ?Sized + 'static,
 {
     use futures_util::FutureExt;
     use std::panic::AssertUnwindSafe;
@@ -288,11 +273,10 @@ where
 /// Bridges a concrete [`CompensatableTask`] to the object-safe [`ErasedCompensatable`].
 pub(crate) struct CompensatableAdapter<T>(pub Arc<T>);
 
-impl<TState, TResourceKey, T> ErasedCompensatable<TState, TResourceKey> for CompensatableAdapter<T>
+impl<TState, T> ErasedCompensatable<TState> for CompensatableAdapter<T>
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
-    T: CompensatableTask<TState, TResourceKey> + 'static,
+    T: CompensatableTask<TState> + 'static,
 {
     fn name(&self) -> Cow<'static, str> {
         self.0.name()
@@ -302,7 +286,7 @@ where
         self.0.config()
     }
 
-    fn run<'a>(&'a self, res: &'a Resources<TResourceKey>) -> ForwardRunFuture<'a, TState> {
+    fn run<'a>(&'a self, res: &'a Resources) -> ForwardRunFuture<'a, TState> {
         let attempt_timeout = self.0.config().attempt_timeout;
         Box::pin(async move {
             // Apply the user's `attempt_timeout` *only* to the forward call.
@@ -356,11 +340,7 @@ where
         })
     }
 
-    fn compensate<'a>(
-        &'a self,
-        res: &'a Resources<TResourceKey>,
-        output_blob: &'a [u8],
-    ) -> CompensateFuture<'a> {
+    fn compensate<'a>(&'a self, res: &'a Resources, output_blob: &'a [u8]) -> CompensateFuture<'a> {
         Box::pin(async move {
             let output: T::Output = serde_json::from_slice(output_blob).map_err(|e| {
                 CanoError::generic(format!(

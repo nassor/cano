@@ -14,8 +14,8 @@ const MODEL: Model = Model {
     optional: &["config", "name"],
     assoc: &[],
     infer_assoc: no_assoc,
-    companion_run: Some(|state, key| {
-        let router = trait_path("RouterTask", state, Some(key));
+    companion_run: Some(|state| {
+        let router = trait_path("RouterTask", state);
         quote!(<Self as #router>::route(self, res))
     }),
 };

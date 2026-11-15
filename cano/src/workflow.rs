@@ -73,7 +73,6 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::hash::Hash;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
@@ -193,34 +192,23 @@ where
     }
 }
 
-/// State machine workflow orchestration with split/join support
-///
-/// The resource key type defaults to [`Cow<'static, str>`](std::borrow::Cow), which
-/// accepts both `&'static str` literals (allocation-free) and owned `String` keys.
-/// To use a different key type — e.g. an enum for compile-time typo protection —
-/// specify it explicitly:
-///
-/// ```rust,ignore
-/// let workflow = Workflow::<MyState, MyKeyType>::new(resources);
-/// ```
-///
 /// Immutable observer snapshot: `None` = no observers attached (the zero-cost
 /// common case), `Some(slice)` = the workflow's observer list frozen into an
 /// `Arc` slice so `observer_slice()` allocates once and clones cheaply.
 type ObserverSlice = Arc<[Arc<dyn WorkflowObserver>]>;
 
+/// State machine workflow orchestration with split/join support.
 #[must_use]
-pub struct Workflow<TState, TResourceKey = Cow<'static, str>>
+pub struct Workflow<TState>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// State machine with support for split/join.
     /// Arc-wrapped so the FSM loop clones the entry as a cheap refcount bump
     /// rather than cloning the inner `Vec<Arc<dyn Task>>` on every iteration.
-    states: HashMap<TState, Arc<StateEntry<TState, TResourceKey>>>,
+    states: HashMap<TState, Arc<StateEntry<TState>>>,
     /// Shared resources for all tasks
-    pub(crate) resources: Arc<Resources<TResourceKey>>,
+    pub(crate) resources: Arc<Resources>,
     /// Total wall-clock budget for the entire `orchestrate` / `resume_from` call.
     /// When set, the FSM aborts the in-flight task at its next await point as soon
     /// as the budget elapses and drains the compensation stack against
@@ -251,7 +239,7 @@ where
     /// keyed by the task's [`name`](crate::saga::CompensatableTask::name). Used to look a
     /// compensator up by id when draining the compensation stack — including a stack
     /// rehydrated from a checkpoint log, where only the `task_id` string is available.
-    compensators: HashMap<Arc<str>, Arc<dyn ErasedCompensatable<TState, TResourceKey>>>,
+    compensators: HashMap<Arc<str>, Arc<dyn ErasedCompensatable<TState>>>,
     /// Optional append-only checkpoint store. When set (alongside [`workflow_id`](Self::workflow_id)),
     /// every state entry writes a [`CheckpointRow`](crate::recovery::CheckpointRow) before the state's task runs, so a
     /// crashed run can be resumed via [`resume_from`](Self::resume_from). `None` by default —
@@ -272,13 +260,12 @@ where
     tracing_span: Option<Span>,
 }
 
-impl<TState, TResourceKey> Workflow<TState, TResourceKey>
+impl<TState> Workflow<TState>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// Create a new workflow with the given resources
-    pub fn new(resources: Resources<TResourceKey>) -> Self {
+    pub fn new(resources: Resources) -> Self {
         Self {
             states: HashMap::new(),
             resources: Arc::new(resources),
@@ -295,6 +282,43 @@ where
             #[cfg(feature = "tracing")]
             tracing_span: None,
         }
+    }
+
+    /// Construct a workflow with no resources.
+    ///
+    /// Use when the workflow needs no external dependencies.
+    /// Equivalent to `Workflow::new(Resources::new())`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use cano::prelude::*;
+    ///
+    /// #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    /// enum Step { Start, Done }
+    ///
+    /// struct NoopTask;
+    ///
+    /// #[task]
+    /// impl Task<Step> for NoopTask {
+    ///     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    ///         Ok(TaskResult::Single(Step::Done))
+    ///     }
+    /// }
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), CanoError> {
+    /// let result = Workflow::bare()
+    ///     .register(Step::Start, NoopTask)
+    ///     .add_exit_state(Step::Done)
+    ///     .orchestrate(Step::Start)
+    ///     .await?;
+    /// assert_eq!(result, Step::Done);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn bare() -> Self {
+        Self::new(Resources::new())
     }
 
     /// Set a wall-clock budget for the entire `orchestrate` (or `resume_from`) call.
@@ -392,7 +416,7 @@ where
     /// it is replaced. This method is infallible.
     pub fn register<T>(mut self, state: TState, task: T) -> Self
     where
-        T: Task<TState, TResourceKey> + Send + Sync + 'static,
+        T: Task<TState> + Send + Sync + 'static,
     {
         self.forget_compensator_for(&state);
         let config = Arc::new(task.config());
@@ -428,7 +452,7 @@ where
     /// it is replaced. This method is infallible.
     pub fn register_router<T>(mut self, state: TState, task: T) -> Self
     where
-        T: RouterTask<TState, TResourceKey> + Task<TState, TResourceKey> + 'static,
+        T: RouterTask<TState> + Task<TState> + 'static,
     {
         self.forget_compensator_for(&state);
         let config = Arc::new(Task::config(&task));
@@ -453,11 +477,11 @@ where
         join_config: JoinConfig<TState>,
     ) -> Self
     where
-        T: Task<TState, TResourceKey> + Send + Sync + 'static,
+        T: Task<TState> + Send + Sync + 'static,
     {
         self.forget_compensator_for(&state);
         let mut configs: Vec<Arc<crate::task::TaskConfig>> = Vec::new();
-        let mut arc_tasks: Vec<Arc<dyn Task<TState, TResourceKey> + Send + Sync>> = Vec::new();
+        let mut arc_tasks: Vec<Arc<dyn Task<TState> + Send + Sync>> = Vec::new();
         for t in tasks {
             configs.push(Arc::new(t.config()));
             arc_tasks.push(Arc::new(t) as Arc<_>);
@@ -507,12 +531,12 @@ where
     /// `register_split_with_compensation` in this version.
     pub fn register_with_compensation<T>(mut self, state: TState, task: T) -> Self
     where
-        T: CompensatableTask<TState, TResourceKey> + 'static,
+        T: CompensatableTask<TState> + 'static,
     {
         self.forget_compensator_for(&state);
         let config = Arc::new(task.config());
         let name: Arc<str> = Arc::from(task.name());
-        let erased: Arc<dyn ErasedCompensatable<TState, TResourceKey>> =
+        let erased: Arc<dyn ErasedCompensatable<TState>> =
             Arc::new(crate::saga::CompensatableAdapter(Arc::new(task)));
         self.compensators.insert(name, Arc::clone(&erased));
         self.states.insert(
@@ -542,12 +566,11 @@ where
     /// Replaces any handler previously registered for `state`. Infallible.
     pub fn register_stepped<T>(mut self, state: TState, task: T) -> Self
     where
-        T: SteppedTask<TState, TResourceKey> + 'static,
+        T: SteppedTask<TState> + 'static,
     {
         self.forget_compensator_for(&state);
         let config = Arc::new(SteppedTask::config(&task));
-        let erased: Arc<dyn ErasedSteppedTask<TState, TResourceKey>> =
-            Arc::new(SteppedAdapter(Arc::new(task)));
+        let erased: Arc<dyn ErasedSteppedTask<TState>> = Arc::new(SteppedAdapter(Arc::new(task)));
         self.states.insert(
             state,
             Arc::new(StateEntry::Stepped {
@@ -572,12 +595,11 @@ where
     /// Replaces any handler previously registered for `state`. Infallible.
     pub fn register_stream<T>(mut self, state: TState, task: T) -> Self
     where
-        T: StreamTask<TState, TResourceKey> + 'static,
+        T: StreamTask<TState> + 'static,
     {
         self.forget_compensator_for(&state);
         let config = Arc::new(StreamTask::config(&task));
-        let erased: Arc<dyn ErasedStreamTask<TState, TResourceKey>> =
-            Arc::new(StreamAdapter(Arc::new(task)));
+        let erased: Arc<dyn ErasedStreamTask<TState>> = Arc::new(StreamAdapter(Arc::new(task)));
         self.states.insert(
             state,
             Arc::new(StateEntry::Stream {
@@ -1020,9 +1042,7 @@ where
 
         self.resources.setup_all().await?;
         let result = self.run_workflow(initial_state, token).await;
-        self.resources
-            .teardown_range(0..self.resources.lifecycle_len())
-            .await;
+        self.resources.teardown_all().await;
         result
     }
 
@@ -1100,10 +1120,9 @@ where
     }
 }
 
-impl<TState, TResourceKey> Clone for Workflow<TState, TResourceKey>
+impl<TState> Clone for Workflow<TState>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     fn clone(&self) -> Self {
         Self {
@@ -1128,52 +1147,9 @@ where
     }
 }
 
-impl<TState> Workflow<TState, Cow<'static, str>>
+impl<TState> std::fmt::Debug for Workflow<TState>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-{
-    /// Construct a workflow with no resources.
-    ///
-    /// Use when the workflow needs no external dependencies.
-    /// Equivalent to `Workflow::new(Resources::new())`.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use cano::prelude::*;
-    ///
-    /// #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-    /// enum Step { Start, Done }
-    ///
-    /// struct NoopTask;
-    ///
-    /// #[task]
-    /// impl Task<Step> for NoopTask {
-    ///     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-    ///         Ok(TaskResult::Single(Step::Done))
-    ///     }
-    /// }
-    ///
-    /// # #[tokio::main]
-    /// # async fn main() -> Result<(), CanoError> {
-    /// let result = Workflow::bare()
-    ///     .register(Step::Start, NoopTask)
-    ///     .add_exit_state(Step::Done)
-    ///     .orchestrate(Step::Start)
-    ///     .await?;
-    /// assert_eq!(result, Step::Done);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn bare() -> Self {
-        Self::new(Resources::new())
-    }
-}
-
-impl<TState, TResourceKey> std::fmt::Debug for Workflow<TState, TResourceKey>
-where
-    TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Workflow")
@@ -1402,7 +1378,7 @@ mod tests {
     #[tokio::test]
     async fn test_workflow_with_data() {
         let store = crate::store::MemoryStore::new();
-        let resources = Resources::new().insert("store", store.clone());
+        let resources = Resources::new().insert(store.clone());
         let workflow = Workflow::new(resources)
             .register(
                 TestState::Start,

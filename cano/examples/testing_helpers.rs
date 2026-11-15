@@ -8,7 +8,6 @@
 //! - [`RecordingObserver`] — capture and assert the path a workflow took.
 //! - [`InMemoryCheckpointStore`] — a process-local checkpoint store (no `recovery`
 //!   feature, no on-disk file) whose `Checkpoint` events the observer records.
-//! - [`TestResources`] — build the [`Resources`] a workflow needs in one chain.
 //! - [`panic_on_attempt`] — a task that panics; the engine converts it to an error
 //!   (panic safety) and fails fast.
 //! - [`assert_compensation_ran`] — assert the order a saga rolled back in.
@@ -38,8 +37,8 @@ struct WorkTask;
 #[task(state = Step)]
 impl WorkTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
-        store.put("processed", 42_u32)?;
+        let store = res.get::<MemoryStore>()?;
+        store.put("processed", 42_u32);
         Ok(TaskResult::Single(Step::Done))
     }
 }
@@ -65,7 +64,7 @@ impl Reserve {
         Ok((TaskResult::Single(Step::Work), Unit))
     }
     async fn compensate(&self, res: &Resources, _out: Unit) -> Result<(), CanoError> {
-        res.get::<CompensationLog, _>("log")?
+        res.get::<CompensationLog>()?
             .0
             .lock()
             .unwrap()
@@ -82,7 +81,7 @@ impl Charge {
         Ok((TaskResult::Single(Step::Finish), Unit))
     }
     async fn compensate(&self, res: &Resources, _out: Unit) -> Result<(), CanoError> {
-        res.get::<CompensationLog, _>("log")?
+        res.get::<CompensationLog>()?
             .0
             .lock()
             .unwrap()
@@ -104,10 +103,10 @@ impl Boom {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // 1. RecordingObserver + InMemoryCheckpointStore + TestResources --------------------
+    // 1. RecordingObserver + InMemoryCheckpointStore --------------------
     let observer = Arc::new(RecordingObserver::new());
     let checkpoints = Arc::new(InMemoryCheckpointStore::new());
-    let resources = TestResources::new().with_store("store").build();
+    let resources = Resources::new().insert(MemoryStore::new());
 
     let workflow = Workflow::new(resources)
         .register(Step::Start, StartTask)
@@ -143,7 +142,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 3. assert_compensation_ran — a saga that rolls back in reverse. --------------------
     let log = CompensationLog::default();
     let handle = log.clone();
-    let saga_resources = Resources::new().insert("log", log);
+    let saga_resources = Resources::new().insert(log);
     let saga = Workflow::new(saga_resources)
         .register_with_compensation(Step::Start, Reserve)
         .register_with_compensation(Step::Work, Charge)

@@ -120,7 +120,6 @@ use crate::resource::Resources;
 use crate::task::{TaskConfig, TaskResult};
 use std::borrow::Cow;
 use std::fmt;
-use std::hash::Hash;
 
 // ---------------------------------------------------------------------------
 // PollOutcome<TState> — the outcome of a single poll() call
@@ -174,8 +173,6 @@ pub enum PollErrorPolicy {
 /// # Generic Types
 ///
 /// - **`TState`**: The state enum used by the workflow (`Clone + Debug + Send + Sync`).
-/// - **`TResourceKey`**: The key type used to look up resources (defaults to
-///   [`Cow<'static, str>`]).
 ///
 /// # Default config
 ///
@@ -203,10 +200,9 @@ pub enum PollErrorPolicy {
 /// }
 /// ```
 #[crate::task::poll]
-pub trait PollTask<TState, TResourceKey = Cow<'static, str>>: Send + Sync
+pub trait PollTask<TState>: Send + Sync
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// Get the task configuration that controls execution behaviour.
     ///
@@ -262,7 +258,7 @@ where
     ///
     /// Returns [`CanoError`] on a non-recoverable error. The loop's response to the
     /// error is governed by [`on_poll_error`](PollTask::on_poll_error).
-    async fn poll(&self, res: &Resources<TResourceKey>) -> Result<PollOutcome<TState>, CanoError>;
+    async fn poll(&self, res: &Resources) -> Result<PollOutcome<TState>, CanoError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -288,11 +284,10 @@ where
 /// There is no built-in iteration limit. To cap total wall-clock time, return
 /// `TaskConfig::minimal().with_attempt_timeout(dur)` from [`PollTask::config`] and
 /// dispatch the task via [`Workflow::orchestrate`](crate::workflow::Workflow::orchestrate).
-pub async fn run_poll_loop<P, S, K>(p: &P, res: &Resources<K>) -> Result<TaskResult<S>, CanoError>
+pub async fn run_poll_loop<P, S>(p: &P, res: &Resources) -> Result<TaskResult<S>, CanoError>
 where
-    P: PollTask<S, K> + ?Sized,
+    P: PollTask<S> + ?Sized,
     S: Clone + fmt::Debug + Send + Sync + 'static,
-    K: Hash + Eq + Send + Sync + 'static,
 {
     let policy = p.on_poll_error();
 
@@ -352,12 +347,10 @@ where
 // ---------------------------------------------------------------------------
 
 /// Type alias for a dynamic [`PollTask`] trait object.
-pub type DynPollTask<TState, TResourceKey = Cow<'static, str>> =
-    dyn PollTask<TState, TResourceKey> + Send + Sync;
+pub type DynPollTask<TState> = dyn PollTask<TState> + Send + Sync;
 
 /// Type alias for an `Arc`-wrapped dynamic [`PollTask`] trait object.
-pub type PollTaskObject<TState, TResourceKey = Cow<'static, str>> =
-    std::sync::Arc<DynPollTask<TState, TResourceKey>>;
+pub type PollTaskObject<TState> = std::sync::Arc<DynPollTask<TState>>;
 
 // ---------------------------------------------------------------------------
 // Tests

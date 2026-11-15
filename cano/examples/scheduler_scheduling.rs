@@ -51,9 +51,9 @@ impl ReportTask {
     }
 
     async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowAction>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
         println!("Preparing {} report...", self.report_type);
-        store.put("report_start_time", Utc::now().to_rfc3339())?;
+        store.put("report_start_time", Utc::now().to_rfc3339());
 
         println!("Generating {} report...", self.report_type);
         // Simulate longer report generation to see concurrent executions
@@ -61,7 +61,7 @@ impl ReportTask {
         let result = format!("{} report generated successfully", self.report_type);
 
         println!("Report completed: {}", result);
-        store.put("report_result", result)?;
+        store.put("report_result", result);
         Ok(TaskResult::Single(WorkflowAction::Complete))
     }
 }
@@ -87,9 +87,9 @@ impl CleanupTask {
     }
 
     async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowAction>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
         println!("Scanning for {} cleanup...", self.cleanup_type);
-        store.put("cleanup_start", Utc::now().to_rfc3339())?;
+        store.put("cleanup_start", Utc::now().to_rfc3339());
 
         let items = [
             "temp_file_1".to_string(),
@@ -102,7 +102,7 @@ impl CleanupTask {
 
         let count = items.len();
         println!("Cleanup completed: {} items removed", count);
-        store.put("cleanup_count", count.to_string())?;
+        store.put("cleanup_count", count.to_string());
         Ok(TaskResult::Single(WorkflowAction::Complete))
     }
 }
@@ -128,9 +128,9 @@ impl ManualTask {
     }
 
     async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowAction>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
         println!("Starting manual task: {}", self.task_name);
-        store.put("manual_task_start", Utc::now().to_rfc3339())?;
+        store.put("manual_task_start", Utc::now().to_rfc3339());
 
         let prep = format!("Manual task: {}", self.task_name);
         println!("Executing: {}", prep);
@@ -139,7 +139,7 @@ impl ManualTask {
 
         let result = format!("{} completed", prep);
         println!("Manual task finished: {}", result);
-        store.put("manual_task_result", result)?;
+        store.put("manual_task_result", result);
         Ok(TaskResult::Single(WorkflowAction::Complete))
     }
 }
@@ -165,9 +165,9 @@ impl SetupTask {
     }
 
     async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowAction>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
         println!("Preparing {} setup...", self.setup_type);
-        store.put("setup_start", Utc::now().to_rfc3339())?;
+        store.put("setup_start", Utc::now().to_rfc3339());
 
         let steps = vec![
             "configure_database".to_string(),
@@ -179,7 +179,7 @@ impl SetupTask {
         sleep(Duration::from_millis(300)).await;
 
         println!("Setup completed successfully");
-        store.put("setup_complete", "true".to_string())?;
+        store.put("setup_complete", "true".to_string());
         Ok(TaskResult::Single(WorkflowAction::Complete))
     }
 }
@@ -192,19 +192,19 @@ async fn main() -> CanoResult<()> {
     let store = MemoryStore::new();
 
     // Create flows
-    let hourly_report_flow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let hourly_report_flow = Workflow::new(Resources::new().insert(store.clone()))
         .register(WorkflowAction::Start, ReportTask::new("Hourly"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
-    let cleanup_flow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let cleanup_flow = Workflow::new(Resources::new().insert(store.clone()))
         .register(WorkflowAction::Start, CleanupTask::new("Temporary"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
-    let manual_flow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let manual_flow = Workflow::new(Resources::new().insert(store.clone()))
         .register(WorkflowAction::Start, ManualTask::new("Data Migration"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
-    let setup_flow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let setup_flow = Workflow::new(Resources::new().insert(store.clone()))
         .register(WorkflowAction::Start, SetupTask::new("System"))
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 

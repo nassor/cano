@@ -14,11 +14,6 @@ enum Step {
     Done,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum Key {
-    Store,
-}
-
 // 1. Inherent form with inferred Item / Output / Cursor and default window / config / name.
 struct InherentInferred;
 
@@ -99,10 +94,10 @@ async fn inherent_runs_via_register_in_memory() {
     assert_eq!(result, TaskResult::Single(Step::Done));
 }
 
-// 2. Inherent form with `key = Key` and an overridden window.
+// 2. Inherent form with an overridden window.
 struct InherentWithKey;
 
-#[task::stream(state = Step, key = Key)]
+#[task::stream(state = Step)]
 impl InherentWithKey {
     fn window(&self) -> StreamWindow {
         StreamWindow::Count(2)
@@ -110,26 +105,21 @@ impl InherentWithKey {
 
     async fn open(
         &self,
-        res: &Resources<Key>,
+        res: &Resources,
         _cursor: Option<u64>,
     ) -> Result<Pin<Box<dyn Stream<Item = u32> + Send>>, CanoError> {
-        // Exercise the enum-keyed resource lookup (constructs `Key::Store`).
-        let _ = res.get::<MemoryStore, _>(&Key::Store);
+        let _ = res.get::<MemoryStore>();
         Ok(Box::pin(stream::iter(vec![10u32, 20, 30, 40]))
             as Pin<Box<dyn Stream<Item = u32> + Send>>)
     }
 
-    async fn process_item(
-        &self,
-        _res: &Resources<Key>,
-        item: u32,
-    ) -> Result<(u32, u64), CanoError> {
+    async fn process_item(&self, _res: &Resources, item: u32) -> Result<(u32, u64), CanoError> {
         Ok((item * 10, item as u64))
     }
 
     async fn flush_window(
         &self,
-        _res: &Resources<Key>,
+        _res: &Resources,
         outputs: Vec<u32>,
     ) -> Result<WindowSignal<Step>, CanoError> {
         assert_eq!(outputs.len(), 2);
@@ -138,7 +128,7 @@ impl InherentWithKey {
 
     async fn on_close(
         &self,
-        _res: &Resources<Key>,
+        _res: &Resources,
         _reason: CloseReason,
     ) -> Result<TaskResult<Step>, CanoError> {
         Ok(TaskResult::Single(Step::Done))
@@ -147,7 +137,7 @@ impl InherentWithKey {
 
 #[tokio::test]
 async fn inherent_with_key_runs() {
-    let resources = Resources::<Key>::new();
+    let resources = Resources::new();
     let result = Task::run(&InherentWithKey, &resources).await.unwrap();
     assert_eq!(result, TaskResult::Single(Step::Done));
 }

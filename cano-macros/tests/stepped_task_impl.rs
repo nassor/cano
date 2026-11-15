@@ -123,11 +123,11 @@ async fn inherent_explicit_cursor_compiles_and_runs() {
 
 struct InherentWithKey;
 
-#[task::stepped(state = MyState, key = Key)]
+#[task::stepped(state = MyState)]
 impl InherentWithKey {
     async fn step(
         &self,
-        _res: &Resources<Key>,
+        _res: &Resources,
         cursor: Option<u32>,
     ) -> Result<StepOutcome<u32, MyState>, CanoError> {
         let _ = cursor;
@@ -138,7 +138,7 @@ impl InherentWithKey {
 #[tokio::test]
 async fn inherent_with_key_runs() {
     let stepper = InherentWithKey;
-    let res: Resources<Key> = Resources::new();
+    let res: Resources = Resources::new();
     let result = Task::run(&stepper, &res).await.unwrap();
     assert_eq!(result, TaskResult::Single(MyState::Done));
 }

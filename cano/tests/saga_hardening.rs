@@ -57,7 +57,7 @@ impl Charge {
                 self.idx
             )));
         }
-        let ledger = res.get::<Ledger, _>("ledger")?;
+        let ledger = res.get::<Ledger>()?;
         ledger.apply(&self.account, self.amount);
         Ok((
             TaskResult::Single(self.next),
@@ -66,7 +66,7 @@ impl Charge {
     }
     async fn compensate(&self, res: &Resources, output: (String, i64)) -> Result<(), CanoError> {
         let (account, amount) = output;
-        res.get::<Ledger, _>("ledger")?.apply(&account, -amount);
+        res.get::<Ledger>()?.apply(&account, -amount);
         Ok(())
     }
 }
@@ -75,7 +75,7 @@ const STEPS: u32 = 3;
 const PER_STEP: i64 = 100;
 
 fn saga(ledger: Ledger, account: &str, fail_at: u32) -> Workflow<u32> {
-    let mut wf = Workflow::new(Resources::new().insert("ledger", ledger)).add_exit_state(STEPS);
+    let mut wf = Workflow::new(Resources::new().insert(ledger)).add_exit_state(STEPS);
     for i in 0..STEPS {
         wf = wf.register_with_compensation(
             i,
@@ -185,7 +185,7 @@ mod recovery {
             Ok((TaskResult::Single(self.next.clone()), self.value))
         }
         async fn compensate(&self, res: &Resources, output: u32) -> Result<(), CanoError> {
-            res.get::<LogRes, _>("log")?
+            res.get::<LogRes>()?
                 .0
                 .lock()
                 .unwrap()
@@ -228,7 +228,7 @@ mod recovery {
         // Keep our own handle to the same store so we can inspect it after the run without
         // opening a *second* `Database` on the file (which redb would reject).
         let store = Arc::new(RedbCheckpointStore::new(&db).unwrap());
-        let wf = Workflow::new(Resources::new().insert("log", LogRes(log.clone())))
+        let wf = Workflow::new(Resources::new().insert(LogRes(log.clone())))
             .register_with_compensation(
                 St::Start,
                 Step {

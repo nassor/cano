@@ -27,11 +27,11 @@
 //! #[task]
 //! impl Task<Step> for FetchTask {
 //!     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-//!         let config = res.get::<FetchConfig, _>("config")?;
-//!         let store = res.get::<MemoryStore, _>("store")?;
+//!         let config = res.get::<FetchConfig>()?;
+//!         let store = res.get::<MemoryStore>()?;
 //!         // Produce `batch_size` items and store them for the next task.
 //!         let data: Vec<u32> = (1..=(config.batch_size as u32)).collect();
-//!         store.put("data", data)?;
+//!         store.put("data", data);
 //!         Ok(TaskResult::Single(Step::Process))
 //!     }
 //! }
@@ -39,9 +39,9 @@
 //! #[task]
 //! impl Task<Step> for ProcessTask {
 //!     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-//!         let store = res.get::<MemoryStore, _>("store")?;
+//!         let store = res.get::<MemoryStore>()?;
 //!         let data: Vec<u32> = store.get("data")?;
-//!         store.put("sum", data.iter().sum::<u32>())?;
+//!         store.put("sum", data.iter().sum::<u32>());
 //!         Ok(TaskResult::Single(Step::Done))
 //!     }
 //! }
@@ -50,8 +50,8 @@
 //! # async fn main() -> Result<(), CanoError> {
 //! let store = MemoryStore::new();
 //! let resources = Resources::new()
-//!     .insert("config", FetchConfig { batch_size: 3 })
-//!     .insert("store", store.clone());
+//!     .insert(FetchConfig { batch_size: 3 })
+//!     .insert(store.clone());
 //! let workflow = Workflow::new(resources)
 //!     .register(Step::Fetch, FetchTask)
 //!     .register(Step::Process, ProcessTask)
@@ -249,8 +249,7 @@
 //! - [`rate_limit`]: [`RateLimiter`] (token bucket) and [`WindowedRateLimiter`] (fixed window) throttles, both implementing [`Meter`] so they compose into a [`MultiRateLimiter`] that enforces several weighted tiers (e.g. a 5h + 7d + per-model limit) at once
 //! - [`store`]: [`MemoryStore`] — a typed in-memory store that implements [`Resource`]
 //! - `testing` (requires `testing` feature): batteries-included test fixtures —
-//!   a `RecordingObserver`, a public `InMemoryCheckpointStore`, a `TestResources`
-//!   builder, a `panic_on_attempt` task factory and an `assert_compensation_ran`
+//!   a `RecordingObserver`, a public `InMemoryCheckpointStore`, a `panic_on_attempt` task factory and an `assert_compensation_ran`
 //!   saga helper. Import explicitly with `use cano::testing::*;` — it is deliberately
 //!   **not** in the [`prelude`] so production code never picks it up by accident.
 //! - [`error`]: [`CanoError`] variants and the [`CanoResult`] alias
@@ -363,8 +362,8 @@ pub use cano_macros::checkpoint_store;
 /// Derive macro that generates a `from_resources` associated function for a struct.
 ///
 /// See [`FromResources`] for the full specification. Each
-/// field must be `Arc<T>`; annotate it with `#[res("key")]` or
-/// `#[res(EnumKey::Variant)]`.
+/// field must be `Arc<T>`; a plain field is looked up by type, a
+/// `#[res("name")]` field by name.
 pub use cano_macros::FromResources;
 
 /// Derive macro that generates an empty `Resource` impl for a struct.

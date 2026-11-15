@@ -75,9 +75,9 @@ impl Worker {
 #[task(state = Step)]
 impl Worker {
     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
         sleep(Duration::from_millis(self.delay_ms)).await;
-        store.put(self.id, format!("done after {}ms", self.delay_ms))?;
+        store.put(self.id, format!("done after {}ms", self.delay_ms));
         println!("  [+] worker {} done ({}ms)", self.id, self.delay_ms);
         Ok(TaskResult::Single(Step::Done))
     }
@@ -105,7 +105,7 @@ async fn run_strategy(label: &str, strategy: JoinStrategy) -> CanoResult<()> {
     let store = MemoryStore::new();
     let join_config = JoinConfig::new(strategy, Step::Done);
 
-    let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let workflow = Workflow::new(Resources::new().insert(store.clone()))
         .register_split(Step::Parallel, workers(), join_config)
         .add_exit_state(Step::Done);
 

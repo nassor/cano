@@ -4,15 +4,15 @@
 //!
 //! Three advanced `Resources` patterns:
 //!
-//! ## (a) Enum resource keys
+//! ## (a) Type-keyed lookups, named second instances
 //!
-//! `Resources::<Key>::new()` parameterises the dictionary with a user-defined enum instead
-//! of `&str`. Typos in key names become compile errors rather than runtime `ResourceNotFound`
-//! panics.
+//! [`Resources::get`] finds a resource by its type, so there is no key string to mistype.
+//! A second instance of a type already present goes in with [`Resources::insert_named`]
+//! and comes back out with [`Resources::get_named`].
 //!
 //! ## (b) `try_insert` duplicate detection
 //!
-//! [`Resources::insert`] panics on a duplicate key (intentional — duplicates are always a
+//! [`Resources::insert`] panics on a duplicate type (intentional — duplicates are always a
 //! programmer error in normal use). [`Resources::try_insert`] instead returns
 //! [`CanoError::ResourceDuplicateKey`], which is useful when building a `Resources` from
 //! dynamic / user-supplied configuration where duplicates are a plausible runtime condition.
@@ -30,16 +30,8 @@ use cano::prelude::*;
 use std::sync::{Arc, Mutex};
 
 // ---------------------------------------------------------------------------
-// Part (a) — enum key type
+// Part (a) — type-keyed and named lookups
 // ---------------------------------------------------------------------------
-
-/// Compile-time-checked resource keys.
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-enum Key {
-    Store,
-    Cache,
-    Config,
-}
 
 /// A minimal config resource with no lifecycle.
 #[derive(Resource)]
@@ -122,54 +114,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== Resources Advanced Demo ===\n");
 
     // -----------------------------------------------------------------------
-    // (a) Enum keys — compile-time safety
+    // (a) Type-keyed lookups, plus a named second instance
     // -----------------------------------------------------------------------
-    println!("-- (a) Enum resource keys --");
+    println!("-- (a) Type-keyed and named lookups --");
     {
-        let resources = Resources::<Key>::new()
-            .insert(Key::Store, MemoryStore::new())
-            .insert(Key::Cache, Cache { label: "L1".into() })
-            .insert(
-                Key::Config,
-                AppConfig {
-                    max_connections: 32,
-                },
-            );
+        let resources = Resources::new()
+            .insert(MemoryStore::new())
+            .insert(Cache { label: "L1".into() })
+            .insert(AppConfig {
+                max_connections: 32,
+            })
+            .insert_named("l2", Cache { label: "L2".into() });
 
-        // `get` requires the right enum variant — a wrong variant is a compile error.
-        let store = resources.get::<MemoryStore, _>(&Key::Store)?;
-        let cache = resources.get::<Cache, _>(&Key::Cache)?;
-        let config = resources.get::<AppConfig, _>(&Key::Config)?;
+        // `get` looks a resource up by its type; no key string to mistype.
+        let store = resources.get::<MemoryStore>()?;
+        let cache = resources.get::<Cache>()?;
+        let config = resources.get::<AppConfig>()?;
+        // A second `Cache` needs a name.
+        let l2 = resources.get_named::<Cache>("l2")?;
 
-        store.put("ping", "pong".to_string())?;
+        store.put("ping", "pong".to_string());
         let pong: String = store.get("ping")?;
 
-        println!("  Key::Store  -> MemoryStore, ping='{pong}'");
-        println!("  Key::Cache  -> Cache(label='{}')", cache.label);
+        println!("  MemoryStore        -> ping='{pong}'");
+        println!("  Cache              -> label='{}'", cache.label);
+        println!("  Cache named \"l2\"   -> label='{}'", l2.label);
         println!(
-            "  Key::Config -> AppConfig(max_connections={})\n",
+            "  AppConfig          -> max_connections={}\n",
             config.max_connections
         );
     }
 
     // -----------------------------------------------------------------------
-    // (b) try_insert — ResourceDuplicateKey on repeated key
+    // (b) try_insert — ResourceDuplicateKey on a repeated type
     // -----------------------------------------------------------------------
     println!("-- (b) try_insert duplicate detection --");
     {
         // First insertion succeeds.
-        let resources: Resources = Resources::new().try_insert("counter", Counter { value: 1 })?;
+        let resources: Resources = Resources::new().try_insert(Counter { value: 1 })?;
 
-        println!("  try_insert 'counter' (first)   -> Ok");
+        println!("  try_insert Counter (first)   -> Ok");
 
-        // Second insertion with the same key returns Err.
-        match resources.try_insert("counter", Counter { value: 2 }) {
-            Ok(_) => println!("  try_insert 'counter' (second)  -> Ok  (unexpected!)"),
+        // A second `Counter` without a name returns Err.
+        match resources.try_insert(Counter { value: 2 }) {
+            Ok(_) => println!("  try_insert Counter (second)  -> Ok  (unexpected!)"),
             Err(CanoError::ResourceDuplicateKey(msg)) => {
-                println!("  try_insert 'counter' (second)  -> Err(ResourceDuplicateKey): {msg}");
+                println!("  try_insert Counter (second)  -> Err(ResourceDuplicateKey): {msg}");
             }
             Err(other) => {
-                println!("  try_insert 'counter' (second)  -> Err (unexpected variant): {other}")
+                println!("  try_insert Counter (second)  -> Err (unexpected variant): {other}")
             }
         }
         println!();
@@ -188,16 +181,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
 
+        // Three resources of one type: each needs its own name.
         let resources: Resources = Resources::new()
-            .insert(
+            .insert_named(
                 "alpha",
                 TrackedResource::new("alpha", Arc::clone(&log), false),
             )
-            .insert(
+            .insert_named(
                 "beta",
                 TrackedResource::new("beta", Arc::clone(&log), false),
             )
-            .insert(
+            .insert_named(
                 "gamma",
                 TrackedResource::new("gamma", Arc::clone(&log), true),
             );

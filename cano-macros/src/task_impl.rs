@@ -1,12 +1,12 @@
 //! Boilerplate-filling pass for `#[cano::task]` on inherent `impl T { ... }` blocks.
 //!
-//! When the user writes `#[task(state = S [, key = K])] impl T { ... }`, this
+//! When the user writes `#[task(state = S)] impl T { ... }`, this
 //! pass:
 //!
 //! 1. Enforces that **exactly one** of `run` / `run_bare` is implemented (both
 //!    or neither is a compile error — that's the headline win over the runtime
 //!    `CanoError::Configuration` trap).
-//! 2. Builds the `impl Task<S [, K]> for T` trait header from the attribute
+//! 2. Builds the `impl Task<S> for T` trait header from the attribute
 //!    args and carries over generics + where-clause from the inherent impl.
 //! 3. Hands the synthesised impl to `async_rewrite::rewrite_impl` so
 //!    every `async fn` becomes a `Pin<Box<dyn Future + Send>>`-returning
@@ -29,9 +29,9 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
     if item_impl.trait_.is_some() {
         return Err(syn::Error::new(
             item_impl.span(),
-            "#[cano::task]: `state` / `key` args only apply to inherent \
+            "#[cano::task]: `state` only applies to inherent \
              `impl T { ... }` blocks; when writing `impl Task<...> for T` the trait header \
-             already specifies them",
+             already specifies it",
         ));
     }
 
@@ -43,14 +43,10 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenS
         )
     })?;
 
-    expand_inherent_impl(item_impl, state_ty, args.key)
+    expand_inherent_impl(item_impl, state_ty)
 }
 
-fn expand_inherent_impl(
-    item_impl: ItemImpl,
-    state_ty: Type,
-    key_ty: Option<Type>,
-) -> syn::Result<TokenStream> {
+fn expand_inherent_impl(item_impl: ItemImpl, state_ty: Type) -> syn::Result<TokenStream> {
     let mut run_fn: Option<&ImplItemFn> = None;
     let mut run_bare_fn: Option<&ImplItemFn> = None;
     let mut errors: Vec<syn::Error> = Vec::new();
@@ -85,7 +81,7 @@ fn expand_inherent_impl(
         (false, false) => errors.push(syn::Error::new(
             item_impl.span(),
             "#[cano::task] requires exactly one of `run` / `run_bare`. \
-             Implement `run(&self, res: &Resources<_>)` when the task uses resources, \
+             Implement `run(&self, res: &Resources)` when the task uses resources, \
              or `run_bare(&self)` when it does not",
         )),
         (true, true) => errors.push(syn::Error::new(
@@ -100,10 +96,7 @@ fn expand_inherent_impl(
         return Err(combine_errors(errors));
     }
 
-    let trait_ref: syn::Path = match key_ty {
-        Some(k) => syn::parse_quote!(::cano::Task<#state_ty, #k>),
-        None => syn::parse_quote!(::cano::Task<#state_ty>),
-    };
+    let trait_ref: syn::Path = syn::parse_quote!(::cano::Task<#state_ty>);
 
     let attrs = &item_impl.attrs;
     let unsafety = &item_impl.unsafety;

@@ -46,7 +46,7 @@ pub struct MetricsTask;
 #[task(state = RequestState)]
 impl MetricsTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<RequestState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
 
         // Get request data from store
         let request_id: String = store.get("request_id")?;
@@ -71,12 +71,12 @@ impl MetricsTask {
         );
 
         // Store metrics in the shared store
-        store.put("revenue", revenue)?;
-        store.put("customer_id", customer_id)?;
-        store.put("transaction_count", transaction_count)?;
+        store.put("revenue", revenue);
+        store.put("customer_id", customer_id);
+        store.put("transaction_count", transaction_count);
 
         let processing_time_ms = if revenue > 50.0 { 150u64 } else { 75u64 };
-        store.put("processing_time_ms", processing_time_ms)?;
+        store.put("processing_time_ms", processing_time_ms);
 
         println!("MetricsTask: Stored metrics in shared store");
         Ok(TaskResult::Single(RequestState::MetricsExtracted))
@@ -90,7 +90,7 @@ pub struct ResponseTask;
 #[task(state = RequestState)]
 impl ResponseTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<RequestState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
 
         // Read metrics from shared store
         let revenue: f64 = store.get("revenue")?;
@@ -124,8 +124,8 @@ impl ResponseTask {
         );
 
         // Store response in shared store
-        store.put("response_message", response_message.clone())?;
-        store.put("status_code", status_code)?;
+        store.put("response_message", response_message.clone());
+        store.put("status_code", status_code);
 
         println!("ResponseTask: Stored response in shared store");
         println!("Response: {}", response_message);
@@ -148,11 +148,11 @@ async fn main() -> CanoResult<()> {
         let store = MemoryStore::new();
 
         // Initialize request data in store
-        store.put("request_id", "req_001".to_string())?;
-        store.put("request_body", "purchase: laptop".to_string())?;
+        store.put("request_id", "req_001".to_string());
+        store.put("request_body", "purchase: laptop".to_string());
 
         // Create workflow
-        let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+        let workflow = Workflow::new(Resources::new().insert(store.clone()))
             .register(RequestState::Start, MetricsTask)
             .register(RequestState::MetricsExtracted, ResponseTask)
             .add_exit_state(RequestState::Complete);
@@ -187,11 +187,11 @@ async fn main() -> CanoResult<()> {
         let store = MemoryStore::new();
 
         // Initialize request data
-        store.put("request_id", "req_002".to_string())?;
-        store.put("request_body", "subscription: premium plan".to_string())?;
+        store.put("request_id", "req_002".to_string());
+        store.put("request_body", "subscription: premium plan".to_string());
 
         // Create workflow
-        let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+        let workflow = Workflow::new(Resources::new().insert(store.clone()))
             .register(RequestState::Start, MetricsTask)
             .register(RequestState::MetricsExtracted, ResponseTask)
             .add_exit_state(RequestState::Complete);
@@ -226,11 +226,11 @@ async fn main() -> CanoResult<()> {
         let store = MemoryStore::new();
 
         // Initialize request data
-        store.put("request_id", "req_003".to_string())?;
-        store.put("request_body", "query: account balance".to_string())?;
+        store.put("request_id", "req_003".to_string());
+        store.put("request_body", "query: account balance".to_string());
 
         // Create workflow
-        let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+        let workflow = Workflow::new(Resources::new().insert(store.clone()))
             .register(RequestState::Start, MetricsTask)
             .register(RequestState::MetricsExtracted, ResponseTask)
             .add_exit_state(RequestState::Complete);

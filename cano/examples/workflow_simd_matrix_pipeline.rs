@@ -225,8 +225,8 @@ impl Task<PipelineState> for MatrixGenerator {
             }
         }
 
-        let store = res.get::<MemoryStore, _>("store")?;
-        store.put("matrices", matrices)?;
+        let store = res.get::<MemoryStore>()?;
+        store.put("matrices", matrices);
         println!("Matrix generation complete!");
         Ok(TaskResult::Single(PipelineState::Multiply))
     }
@@ -243,7 +243,7 @@ impl Task<PipelineState> for SimdMatrixMultiplier {
     }
 
     async fn run(&self, res: &Resources) -> Result<TaskResult<PipelineState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
         println!("Loading matrices for SIMD multiplication...");
         let matrices: Vec<SimdMatrix> = store.get("matrices")?;
 
@@ -267,7 +267,7 @@ impl Task<PipelineState> for SimdMatrixMultiplier {
         );
         println!("  Processed {} matrix pairs", results.len());
 
-        store.put("multiplied_matrices", results)?;
+        store.put("multiplied_matrices", results);
         Ok(TaskResult::Single(PipelineState::Transform))
     }
 }
@@ -291,7 +291,7 @@ impl Task<PipelineState> for SimdMatrixTransformer {
     }
 
     async fn run(&self, res: &Resources) -> Result<TaskResult<PipelineState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
         println!("Loading matrices for SIMD transformations...");
         let matrices: Vec<SimdMatrix> = store.get("multiplied_matrices")?;
 
@@ -324,7 +324,7 @@ impl Task<PipelineState> for SimdMatrixTransformer {
         );
         println!("  Processed {} matrices", matrices.len());
 
-        store.put("transformed_matrices", results)?;
+        store.put("transformed_matrices", results);
         Ok(TaskResult::Single(PipelineState::Statistics))
     }
 }
@@ -340,7 +340,7 @@ impl Task<PipelineState> for SimdStatisticsCalculator {
     }
 
     async fn run(&self, res: &Resources) -> Result<TaskResult<PipelineState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
         println!("Loading matrices for statistics calculation...");
         let matrices: Vec<SimdMatrix> = store.get("transformed_matrices")?;
 
@@ -396,7 +396,7 @@ impl Task<PipelineState> for SimdStatisticsCalculator {
             duration
         );
 
-        store.put("statistics", results.clone())?;
+        store.put("statistics", results.clone());
 
         for (i, (sum, mean, variance)) in results.iter().enumerate() {
             println!(
@@ -459,7 +459,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let store = MemoryStore::default();
 
     // Create the workflow with SIMD-accelerated tasks
-    let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let workflow = Workflow::new(Resources::new().insert(store.clone()))
         .register(PipelineState::Generate, MatrixGenerator::new(64, 20)) // 64x64 matrices, 20 of them
         .register(PipelineState::Multiply, SimdMatrixMultiplier)
         .register(PipelineState::Transform, SimdMatrixTransformer::new(1.5))

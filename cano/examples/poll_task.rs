@@ -87,7 +87,7 @@ struct AwaitJob;
 #[task::poll(state = Step)]
 impl AwaitJob {
     async fn poll(&self, res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
-        let job = res.get::<Job, _>("job")?;
+        let job = res.get::<Job>()?;
         let done = job.done();
         let total = job.ticks_total;
 
@@ -153,7 +153,7 @@ async fn main() -> CanoResult<()> {
     println!("=== poll_task example ===");
     println!("background job: {TICKS} ticks at ~10 ms each\n");
 
-    let resources = Resources::new().insert("job", job);
+    let resources = Resources::new().insert(job);
 
     let workflow = Workflow::new(resources)
         .register(Step::AwaitJob, AwaitJob)

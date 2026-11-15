@@ -1,82 +1,53 @@
 //! # Resources — Unified Lifecycle-Managed Dependencies
 //!
-//! This module provides the [`Resource`] trait and the [`Resources`] container, which together
-//! replace the `TStore` + `TParams` dual-generic pattern used in earlier versions of Cano. All
-//! external dependencies a workflow needs — database pools, HTTP clients, configuration objects,
+//! This module provides the [`Resource`] trait and the [`Resources`] container. All external
+//! dependencies a workflow needs — database pools, HTTP clients, configuration objects,
 //! caches — are registered once into a [`Resources`] map and then injected into every task at
 //! dispatch time.
 //!
-//! ## Design Rationale
+//! ## Keyed by type
 //!
-//! The old `TStore`/`TParams` split forced callers to carry two separate generics and to manually
-//! thread shared state between tasks. `Resources` unifies that into a single typed map:
-//!
-//! - **One place to register** — call `.insert()` once at startup.
-//! - **Type-safe retrieval** — [`Resources::get`] downcasts to the concrete type you request; a
-//!   wrong type is a compile-time or runtime error, never silent corruption.
-//! - **Lifecycle management** — every `Resource` has optional `setup` / `teardown` hooks that the
-//!   engine calls automatically.
-//!
-//! ## Lifecycle Guarantees
-//!
-//! 1. `setup` is called in **insertion order** (FIFO). Dependencies that must start before
-//!    others should be inserted first.
-//! 2. `teardown` is called in **reverse insertion order** (LIFO). Resources are torn down from
-//!    most-recently-inserted to least-recently-inserted, which is the natural reverse of
-//!    initialization.
-//! 3. Both `setup` and `teardown` calls are **sequential**, not concurrent. This avoids
-//!    ordering races between resources that depend on each other.
-//! 4. If `setup` fails at position *N*, `teardown` is run LIFO from position *N−1* down to
-//!    position 0. Resources at positions ≥ *N* never had their `setup` called and are therefore
-//!    never torn down.
-//! 5. `teardown` is called **only** on resources whose `setup` returned `Ok`. A resource whose
-//!    `setup` returned `Err` is considered uninitialized and receives no teardown.
-//! 6. `teardown` errors are **logged but never abort** the teardown sequence. All remaining
-//!    resources continue to be torn down even if one fails.
-//!
-//! ## Concurrency Model
-//!
-//! [`Resources::get`] returns an `Arc<R>`. Split tasks that run in parallel each receive their own
-//! `Arc` clone, which is cheap (atomic reference count increment). Resources that need mutable
-//! internal state must use interior mutability (`Mutex`, `RwLock`, `DashMap`, etc.). A coarse
-//! `Mutex<T>` inside a resource serializes concurrent split tasks on that resource; a fine-grained
-//! `RwLock` allows concurrent reads with exclusive writes.
-//!
-//! ## Key Types
-//!
-//! By default `TResourceKey = Cow<'static, str>`, which lets you insert `&'static str` keys
-//! without allocating (they wrap as `Cow::Borrowed`) while still accepting owned `String`
-//! keys (`Cow::Owned`) for runtime-built names. Lookups use `&str` via the `Borrow<str>`
-//! blanket impl, so the hot path stays allocation-free:
+//! A resource is inserted with [`insert`](Resources::insert) and read back by its type with
+//! [`get`](Resources::get) — no key strings to keep in sync:
 //!
 //! ```rust
-//! use cano::resource::{Resource, Resources};
-//!
-//! struct MyService;
-//!
-//! #[cano::resource]
-//! impl Resource for MyService {}
-//!
-//! // "my_service" stays borrowed — no allocation on insert.
-//! let resources: Resources = Resources::new().insert("my_service", MyService);
-//!
-//! // &str lookup works because Cow<'_, str>: Borrow<str>.
-//! let _svc: std::sync::Arc<MyService> = resources.get("my_service").unwrap();
-//! ```
-//!
-//! For stateless resources (no `setup` / `teardown` logic needed), use the
-//! `#[derive(Resource)]` shortcut to skip the empty impl block entirely:
-//!
-//! ```rust
-//! use cano::Resource;
+//! use cano::prelude::*;
 //!
 //! #[derive(Resource)]
 //! struct Settings { batch: usize }
+//!
+//! let resources = Resources::new()
+//!     .insert(Settings { batch: 3 })
+//!     .insert(MemoryStore::new());
+//!
+//! let settings: &Settings = resources.get::<Settings>().unwrap();
+//! assert_eq!(settings.batch, 3);
+//! resources.get::<MemoryStore>().unwrap().put("n", settings.batch);
 //! ```
 //!
-//! To pull several resources out at once with one call, define a deps struct
-//! decorated with `#[derive(FromResources)]`. Each field is tagged with the
-//! resource key and must be `Arc<T>` (matching `Resources::get`'s return shape):
+//! A second instance of a type already present needs a name: insert it with
+//! [`insert_named`](Resources::insert_named) and read it with
+//! [`get_named`](Resources::get_named):
+//!
+//! ```rust
+//! use cano::prelude::*;
+//!
+//! let resources = Resources::new()
+//!     .insert(MemoryStore::new())
+//!     .insert_named("audit", MemoryStore::new());
+//!
+//! let _primary = resources.get::<MemoryStore>().unwrap();
+//! let _audit = resources.get_named::<MemoryStore>("audit").unwrap();
+//! ```
+//!
+//! `get` / `get_named` borrow (`&R`); [`get_arc`](Resources::get_arc) /
+//! [`get_named_arc`](Resources::get_named_arc) hand out an owned `Arc<R>` for code that must
+//! outlive the borrow (a spawned task, for instance).
+//!
+//! For stateless resources (no `setup` / `teardown` logic), `#[derive(Resource)]` skips the
+//! empty impl block. To pull several resources out at once, decorate a deps struct with
+//! `#[derive(FromResources)]`; every field is an `Arc<T>` looked up by type, or by name with
+//! `#[res("name")]`:
 //!
 //! ```ignore
 //! use cano::prelude::*;
@@ -84,67 +55,41 @@
 //!
 //! #[derive(FromResources)]
 //! struct PrepDeps {
-//!     #[res("settings")]
 //!     settings: Arc<Settings>,
-//!     #[res("store")]
-//!     store: Arc<MemoryStore>,
+//!     #[res("audit")]
+//!     audit: Arc<MemoryStore>,
 //! }
 //!
 //! // ... inside a Task::run:
-//! let PrepDeps { settings, store } = PrepDeps::from_resources(res)?;
+//! let PrepDeps { settings, audit } = PrepDeps::from_resources(res)?;
 //! ```
 //!
-//! For larger codebases, enum keys eliminate typos at compile time:
+//! ## Lifecycle Guarantees
 //!
-//! ```rust
-//! use cano::resource::{Resource, Resources};
+//! 1. `setup` is called in **insertion order** (FIFO). Dependencies that must start before
+//!    others should be inserted first.
+//! 2. `teardown` is called in **reverse insertion order** (LIFO).
+//! 3. Both `setup` and `teardown` calls are **sequential**, not concurrent.
+//! 4. If `setup` fails at position *N*, `teardown` is run LIFO from position *N−1* down to
+//!    position 0. Resources at positions ≥ *N* never had their `setup` called and are therefore
+//!    never torn down.
+//! 5. `teardown` errors are **logged but never abort** the teardown sequence.
 //!
-//! #[derive(Hash, PartialEq, Eq)]
-//! enum Key { Db, Cache }
+//! ## Concurrency Model
 //!
-//! struct DbPool;
-//! struct CacheClient;
+//! Every resource is stored once behind an `Arc` and shared by every task, including split
+//! tasks running in parallel. Resources that need mutable internal state must use interior
+//! mutability (`Mutex`, `RwLock`, atomics, …).
 //!
-//! #[cano::resource]
-//! impl Resource for DbPool {}
-//!
-//! #[cano::resource]
-//! impl Resource for CacheClient {}
-//!
-//! let resources: Resources<Key> = Resources::new()
-//!     .insert(Key::Db,    DbPool)
-//!     .insert(Key::Cache, CacheClient);
-//!
-//! let _db: std::sync::Arc<DbPool> = resources.get(&Key::Db).unwrap();
-//! ```
-//!
-//! ## Sharing Resources Across Tasks
-//!
-//! `Resources` is **not** `Clone` — `Box<dyn Any>` is not cloneable. To share a `Resources`
-//! instance between concurrent parts of your system (e.g., a scheduler running multiple
-//! workflows), wrap it in an `Arc`:
-//!
-//! ```rust
-//! use std::sync::Arc;
-//! use cano::resource::{Resource, Resources};
-//!
-//! struct Noop;
-//!
-//! #[cano::resource]
-//! impl Resource for Noop {}
-//!
-//! let shared: Arc<Resources> = Arc::new(Resources::new().insert("noop", Noop));
-//! let clone = Arc::clone(&shared);
-//! let _ = clone.get::<Noop, str>("noop").unwrap();
-//! ```
+//! `Resources` is **not** `Clone`; share one between several owners by wrapping it in an `Arc`.
 
 use crate::error::CanoError;
 use cano_macros::resource;
-use std::any::Any;
+use std::any::{Any, TypeId};
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt;
-use std::hash::Hash;
+use std::hash::{BuildHasherDefault, Hasher};
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -257,213 +202,210 @@ pub trait Resource: Send + Sync + 'static {
 // Resources container
 // ---------------------------------------------------------------------------
 
-/// A typed map of lifecycle-managed resources.
-///
-/// Resources are inserted with [`insert`](Resources::insert) and retrieved with
-/// [`get`](Resources::get). The engine calls [`setup_all`](Resources::setup_all)
-/// before executing the workflow and handles teardown on completion or failure.
-///
-/// See the [module documentation](self) for lifecycle guarantees, concurrency notes,
-/// and examples of enum vs. string keys.
-pub struct Resources<TResourceKey = Cow<'static, str>>
-where
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
-{
-    /// Type-erased resource values, keyed for fast lookup. The `usize` is the
-    /// resource's index into [`lifecycle`](Self::lifecycle); [`check_all_health`]
-    /// uses it to recover the `dyn Resource` handle for a keyed health report.
-    ///
-    /// [`check_all_health`]: Self::check_all_health
-    data: HashMap<TResourceKey, (Box<dyn Any + Send + Sync>, usize)>,
-    /// Ordered list of resources for FIFO setup / LIFO teardown.
-    lifecycle: Vec<Arc<dyn Resource>>,
+/// `TypeId` is already a uniformly distributed hash, so the type map skips SipHash.
+#[derive(Default)]
+struct TypeIdHasher(u64);
+
+impl Hasher for TypeIdHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        // Not reached for `TypeId` today (it writes integers); fold the bytes anyway so the
+        // map stays correct if that ever changes.
+        for &b in bytes {
+            self.0 = self.0.rotate_left(8) ^ u64::from(b);
+        }
+    }
+
+    fn write_u64(&mut self, n: u64) {
+        self.0 ^= n;
+    }
+
+    fn write_u128(&mut self, n: u128) {
+        self.0 ^= (n as u64) ^ ((n >> 64) as u64);
+    }
 }
 
-impl<TResourceKey: Hash + Eq + Send + Sync + 'static> Resources<TResourceKey> {
+type TypeMap = HashMap<TypeId, Box<dyn Any + Send + Sync>, BuildHasherDefault<TypeIdHasher>>;
+
+/// A map of lifecycle-managed resources, keyed by type (and optionally by name).
+///
+/// See the [module documentation](self) for lookups, lifecycle guarantees and
+/// concurrency notes.
+#[derive(Default)]
+pub struct Resources {
+    /// One resource per type; each box holds an `Arc<R>`.
+    by_type: TypeMap,
+    /// Named resources; each box holds an `Arc<R>`.
+    by_name: HashMap<Cow<'static, str>, Box<dyn Any + Send + Sync>>,
+    /// Insertion order for FIFO setup / LIFO teardown, labelled with the name (or the type
+    /// name for unnamed resources) for health reports.
+    lifecycle: Vec<(Cow<'static, str>, Arc<dyn Resource>)>,
+}
+
+impl Resources {
     /// Create a new, empty `Resources` map.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use cano::resource::Resources;
-    ///
-    /// // Default key type is `Cow<'static, str>` — accepts both literals and owned strings.
-    /// let resources: Resources = Resources::new();
-    /// # let _ = resources;
-    /// ```
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            data: HashMap::new(),
-            lifecycle: Vec::new(),
-        }
+        Self::default()
     }
 
-    /// Return an empty resource map.
-    ///
-    /// Equivalent to [`new`](Self::new). Use this when you want to be explicit
-    /// that the workflow intentionally has no external dependencies.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use cano::prelude::*;
-    /// # #[derive(Clone, Debug, PartialEq, Eq, Hash)] enum S { Done }
-    /// let wf: Workflow<S> = Workflow::new(Resources::empty()).add_exit_state(S::Done);
-    /// ```
-    #[must_use]
-    pub fn empty() -> Self {
-        Self::new()
-    }
-
-    /// Create a new `Resources` map with preallocated capacity for `n` entries.
-    ///
-    /// Equivalent to [`new`](Self::new) but avoids reallocations when you know
-    /// the number of resources up front.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use cano::resource::Resources;
-    ///
-    /// let resources: Resources = Resources::with_capacity(8);
-    /// # let _ = resources;
-    /// ```
-    #[must_use]
-    pub fn with_capacity(n: usize) -> Self {
-        Self {
-            data: HashMap::with_capacity(n),
-            lifecycle: Vec::with_capacity(n),
-        }
-    }
-
-    /// Insert a resource into the map, returning `self` for builder-style chaining.
-    ///
-    /// The resource is stored under `key` and added to the lifecycle list in insertion order.
+    /// Insert `resource` as the instance of its type, returning `self` for chaining.
     ///
     /// # Panics
     ///
-    /// Panics if `key` is already present. Builder-style insertion is a one-shot wiring
-    /// step; a duplicate key is a programmer error caught at startup, before any task runs.
-    /// If you need to handle duplicates as data, use [`try_insert`](Self::try_insert), which
-    /// returns a [`CanoError::ResourceDuplicateKey`] instead of panicking.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use cano::resource::{Resource, Resources};
-    ///
-    /// struct Counter;
-    ///
-    /// #[cano::resource]
-    /// impl Resource for Counter {}
-    ///
-    /// let resources: Resources = Resources::new().insert("counter", Counter);
-    /// # let _ = resources;
-    /// ```
+    /// Panics if a resource of the same type was already inserted — wiring is a one-shot
+    /// startup step, so this is a programmer error. Use [`insert_named`](Self::insert_named)
+    /// for a second instance, or [`try_insert`](Self::try_insert) to get an error instead.
     #[must_use]
-    pub fn insert<R: Resource + 'static>(
-        mut self,
-        key: impl Into<TResourceKey>,
-        resource: R,
-    ) -> Self {
-        let arc = Arc::new(resource);
-        let key = key.into();
-        assert!(
-            !self.data.contains_key(&key),
-            "duplicate resource key inserted into Resources; use try_insert to handle duplicates as Result"
-        );
-        let idx = self.lifecycle.len();
-        self.data.insert(key, (Box::new(Arc::clone(&arc)), idx));
-        self.lifecycle.push(arc as Arc<dyn Resource>);
+    pub fn insert<R: Resource>(mut self, resource: R) -> Self {
+        if let Err(e) = self.put(None, resource) {
+            panic!("{}", e.message());
+        }
         self
     }
 
-    /// Insert a resource into the map, returning the updated `Resources` or an error.
+    /// Insert `resource` under `name`, returning `self` for chaining. Read it back with
+    /// [`get_named`](Self::get_named).
     ///
-    /// Same as [`insert`](Self::insert) but returns a [`CanoError::ResourceDuplicateKey`]
-    /// instead of panicking when `key` is already present. Use this when duplicates are a
-    /// possible runtime condition you want to handle (e.g. building `Resources` from
-    /// dynamic input) rather than a programmer error.
+    /// # Panics
+    ///
+    /// Panics if `name` is already taken. Use
+    /// [`try_insert_named`](Self::try_insert_named) to get an error instead.
+    #[must_use]
+    pub fn insert_named<R: Resource>(
+        mut self,
+        name: impl Into<Cow<'static, str>>,
+        resource: R,
+    ) -> Self {
+        if let Err(e) = self.put(Some(name.into()), resource) {
+            panic!("{}", e.message());
+        }
+        self
+    }
+
+    /// [`insert`](Self::insert) that reports a duplicate type as an error.
     ///
     /// # Errors
     ///
-    /// Returns [`CanoError::ResourceDuplicateKey`] if `key` is already present.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use cano::resource::{Resource, Resources};
-    ///
-    /// struct Counter;
-    ///
-    /// #[cano::resource]
-    /// impl Resource for Counter {}
-    ///
-    /// # fn main() -> Result<(), cano::error::CanoError> {
-    /// let resources: Resources = Resources::new().try_insert("counter", Counter)?;
-    /// # let _ = resources;
-    /// # Ok(()) }
-    /// ```
-    pub fn try_insert<R: Resource + 'static>(
-        mut self,
-        key: impl Into<TResourceKey>,
-        resource: R,
-    ) -> Result<Self, CanoError> {
-        let arc = Arc::new(resource);
-        let key = key.into();
-        if self.data.contains_key(&key) {
-            return Err(CanoError::resource_duplicate_key(
-                "duplicate resource key inserted into Resources",
-            ));
-        }
-        let idx = self.lifecycle.len();
-        self.data.insert(key, (Box::new(Arc::clone(&arc)), idx));
-        self.lifecycle.push(arc as Arc<dyn Resource>);
+    /// [`CanoError::ResourceDuplicateKey`] if a resource of type `R` is already present.
+    pub fn try_insert<R: Resource>(mut self, resource: R) -> Result<Self, CanoError> {
+        self.put(None, resource)?;
         Ok(self)
     }
 
-    /// Retrieve a resource by key, returning an `Arc<R>`.
+    /// [`insert_named`](Self::insert_named) that reports a duplicate name as an error.
     ///
     /// # Errors
     ///
-    /// - [`CanoError::ResourceNotFound`] — no entry exists for `key`.
-    /// - [`CanoError::ResourceTypeMismatch`] — an entry exists but was stored as a different type.
+    /// [`CanoError::ResourceDuplicateKey`] if `name` is already taken.
+    pub fn try_insert_named<R: Resource>(
+        mut self,
+        name: impl Into<Cow<'static, str>>,
+        resource: R,
+    ) -> Result<Self, CanoError> {
+        self.put(Some(name.into()), resource)?;
+        Ok(self)
+    }
+
+    /// Borrow the resource of type `R`.
     ///
-    /// # Examples
+    /// # Errors
     ///
-    /// ```rust
-    /// use cano::resource::{Resource, Resources};
+    /// [`CanoError::ResourceNotFound`] when no resource of type `R` was inserted (named
+    /// resources are not considered).
+    pub fn get<R: Resource>(&self) -> Result<&R, CanoError> {
+        self.slot::<R>(None).map(|arc| &**arc)
+    }
+
+    /// Borrow the resource named `name`.
     ///
-    /// struct Pool;
+    /// # Errors
     ///
-    /// #[cano::resource]
-    /// impl Resource for Pool {}
+    /// - [`CanoError::ResourceNotFound`] — nothing is named `name`.
+    /// - [`CanoError::ResourceTypeMismatch`] — `name` holds a different type.
+    pub fn get_named<R: Resource>(&self, name: &str) -> Result<&R, CanoError> {
+        self.slot::<R>(Some(name)).map(|arc| &**arc)
+    }
+
+    /// [`get`](Self::get), returning an owned `Arc<R>`.
     ///
-    /// let resources: Resources = Resources::new().insert("pool", Pool);
-    /// let pool: std::sync::Arc<Pool> = resources.get("pool").unwrap();
-    /// ```
-    pub fn get<R, Q>(&self, key: &Q) -> Result<Arc<R>, CanoError>
-    where
-        R: Resource + 'static,
-        TResourceKey: std::borrow::Borrow<Q>,
-        Q: Hash + Eq + ?Sized,
-    {
-        let (boxed, _idx) = self.data.get(key).ok_or_else(|| {
-            CanoError::ResourceNotFound(format!(
-                "no resource found for the given key (requested type: {})",
-                std::any::type_name::<R>(),
-            ))
-        })?;
-        boxed
-            .downcast_ref::<Arc<R>>()
-            .map(Arc::clone)
-            .ok_or_else(|| {
-                CanoError::ResourceTypeMismatch(format!(
-                    "resource found but the requested type {} does not match the stored type",
-                    std::any::type_name::<R>(),
-                ))
-            })
+    /// # Errors
+    ///
+    /// As [`get`](Self::get).
+    pub fn get_arc<R: Resource>(&self) -> Result<Arc<R>, CanoError> {
+        self.slot::<R>(None).map(Arc::clone)
+    }
+
+    /// [`get_named`](Self::get_named), returning an owned `Arc<R>`.
+    ///
+    /// # Errors
+    ///
+    /// As [`get_named`](Self::get_named).
+    pub fn get_named_arc<R: Resource>(&self, name: &str) -> Result<Arc<R>, CanoError> {
+        self.slot::<R>(Some(name)).map(Arc::clone)
+    }
+
+    fn put<R: Resource>(
+        &mut self,
+        name: Option<Cow<'static, str>>,
+        resource: R,
+    ) -> Result<(), CanoError> {
+        let arc = Arc::new(resource);
+        let label = match name {
+            Some(name) => {
+                if self.by_name.contains_key(&name) {
+                    return Err(CanoError::resource_duplicate_key(format!(
+                        "duplicate resource name {name:?}"
+                    )));
+                }
+                self.by_name
+                    .insert(name.clone(), Box::new(Arc::clone(&arc)));
+                name
+            }
+            None => {
+                let type_name = std::any::type_name::<R>();
+                if self.by_type.contains_key(&TypeId::of::<R>()) {
+                    return Err(CanoError::resource_duplicate_key(format!(
+                        "duplicate resource type {type_name}; use insert_named for a second instance"
+                    )));
+                }
+                self.by_type
+                    .insert(TypeId::of::<R>(), Box::new(Arc::clone(&arc)));
+                Cow::Borrowed(type_name)
+            }
+        };
+        self.lifecycle.push((label, arc));
+        Ok(())
+    }
+
+    fn slot<R: Resource>(&self, name: Option<&str>) -> Result<&Arc<R>, CanoError> {
+        let type_name = std::any::type_name::<R>;
+        match name {
+            None => self
+                .by_type
+                .get(&TypeId::of::<R>())
+                .and_then(|boxed| boxed.downcast_ref::<Arc<R>>())
+                .ok_or_else(|| {
+                    CanoError::ResourceNotFound(format!("no resource of type {}", type_name()))
+                }),
+            Some(name) => {
+                let boxed = self.by_name.get(name).ok_or_else(|| {
+                    CanoError::ResourceNotFound(format!(
+                        "no resource named {name:?} (requested type: {})",
+                        type_name()
+                    ))
+                })?;
+                boxed.downcast_ref::<Arc<R>>().ok_or_else(|| {
+                    CanoError::ResourceTypeMismatch(format!(
+                        "resource {name:?} is not a {}",
+                        type_name()
+                    ))
+                })
+            }
+        }
     }
 
     /// Call `setup` on every resource in insertion order.
@@ -471,11 +413,12 @@ impl<TResourceKey: Hash + Eq + Send + Sync + 'static> Resources<TResourceKey> {
     /// If any `setup` call fails, `teardown` is called LIFO on all previously
     /// successful resources before the error is returned. Resources at position ≥ N
     /// (where N is the failing index) are never touched.
+    ///
+    /// # Errors
+    ///
+    /// The first `setup` error.
     pub async fn setup_all(&self) -> Result<(), CanoError> {
-        if self.lifecycle.is_empty() {
-            return Ok(());
-        }
-        for (idx, resource) in self.lifecycle.iter().enumerate() {
+        for (idx, (_, resource)) in self.lifecycle.iter().enumerate() {
             if let Err(e) = resource.setup().await {
                 self.teardown_range(0..idx).await;
                 return Err(e);
@@ -484,7 +427,7 @@ impl<TResourceKey: Hash + Eq + Send + Sync + 'static> Resources<TResourceKey> {
         Ok(())
     }
 
-    /// Call `teardown` on `lifecycle[range]` in **reverse** (LIFO) order.
+    /// Call `teardown` on every resource in **reverse** (LIFO) order.
     ///
     /// Errors from individual teardowns are logged (or printed to stderr when the
     /// `tracing` feature is disabled) but never abort the sequence.
@@ -492,19 +435,20 @@ impl<TResourceKey: Hash + Eq + Send + Sync + 'static> Resources<TResourceKey> {
         self.teardown_range(0..self.lifecycle.len()).await;
     }
 
-    pub(crate) async fn teardown_range(&self, range: Range<usize>) {
+    /// [`teardown_all`](Self::teardown_all), returning the first teardown error.
+    pub(crate) async fn teardown_all_result(&self) -> Result<(), CanoError> {
+        self.teardown_range_result(0..self.lifecycle.len()).await
+    }
+
+    async fn teardown_range(&self, range: Range<usize>) {
         let _ = self.teardown_range_result(range).await;
     }
 
-    /// Like [`teardown_range`](Self::teardown_range), but returns the first
-    /// teardown error so callers that must surface teardown failures (e.g.
-    /// `resume_from`, where a leaked resource after a successful run is a real
-    /// problem for the caller to know about) can propagate it. Every resource in
-    /// the range is still torn down — an error never aborts the sequence — and
-    /// each error is still logged, exactly as in the swallowing variant.
-    pub(crate) async fn teardown_range_result(&self, range: Range<usize>) -> Result<(), CanoError> {
+    /// Tear down `lifecycle[range]` LIFO; every resource is still torn down when one fails,
+    /// each error is logged, and the first one is returned.
+    async fn teardown_range_result(&self, range: Range<usize>) -> Result<(), CanoError> {
         let mut first_error: Option<CanoError> = None;
-        for resource in self.lifecycle[range].iter().rev() {
+        for (_, resource) in self.lifecycle[range].iter().rev() {
             if let Err(e) = resource.teardown().await {
                 #[cfg(feature = "tracing")]
                 tracing::error!("resource teardown failed: {e}");
@@ -521,45 +465,26 @@ impl<TResourceKey: Hash + Eq + Send + Sync + 'static> Resources<TResourceKey> {
         }
     }
 
-    /// Return the number of resources in the lifecycle list.
+    /// Call [`Resource::health`] on every resource, in insertion order. Each status is
+    /// labelled with the resource's name, or its type name when it was inserted unnamed.
     ///
-    /// Internal helper used by the workflow and scheduler engines together with
-    /// [`teardown_range`](Self::teardown_range) when partial-rollback teardown is
-    /// needed. Public callers should use [`teardown_all`](Self::teardown_all).
-    pub(crate) fn lifecycle_len(&self) -> usize {
-        self.lifecycle.len()
-    }
-
-    /// Call [`Resource::health`] on every registered resource and return the
-    /// results keyed by the same key passed to [`insert`](Self::insert).
-    ///
-    /// Checks run sequentially (one `await` at a time), so a slow `health`
-    /// implementation delays the rest. Returns an empty map when no resources
-    /// are registered.
-    ///
-    /// Requires `TResourceKey: Clone` because the returned map owns a copy of
-    /// each key. Use [`aggregate_health`](Self::aggregate_health) when you only
-    /// need the overall worst status and don't want that bound.
-    pub async fn check_all_health(&self) -> HashMap<TResourceKey, HealthStatus>
-    where
-        TResourceKey: Clone,
-    {
-        let mut out = HashMap::with_capacity(self.data.len());
-        for (key, (_, idx)) in &self.data {
-            let status = self.lifecycle[*idx].health().await;
-            out.insert(key.clone(), status);
+    /// Checks run sequentially, so a slow `health` implementation delays the rest.
+    pub async fn check_all_health(&self) -> Vec<(Cow<'static, str>, HealthStatus)> {
+        let mut out = Vec::with_capacity(self.lifecycle.len());
+        for (label, resource) in &self.lifecycle {
+            out.push((label.clone(), resource.health().await));
         }
         out
     }
 
-    /// Call [`Resource::health`] on every registered resource and fold the
-    /// results into the single worst status (`Healthy` < `Degraded` < `Unhealthy`).
+    /// Call [`Resource::health`] on every resource and fold the results into the single
+    /// worst status (`Healthy` < `Degraded` < `Unhealthy`).
     ///
-    /// Checks run sequentially in lifecycle (insertion) order. Returns
-    /// [`HealthStatus::Healthy`] when no resources are registered.
+    /// Checks run sequentially in insertion order. Returns [`HealthStatus::Healthy`] when no
+    /// resources are registered.
     pub async fn aggregate_health(&self) -> HealthStatus {
         let mut worst = HealthStatus::Healthy;
-        for resource in &self.lifecycle {
+        for (_, resource) in &self.lifecycle {
             let status = resource.health().await;
             if status.severity() > worst.severity() {
                 worst = status;
@@ -569,18 +494,10 @@ impl<TResourceKey: Hash + Eq + Send + Sync + 'static> Resources<TResourceKey> {
     }
 }
 
-impl<TResourceKey: Hash + Eq + Send + Sync + 'static> Default for Resources<TResourceKey> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<TResourceKey: fmt::Debug + Hash + Eq + Send + Sync + 'static> fmt::Debug
-    for Resources<TResourceKey>
-{
+impl fmt::Debug for Resources {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Resources")
-            .field("count", &self.lifecycle.len())
+        f.debug_list()
+            .entries(self.lifecycle.iter().map(|(label, _)| label))
             .finish()
     }
 }
@@ -594,10 +511,6 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    // ------------------------------------------------------------------
-    // Simple zero-size types for type-mismatch tests
-    // ------------------------------------------------------------------
-
     #[derive(Debug)]
     struct TypeA;
     #[resource]
@@ -608,31 +521,38 @@ mod tests {
     #[resource]
     impl Resource for TypeB {}
 
-    // ------------------------------------------------------------------
-    // Tracking resource for lifecycle-order tests
-    // ------------------------------------------------------------------
-
-    struct TrackingResource {
+    /// Logs `setup:{name}` / `teardown:{name}`; optionally fails either phase.
+    struct Tracking {
         log: Arc<Mutex<Vec<String>>>,
-        name: String,
+        name: &'static str,
+        fail_setup: bool,
+        fail_teardown: bool,
     }
 
-    impl TrackingResource {
-        fn new(name: impl Into<String>, log: Arc<Mutex<Vec<String>>>) -> Self {
+    impl Tracking {
+        fn new(name: &'static str, log: &Arc<Mutex<Vec<String>>>) -> Self {
             Self {
-                log,
-                name: name.into(),
+                log: Arc::clone(log),
+                name,
+                fail_setup: false,
+                fail_teardown: false,
             }
         }
     }
 
     #[resource]
-    impl Resource for TrackingResource {
+    impl Resource for Tracking {
         async fn setup(&self) -> Result<(), CanoError> {
             self.log
                 .lock()
                 .unwrap()
                 .push(format!("setup:{}", self.name));
+            if self.fail_setup {
+                return Err(CanoError::generic(format!(
+                    "setup failed for {}",
+                    self.name
+                )));
+            }
             Ok(())
         }
 
@@ -641,284 +561,144 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("teardown:{}", self.name));
-            Ok(())
-        }
-    }
-
-    // Tracking resource that fails on setup
-    struct FailingResource {
-        log: Arc<Mutex<Vec<String>>>,
-        name: String,
-    }
-
-    impl FailingResource {
-        fn new(name: impl Into<String>, log: Arc<Mutex<Vec<String>>>) -> Self {
-            Self {
-                log,
-                name: name.into(),
+            if self.fail_teardown {
+                return Err(CanoError::generic(format!(
+                    "teardown failed for {}",
+                    self.name
+                )));
             }
-        }
-    }
-
-    #[resource]
-    impl Resource for FailingResource {
-        async fn setup(&self) -> Result<(), CanoError> {
-            self.log
-                .lock()
-                .unwrap()
-                .push(format!("setup:{}", self.name));
-            Err(CanoError::generic(format!(
-                "setup failed for {}",
-                self.name
-            )))
-        }
-
-        async fn teardown(&self) -> Result<(), CanoError> {
-            self.log
-                .lock()
-                .unwrap()
-                .push(format!("teardown:{}", self.name));
             Ok(())
         }
     }
 
-    // Tracking resource that fails on teardown
-    struct FailingTeardownResource {
-        log: Arc<Mutex<Vec<String>>>,
-        name: String,
+    fn log() -> Arc<Mutex<Vec<String>>> {
+        Arc::new(Mutex::new(Vec::new()))
     }
-
-    impl FailingTeardownResource {
-        fn new(name: impl Into<String>, log: Arc<Mutex<Vec<String>>>) -> Self {
-            Self {
-                log,
-                name: name.into(),
-            }
-        }
-    }
-
-    #[resource]
-    impl Resource for FailingTeardownResource {
-        async fn setup(&self) -> Result<(), CanoError> {
-            self.log
-                .lock()
-                .unwrap()
-                .push(format!("setup:{}", self.name));
-            Ok(())
-        }
-
-        async fn teardown(&self) -> Result<(), CanoError> {
-            self.log
-                .lock()
-                .unwrap()
-                .push(format!("teardown:{}", self.name));
-            Err(CanoError::generic(format!(
-                "teardown failed for {}",
-                self.name
-            )))
-        }
-    }
-
-    // ------------------------------------------------------------------
-    // 0. EMPTY constant is an empty map
-    // ------------------------------------------------------------------
 
     #[test]
-    fn test_empty_is_empty() {
-        let r = Resources::<String>::empty();
-        assert_eq!(
-            r.lifecycle.len(),
-            0,
-            "Resources::empty() should have no lifecycle entries"
-        );
-        assert_eq!(
-            r.data.len(),
-            0,
-            "Resources::empty() should have no data entries"
-        );
+    fn get_by_type_borrows_the_same_instance() {
+        let resources = Resources::new().insert(TypeA).insert(TypeB);
+        let a1: *const TypeA = resources.get::<TypeA>().unwrap();
+        let a2 = resources.get_arc::<TypeA>().unwrap();
+        assert!(std::ptr::eq(a1, &*a2));
+        assert!(resources.get::<TypeB>().is_ok());
     }
 
-    // ------------------------------------------------------------------
-    // 1. insert + get round-trip with string key
-    // ------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn test_insert_get_roundtrip_string_key() {
-        let resources: Resources<String> = Resources::new().insert("a".to_string(), TypeA);
-        let result = resources.get::<TypeA, str>("a");
-        assert!(result.is_ok(), "expected Ok, got {result:?}");
-    }
-
-    // ------------------------------------------------------------------
-    // 2. get missing key returns ResourceNotFound
-    // ------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn test_get_missing_key() {
-        let resources: Resources<String> = Resources::new();
-        let result = resources.get::<TypeA, str>("absent");
-
-        assert!(result.is_err());
-        let err = result.unwrap_err();
+    #[test]
+    fn missing_type_names_the_type() {
+        let err = Resources::new().get::<TypeA>().unwrap_err();
         assert_eq!(err.category(), "resource_not_found");
+        assert!(err.message().contains("TypeA"), "{err}");
     }
 
-    // ------------------------------------------------------------------
-    // 3. get with wrong type returns ResourceTypeMismatch, distinct from missing
-    // ------------------------------------------------------------------
+    #[test]
+    fn named_resources_are_separate_from_typed_ones() {
+        let resources = Resources::new().insert(TypeA).insert_named("second", TypeA);
+        assert!(resources.get::<TypeA>().is_ok());
+        assert!(resources.get_named::<TypeA>("second").is_ok());
+        assert!(resources.get_named_arc::<TypeA>("second").is_ok());
+        assert!(!std::ptr::eq(
+            resources.get::<TypeA>().unwrap(),
+            resources.get_named::<TypeA>("second").unwrap()
+        ));
 
-    #[tokio::test]
-    async fn test_get_wrong_type() {
-        let resources: Resources<String> = Resources::new().insert("a".to_string(), TypeA);
-
-        // Correct type — should succeed
-        assert!(resources.get::<TypeA, str>("a").is_ok());
-
-        // Wrong type — should be ResourceTypeMismatch, not ResourceNotFound
-        let err = resources.get::<TypeB, str>("a").unwrap_err();
-        assert_eq!(err.category(), "resource_type_mismatch");
-
-        // Missing key — should be ResourceNotFound, confirming the two are distinct
-        let missing_err = resources.get::<TypeA, str>("missing").unwrap_err();
-        assert_eq!(missing_err.category(), "resource_not_found");
-
-        assert_ne!(err.category(), missing_err.category());
+        // A named-only type is not found by type.
+        let named_only = Resources::new().insert_named("b", TypeB);
+        assert_eq!(
+            named_only.get::<TypeB>().unwrap_err().category(),
+            "resource_not_found"
+        );
     }
 
-    // ------------------------------------------------------------------
-    // 4. two get() calls on the same key return ptr_eq Arcs
-    // ------------------------------------------------------------------
+    #[test]
+    fn get_named_reports_missing_and_mismatch_distinctly() {
+        let resources = Resources::new().insert_named("a", TypeA);
+        let mismatch = resources.get_named::<TypeB>("a").unwrap_err();
+        assert_eq!(mismatch.category(), "resource_type_mismatch");
+        assert!(mismatch.message().contains("\"a\""), "{mismatch}");
 
-    #[tokio::test]
-    async fn test_arc_identity() {
-        let resources: Resources<String> = Resources::new().insert("a".to_string(), TypeA);
-
-        let arc1 = resources.get::<TypeA, str>("a").unwrap();
-        let arc2 = resources.get::<TypeA, str>("a").unwrap();
-
-        assert!(Arc::ptr_eq(&arc1, &arc2), "expected same underlying Arc");
+        let missing = resources.get_named::<TypeA>("absent").unwrap_err();
+        assert_eq!(missing.category(), "resource_not_found");
+        assert!(missing.message().contains("\"absent\""), "{missing}");
     }
 
-    // ------------------------------------------------------------------
-    // 5. default() produces the same empty state as new()
-    // ------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn test_default_equals_new() {
-        let by_default: Resources<String> = Resources::default();
-        let by_new: Resources<String> = Resources::new();
-
-        assert_eq!(by_default.data.len(), by_new.data.len());
-        assert_eq!(by_default.lifecycle.len(), by_new.lifecycle.len());
+    #[test]
+    #[should_panic(expected = "use insert_named for a second instance")]
+    fn insert_panics_on_duplicate_type() {
+        let _ = Resources::new().insert(TypeA).insert(TypeA);
     }
 
-    // ------------------------------------------------------------------
-    // 6. with_capacity does not panic
-    // ------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn test_with_capacity() {
-        let resources: Resources<String> = Resources::with_capacity(64);
-        assert_eq!(resources.lifecycle.len(), 0);
-        assert_eq!(resources.data.len(), 0);
+    #[test]
+    #[should_panic(expected = "duplicate resource name \"dup\"")]
+    fn insert_named_panics_on_duplicate_name() {
+        let _ = Resources::new()
+            .insert_named("dup", TypeA)
+            .insert_named("dup", TypeB);
     }
 
-    // ------------------------------------------------------------------
-    // 7. setup is called in insertion (FIFO) order
-    // ------------------------------------------------------------------
+    #[test]
+    fn try_insert_reports_duplicates() {
+        let err = Resources::new()
+            .insert(TypeA)
+            .try_insert(TypeA)
+            .expect_err("duplicate type");
+        assert_eq!(err.category(), "resource_duplicate_key");
+
+        let err = Resources::new()
+            .insert_named("x", TypeA)
+            .try_insert_named("x", TypeB)
+            .expect_err("duplicate name");
+        assert_eq!(err.category(), "resource_duplicate_key");
+
+        let ok = Resources::new()
+            .try_insert(TypeA)
+            .and_then(|r| r.try_insert_named("x", TypeA))
+            .expect("fresh type and name");
+        assert!(ok.get_named::<TypeA>("x").is_ok());
+    }
 
     #[tokio::test]
-    async fn test_lifecycle_setup_insertion_order() {
-        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-
-        let resources: Resources<String> = Resources::new()
-            .insert(
-                "a".to_string(),
-                TrackingResource::new("A", Arc::clone(&log)),
-            )
-            .insert(
-                "b".to_string(),
-                TrackingResource::new("B", Arc::clone(&log)),
-            )
-            .insert(
-                "c".to_string(),
-                TrackingResource::new("C", Arc::clone(&log)),
-            );
+    async fn setup_is_fifo_and_teardown_is_lifo() {
+        let log = log();
+        let resources = Resources::new()
+            .insert_named("a", Tracking::new("A", &log))
+            .insert_named("b", Tracking::new("B", &log))
+            .insert_named("c", Tracking::new("C", &log));
 
         resources.setup_all().await.unwrap();
+        resources.teardown_all().await;
 
         let events = log.lock().unwrap().clone();
-        assert_eq!(events, ["setup:A", "setup:B", "setup:C"]);
+        assert_eq!(
+            events,
+            [
+                "setup:A",
+                "setup:B",
+                "setup:C",
+                "teardown:C",
+                "teardown:B",
+                "teardown:A"
+            ]
+        );
     }
 
-    // ------------------------------------------------------------------
-    // 8. teardown is called in reverse insertion (LIFO) order
-    // ------------------------------------------------------------------
-
     #[tokio::test]
-    async fn test_lifecycle_teardown_lifo_order() {
-        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-
-        let resources: Resources<String> = Resources::new()
-            .insert(
-                "a".to_string(),
-                TrackingResource::new("A", Arc::clone(&log)),
+    async fn setup_failure_rolls_back_only_the_set_up_prefix() {
+        let log = log();
+        let resources = Resources::new()
+            .insert_named("r0", Tracking::new("R0", &log))
+            .insert_named("r1", Tracking::new("R1", &log))
+            .insert_named(
+                "r2",
+                Tracking {
+                    fail_setup: true,
+                    ..Tracking::new("R2", &log)
+                },
             )
-            .insert(
-                "b".to_string(),
-                TrackingResource::new("B", Arc::clone(&log)),
-            )
-            .insert(
-                "c".to_string(),
-                TrackingResource::new("C", Arc::clone(&log)),
-            );
+            .insert_named("r3", Tracking::new("R3", &log));
 
-        // Setup all first (FIFO), then teardown all (LIFO)
-        resources.setup_all().await.unwrap();
-
-        // Clear log so we only observe teardown order
-        log.lock().unwrap().clear();
-
-        resources.teardown_range(0..resources.lifecycle.len()).await;
-
+        assert!(resources.setup_all().await.is_err());
         let events = log.lock().unwrap().clone();
-        assert_eq!(events, ["teardown:C", "teardown:B", "teardown:A"]);
-    }
-
-    // ------------------------------------------------------------------
-    // 9. partial rollback: failure at position 2 of 4 triggers teardown of 0..1 LIFO
-    // ------------------------------------------------------------------
-
-    #[tokio::test]
-    async fn test_setup_failure_partial_rollback() {
-        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-
-        // Position 0: ok, Position 1: ok, Position 2: fails, Position 3: never reached
-        let resources: Resources<String> = Resources::new()
-            .insert(
-                "r0".to_string(),
-                TrackingResource::new("R0", Arc::clone(&log)),
-            )
-            .insert(
-                "r1".to_string(),
-                TrackingResource::new("R1", Arc::clone(&log)),
-            )
-            .insert(
-                "r2".to_string(),
-                FailingResource::new("R2", Arc::clone(&log)),
-            )
-            .insert(
-                "r3".to_string(),
-                TrackingResource::new("R3", Arc::clone(&log)),
-            );
-
-        let result = resources.setup_all().await;
-        assert!(result.is_err(), "expected setup_all to fail");
-
-        let events = log.lock().unwrap().clone();
-
-        // setup:R0, setup:R1, setup:R2 (fails), teardown:R1, teardown:R0
-        // R3 must never appear; teardown order is LIFO of successfully-setup resources
         assert_eq!(
             events,
             [
@@ -927,85 +707,30 @@ mod tests {
                 "setup:R2",
                 "teardown:R1",
                 "teardown:R0"
-            ],
-            "unexpected lifecycle events: {events:?}"
+            ]
         );
     }
 
-    // ------------------------------------------------------------------
-    // 10. teardown continues past individual failures — all N resources get called
-    // ------------------------------------------------------------------
-
     #[tokio::test]
-    async fn test_teardown_continues_past_failures() {
-        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    async fn teardown_continues_past_failures_and_reports_the_first() {
+        let log = log();
+        let failing = |name| Tracking {
+            fail_teardown: true,
+            ..Tracking::new(name, &log)
+        };
+        let resources = Resources::new()
+            .insert_named("r0", failing("R0"))
+            .insert_named("r1", failing("R1"))
+            .insert_named("r2", failing("R2"));
 
-        // All three resources fail their teardown
-        let resources: Resources<String> = Resources::new()
-            .insert(
-                "r0".to_string(),
-                FailingTeardownResource::new("R0", Arc::clone(&log)),
-            )
-            .insert(
-                "r1".to_string(),
-                FailingTeardownResource::new("R1", Arc::clone(&log)),
-            )
-            .insert(
-                "r2".to_string(),
-                FailingTeardownResource::new("R2", Arc::clone(&log)),
-            );
-
-        // teardown_range should not return an error or panic even when all fail
-        resources.teardown_range(0..resources.lifecycle.len()).await;
-
+        let err = resources.teardown_all_result().await.unwrap_err();
+        assert!(
+            err.message().contains("R2"),
+            "first error is the first torn down: {err}"
+        );
         let events = log.lock().unwrap().clone();
-        // All three must have been called despite failures; LIFO order
         assert_eq!(events, ["teardown:R2", "teardown:R1", "teardown:R0"]);
     }
-
-    // ------------------------------------------------------------------
-    // 11. insert panics on duplicate key (programmer error)
-    // ------------------------------------------------------------------
-
-    #[test]
-    #[should_panic(expected = "duplicate resource key inserted into Resources")]
-    fn test_insert_panics_on_duplicate() {
-        let _resources: Resources<String> = Resources::new()
-            .insert("dup".to_string(), TypeA)
-            .insert("dup".to_string(), TypeA);
-    }
-
-    // ------------------------------------------------------------------
-    // 12. try_insert returns ResourceDuplicateKey on duplicate (no panic)
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn test_try_insert_returns_duplicate_key_error() {
-        let first = Resources::<String>::new().insert("dup".to_string(), TypeA);
-        let err = first
-            .try_insert("dup".to_string(), TypeA)
-            .expect_err("try_insert must reject duplicates");
-        assert_eq!(err.category(), "resource_duplicate_key");
-        assert!(err.message().contains("duplicate"));
-    }
-
-    // ------------------------------------------------------------------
-    // 13. try_insert succeeds for fresh keys and chains with insert
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn test_try_insert_succeeds_for_fresh_key() {
-        let resources = Resources::<String>::new()
-            .insert("a".to_string(), TypeA)
-            .try_insert("b".to_string(), TypeB)
-            .expect("fresh key must insert");
-        assert!(resources.get::<TypeA, str>("a").is_ok());
-        assert!(resources.get::<TypeB, str>("b").is_ok());
-    }
-
-    // ------------------------------------------------------------------
-    // 14. health probes: default Healthy, custom statuses, aggregation
-    // ------------------------------------------------------------------
 
     struct DegradedResource;
     #[resource]
@@ -1024,58 +749,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_default_health_is_healthy() {
-        let resources = Resources::<String>::new().insert("a".to_string(), TypeA);
-        let health = resources.check_all_health().await;
-        assert_eq!(health.get("a"), Some(&HealthStatus::Healthy));
-        assert_eq!(resources.aggregate_health().await, HealthStatus::Healthy);
-    }
-
-    #[tokio::test]
-    async fn test_check_all_health_reports_per_resource_status() {
-        let resources = Resources::<String>::new()
-            .insert("ok".to_string(), TypeA)
-            .insert("degraded".to_string(), DegradedResource)
-            .insert("down".to_string(), UnhealthyResource);
+    async fn check_all_health_is_labelled_and_ordered() {
+        let resources = Resources::new()
+            .insert(TypeA)
+            .insert_named("degraded", DegradedResource)
+            .insert_named("down", UnhealthyResource);
 
         let health = resources.check_all_health().await;
         assert_eq!(health.len(), 3);
-        assert_eq!(health.get("ok"), Some(&HealthStatus::Healthy));
+        assert!(health[0].0.ends_with("TypeA"), "{:?}", health[0].0);
+        assert_eq!(health[0].1, HealthStatus::Healthy);
         assert_eq!(
-            health.get("degraded"),
-            Some(&HealthStatus::Degraded("replica lag".to_string()))
+            health[1],
+            (
+                Cow::Borrowed("degraded"),
+                HealthStatus::Degraded("replica lag".to_string())
+            )
         );
         assert_eq!(
-            health.get("down"),
-            Some(&HealthStatus::Unhealthy("connection refused".to_string()))
+            health[2],
+            (
+                Cow::Borrowed("down"),
+                HealthStatus::Unhealthy("connection refused".to_string())
+            )
         );
     }
 
     #[tokio::test]
-    async fn test_aggregate_health_returns_worst_status() {
-        let degraded_only = Resources::<String>::new()
-            .insert("ok".to_string(), TypeA)
-            .insert("degraded".to_string(), DegradedResource);
+    async fn aggregate_health_returns_worst_status() {
+        let degraded_only = Resources::new().insert(TypeA).insert(DegradedResource);
         assert_eq!(
             degraded_only.aggregate_health().await,
             HealthStatus::Degraded("replica lag".to_string())
         );
 
-        let with_unhealthy = Resources::<String>::new()
-            .insert("ok".to_string(), TypeA)
-            .insert("degraded".to_string(), DegradedResource)
-            .insert("down".to_string(), UnhealthyResource);
+        let with_unhealthy = Resources::new()
+            .insert(TypeA)
+            .insert(DegradedResource)
+            .insert(UnhealthyResource);
         assert_eq!(
             with_unhealthy.aggregate_health().await,
             HealthStatus::Unhealthy("connection refused".to_string())
         );
-    }
 
-    #[tokio::test]
-    async fn test_health_on_empty_resources() {
-        let resources: Resources<String> = Resources::new();
-        assert!(resources.check_all_health().await.is_empty());
-        assert_eq!(resources.aggregate_health().await, HealthStatus::Healthy);
+        let empty = Resources::new();
+        assert!(empty.check_all_health().await.is_empty());
+        assert_eq!(empty.aggregate_health().await, HealthStatus::Healthy);
     }
 
     #[test]

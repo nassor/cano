@@ -95,8 +95,8 @@ impl Task<Step> for ManualTask {
     }
 
     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        let breaker = res.get::<CircuitBreaker, _>("breaker")?;
-        let client = res.get::<FlakyClient, _>("client")?;
+        let breaker = res.get_arc::<CircuitBreaker>()?;
+        let client = res.get::<FlakyClient>()?;
 
         // Step 1: request a permit. Returns Err(CircuitOpen) if the breaker is open.
         let permit = breaker.try_acquire()?;
@@ -139,8 +139,8 @@ async fn main() -> Result<(), CanoError> {
     let call_count = Arc::clone(&client.calls);
 
     let resources = Resources::new()
-        .insert("breaker", (*breaker).clone()) // store the breaker as a Resource
-        .insert("client", client);
+        .insert((*breaker).clone()) // store the breaker as a Resource
+        .insert(client);
 
     let workflow = Workflow::new(resources)
         .register(Step::Call, ManualTask)

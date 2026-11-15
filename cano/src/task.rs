@@ -52,10 +52,10 @@
 //! #[task]
 //! impl Task<Step> for FetchTask {
 //!     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-//!         let store = res.get::<MemoryStore, _>("store")?;
-//!         let params = res.get::<FetchParams, _>("params")?;
+//!         let store = res.get::<MemoryStore>()?;
+//!         let params = res.get::<FetchParams>()?;
 //!         let data: Vec<u32> = (0..params.limit as u32).collect();
-//!         store.put("data", data)?;
+//!         store.put("data", data);
 //!         Ok(TaskResult::Single(Step::Done))
 //!     }
 //! }
@@ -64,8 +64,8 @@
 //! # async fn main() -> Result<(), CanoError> {
 //! let store = MemoryStore::new();
 //! let resources = Resources::new()
-//!     .insert("store".to_owned(), store)
-//!     .insert("params".to_owned(), FetchParams { limit: 10 });
+//!     .insert(store)
+//!     .insert(FetchParams { limit: 10 });
 //! let result = Workflow::new(resources)
 //!     .register(Step::Fetch, FetchTask)
 //!     .add_exit_state(Step::Done)
@@ -81,7 +81,6 @@ use crate::resource::Resources;
 use cano_macros::task;
 use std::borrow::Cow;
 use std::fmt;
-use std::hash::Hash;
 
 pub mod batch;
 pub mod poll;
@@ -199,9 +198,6 @@ pub enum TaskResult<TState> {
 /// # Generic Types
 ///
 /// - **`TState`**: The return type that determines workflow routing (typically an enum)
-/// - **`TResourceKey`**: The key type used to look up resources (defaults to
-///   [`Cow<'static, str>`](std::borrow::Cow) — accepts `&'static str` literals
-///   without allocating, plus owned `String` keys for runtime-built names)
 ///
 /// # Benefits
 ///
@@ -222,7 +218,7 @@ pub enum TaskResult<TState> {
 /// #[task]
 /// impl Task<String> for DataProcessor {
 ///     async fn run(&self, res: &Resources) -> Result<TaskResult<String>, CanoError> {
-///         let store = res.get::<MemoryStore, _>("store")?;
+///         let store = res.get::<MemoryStore>()?;
 ///         // Load data
 ///         let input: i32 = store.get("input").unwrap_or(1);
 ///
@@ -230,7 +226,7 @@ pub enum TaskResult<TState> {
 ///         let result = input * self.multiplier;
 ///
 ///         // Store result
-///         store.put("output", result)?;
+///         store.put("output", result);
 ///
 ///         // Determine next state
 ///         if result > 100 {
@@ -242,10 +238,9 @@ pub enum TaskResult<TState> {
 /// }
 /// ```
 #[task]
-pub trait Task<TState, TResourceKey = Cow<'static, str>>: Send + Sync
+pub trait Task<TState>: Send + Sync
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// Get the task configuration that controls execution behavior
     ///
@@ -283,7 +278,7 @@ where
     /// # Errors
     ///
     /// Returns a [`CanoError`] propagated from the task logic.
-    async fn run(&self, res: &Resources<TResourceKey>) -> Result<TaskResult<TState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskResult<TState>, CanoError> {
         let _ = res;
         self.run_bare().await
     }
@@ -329,36 +324,30 @@ where
 /// Type alias for a dynamic task trait object.
 ///
 /// Use this when you need to store different task types in the same collection.
-/// `TResourceKey` defaults to [`Cow<'static, str>`](std::borrow::Cow) to match
-/// [`Resources`]; pass an enum key type for typed
-/// resource lookups.
 ///
 /// ```
 /// use cano::prelude::*;
 ///
 /// #[derive(Debug, Clone, PartialEq, Eq, Hash)] enum Step { Start, Done }
-/// #[derive(Hash, Eq, PartialEq)] enum Key { Store }
 ///
 /// struct First;
 /// #[task]
-/// impl Task<Step, Key> for First {
-///     async fn run(&self, _res: &Resources<Key>) -> Result<TaskResult<Step>, CanoError> {
+/// impl Task<Step> for First {
+///     async fn run(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
 ///         Ok(TaskResult::Single(Step::Done))
 ///     }
 /// }
 ///
-/// // Heterogeneous collection of enum-keyed tasks.
-/// let tasks: Vec<TaskObject<Step, Key>> = vec![std::sync::Arc::new(First)];
+/// // Heterogeneous collection of tasks.
+/// let tasks: Vec<TaskObject<Step>> = vec![std::sync::Arc::new(First)];
 /// assert_eq!(tasks.len(), 1);
 /// ```
-pub type DynTask<TState, TResourceKey = Cow<'static, str>> =
-    dyn Task<TState, TResourceKey> + Send + Sync;
+pub type DynTask<TState> = dyn Task<TState> + Send + Sync;
 
 /// Type alias for an `Arc`-wrapped dynamic task trait object.
 ///
 /// This alias simplifies working with dynamic task collections in workflows.
-pub type TaskObject<TState, TResourceKey = Cow<'static, str>> =
-    std::sync::Arc<DynTask<TState, TResourceKey>>;
+pub type TaskObject<TState> = std::sync::Arc<DynTask<TState>>;
 
 #[cfg(test)]
 mod tests {

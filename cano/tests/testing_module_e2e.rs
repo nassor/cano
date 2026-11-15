@@ -144,11 +144,7 @@ impl Step1 {
         Ok((TaskResult::Single(S::Work), Unit))
     }
     async fn compensate(&self, res: &Resources, _o: Unit) -> Result<(), CanoError> {
-        res.get::<Log, _>("log")?
-            .0
-            .lock()
-            .unwrap()
-            .push("step1".into());
+        res.get::<Log>()?.0.lock().unwrap().push("step1".into());
         Ok(())
     }
 }
@@ -161,11 +157,7 @@ impl Step2 {
         Ok((TaskResult::Single(S::Finish), Unit))
     }
     async fn compensate(&self, res: &Resources, _o: Unit) -> Result<(), CanoError> {
-        res.get::<Log, _>("log")?
-            .0
-            .lock()
-            .unwrap()
-            .push("step2".into());
+        res.get::<Log>()?.0.lock().unwrap().push("step2".into());
         Ok(())
     }
 }
@@ -185,7 +177,7 @@ impl Fail {
 async fn assert_compensation_ran_matches_reverse_order() {
     let log = Log::default();
     let handle = log.clone();
-    let resources = Resources::new().insert("log", log);
+    let resources = Resources::new().insert(log);
     let saga = Workflow::new(resources)
         .register_with_compensation(S::Start, Step1)
         .register_with_compensation(S::Work, Step2)

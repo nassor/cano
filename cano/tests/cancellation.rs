@@ -674,12 +674,9 @@ impl Resource for TeardownProbe {
 async fn resources_are_torn_down_on_cancel() {
     let tore_down = Arc::new(AtomicUsize::new(0));
     let started = flag();
-    let resources = Resources::new().insert(
-        "probe",
-        TeardownProbe {
-            tore_down: tore_down.clone(),
-        },
-    );
+    let resources = Resources::new().insert(TeardownProbe {
+        tore_down: tore_down.clone(),
+    });
     let wf = Workflow::new(resources)
         .register(
             Step::Ship,

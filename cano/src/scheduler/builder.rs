@@ -80,16 +80,15 @@ impl Scheduler {
     /// Run `workflow` from `initial_state` immediately after `start`, then every
     /// `interval` (stretched by a pending backoff window). A zero interval is a
     /// configuration error.
-    pub fn every<TState, TResourceKey>(
+    pub fn every<TState>(
         self,
         id: &str,
-        workflow: Workflow<TState, TResourceKey>,
+        workflow: Workflow<TState>,
         initial_state: TState,
         interval: Duration,
     ) -> Self
     where
         TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-        TResourceKey: std::hash::Hash + Eq + Send + Sync + 'static,
     {
         if interval.is_zero() {
             return self.fail(CanoError::configuration(format!(
@@ -101,16 +100,15 @@ impl Scheduler {
 
     /// Run `workflow` from `initial_state` on a cron schedule (seconds-resolution
     /// expression, as parsed by the `cron` crate).
-    pub fn cron<TState, TResourceKey>(
+    pub fn cron<TState>(
         self,
         id: &str,
-        workflow: Workflow<TState, TResourceKey>,
+        workflow: Workflow<TState>,
         initial_state: TState,
         expr: &str,
     ) -> Self
     where
         TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-        TResourceKey: std::hash::Hash + Eq + Send + Sync + 'static,
     {
         match CronSchedule::from_str(expr) {
             Ok(parsed) => self.add(
@@ -126,15 +124,9 @@ impl Scheduler {
     }
 
     /// Register `workflow` to run only on [`RunningScheduler::trigger`].
-    pub fn manual<TState, TResourceKey>(
-        self,
-        id: &str,
-        workflow: Workflow<TState, TResourceKey>,
-        initial_state: TState,
-    ) -> Self
+    pub fn manual<TState>(self, id: &str, workflow: Workflow<TState>, initial_state: TState) -> Self
     where
         TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-        TResourceKey: std::hash::Hash + Eq + Send + Sync + 'static,
     {
         self.add(id, workflow, initial_state, ParsedSchedule::Manual)
     }
@@ -206,16 +198,15 @@ impl Scheduler {
         self
     }
 
-    fn add<TState, TResourceKey>(
+    fn add<TState>(
         mut self,
         id: &str,
-        workflow: Workflow<TState, TResourceKey>,
+        workflow: Workflow<TState>,
         initial_state: TState,
         schedule: ParsedSchedule,
     ) -> Self
     where
         TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-        TResourceKey: std::hash::Hash + Eq + Send + Sync + 'static,
     {
         if self.flows.iter().any(|(flow_id, _)| &**flow_id == id) {
             return self.fail(CanoError::configuration(format!(

@@ -20,7 +20,7 @@ const MODEL: Model = Model {
     assoc: &["Item", "ItemOutput"],
     infer_assoc,
     companion_run: Some(
-        |state, key| quote!(::std::boxed::Box::pin(::cano::task::batch::run_batch::<Self, #state, #key>(self, res))),
+        |state| quote!(::std::boxed::Box::pin(::cano::task::batch::run_batch::<Self, #state>(self, res))),
     ),
 };
 

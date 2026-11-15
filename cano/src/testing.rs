@@ -8,8 +8,7 @@
 //! ```
 //!
 //! It wraps existing public surface ([`WorkflowObserver`],
-//! [`CheckpointStore`], [`Resources`],
-//! [`MemoryStore`], [`Task`]) — it adds **no** new
+//! [`CheckpointStore`], [`Task`]) — it adds **no** new
 //! traits and changes **no** existing public items, so a typical workflow test drops from a
 //! pile of bespoke fixtures to a handful of lines.
 //!
@@ -17,7 +16,6 @@
 //! |---|---|
 //! | [`RecordingObserver`] | a [`WorkflowObserver`] that captures every lifecycle event into an inspectable [`Vec<RecordedEvent>`] |
 //! | [`InMemoryCheckpointStore`] | a process-local [`CheckpointStore`] for resume/recovery tests, with no `recovery` feature or on-disk file needed |
-//! | [`TestResources`] | a tiny builder for the [`Resources`] dictionary a workflow needs |
 //! | [`panic_on_attempt`] | a [`PanicOnAttempt`] task factory that panics on its first *N* attempts — exercises the panic-safety path (panics fail fast, they are not retried) |
 //! | [`assert_compensation_ran`] | a saga assertion that compares the recorded compensation order against an expected sequence |
 //!
@@ -63,8 +61,6 @@ use parking_lot::Mutex;
 use crate::error::CanoError;
 use crate::observer::WorkflowObserver;
 use crate::recovery::{CheckpointRow, CheckpointStore};
-use crate::resource::{Resource, Resources};
-use crate::store::MemoryStore;
 use crate::task::{Task, TaskConfig, TaskResult};
 
 /// A single event captured by [`RecordingObserver`].
@@ -247,13 +243,12 @@ impl RecordingObserver {
     /// [`Workflow::registered_states`](crate::workflow::Workflow::registered_states)).
     /// Returns `Err` with the missing state labels, like
     /// [`assert_all_states_entered`](Self::assert_all_states_entered).
-    pub fn assert_registered_states_entered<TState, TResourceKey>(
+    pub fn assert_registered_states_entered<TState>(
         &self,
-        workflow: &crate::workflow::Workflow<TState, TResourceKey>,
+        workflow: &crate::workflow::Workflow<TState>,
     ) -> Result<(), Vec<String>>
     where
         TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-        TResourceKey: std::hash::Hash + Eq + Send + Sync + 'static,
     {
         let registered: Vec<TState> = workflow.registered_states().cloned().collect();
         self.assert_all_states_entered(&registered)
@@ -367,52 +362,6 @@ impl CheckpointStore for InMemoryCheckpointStore {
     }
 }
 
-/// A small builder for the [`Resources`] dictionary a workflow
-/// needs.
-///
-/// Saves the `Resources::new().insert(..).insert(..)` ceremony, and gives a one-call
-/// [`with_store`](Self::with_store) for the common case of "I just need a
-/// [`MemoryStore`] at some key".
-///
-/// ```rust
-/// use cano::testing::TestResources;
-///
-/// let resources = TestResources::new().with_store("store").build();
-/// assert!(resources.get::<cano::MemoryStore, _>("store").is_ok());
-/// ```
-#[derive(Default)]
-pub struct TestResources {
-    inner: Resources,
-}
-
-impl TestResources {
-    /// Start an empty builder.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Insert a fresh [`MemoryStore`] at `key`.
-    #[must_use]
-    pub fn with_store(mut self, key: &'static str) -> Self {
-        self.inner = std::mem::take(&mut self.inner).insert(key, MemoryStore::new());
-        self
-    }
-
-    /// Insert an arbitrary [`Resource`] at `key`.
-    #[must_use]
-    pub fn with_resource<R: Resource + 'static>(mut self, key: &'static str, resource: R) -> Self {
-        self.inner = std::mem::take(&mut self.inner).insert(key, resource);
-        self
-    }
-
-    /// Finish building and hand back the [`Resources`].
-    #[must_use]
-    pub fn build(self) -> Resources {
-        self.inner
-    }
-}
-
 /// A [`Task`] that panics on its first `n` attempts, then transitions to a
 /// fixed next state. Build it with [`panic_on_attempt`].
 ///
@@ -501,7 +450,7 @@ where
 /// Assert that a saga's recorded compensation order matches `expected`.
 ///
 /// Collect the names (or labels) of the compensations that ran — typically by having each
-/// `compensate` push its identifier into a shared `Vec` in [`Resources`] —
+/// `compensate` push its identifier into a shared `Vec` in [`Resources`](crate::Resources) —
 /// and pass that slice as `actual`. Compensations drain in reverse of completion order, so
 /// `expected` should list them in the order you expect them to *undo*.
 ///
@@ -653,29 +602,6 @@ mod tests {
         store.clear("a").await.unwrap();
         assert!(store.load_run("a").await.unwrap().is_empty());
         assert_eq!(store.load_run("b").await.unwrap().len(), 1);
-    }
-
-    #[test]
-    fn test_resources_with_store_inserts_memory_store() {
-        let resources = TestResources::new().with_store("store").build();
-        assert!(resources.get::<MemoryStore, _>("store").is_ok());
-    }
-
-    #[test]
-    fn test_resources_with_resource_inserts_custom() {
-        #[derive(Clone)]
-        struct Cfg {
-            limit: usize,
-        }
-        #[resource]
-        impl Resource for Cfg {}
-
-        let resources = TestResources::new()
-            .with_store("store")
-            .with_resource("cfg", Cfg { limit: 7 })
-            .build();
-        assert_eq!(resources.get::<Cfg, _>("cfg").unwrap().limit, 7);
-        assert!(resources.get::<MemoryStore, _>("store").is_ok());
     }
 
     #[tokio::test]

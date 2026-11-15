@@ -85,8 +85,8 @@ impl DataTask {
 #[task]
 impl Task<TestState> for DataTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
-        let store: Arc<MemoryStore> = res.get("store")?;
-        store.put(&self.key, self.value.clone())?;
+        let store = res.get::<MemoryStore>()?;
+        store.put(&self.key, self.value.clone());
         Ok(TaskResult::Single(self.next_state.clone()))
     }
 }

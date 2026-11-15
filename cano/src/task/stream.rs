@@ -75,7 +75,6 @@ use serde::de::DeserializeOwned;
 use std::borrow::Cow;
 use std::fmt;
 use std::future::Future;
-use std::hash::Hash;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -165,7 +164,6 @@ pub enum CloseReason {
 /// # Generic Types
 ///
 /// - **`TState`**: The workflow state enum (`Clone + Debug + Send + Sync`).
-/// - **`TResourceKey`**: The resource-lookup key type (defaults to [`Cow<'static, str>`]).
 ///
 /// # Associated Types
 ///
@@ -177,10 +175,9 @@ pub enum CloseReason {
 /// `process_item`'s owned `item` parameter and `Output` / `Cursor` from the `Ok` tuple of
 /// its return type.
 #[crate::task::stream]
-pub trait StreamTask<TState, TResourceKey = Cow<'static, str>>: Send + Sync
+pub trait StreamTask<TState>: Send + Sync
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// One element pulled from the source stream.
     type Item: Send + 'static;
@@ -223,7 +220,7 @@ where
     /// `None` on a fresh run. Must be idempotent (see the module docs).
     async fn open(
         &self,
-        res: &Resources<TResourceKey>,
+        res: &Resources,
         cursor: Option<Self::Cursor>,
     ) -> Result<Pin<Box<dyn Stream<Item = Self::Item> + Send>>, CanoError>;
 
@@ -231,7 +228,7 @@ where
     /// position to commit once this item's window flushes).
     async fn process_item(
         &self,
-        res: &Resources<TResourceKey>,
+        res: &Resources,
         item: Self::Item,
     ) -> Result<(Self::Output, Self::Cursor), CanoError>;
 
@@ -242,7 +239,7 @@ where
     /// committed and consumption continues.
     async fn flush_window(
         &self,
-        res: &Resources<TResourceKey>,
+        res: &Resources,
         outputs: Vec<Self::Output>,
     ) -> Result<WindowSignal<TState>, CanoError>;
 
@@ -279,7 +276,7 @@ where
     /// idempotent and on the at-least-once resume contract to replay the lost window.
     async fn on_close(
         &self,
-        res: &Resources<TResourceKey>,
+        res: &Resources,
         reason: CloseReason,
     ) -> Result<TaskResult<TState>, CanoError>;
 
@@ -293,7 +290,7 @@ where
     #[doc(hidden)]
     fn run_in_memory<'life0, 'life1, 'async_trait>(
         &'life0 self,
-        res: &'life1 Resources<TResourceKey>,
+        res: &'life1 Resources,
     ) -> Pin<Box<dyn Future<Output = Result<TaskResult<TState>, CanoError>> + Send + 'async_trait>>
     where
         'life0: 'async_trait,
@@ -336,9 +333,9 @@ const MIN_DURATION_WINDOW: std::time::Duration = std::time::Duration::from_milli
 /// Pull and process items until one window flushes (or the loop terminates). Shared by the
 /// in-memory companion and the engine-driven session — there is exactly one loop body.
 #[allow(clippy::too_many_arguments)]
-async fn drive_window<T, S, K>(
+async fn drive_window<T, S>(
     task: &T,
-    res: &Resources<K>,
+    res: &Resources,
     stream: &mut Pin<Box<dyn Stream<Item = T::Item> + Send>>,
     consecutive_errors: &mut u32,
     window: &StreamWindow,
@@ -347,9 +344,8 @@ async fn drive_window<T, S, K>(
     token: Option<&CancellationToken>,
 ) -> Result<WindowStep<T::Cursor, S>, CanoError>
 where
-    T: StreamTask<S, K> + ?Sized,
+    T: StreamTask<S> + ?Sized,
     S: Clone + fmt::Debug + Send + Sync + 'static,
-    K: Hash + Eq + Send + Sync + 'static,
 {
     use futures_util::StreamExt as _;
 
@@ -506,15 +502,14 @@ where
 /// `CanoError::Cancelled`; the exhausted path honors it). The count- and
 /// duration-window arms use [`flush_full_window`] instead, which maps the signal onto a
 /// terminal [`WindowStep`].
-async fn flush_partial_window<T, S, K>(
+async fn flush_partial_window<T, S>(
     task: &T,
-    res: &Resources<K>,
+    res: &Resources,
     outputs: Vec<T::Output>,
 ) -> Result<WindowSignal<S>, CanoError>
 where
-    T: StreamTask<S, K> + ?Sized,
+    T: StreamTask<S> + ?Sized,
     S: Clone + fmt::Debug + Send + Sync + 'static,
-    K: Hash + Eq + Send + Sync + 'static,
 {
     #[cfg(feature = "metrics")]
     crate::metrics::stream_window();
@@ -529,16 +524,15 @@ where
 /// Deliberately *not* used by the cancel drain (which ignores `Stop`, because a cancelled
 /// run always surfaces `CanoError::Cancelled`) nor by the exhausted path (where `Continue`
 /// falls through to `on_close(Exhausted)`); those arms have different signal semantics.
-async fn flush_full_window<T, S, K>(
+async fn flush_full_window<T, S>(
     task: &T,
-    res: &Resources<K>,
+    res: &Resources,
     outputs: Vec<T::Output>,
     last_cursor: Option<T::Cursor>,
 ) -> Result<WindowStep<T::Cursor, S>, CanoError>
 where
-    T: StreamTask<S, K> + ?Sized,
+    T: StreamTask<S> + ?Sized,
     S: Clone + fmt::Debug + Send + Sync + 'static,
-    K: Hash + Eq + Send + Sync + 'static,
 {
     #[cfg(feature = "metrics")]
     crate::metrics::stream_window();
@@ -555,14 +549,10 @@ where
 
 /// In-memory companion loop: drive windows with no token (no cancellation), no
 /// cursor persistence. Backs [`StreamTask::run_in_memory`].
-async fn run_stream_in_memory<T, S, K>(
-    task: &T,
-    res: &Resources<K>,
-) -> Result<TaskResult<S>, CanoError>
+async fn run_stream_in_memory<T, S>(task: &T, res: &Resources) -> Result<TaskResult<S>, CanoError>
 where
-    T: StreamTask<S, K> + ?Sized,
+    T: StreamTask<S> + ?Sized,
     S: Clone + fmt::Debug + Send + Sync + 'static,
-    K: Hash + Eq + Send + Sync + 'static,
 {
     let window = task.window();
     let policy = task.on_item_error();
@@ -626,53 +616,46 @@ pub type WindowFuture<'a, TState> =
 
 /// Object-safe view of an opened stream session. The engine advances it one window at a
 /// time, persisting the returned cursor between windows.
-pub trait ErasedStreamSession<TState, TResourceKey>: Send
+pub trait ErasedStreamSession<TState>: Send
 where
     TState: Clone + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// Consume until one window flushes (or the loop terminates).
     fn next_window<'a>(
         &'a mut self,
-        res: &'a Resources<TResourceKey>,
+        res: &'a Resources,
         token: Option<&'a CancellationToken>,
     ) -> WindowFuture<'a, TState>;
 }
 
 /// Future returned by [`ErasedStreamTask::open_session`].
-pub type OpenSessionFuture<'a, TState, TResourceKey> = Pin<
-    Box<
-        dyn Future<Output = Result<Box<dyn ErasedStreamSession<TState, TResourceKey>>, CanoError>>
-            + Send
-            + 'a,
-    >,
+pub type OpenSessionFuture<'a, TState> = Pin<
+    Box<dyn Future<Output = Result<Box<dyn ErasedStreamSession<TState>>, CanoError>> + Send + 'a>,
 >;
 
 /// Object-safe, type-erased view of a [`StreamTask`] for the engine's
 /// [`StateEntry::Stream`](crate::workflow::execution::StateEntry) path.
-pub trait ErasedStreamTask<TState, TResourceKey>: Send + Sync
+pub trait ErasedStreamTask<TState>: Send + Sync
 where
     TState: Clone + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     fn name(&self) -> Cow<'static, str>;
     /// Open (or resume) the source from `cursor_bytes`, returning a driven session.
     /// `attempt_timeout` (from the registered `config()`) bounds each `process_item`.
     fn open_session<'a>(
         &'a self,
-        res: &'a Resources<TResourceKey>,
+        res: &'a Resources,
         cursor_bytes: Option<Vec<u8>>,
         attempt_timeout: Option<std::time::Duration>,
-    ) -> OpenSessionFuture<'a, TState, TResourceKey>;
+    ) -> OpenSessionFuture<'a, TState>;
 }
 
 /// An opened, concretely-typed stream session: owns the task handle + the stream + the
 /// per-stream error counter. Holds the single windowed loop body.
-struct StreamSession<T, S, K>
+struct StreamSession<T, S>
 where
-    T: StreamTask<S, K> + 'static,
+    T: StreamTask<S> + 'static,
     S: Clone + fmt::Debug + Send + Sync + 'static,
-    K: Hash + Eq + Send + Sync + 'static,
 {
     task: Arc<T>,
     stream: Pin<Box<dyn Stream<Item = T::Item> + Send>>,
@@ -682,15 +665,14 @@ where
     consecutive_errors: u32,
 }
 
-impl<T, S, K> ErasedStreamSession<S, K> for StreamSession<T, S, K>
+impl<T, S> ErasedStreamSession<S> for StreamSession<T, S>
 where
-    T: StreamTask<S, K> + 'static,
+    T: StreamTask<S> + 'static,
     S: Clone + fmt::Debug + Send + Sync + 'static,
-    K: Hash + Eq + Send + Sync + 'static,
 {
     fn next_window<'a>(
         &'a mut self,
-        res: &'a Resources<K>,
+        res: &'a Resources,
         token: Option<&'a CancellationToken>,
     ) -> WindowFuture<'a, S> {
         Box::pin(async move {
@@ -732,21 +714,20 @@ where
 /// `serde_json` cursor (de)serialization so the engine only sees `Vec<u8>`.
 pub(crate) struct StreamAdapter<T>(pub Arc<T>);
 
-impl<TState, TResourceKey, T> ErasedStreamTask<TState, TResourceKey> for StreamAdapter<T>
+impl<TState, T> ErasedStreamTask<TState> for StreamAdapter<T>
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
-    T: StreamTask<TState, TResourceKey> + 'static,
+    T: StreamTask<TState> + 'static,
 {
     fn name(&self) -> Cow<'static, str> {
         self.0.name()
     }
     fn open_session<'a>(
         &'a self,
-        res: &'a Resources<TResourceKey>,
+        res: &'a Resources,
         cursor_bytes: Option<Vec<u8>>,
         attempt_timeout: Option<std::time::Duration>,
-    ) -> OpenSessionFuture<'a, TState, TResourceKey> {
+    ) -> OpenSessionFuture<'a, TState> {
         Box::pin(async move {
             let cursor: Option<T::Cursor> = match cursor_bytes {
                 None => None,
@@ -766,7 +747,7 @@ where
                 attempt_timeout,
                 consecutive_errors: 0,
             };
-            Ok(Box::new(session) as Box<dyn ErasedStreamSession<TState, TResourceKey>>)
+            Ok(Box::new(session) as Box<dyn ErasedStreamSession<TState>>)
         })
     }
 }

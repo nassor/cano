@@ -129,7 +129,6 @@ use crate::resource::Resources;
 use crate::task::{TaskConfig, TaskResult};
 use std::borrow::Cow;
 use std::fmt;
-use std::hash::Hash;
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
@@ -165,8 +164,6 @@ pub enum TimerOutcome {
 /// # Generic Types
 ///
 /// - **`TState`**: The state enum used by the workflow (`Clone + Debug + Send + Sync`).
-/// - **`TResourceKey`**: The key type used to look up resources (defaults to
-///   [`Cow<'static, str>`]).
 ///
 /// # Default config
 ///
@@ -198,10 +195,9 @@ pub enum TimerOutcome {
 /// }
 /// ```
 #[crate::task::timer]
-pub trait TimerTask<TState, TResourceKey = Cow<'static, str>>: Send + Sync
+pub trait TimerTask<TState>: Send + Sync
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// Get the task configuration that controls execution behaviour.
     ///
@@ -229,17 +225,14 @@ where
     /// # Errors
     ///
     /// Returns [`CanoError`] to abort before sleeping (no [`after_wait`](Self::after_wait) call).
-    async fn wait(&self, res: &Resources<TResourceKey>) -> Result<TimerOutcome, CanoError>;
+    async fn wait(&self, res: &Resources) -> Result<TimerOutcome, CanoError>;
 
     /// Decide the next state. Called once, after the sleep has elapsed.
     ///
     /// # Errors
     ///
     /// Returns [`CanoError`] propagated from the task logic.
-    async fn after_wait(
-        &self,
-        res: &Resources<TResourceKey>,
-    ) -> Result<TaskResult<TState>, CanoError>;
+    async fn after_wait(&self, res: &Resources) -> Result<TaskResult<TState>, CanoError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -256,11 +249,10 @@ where
 /// To cap the whole wait, return `TaskConfig::minimal().with_attempt_timeout(dur)` from
 /// [`TimerTask::config`] and dispatch the task via
 /// [`Workflow::orchestrate`](crate::workflow::Workflow::orchestrate).
-pub async fn run_timer<T, S, K>(t: &T, res: &Resources<K>) -> Result<TaskResult<S>, CanoError>
+pub async fn run_timer<T, S>(t: &T, res: &Resources) -> Result<TaskResult<S>, CanoError>
 where
-    T: TimerTask<S, K> + ?Sized,
+    T: TimerTask<S> + ?Sized,
     S: Clone + fmt::Debug + Send + Sync + 'static,
-    K: Hash + Eq + Send + Sync + 'static,
 {
     match t.wait(res).await? {
         TimerOutcome::Duration(d) => tokio::time::sleep(d).await,
@@ -275,12 +267,10 @@ where
 // ---------------------------------------------------------------------------
 
 /// Type alias for a dynamic [`TimerTask`] trait object.
-pub type DynTimerTask<TState, TResourceKey = Cow<'static, str>> =
-    dyn TimerTask<TState, TResourceKey> + Send + Sync;
+pub type DynTimerTask<TState> = dyn TimerTask<TState> + Send + Sync;
 
 /// Type alias for an `Arc`-wrapped dynamic [`TimerTask`] trait object.
-pub type TimerTaskObject<TState, TResourceKey = Cow<'static, str>> =
-    std::sync::Arc<DynTimerTask<TState, TResourceKey>>;
+pub type TimerTaskObject<TState> = std::sync::Arc<DynTimerTask<TState>>;
 
 // ---------------------------------------------------------------------------
 // Tests

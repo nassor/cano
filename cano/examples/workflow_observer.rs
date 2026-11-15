@@ -195,9 +195,9 @@ async fn main() -> Result<(), CanoError> {
     // -- Scenario C -------------------------------------------------------
     println!("Scenario C — resource health probes\n");
     let resources: Resources = Resources::new()
-        .insert("db", PrimaryDb)
-        .insert("replica", ReadReplica)
-        .insert("payments", PaymentsApi);
+        .insert(PrimaryDb)
+        .insert(ReadReplica)
+        .insert(PaymentsApi);
 
     let mut report: Vec<_> = resources.check_all_health().await.into_iter().collect();
     report.sort_by(|a, b| a.0.cmp(&b.0));

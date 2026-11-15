@@ -43,12 +43,12 @@ mod stream_task_impl;
 mod task_impl;
 mod timer_task_impl;
 
-/// Derive a `from_resources(&Resources<_>) -> CanoResult<Self>` constructor that
+/// Derive a `from_resources(&Resources) -> CanoResult<Self>` constructor that
 /// pulls each field out of a `cano::Resources` map.
 ///
-/// Each field must be `Arc<T>`. Use `#[res("key")]` for string-literal lookups
-/// or `#[res(EnumType::Variant)]` for enum-path lookups. Use
-/// `#[from_resources(key = MyType)]` on the struct to override the inferred key type.
+/// Each field must be `Arc<T>`. A plain field is looked up by its type
+/// (`Resources::get_arc::<T>()`); `#[res("name")]` looks it up by name
+/// (`Resources::get_named_arc::<T>("name")`).
 ///
 /// # Example
 ///
@@ -58,11 +58,12 @@ mod timer_task_impl;
 ///
 /// #[derive(FromResources)]
 /// struct Deps {
-///     #[res("store")]
 ///     store: Arc<MemoryStore>,
+///     #[res("audit")]
+///     audit: Arc<MemoryStore>,
 /// }
 /// ```
-#[proc_macro_derive(FromResources, attributes(res, from_resources))]
+#[proc_macro_derive(FromResources, attributes(res))]
 pub fn derive_from_resources(input: TokenStream) -> TokenStream {
     from_resources::expand(input.into())
         .unwrap_or_else(syn::Error::into_compile_error)
@@ -82,7 +83,7 @@ pub fn derive_from_resources(input: TokenStream) -> TokenStream {
 ///
 /// 1. **Trait-impl form:** `#[task] impl Task<S> for X { ... }` — user
 ///    writes the trait header.
-/// 2. **Inherent-impl form:** `#[task(state = S [, key = K])] impl X { ... }` —
+/// 2. **Inherent-impl form:** `#[task(state = S)] impl X { ... }` —
 ///    user writes only the inherent block; the macro builds the trait header
 ///    and enforces that exactly one of `run` / `run_bare` is present.
 ///
@@ -159,7 +160,7 @@ pub fn checkpoint_store(_attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Apply to the `CompensatableTask` trait definition, an
-/// `impl CompensatableTask<S [, K]> for T` block, or — for less boilerplate — an
+/// `impl CompensatableTask<S> for T` block, or — for less boilerplate — an
 /// inherent `impl T { ... }` block.
 ///
 /// Use as `#[cano::saga::task]`.
@@ -168,9 +169,9 @@ pub fn checkpoint_store(_attr: TokenStream, item: TokenStream) -> TokenStream {
 ///
 /// 1. **Trait-impl form:** `#[saga::task] impl CompensatableTask<S> for T { type Output =
 ///    O; async fn run(..); async fn compensate(..); }` — user writes the trait header.
-/// 2. **Inherent-impl form:** `#[saga::task(state = S [, key = K])] impl T { type Output =
+/// 2. **Inherent-impl form:** `#[saga::task(state = S)] impl T { type Output =
 ///    O; async fn run(..); async fn compensate(..); }` — the macro builds the
-///    `impl CompensatableTask<S [, K]> for T` header from the attribute args and enforces that
+///    `impl CompensatableTask<S> for T` header from the attribute args and enforces that
 ///    `type Output`, `run`, and `compensate` are present (`config` / `name` may be overridden).
 ///
 /// Either way, every `async fn` is rewritten to return
@@ -191,7 +192,7 @@ pub fn compensatable_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Apply to the `RouterTask` trait definition, an
-/// `impl RouterTask<S [, K]> for T` block, or — for less boilerplate — an
+/// `impl RouterTask<S> for T` block, or — for less boilerplate — an
 /// inherent `impl T { ... }` block.
 ///
 /// Use as `#[cano::task::router]`.
@@ -201,10 +202,10 @@ pub fn compensatable_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// 1. **Trait-impl form:** `#[task::router] impl RouterTask<S> for T { async fn route(..) { ... } }` —
 ///    user writes the trait header. The macro async-rewrites the `RouterTask` impl AND emits a
 ///    companion `impl Task<S> for T` that delegates `Task::run` → `RouterTask::route`.
-/// 2. **Inherent-impl form:** `#[task::router(state = S [, key = K])] impl T { async fn route(..) { ... } }` —
-///    the macro builds the `impl RouterTask<S [, K]> for T` header from the attribute args, enforces
+/// 2. **Inherent-impl form:** `#[task::router(state = S)] impl T { async fn route(..) { ... } }` —
+///    the macro builds the `impl RouterTask<S> for T` header from the attribute args, enforces
 ///    that `route` is present (`config` / `name` may be overridden), and emits the same companion
-///    `impl Task<S [, K]> for T`.
+///    `impl Task<S> for T`.
 ///
 /// On a trait definition (`#[task::router] pub trait RouterTask ...`) the macro just performs the
 /// async-fn-in-trait rewrite.
@@ -220,7 +221,7 @@ pub fn router_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Apply to the `BatchTask` trait definition, an
-/// `impl BatchTask<S [, K]> for T` block, or — for less boilerplate — an
+/// `impl BatchTask<S> for T` block, or — for less boilerplate — an
 /// inherent `impl T { ... }` block.
 ///
 /// Use as `#[cano::task::batch]`.
@@ -230,12 +231,12 @@ pub fn router_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// 1. **Trait-impl form:** `#[task::batch] impl BatchTask<S> for T { type Item = I; type ItemOutput = O; ... }` —
 ///    user writes the trait header. The macro async-rewrites the `BatchTask` impl AND emits a
 ///    companion `impl Task<S> for T` that delegates `Task::run` → `run_batch`.
-/// 2. **Inherent-impl form:** `#[task::batch(state = S [, key = K])] impl T { async fn load(..); async fn process_item(..); async fn finish(..); }` —
-///    the macro builds the `impl BatchTask<S [, K]> for T` header from the attribute args,
+/// 2. **Inherent-impl form:** `#[task::batch(state = S)] impl T { async fn load(..); async fn process_item(..); async fn finish(..); }` —
+///    the macro builds the `impl BatchTask<S> for T` header from the attribute args,
 ///    infers `type Item` from the `&T` parameter of `process_item` and `type ItemOutput` from
 ///    its return type, enforces that `load`, `process_item`, and `finish` are present
 ///    (`concurrency`, `item_retry`, `config`, `name` may be overridden), and emits the same
-///    companion `impl Task<S [, K]> for T`.
+///    companion `impl Task<S> for T`.
 ///
 /// On a trait definition (`#[task::batch] pub trait BatchTask ...`) the macro just performs the
 /// async-fn-in-trait rewrite.
@@ -255,7 +256,7 @@ pub fn batch_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Apply to the `PollTask` trait definition, an
-/// `impl PollTask<S [, K]> for T` block, or — for less boilerplate — an
+/// `impl PollTask<S> for T` block, or — for less boilerplate — an
 /// inherent `impl T { ... }` block.
 ///
 /// Use as `#[cano::task::poll]`.
@@ -265,10 +266,10 @@ pub fn batch_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// 1. **Trait-impl form:** `#[task::poll] impl PollTask<S> for T { async fn poll(..) { ... } }` —
 ///    user writes the trait header. The macro async-rewrites the `PollTask` impl AND emits a
 ///    companion `impl Task<S> for T` that delegates `Task::run` via the `run_poll_loop` helper.
-/// 2. **Inherent-impl form:** `#[task::poll(state = S [, key = K])] impl T { async fn poll(..) { ... } }` —
-///    the macro builds the `impl PollTask<S [, K]> for T` header from the attribute args, enforces
+/// 2. **Inherent-impl form:** `#[task::poll(state = S)] impl T { async fn poll(..) { ... } }` —
+///    the macro builds the `impl PollTask<S> for T` header from the attribute args, enforces
 ///    that `poll` is present (`config` / `name` may be overridden), and emits the same companion
-///    `impl Task<S [, K]> for T`.
+///    `impl Task<S> for T`.
 ///
 /// On a trait definition (`#[task::poll] pub trait PollTask ...`) the macro just performs the
 /// async-fn-in-trait rewrite.
@@ -287,7 +288,7 @@ pub fn poll_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Apply to the `TimerTask` trait definition, an
-/// `impl TimerTask<S [, K]> for T` block, or — for less boilerplate — an
+/// `impl TimerTask<S> for T` block, or — for less boilerplate — an
 /// inherent `impl T { ... }` block.
 ///
 /// Use as `#[cano::task::timer]`.
@@ -298,10 +299,10 @@ pub fn poll_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///    user writes the trait header. The macro async-rewrites the `TimerTask` impl AND emits a
 ///    companion `impl Task<S> for T` whose `Task::run` sleeps for the returned `TimerOutcome`
 ///    (via the `run_timer` helper) then calls `after_wait`.
-/// 2. **Inherent-impl form:** `#[task::timer(state = S [, key = K])] impl T { async fn wait(..) { ... } async fn after_wait(..) { ... } }` —
-///    the macro builds the `impl TimerTask<S [, K]> for T` header from the attribute args, enforces
+/// 2. **Inherent-impl form:** `#[task::timer(state = S)] impl T { async fn wait(..) { ... } async fn after_wait(..) { ... } }` —
+///    the macro builds the `impl TimerTask<S> for T` header from the attribute args, enforces
 ///    that both `wait` and `after_wait` are present (`config` / `name` may be overridden), and emits
-///    the same companion `impl Task<S [, K]> for T`.
+///    the same companion `impl Task<S> for T`.
 ///
 /// On a trait definition (`#[task::timer] pub trait TimerTask ...`) the macro just performs the
 /// async-fn-in-trait rewrite.
@@ -323,7 +324,7 @@ pub fn timer_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 /// Apply to the `SteppedTask` trait definition, an
-/// `impl SteppedTask<S [, K]> for T` block, or — for less boilerplate — an
+/// `impl SteppedTask<S> for T` block, or — for less boilerplate — an
 /// inherent `impl T { ... }` block.
 ///
 /// Use as `#[cano::task::stepped]`.
@@ -333,10 +334,10 @@ pub fn timer_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// 1. **Trait-impl form:** `#[task::stepped] impl SteppedTask<S> for T { type Cursor = C; async fn step(..) { ... } }` —
 ///    user writes the trait header. The macro async-rewrites the `SteppedTask` impl AND emits a
 ///    companion `impl Task<S> for T` that delegates `Task::run` via the `run_stepped` helper.
-/// 2. **Inherent-impl form:** `#[task::stepped(state = S [, key = K])] impl T { async fn step(..) { ... } }` —
-///    the macro builds the `impl SteppedTask<S [, K]> for T` header from the attribute args, infers
+/// 2. **Inherent-impl form:** `#[task::stepped(state = S)] impl T { async fn step(..) { ... } }` —
+///    the macro builds the `impl SteppedTask<S> for T` header from the attribute args, infers
 ///    `type Cursor` from the `Option<C>` third parameter of `step`, enforces that `step` is present
-///    (`config` / `name` may be overridden), and emits the same companion `impl Task<S [, K]> for T`.
+///    (`config` / `name` may be overridden), and emits the same companion `impl Task<S> for T`.
 ///
 /// On a trait definition (`#[task::stepped] pub trait SteppedTask ...`) the macro just performs the
 /// async-fn-in-trait rewrite.
@@ -354,7 +355,7 @@ pub fn stepped_task(attr: TokenStream, item: TokenStream) -> TokenStream {
         .into()
 }
 
-/// Apply to the `StreamTask` trait definition, an `impl StreamTask<S [, K]> for T`
+/// Apply to the `StreamTask` trait definition, an `impl StreamTask<S> for T`
 /// block, or an inherent `impl T { ... }` block.
 ///
 /// Use as `#[cano::task::stream]`. `StreamTask` is a genuine stream-processing model:
@@ -365,11 +366,11 @@ pub fn stepped_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Two surface forms on impl blocks:
 ///
 /// 1. **Trait-impl form:** `#[task::stream] impl StreamTask<S> for T { type Item = ..; .. }`.
-/// 2. **Inherent-impl form:** `#[task::stream(state = S [, key = K])] impl T { async fn open(..) .. }` —
+/// 2. **Inherent-impl form:** `#[task::stream(state = S)] impl T { async fn open(..) .. }` —
 ///    the macro infers `type Item` from `process_item`'s owned `item` parameter and
 ///    `type Output` / `type Cursor` from the `Ok` 2-tuple of `process_item`'s return,
 ///    requires `open` / `process_item` / `flush_window` / `on_close`, and emits a
-///    companion `impl Task<S [, K]> for T` whose `run` forwards to `StreamTask::run_in_memory`.
+///    companion `impl Task<S> for T` whose `run` forwards to `StreamTask::run_in_memory`.
 ///
 /// On a trait definition the macro just performs the async-fn-in-trait rewrite.
 ///

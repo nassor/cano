@@ -5,7 +5,7 @@
 //! 1. [`#[derive(Resource)]`](cano::Resource) — turns a struct into a `Resource`
 //!    with no-op lifecycle, ready to insert into a `Resources` map.
 //! 2. [`#[derive(FromResources)]`](cano::FromResources) — generates a
-//!    `from_resources(&Resources<_>)` constructor that pulls each declared
+//!    `from_resources(&Resources)` constructor that pulls each declared
 //!    field out of the map. Field-level `#[res("key")]` declares the lookup key.
 //! 3. [`#[task(state = ...)]`](cano::task) on an inherent `impl` block — the
 //!    macro builds the `impl Task<State> for X` header from the attribute,
@@ -89,7 +89,7 @@ impl GeneratorTask {
 
         // Persist
         let StoreDeps { store } = StoreDeps::from_resources(res)?;
-        store.put("filtered_numbers", evens)?;
+        store.put("filtered_numbers", evens);
         println!("Generator task completed");
         Ok(TaskResult::Single(WorkflowAction::Count))
     }
@@ -115,8 +115,8 @@ impl CounterTask {
         let count = numbers.len();
         println!("Counted {} even numbers", count);
 
-        store.put("number_count", count)?;
-        store.remove("filtered_numbers")?;
+        store.put("number_count", count);
+        store.remove("filtered_numbers");
         println!(
             "Counter task completed — count {} stored, intermediate data cleaned",
             count
@@ -138,14 +138,11 @@ async fn main() -> Result<(), CanoError> {
 
     // Build the resource map: a config struct + the shared store.
     let resources = Resources::new()
-        .insert(
-            "config",
-            GeneratorConfig {
-                min_size: 25,
-                max_size: 150,
-            },
-        )
-        .insert("store", store.clone());
+        .insert(GeneratorConfig {
+            min_size: 25,
+            max_size: 150,
+        })
+        .insert(store.clone());
 
     let workflow = Workflow::new(resources)
         .register(WorkflowAction::Generate, GeneratorTask)

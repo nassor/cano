@@ -56,7 +56,7 @@ struct WorkTask;
 #[task(state = Step)]
 impl StartTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        res.get::<SideEffects, _>("sidefx")?.record("Start");
+        res.get::<SideEffects>()?.record("Start");
         Ok(TaskResult::Single(Step::Work))
     }
 }
@@ -64,10 +64,10 @@ impl StartTask {
 #[task(state = Step)]
 impl WorkTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        res.get::<SideEffects, _>("sidefx")?.record("Work");
+        res.get::<SideEffects>()?.record("Work");
         println!("WORK_SIDEFX_WRITTEN");
         let _ = std::io::stdout().flush();
-        if res.get::<PauseAfterWork, _>("pause")?.0 {
+        if res.get::<PauseAfterWork>()?.0 {
             // Park until the parent SIGKILLs us — the `Work` checkpoint is
             // already durable (it's written on state entry, before this task).
             tokio::time::sleep(Duration::from_secs(3600)).await;
@@ -111,8 +111,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let store = Arc::new(RedbCheckpointStore::new(db_path)?);
     let resources = Resources::new()
-        .insert("sidefx", SideEffects { path: sidefx })
-        .insert("pause", PauseAfterWork(mode == "fresh"));
+        .insert(SideEffects { path: sidefx })
+        .insert(PauseAfterWork(mode == "fresh"));
 
     let workflow = Workflow::new(resources)
         .register(Step::Start, StartTask)

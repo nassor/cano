@@ -8,7 +8,6 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::hash::Hash;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
@@ -30,14 +29,13 @@ use super::{Workflow, notify_observers, panic_payload_message};
 use tracing::{Instrument, debug, info, info_span, warn};
 
 /// Entry in the workflow state machine
-pub enum StateEntry<TState, TResourceKey = Cow<'static, str>>
+pub enum StateEntry<TState>
 where
     TState: Clone + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// Single task execution
     Single {
-        task: Arc<dyn Task<TState, TResourceKey> + Send + Sync>,
+        task: Arc<dyn Task<TState> + Send + Sync>,
         /// TaskConfig captured at registration time. Avoids per-dispatch
         /// virtual call through dyn Task to retrieve it.
         config: Arc<crate::task::TaskConfig>,
@@ -56,13 +54,13 @@ where
     /// error. Restarting from the initial state is safe — routers have no side
     /// effects.
     Router {
-        task: Arc<dyn Task<TState, TResourceKey> + Send + Sync>,
+        task: Arc<dyn Task<TState> + Send + Sync>,
         /// TaskConfig captured at registration time (same rationale as `Single`).
         config: Arc<crate::task::TaskConfig>,
     },
     /// Split into parallel tasks with join configuration
     Split {
-        tasks: Vec<Arc<dyn Task<TState, TResourceKey> + Send + Sync>>,
+        tasks: Vec<Arc<dyn Task<TState> + Send + Sync>>,
         /// Per-task configs in the same order as `tasks`. Captured at
         /// registration time (see `Single::config` for rationale).
         configs: Arc<Vec<Arc<crate::task::TaskConfig>>>,
@@ -73,7 +71,7 @@ where
     CompensatableSingle {
         /// Type-erased compensatable task — exposes the forward run (returning the next
         /// state plus the serialized output) and the compensation.
-        task: Arc<dyn ErasedCompensatable<TState, TResourceKey>>,
+        task: Arc<dyn ErasedCompensatable<TState>>,
         /// Forward-run config, captured at registration time (see `Single::config`).
         config: Arc<crate::task::TaskConfig>,
     },
@@ -88,7 +86,7 @@ where
     /// of `None`, so processing continues from where it left off.
     Stepped {
         /// Type-erased stepped task — exposes `name`, `config`, and `step`.
-        task: Arc<dyn ErasedSteppedTask<TState, TResourceKey>>,
+        task: Arc<dyn ErasedSteppedTask<TState>>,
         /// Task config captured at registration time (same rationale as `Single::config`).
         config: Arc<crate::task::TaskConfig>,
     },
@@ -108,16 +106,15 @@ where
     /// surfaces as `CanoError::WorkflowTimeout` rather than `Cancelled`.
     Stream {
         /// Type-erased stream task — exposes `name`, `config`, and `open_session`.
-        task: Arc<dyn ErasedStreamTask<TState, TResourceKey>>,
+        task: Arc<dyn ErasedStreamTask<TState>>,
         /// Task config captured at registration time (same rationale as `Single::config`).
         config: Arc<crate::task::TaskConfig>,
     },
 }
 
-impl<TState, TResourceKey> Clone for StateEntry<TState, TResourceKey>
+impl<TState> Clone for StateEntry<TState>
 where
     TState: Clone + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     fn clone(&self) -> Self {
         match self {
@@ -154,10 +151,9 @@ where
     }
 }
 
-impl<TState, TResourceKey> StateEntry<TState, TResourceKey>
+impl<TState> StateEntry<TState>
 where
     TState: Clone + std::fmt::Debug + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// The task identifier for this state entry, or an empty `String` for
     /// variants with no single task (`Split`) or for variants that are
@@ -203,10 +199,9 @@ fn split_error_summary<TState>(errors: &[SplitTaskResult<TState>]) -> String {
     parts.join("; ")
 }
 
-impl<TState, TResourceKey> Workflow<TState, TResourceKey>
+impl<TState> Workflow<TState>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// The FSM loop, parameterized by the starting checkpoint sequence, the workflow id
     /// to record under, and the (possibly pre-populated, on resume) compensation stack.
@@ -878,7 +873,7 @@ where
 
     async fn execute_single_task(
         &self,
-        task: Arc<dyn Task<TState, TResourceKey> + Send + Sync>,
+        task: Arc<dyn Task<TState> + Send + Sync>,
         config: Arc<crate::task::TaskConfig>,
     ) -> Result<TState, CanoError> {
         let observers = self.observer_slice();
@@ -908,7 +903,7 @@ where
             run_with_retries(&config, || {
                 let task_clone = task.clone();
                 let resources_clone = Arc::clone(&self.resources);
-                async move { task_clone.run(&*resources_clone).await }
+                async move { task_clone.run(&resources_clone).await }
             })
             .await
         };
@@ -956,7 +951,7 @@ where
     #[allow(clippy::too_many_arguments)]
     async fn execute_stepped_task(
         &self,
-        task: Arc<dyn ErasedSteppedTask<TState, TResourceKey>>,
+        task: Arc<dyn ErasedSteppedTask<TState>>,
         config: Arc<crate::task::TaskConfig>,
         workflow_id: &Option<Arc<str>>,
         state_label: &str,
@@ -987,7 +982,7 @@ where
                     let c = attempt_cursor.clone();
                     let t = Arc::clone(&task);
                     let r = Arc::clone(&self.resources);
-                    async move { t.step(&*r, c).await }
+                    async move { t.step(&r, c).await }
                 })
                 .await
             };
@@ -1067,7 +1062,7 @@ where
     #[allow(clippy::too_many_arguments)]
     async fn execute_stream_task(
         &self,
-        task: Arc<dyn ErasedStreamTask<TState, TResourceKey>>,
+        task: Arc<dyn ErasedStreamTask<TState>>,
         config: Arc<crate::task::TaskConfig>,
         workflow_id: &Option<Arc<str>>,
         state_label: &str,
@@ -1258,7 +1253,7 @@ where
 
     async fn execute_split_join(
         &self,
-        tasks: Vec<Arc<dyn Task<TState, TResourceKey> + Send + Sync>>,
+        tasks: Vec<Arc<dyn Task<TState> + Send + Sync>>,
         configs: Arc<Vec<Arc<crate::task::TaskConfig>>>,
         join_config: Arc<JoinConfig<TState>>,
     ) -> Result<TState, CanoError> {
@@ -1350,7 +1345,7 @@ where
                     let result = run_with_retries(&config, || {
                         let t = task.clone();
                         let r = Arc::clone(&resources_clone);
-                        async move { t.run(&*r).await }
+                        async move { t.run(&r).await }
                     })
                     .await;
 
@@ -1719,7 +1714,7 @@ mod tests {
     #[tokio::test]
     async fn test_split_with_data_sharing() {
         let store = crate::store::MemoryStore::new();
-        let resources = Resources::new().insert("store", store.clone());
+        let resources = Resources::new().insert(store.clone());
 
         let tasks = vec![
             DataTask::new("task1", "value1", TestState::Join),
@@ -1749,7 +1744,7 @@ mod tests {
     #[tokio::test]
     async fn test_complex_workflow_with_split_join() {
         let store = crate::store::MemoryStore::new();
-        let resources = Resources::new().insert("store", store.clone());
+        let resources = Resources::new().insert(store.clone());
 
         let split_tasks = vec![
             DataTask::new("parallel1", "data1", TestState::Join),

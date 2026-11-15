@@ -7,7 +7,6 @@
 //! last recorded state, rehydrating the compensation stack from the log.
 
 use std::collections::HashMap;
-use std::hash::Hash;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
@@ -198,10 +197,9 @@ where
     }
 }
 
-impl<TState, TResourceKey> Workflow<TState, TResourceKey>
+impl<TState> Workflow<TState>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// Drain the compensation stack (LIFO) after a terminal workflow failure.
     ///
@@ -406,7 +404,7 @@ where
 
     pub(super) async fn execute_compensatable_task(
         &self,
-        task: Arc<dyn ErasedCompensatable<TState, TResourceKey>>,
+        task: Arc<dyn ErasedCompensatable<TState>>,
         config: Arc<crate::task::TaskConfig>,
     ) -> Result<(TState, Vec<u8>), CanoError> {
         let observers = self.observer_slice();
@@ -445,7 +443,7 @@ where
             run_with_retries(&config, || {
                 let task_clone = task.clone();
                 let resources_clone = Arc::clone(&self.resources);
-                async move { task_clone.run(&*resources_clone).await }
+                async move { task_clone.run(&resources_clone).await }
             })
             .await
         };
@@ -603,16 +601,13 @@ where
         // Once setup_all succeeds, EVERY exit path from this function must
         // run teardown — even the rehydration `?`/`return Err` early-returns
         // between here and `execute_workflow_from`. Wrap the body so a single
-        // `teardown_range` call at the bottom handles every path uniformly.
+        // `teardown_all_result` call at the bottom handles every path uniformly.
         let result: Result<TState, CanoError> =
             self.execute_resume_inner(workflow_id, store, token).await;
-        let teardown_result = self
-            .resources
-            .teardown_range_result(0..self.resources.lifecycle_len())
-            .await;
+        let teardown_result = self.resources.teardown_all_result().await;
         match (result, teardown_result) {
             // The run itself failed — that error is the primary signal; the
-            // teardown error was already logged by `teardown_range_result`.
+            // teardown error was already logged.
             (Err(e), _) => Err(e),
             // The run succeeded but resources could not be torn down. Surface
             // the teardown error so the caller knows the cleanup was incomplete
@@ -3702,12 +3697,9 @@ mod tests {
         let rows_before = store.audit_rows("f3").len();
 
         let triggered = Arc::new(AtomicBool::new(false));
-        let resources = Resources::new().insert(
-            "db",
-            FailingResource {
-                triggered: triggered.clone(),
-            },
-        );
+        let resources = Resources::new().insert(FailingResource {
+            triggered: triggered.clone(),
+        });
 
         // Observer that records every on_resume call.
         let (obs, rec) = EventLog::new();
@@ -3979,13 +3971,10 @@ mod tests {
         // empty-rows check fails post-setup.
         let setups = Arc::new(AtomicU32::new(0));
         let teardowns = Arc::new(AtomicU32::new(0));
-        let resources = Resources::new().insert(
-            "counter",
-            CountingResource {
-                setups: setups.clone(),
-                teardowns: teardowns.clone(),
-            },
-        );
+        let resources = Resources::new().insert(CountingResource {
+            setups: setups.clone(),
+            teardowns: teardowns.clone(),
+        });
         let store = Arc::new(MemCheckpoints::default());
         let workflow = Workflow::new(resources)
             .register(TestState::Start, SimpleTask::new(TestState::Complete))

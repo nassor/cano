@@ -23,8 +23,8 @@ const MODEL: Model = Model {
     optional: &["window", "on_item_error", "config", "name"],
     assoc: &["Item", "Output", "Cursor"],
     infer_assoc,
-    companion_run: Some(|state, key| {
-        let stream = trait_path("StreamTask", state, Some(key));
+    companion_run: Some(|state| {
+        let stream = trait_path("StreamTask", state);
         quote!(<Self as #stream>::run_in_memory(self, res))
     }),
 };
@@ -169,7 +169,7 @@ mod tests {
             impl Counter {
                 async fn open(
                     &self,
-                    _res: &Resources<TestState>,
+                    _res: &Resources,
                     _cursor: Option<u64>,
                 ) -> Result<Pin<Box<dyn Stream<Item = u64> + Send>>, CanoError> {
                     unimplemented!()
@@ -177,7 +177,7 @@ mod tests {
 
                 async fn process_item(
                     &self,
-                    _res: &Resources<TestState>,
+                    _res: &Resources,
                     item: &u64,
                 ) -> Result<(u64, u64), CanoError> {
                     unimplemented!()
@@ -185,7 +185,7 @@ mod tests {
 
                 async fn flush_window(
                     &self,
-                    _res: &Resources<TestState>,
+                    _res: &Resources,
                     _outputs: Vec<u64>,
                 ) -> Result<WindowSignal<u64>, CanoError> {
                     unimplemented!()
@@ -193,7 +193,7 @@ mod tests {
 
                 async fn on_close(
                     &self,
-                    _res: &Resources<TestState>,
+                    _res: &Resources,
                     _reason: CloseReason,
                 ) -> Result<TaskResult<TestState>, CanoError> {
                     unimplemented!()

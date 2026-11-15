@@ -55,8 +55,8 @@ impl LongProcessingTask {
         println!("Long task completed");
 
         let result = format!("Long task finished after {}s", self.duration_secs);
-        let store = res.get::<MemoryStore, _>("store")?;
-        store.put("long_task_result", result)?;
+        let store = res.get::<MemoryStore>()?;
+        store.put("long_task_result", result);
         Ok(TaskResult::Single(MyState::Processing))
     }
 }
@@ -68,7 +68,7 @@ struct ProcessingTask;
 #[task(state = MyState)]
 impl ProcessingTask {
     async fn run(&self, res: &Resources) -> Result<TaskResult<MyState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
         let result: String = store
             .get("long_task_result")
             .unwrap_or_else(|_| "No result available".to_string());
@@ -77,7 +77,7 @@ impl ProcessingTask {
         sleep(Duration::from_secs(1)).await;
 
         let processed = format!("Processed: {}", result);
-        store.put("processed_result", processed)?;
+        store.put("processed_result", processed);
         println!("Processing completed");
         Ok(TaskResult::Single(MyState::End))
     }
@@ -103,12 +103,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let store = MemoryStore::new();
 
-    let long_flow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let long_flow = Workflow::new(Resources::new().insert(store.clone()))
         .register(MyState::Start, LongProcessingTask::new(5))
         .register(MyState::Processing, ProcessingTask)
         .add_exit_state(MyState::End);
 
-    let quick_flow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let quick_flow = Workflow::new(Resources::new().insert(store.clone()))
         .register(MyState::Start, QuickTask)
         .add_exit_state(MyState::End);
 

@@ -17,7 +17,7 @@ const MODEL: Model = Model {
     assoc: &["Cursor"],
     infer_assoc,
     companion_run: Some(
-        |state, key| quote!(::std::boxed::Box::pin(::cano::task::stepped::run_stepped::<Self, #state, #key>(self, res))),
+        |state| quote!(::std::boxed::Box::pin(::cano::task::stepped::run_stepped::<Self, #state>(self, res))),
     ),
 };
 
@@ -35,7 +35,7 @@ fn infer_assoc(item: &ItemImpl) -> syn::Result<Vec<ImplItem>> {
 }
 
 /// Extract `T` from the third parameter `cursor: Option<T>` of `step`
-/// (`&self`, `res: &Resources<_>`, then `cursor`).
+/// (`&self`, `res: &Resources`, then `cursor`).
 fn peel_option_param(f: &ImplItemFn, fn_name: &str) -> syn::Result<Type> {
     let third = f.sig.inputs.iter().nth(2).ok_or_else(|| {
         syn::Error::new_spanned(

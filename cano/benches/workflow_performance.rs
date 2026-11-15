@@ -83,10 +83,10 @@ impl Task<TestState> for IOBoundTask {
         // Simulate database connection or file opening (prep phase)
         tokio::time::sleep(self.io_duration / 8).await;
 
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore>()?;
         // Store some metadata about the operation
         let metadata = format!("io_prep_{}", self.operation_type);
-        let _ = store.put("io_metadata", metadata);
+        store.put("io_metadata", metadata);
 
         // Simulate the main IO operation (exec phase)
         tokio::time::sleep(self.io_duration).await;
@@ -98,7 +98,7 @@ impl Task<TestState> for IOBoundTask {
         // Simulate cleanup and result storage (post phase)
         tokio::time::sleep(self.io_duration / 16).await;
         let result_key = format!("io_result_{}", self.operation_type);
-        let _ = store.put(&result_key, exec_res);
+        store.put(&result_key, exec_res);
 
         Ok(TaskResult::Single(self.next_state.clone()))
     }
@@ -110,10 +110,10 @@ impl Task<TestState> for CPUBoundTask {
         // Prepare data for CPU-intensive computation (prep phase)
         let data: Vec<u64> = (0..self.iterations as u64).collect();
 
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore>()?;
         // Store computation metadata
         let metadata = format!("cpu_prep_{}_{}", self.operation_type, self.iterations);
-        let _ = store.put("cpu_metadata", metadata);
+        store.put("cpu_metadata", metadata);
 
         // Perform CPU-intensive calculation (exec phase)
         let result: u64 = match self.operation_type.as_str() {
@@ -137,7 +137,7 @@ impl Task<TestState> for CPUBoundTask {
 
         // Store computation result (post phase)
         let result_key = format!("cpu_result_{}", self.operation_type);
-        let _ = store.put(&result_key, result);
+        store.put(&result_key, result);
 
         Ok(TaskResult::Single(self.next_state.clone()))
     }
@@ -180,7 +180,7 @@ fn bench_task_performance(c: &mut Criterion) {
             &duration,
             |b, &duration| {
                 let task = SimpleTask::new(TestState::Complete, duration);
-                let resources = Resources::new().insert("store", MemoryStore::new());
+                let resources = Resources::new().insert(MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -208,7 +208,7 @@ fn bench_concurrent_task_execution(c: &mut Criterion) {
                 let tasks: Vec<SimpleTask> = (0..count)
                     .map(|_| SimpleTask::new(TestState::Complete, duration))
                     .collect();
-                let resources = Resources::new().insert("store", MemoryStore::new());
+                let resources = Resources::new().insert(MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -232,7 +232,7 @@ fn bench_concurrent_task_execution(c: &mut Criterion) {
                 let tasks: Vec<SimpleTask> = (0..count)
                     .map(|_| SimpleTask::new(TestState::Complete, duration))
                     .collect();
-                let resources = Resources::new().insert("store", MemoryStore::new());
+                let resources = Resources::new().insert(MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -262,7 +262,7 @@ fn bench_store_operations(c: &mut Criterion) {
                     let store = MemoryStore::new();
                     for i in 0..count {
                         let key = format!("key_{i}");
-                        let _ = store.put(&key, i);
+                        store.put(&key, i);
                     }
                 });
             },
@@ -276,7 +276,7 @@ fn bench_store_operations(c: &mut Criterion) {
                 // Pre-populate the store
                 for i in 0..count {
                     let key = format!("key_{i}");
-                    let _ = store.put(&key, i);
+                    store.put(&key, i);
                 }
 
                 b.iter(|| {
@@ -355,7 +355,7 @@ fn bench_io_bound_workflows(c: &mut Criterion) {
                             )
                         })
                         .collect();
-                    let resources = Resources::new().insert("store", MemoryStore::new());
+                    let resources = Resources::new().insert(MemoryStore::new());
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
@@ -384,7 +384,7 @@ fn bench_io_bound_workflows(c: &mut Criterion) {
                             )
                         })
                         .collect();
-                    let resources = Resources::new().insert("store", MemoryStore::new());
+                    let resources = Resources::new().insert(MemoryStore::new());
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
@@ -437,7 +437,7 @@ fn bench_cpu_bound_workflows(c: &mut Criterion) {
                             )
                         })
                         .collect();
-                    let resources = Resources::new().insert("store", MemoryStore::new());
+                    let resources = Resources::new().insert(MemoryStore::new());
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
@@ -466,7 +466,7 @@ fn bench_cpu_bound_workflows(c: &mut Criterion) {
                             )
                         })
                         .collect();
-                    let resources = Resources::new().insert("store", MemoryStore::new());
+                    let resources = Resources::new().insert(MemoryStore::new());
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
@@ -505,7 +505,7 @@ fn bench_mixed_workload_workflows(c: &mut Criterion) {
             |b, &(io_duration, cpu_iterations)| {
                 let io_task = IOBoundTask::new(TestState::Step1, io_duration, "database");
                 let cpu_task = CPUBoundTask::new(TestState::Complete, cpu_iterations, "processing");
-                let resources = Resources::new().insert("store", MemoryStore::new());
+                let resources = Resources::new().insert(MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -525,7 +525,7 @@ fn bench_mixed_workload_workflows(c: &mut Criterion) {
             |b, &(io_duration, cpu_iterations)| {
                 let io_task = IOBoundTask::new(TestState::Complete, io_duration, "api_service");
                 let cpu_task = CPUBoundTask::new(TestState::Complete, cpu_iterations, "analytics");
-                let resources = Resources::new().insert("store", MemoryStore::new());
+                let resources = Resources::new().insert(MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {

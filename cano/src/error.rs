@@ -281,13 +281,14 @@ pub enum CanoError {
     /// Try to be specific in the error message.
     Generic(String),
 
-    /// A resource key was not found in the Resources map
+    /// No resource of the requested type (or under the requested name) is in the
+    /// Resources map
     ResourceNotFound(String),
 
-    /// A resource was found under the key but its stored type did not match the requested type
+    /// A named resource exists but holds a different type than the one requested
     ResourceTypeMismatch(String),
 
-    /// A resource key was inserted twice into the same Resources map
+    /// A resource type (or name) was inserted twice into the same Resources map
     ResourceDuplicateKey(String),
 
     /// A persisted checkpoint row's workflow version does not match the
@@ -862,7 +863,7 @@ mod tests {
         assert_eq!(cano_error.category(), "store");
 
         // Test conversion via From trait
-        let store_error = StoreError::lock_error("lock failed");
+        let store_error = StoreError::append_type_mismatch("lock failed");
         let cano_error: CanoError = store_error.into();
         assert_eq!(cano_error.category(), "store");
         assert!(cano_error.message().contains("lock failed"));
