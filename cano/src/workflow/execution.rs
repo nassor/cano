@@ -18,7 +18,7 @@ use crate::recovery::CheckpointRow;
 use crate::saga::{CompensationEntry, ErasedCompensatable};
 use crate::task::stepped::{ErasedStep, ErasedSteppedTask};
 use crate::task::stream::{ErasedStreamTask, ErasedWindowStep};
-use crate::task::{Task, TaskResult, run_with_retries};
+use crate::task::{Task, run_with_retries};
 use tokio_util::sync::CancellationToken;
 
 use super::compensation::resolve_compensation_deadline;
@@ -914,19 +914,11 @@ where
         // a migration), corrupting every trace on the runtime.
         #[cfg(feature = "tracing")]
         let run = run.instrument(task_span);
-        let result = run.await;
-
-        let outcome: Result<TState, CanoError> = match result {
-            Ok(TaskResult::Single(next_state)) => {
-                #[cfg(feature = "tracing")]
-                debug!(next_state = ?next_state, "Single task completed");
-                Ok(next_state)
-            }
-            Ok(TaskResult::Split(_)) => Err(CanoError::workflow(
-                "Single task returned split result - use register_split() for split tasks",
-            )),
-            Err(e) => Err(e),
-        };
+        let outcome: Result<TState, CanoError> = run.await;
+        #[cfg(feature = "tracing")]
+        if let Ok(next_state) = &outcome {
+            debug!(next_state = ?next_state, "Single task completed");
+        }
 
         if let Some(ref slice) = observers {
             match &outcome {
@@ -945,9 +937,8 @@ where
     /// - `sequence`: mutated in-place — each persisted cursor row consumes one number.
     ///   The caller already consumed one for the state-entry row before calling here.
     ///
-    /// Returns the next `TState` on `StepOutcome::Done(TaskResult::Single)`. Returns an error
-    /// if `StepOutcome::Done(TaskResult::Split)` is returned (split is unsupported here), or on
-    /// any task / checkpoint failure.
+    /// Returns the next `TState` on `StepOutcome::Done`, or an error on any task /
+    /// checkpoint failure.
     #[allow(clippy::too_many_arguments)]
     async fn execute_stepped_task(
         &self,
@@ -990,19 +981,12 @@ where
 
             match step_result {
                 Err(e) => break Err(e),
-                Ok(ErasedStep::Done(TaskResult::Single(next_state))) => {
+                Ok(ErasedStep::Done(next_state)) => {
                     #[cfg(feature = "tracing")]
                     tracing::debug!(next_state = ?next_state, "Stepped task completed");
                     #[cfg(feature = "metrics")]
                     crate::metrics::step_iteration(true);
                     break Ok(next_state);
-                }
-                Ok(ErasedStep::Done(TaskResult::Split(_))) => {
-                    #[cfg(feature = "metrics")]
-                    crate::metrics::step_iteration(true);
-                    break Err(CanoError::workflow(
-                        "Stepped task returned split result — split is not supported for Stepped states",
-                    ));
                 }
                 Ok(ErasedStep::More(new_cursor_bytes)) => {
                     #[cfg(feature = "metrics")]
@@ -1154,15 +1138,7 @@ where
                     ErasedWindowStep::Done {
                         final_cursor,
                         result,
-                    } => {
-                        let next = match result {
-                            TaskResult::Single(next_state) => Ok(next_state),
-                            TaskResult::Split(_) => Err(CanoError::workflow(
-                                "Stream task returned split result — split is not supported for Stream states",
-                            )),
-                        };
-                        (final_cursor, Some(next))
-                    }
+                    } => (final_cursor, Some(Ok(result))),
                     ErasedWindowStep::Cancelled { final_cursor } => {
                         was_cancelled.store(true, Ordering::Relaxed);
                         (final_cursor, Some(Err(CanoError::cancelled())))
@@ -1278,7 +1254,7 @@ where
             .bulkhead
             .map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
 
-        let mut join_set: tokio::task::JoinSet<(usize, Result<TaskResult<TState>, CanoError>)> =
+        let mut join_set: tokio::task::JoinSet<(usize, Result<TState, CanoError>)> =
             tokio::task::JoinSet::new();
 
         // Observer wiring. `task_ids[idx]` holds each split task's reported id
@@ -1476,7 +1452,7 @@ where
 
     async fn collect_results(
         &self,
-        mut join_set: tokio::task::JoinSet<(usize, Result<TaskResult<TState>, CanoError>)>,
+        mut join_set: tokio::task::JoinSet<(usize, Result<TState, CanoError>)>,
         join_config: &JoinConfig<TState>,
         total_tasks: usize,
     ) -> Result<SplitResult<TState>, CanoError> {
@@ -1691,9 +1667,9 @@ mod tests {
 
         #[task]
         impl Task<TestState> for SlowTask {
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run(&self) -> Result<TestState, CanoError> {
                 tokio::time::sleep(Duration::from_millis(200)).await;
-                Ok(TaskResult::Single(TestState::Complete))
+                Ok(TestState::Complete)
             }
         }
 
@@ -1787,9 +1763,9 @@ mod tests {
 
         #[task]
         impl Task<TestState> for DelayedTask {
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run(&self) -> Result<TestState, CanoError> {
                 tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
-                Ok(TaskResult::Single(TestState::Complete))
+                Ok(TestState::Complete)
             }
         }
 
@@ -1835,15 +1811,15 @@ mod tests {
         #[task]
         impl Task<TestState> for MixedTask {
             fn config(&self) -> crate::task::TaskConfig {
-                crate::task::TaskConfig::minimal()
+                crate::task::TaskConfig::new()
             }
 
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run(&self) -> Result<TestState, CanoError> {
                 tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
                 if self.should_fail {
                     Err(CanoError::task_execution("Task failed"))
                 } else {
-                    Ok(TaskResult::Single(TestState::Complete))
+                    Ok(TestState::Complete)
                 }
             }
         }
@@ -1886,9 +1862,9 @@ mod tests {
 
         #[task]
         impl Task<TestState> for SlowTask {
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run(&self) -> Result<TestState, CanoError> {
                 tokio::time::sleep(Duration::from_millis(500)).await;
-                Ok(TaskResult::Single(TestState::Complete))
+                Ok(TestState::Complete)
             }
         }
 
@@ -1919,9 +1895,9 @@ mod tests {
 
         #[task]
         impl Task<TestState> for DelayedTask {
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run(&self) -> Result<TestState, CanoError> {
                 tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
-                Ok(TaskResult::Single(TestState::Complete))
+                Ok(TestState::Complete)
             }
         }
 
@@ -1968,15 +1944,15 @@ mod tests {
         #[task]
         impl Task<TestState> for MixedTask {
             fn config(&self) -> crate::task::TaskConfig {
-                crate::task::TaskConfig::minimal()
+                crate::task::TaskConfig::new()
             }
 
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run(&self) -> Result<TestState, CanoError> {
                 tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
                 if self.should_fail {
                     Err(CanoError::task_execution("Task failed"))
                 } else {
-                    Ok(TaskResult::Single(TestState::Complete))
+                    Ok(TestState::Complete)
                 }
             }
         }
@@ -2022,9 +1998,9 @@ mod tests {
 
         #[task]
         impl Task<TestState> for FastTask {
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run(&self) -> Result<TestState, CanoError> {
                 tokio::time::sleep(Duration::from_millis(self.delay_ms)).await;
-                Ok(TaskResult::Single(TestState::Complete))
+                Ok(TestState::Complete)
             }
         }
 
@@ -2053,8 +2029,8 @@ mod tests {
 
         #[task]
         impl Task<TestState> for SimpleTaskLocal {
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
-                Ok(TaskResult::Single(TestState::Complete))
+            async fn run(&self) -> Result<TestState, CanoError> {
+                Ok(TestState::Complete)
             }
         }
 
@@ -2177,26 +2153,6 @@ mod tests {
         assert!(err.to_string().contains("no exit states"));
     }
 
-    #[tokio::test]
-    async fn test_split_task_from_single_register() {
-        #[derive(Clone)]
-        struct SplitReturningTask;
-
-        #[task]
-        impl Task<TestState> for SplitReturningTask {
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
-                Ok(TaskResult::Split(vec![TestState::Complete]))
-            }
-        }
-
-        let workflow = Workflow::bare()
-            .register(TestState::Start, SplitReturningTask)
-            .add_exit_state(TestState::Complete);
-        let result = workflow.orchestrate(TestState::Start).await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("register_split"));
-    }
-
     /// Regression test: a task registered in a workflow is retried exactly once per the
     /// configured retry count by the outer `execute_single_task` `run_with_retries`.
     #[tokio::test]
@@ -2214,7 +2170,7 @@ mod tests {
                 crate::task::TaskConfig::new().with_fixed_retry(2, Duration::from_millis(1))
             }
 
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run(&self) -> Result<TestState, CanoError> {
                 self.call_count.fetch_add(1, Ordering::SeqCst);
                 Err(CanoError::task_execution("always fails"))
             }
@@ -2261,10 +2217,10 @@ mod tests {
                     .with_fixed_retry(4, std::time::Duration::from_millis(1))
             }
 
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run(&self) -> Result<TestState, CanoError> {
                 let count = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
                 if count >= self.succeed_after {
-                    Ok(TaskResult::Single(TestState::Complete))
+                    Ok(TestState::Complete)
                 } else {
                     Err(CanoError::task_execution("not ready yet"))
                 }
@@ -2300,10 +2256,10 @@ mod tests {
     #[task]
     impl Task<TestState> for PanickingTask {
         fn config(&self) -> crate::task::TaskConfig {
-            crate::task::TaskConfig::minimal()
+            crate::task::TaskConfig::new()
         }
 
-        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+        async fn run(&self) -> Result<TestState, CanoError> {
             panic!("boom");
         }
     }
@@ -2363,10 +2319,10 @@ mod tests {
     #[task]
     impl Task<TestState> for ConcurrencyProbe {
         fn config(&self) -> crate::task::TaskConfig {
-            crate::task::TaskConfig::minimal()
+            crate::task::TaskConfig::new()
         }
 
-        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+        async fn run(&self) -> Result<TestState, CanoError> {
             let now = self.live.fetch_add(1, Ordering::SeqCst) + 1;
             // Update peak via a CAS loop.
             let mut peak = self.max.load(Ordering::SeqCst);
@@ -2381,7 +2337,7 @@ mod tests {
             }
             tokio::time::sleep(self.sleep).await;
             self.live.fetch_sub(1, Ordering::SeqCst);
-            Ok(TaskResult::Single(TestState::Complete))
+            Ok(TestState::Complete)
         }
     }
 
@@ -2441,9 +2397,9 @@ mod tests {
                     .with_attempt_timeout(Duration::from_millis(20))
             }
 
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run(&self) -> Result<TestState, CanoError> {
                 tokio::time::sleep(Duration::from_millis(200)).await;
-                Ok(TaskResult::Single(TestState::Complete))
+                Ok(TestState::Complete)
             }
         }
 
@@ -2475,10 +2431,10 @@ mod tests {
         #[task]
         impl Task<TestState> for FailingTask {
             fn config(&self) -> crate::task::TaskConfig {
-                crate::task::TaskConfig::minimal().with_circuit_breaker(Arc::clone(&self.breaker))
+                crate::task::TaskConfig::new().with_circuit_breaker(Arc::clone(&self.breaker))
             }
 
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run(&self) -> Result<TestState, CanoError> {
                 Err(CanoError::task_execution("always fails"))
             }
         }
@@ -2529,7 +2485,7 @@ mod tests {
         impl SteppedTask<TestState> for Counter {
             type Cursor = u32;
             fn config(&self) -> crate::task::TaskConfig {
-                crate::task::TaskConfig::minimal()
+                crate::task::TaskConfig::new()
             }
             async fn step(
                 &self,
@@ -2538,7 +2494,7 @@ mod tests {
             ) -> Result<StepOutcome<u32, TestState>, CanoError> {
                 let n = cursor.unwrap_or(0) + 1;
                 if n >= self.target {
-                    Ok(StepOutcome::Done(TaskResult::Single(TestState::Complete)))
+                    Ok(StepOutcome::Done(TestState::Complete))
                 } else {
                     Ok(StepOutcome::More(n))
                 }
@@ -2554,42 +2510,6 @@ mod tests {
         assert_eq!(result, TestState::Complete);
     }
 
-    #[tokio::test]
-    async fn test_register_stepped_split_result_is_rejected() {
-        // StepOutcome::Done(TaskResult::Split) must return a workflow error.
-        struct SplitStepper;
-
-        #[task_mod::stepped]
-        impl SteppedTask<TestState> for SplitStepper {
-            type Cursor = u32;
-            fn config(&self) -> crate::task::TaskConfig {
-                crate::task::TaskConfig::minimal()
-            }
-            async fn step(
-                &self,
-                _res: &Resources,
-                _cursor: Option<u32>,
-            ) -> Result<StepOutcome<u32, TestState>, CanoError> {
-                Ok(StepOutcome::Done(TaskResult::Split(vec![
-                    TestState::Complete,
-                ])))
-            }
-        }
-
-        let err = Workflow::bare()
-            .register_stepped(TestState::Start, SplitStepper)
-            .add_exit_state(TestState::Complete)
-            .orchestrate(TestState::Start)
-            .await
-            .expect_err("split result from stepped must error");
-        // The FSM wraps the failure with state context; `.inner()` peels one layer.
-        assert!(
-            matches!(err.inner(), CanoError::Workflow(_)),
-            "expected Workflow error, got {err:?}"
-        );
-        assert!(err.to_string().contains("split"), "got: {err}");
-    }
-
     // ---- WithStateContext wrapping ----
 
     #[tokio::test]
@@ -2603,9 +2523,9 @@ mod tests {
         #[task]
         impl Task<TestState> for FailNoRetry {
             fn config(&self) -> task_mod::TaskConfig {
-                task_mod::TaskConfig::minimal()
+                task_mod::TaskConfig::new()
             }
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run(&self) -> Result<TestState, CanoError> {
                 Err(CanoError::task_execution("boom"))
             }
         }
@@ -2644,7 +2564,7 @@ mod tests {
             fn config(&self) -> task_mod::TaskConfig {
                 task_mod::TaskConfig::new().with_fixed_retry(2, Duration::from_millis(0))
             }
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run(&self) -> Result<TestState, CanoError> {
                 Err(CanoError::task_execution("nope"))
             }
         }
@@ -2673,8 +2593,8 @@ mod tests {
 
         #[task_mod::router]
         impl RouterTask<TestState> for AlwaysRoute {
-            async fn route(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
-                Ok(TaskResult::Single(TestState::Process))
+            async fn route(&self, _res: &Resources) -> Result<TestState, CanoError> {
+                Ok(TestState::Process)
             }
         }
 
@@ -2712,11 +2632,11 @@ mod tests {
     #[task]
     impl Task<TestState> for SleepyTask {
         fn config(&self) -> crate::task::TaskConfig {
-            crate::task::TaskConfig::minimal()
+            crate::task::TaskConfig::new()
         }
-        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+        async fn run(&self) -> Result<TestState, CanoError> {
             tokio::time::sleep(Duration::from_millis(self.sleep_ms)).await;
-            Ok(TaskResult::Single(self.next.clone()))
+            Ok(self.next.clone())
         }
     }
 
@@ -2822,7 +2742,7 @@ mod tests {
         impl CompensatableTask<TestState> for A {
             type Output = u32;
             fn config(&self) -> crate::task::TaskConfig {
-                crate::task::TaskConfig::minimal()
+                crate::task::TaskConfig::new()
             }
             fn name(&self) -> std::borrow::Cow<'static, str> {
                 "A".into()
@@ -2830,8 +2750,8 @@ mod tests {
             async fn run(
                 &self,
                 _res: &crate::resource::Resources,
-            ) -> Result<(TaskResult<TestState>, u32), CanoError> {
-                Ok((TaskResult::Single(TestState::Process), 7))
+            ) -> Result<(TestState, u32), CanoError> {
+                Ok((TestState::Process, 7))
             }
             async fn compensate(
                 &self,
@@ -2888,7 +2808,7 @@ mod tests {
         impl CompensatableTask<TestState> for SlowComp {
             type Output = u32;
             fn config(&self) -> crate::task::TaskConfig {
-                crate::task::TaskConfig::minimal()
+                crate::task::TaskConfig::new()
             }
             fn name(&self) -> std::borrow::Cow<'static, str> {
                 "SlowComp".into()
@@ -2896,10 +2816,10 @@ mod tests {
             async fn run(
                 &self,
                 _res: &crate::resource::Resources,
-            ) -> Result<(TaskResult<TestState>, u32), CanoError> {
+            ) -> Result<(TestState, u32), CanoError> {
                 tokio::time::sleep(Duration::from_millis(80)).await;
                 self.log.lock().unwrap().push("ran".to_string());
-                Ok((TaskResult::Single(TestState::Complete), 42))
+                Ok((TestState::Complete, 42))
             }
             async fn compensate(
                 &self,

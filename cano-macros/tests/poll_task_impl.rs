@@ -10,7 +10,6 @@ use std::sync::atomic::{AtomicU32, Ordering};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step {
     Poll,
-    Next,
     Done,
 }
 
@@ -23,7 +22,7 @@ struct InherentPoller;
 #[task::poll(state = Step)]
 impl InherentPoller {
     async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
-        Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
+        Ok(PollOutcome::Ready(Step::Done))
     }
 }
 
@@ -50,14 +49,14 @@ fn inherent_poller_has_default_name() {
 async fn inherent_poller_poll_works() {
     let res = Resources::new();
     let result = PollTask::poll(&InherentPoller, &res).await.unwrap();
-    assert_eq!(result, PollOutcome::Ready(TaskResult::Single(Step::Done)));
+    assert_eq!(result, PollOutcome::Ready(Step::Done));
 }
 
 #[tokio::test]
 async fn inherent_poller_task_run_works() {
     let res = Resources::new();
     let result = Task::run(&InherentPoller, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::Done));
+    assert_eq!(result, Step::Done);
 }
 
 // ---------------------------------------------------------------------------
@@ -68,16 +67,12 @@ struct InherentCustomPoller;
 
 #[task::poll(state = Step)]
 impl InherentCustomPoller {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-
     fn name(&self) -> Cow<'static, str> {
         Cow::Borrowed("my-inherent-poller")
     }
 
     async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
-        Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
+        Ok(PollOutcome::Ready(Step::Done))
     }
 }
 
@@ -128,7 +123,7 @@ impl InherentCountingPoller {
     async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
         let n = self.count.fetch_add(1, Ordering::Relaxed) + 1;
         if n >= self.target {
-            Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
+            Ok(PollOutcome::Ready(Step::Done))
         } else {
             Ok(PollOutcome::Pending { delay_ms: 0 })
         }
@@ -143,31 +138,8 @@ async fn inherent_poller_multiple_polls() {
     };
     let res = Resources::new();
     let result = Task::run(&poller, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::Done));
+    assert_eq!(result, Step::Done);
     assert_eq!(poller.count.load(Ordering::Relaxed), 3);
-}
-
-// ---------------------------------------------------------------------------
-// Inherent form returning Split
-// ---------------------------------------------------------------------------
-
-struct InherentSplitPoller;
-
-#[task::poll(state = Step)]
-impl InherentSplitPoller {
-    async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
-        Ok(PollOutcome::Ready(TaskResult::Split(vec![
-            Step::Poll,
-            Step::Next,
-        ])))
-    }
-}
-
-#[tokio::test]
-async fn inherent_poller_can_return_split() {
-    let res = Resources::new();
-    let result = Task::run(&InherentSplitPoller, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Split(vec![Step::Poll, Step::Next]));
 }
 
 // ---------------------------------------------------------------------------
@@ -179,7 +151,7 @@ struct TraitPoller;
 #[task::poll]
 impl PollTask<Step> for TraitPoller {
     async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
-        Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
+        Ok(PollOutcome::Ready(Step::Done))
     }
 }
 
@@ -187,14 +159,14 @@ impl PollTask<Step> for TraitPoller {
 async fn trait_form_poll_works() {
     let res = Resources::new();
     let result = PollTask::poll(&TraitPoller, &res).await.unwrap();
-    assert_eq!(result, PollOutcome::Ready(TaskResult::Single(Step::Done)));
+    assert_eq!(result, PollOutcome::Ready(Step::Done));
 }
 
 #[tokio::test]
 async fn trait_form_companion_task_run_works() {
     let res = Resources::new();
     let result = Task::run(&TraitPoller, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::Done));
+    assert_eq!(result, Step::Done);
 }
 
 // ---------------------------------------------------------------------------
@@ -206,7 +178,7 @@ async fn inherent_poller_as_dyn_task() {
     let poller: Arc<dyn Task<Step>> = Arc::new(InherentPoller);
     let res = Resources::new();
     let result = Task::run(poller.as_ref(), &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::Done));
+    assert_eq!(result, Step::Done);
 }
 
 // ---------------------------------------------------------------------------
@@ -286,7 +258,7 @@ impl InherentResilientPoller {
         if n < self.errors_before_ready {
             Err(CanoError::task_execution("transient"))
         } else {
-            Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
+            Ok(PollOutcome::Ready(Step::Done))
         }
     }
 }
@@ -312,6 +284,6 @@ async fn inherent_retry_on_error_within_budget_succeeds() {
     };
     let res = Resources::new();
     let result = Task::run(&poller, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::Done));
+    assert_eq!(result, Step::Done);
     assert_eq!(poller.count.load(Ordering::Relaxed), 3); // 2 errors + 1 Ready
 }

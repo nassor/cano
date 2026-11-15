@@ -57,19 +57,17 @@ struct FinalizeTask;
 
 #[task(state = Step)]
 impl StartTask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         println!("  start");
-        Ok(TaskResult::Single(Step::Process))
+        Ok(Step::Process)
     }
 }
 
 #[task(state = Step)]
 impl ProcessTask {
     // No retries — let the first failure (the "crash") bubble out of `orchestrate`.
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
         let n = res
             .get::<CrashOnce>()?
             .attempts
@@ -80,15 +78,15 @@ impl ProcessTask {
             return Err(CanoError::task_execution("simulated crash in ProcessTask"));
         }
         println!("  process: attempt {n} — ok");
-        Ok(TaskResult::Single(Step::Finalize))
+        Ok(Step::Finalize)
     }
 }
 
 #[task(state = Step)]
 impl FinalizeTask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         println!("  finalize");
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 

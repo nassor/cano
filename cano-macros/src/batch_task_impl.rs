@@ -18,6 +18,7 @@ const MODEL: Model = Model {
     required: &["load", "process_item", "finish"],
     optional: &["concurrency", "item_retry", "config", "name"],
     assoc: &["Item", "ItemOutput"],
+    res_first: &[("load", 1), ("finish", 2)],
     infer_assoc,
     companion_run: Some(
         |state| quote!(::std::boxed::Box::pin(::cano::task::batch::run_batch::<Self, #state>(self, res))),

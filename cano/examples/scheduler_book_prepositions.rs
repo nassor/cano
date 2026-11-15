@@ -115,7 +115,7 @@ impl BookDownloadTask {
         TaskConfig::new().with_fixed_retry(2, Duration::from_secs(1))
     }
 
-    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowPhase>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<WorkflowPhase, CanoError> {
         let book_opt = match self.download_book().await {
             Ok(book) => Some(book),
             Err(error) => {
@@ -129,9 +129,9 @@ impl BookDownloadTask {
             let mut books: Vec<Book> = store.get("books").unwrap_or_else(|_| Vec::new());
             books.push(book);
             store.put("books", books);
-            Ok(TaskResult::Single(WorkflowPhase::Analyze))
+            Ok(WorkflowPhase::Analyze)
         } else {
-            Ok(TaskResult::Single(WorkflowPhase::Complete))
+            Ok(WorkflowPhase::Complete)
         }
     }
 }
@@ -185,7 +185,7 @@ impl PrepositionAnalysisTask {
 
 #[task(state = WorkflowPhase)]
 impl PrepositionAnalysisTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowPhase>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<WorkflowPhase, CanoError> {
         let store = res.get::<MemoryStore>()?;
         let books: Vec<Book> = store
             .get("books")
@@ -203,7 +203,7 @@ impl PrepositionAnalysisTask {
         let count = analyses.len();
         store.put("book_analyses", analyses);
         println!("Stored {} book analyses", count);
-        Ok(TaskResult::Single(WorkflowPhase::Rank))
+        Ok(WorkflowPhase::Rank)
     }
 }
 
@@ -213,7 +213,7 @@ struct BookRankingTask;
 
 #[task(state = WorkflowPhase)]
 impl BookRankingTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowPhase>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<WorkflowPhase, CanoError> {
         let store = res.get::<MemoryStore>()?;
         let analyses: Vec<BookAnalysis> = store
             .get("book_analyses")
@@ -251,7 +251,7 @@ impl BookRankingTask {
             );
         }
 
-        Ok(TaskResult::Single(WorkflowPhase::Complete))
+        Ok(WorkflowPhase::Complete)
     }
 }
 

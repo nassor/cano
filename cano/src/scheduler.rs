@@ -206,8 +206,8 @@ mod metrics_tests {
     struct Ok1;
     #[crate::task]
     impl Task<St> for Ok1 {
-        async fn run_bare(&self) -> Result<TaskResult<St>, CanoError> {
-            Ok(TaskResult::Single(St::Done))
+        async fn run(&self) -> Result<St, CanoError> {
+            Ok(St::Done)
         }
     }
 

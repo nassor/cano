@@ -50,16 +50,16 @@ struct WorkTask;
 
 #[task(state = St)]
 impl StartTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<St>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<St, CanoError> {
         res.get::<SideEffects>()?.record("Start");
-        Ok(TaskResult::Single(St::Work))
+        Ok(St::Work)
     }
 }
 #[task(state = St)]
 impl WorkTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<St>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<St, CanoError> {
         res.get::<SideEffects>()?.record("Work");
-        Ok(TaskResult::Single(St::Done))
+        Ok(St::Done)
     }
 }
 

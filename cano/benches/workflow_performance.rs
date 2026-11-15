@@ -67,19 +67,19 @@ enum TestState {
 
 #[task]
 impl Task<TestState> for SimpleTask {
-    async fn run(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<TestState, CanoError> {
         tokio::time::sleep(self.duration / 4).await;
         // simulate exec phase
         tokio::time::sleep(self.duration / 2).await;
         // simulate post phase
         tokio::time::sleep(self.duration / 4).await;
-        Ok(TaskResult::Single(self.next_state.clone()))
+        Ok(self.next_state.clone())
     }
 }
 
 #[task]
 impl Task<TestState> for IOBoundTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TestState, CanoError> {
         // Simulate database connection or file opening (prep phase)
         tokio::time::sleep(self.io_duration / 8).await;
 
@@ -100,13 +100,13 @@ impl Task<TestState> for IOBoundTask {
         let result_key = format!("io_result_{}", self.operation_type);
         store.put(&result_key, exec_res);
 
-        Ok(TaskResult::Single(self.next_state.clone()))
+        Ok(self.next_state.clone())
     }
 }
 
 #[task]
 impl Task<TestState> for CPUBoundTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TestState, CanoError> {
         // Prepare data for CPU-intensive computation (prep phase)
         let data: Vec<u64> = (0..self.iterations as u64).collect();
 
@@ -139,7 +139,7 @@ impl Task<TestState> for CPUBoundTask {
         let result_key = format!("cpu_result_{}", self.operation_type);
         store.put(&result_key, result);
 
-        Ok(TaskResult::Single(self.next_state.clone()))
+        Ok(self.next_state.clone())
     }
 }
 
@@ -560,8 +560,8 @@ fn bench_orchestrate_overhead(c: &mut Criterion) {
 
     #[cano::task]
     impl Task<S> for Noop {
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(S::Done))
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(S::Done)
         }
     }
 
@@ -603,8 +603,8 @@ fn bench_large_split_collect(c: &mut Criterion) {
 
             #[cano::task]
             impl Task<S> for Noop {
-                async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-                    Ok(TaskResult::Single(S::Done))
+                async fn run(&self) -> Result<S, CanoError> {
+                    Ok(S::Done)
                 }
             }
 
@@ -644,20 +644,20 @@ fn bench_fsm_transitions(c: &mut Criterion) {
 
     #[cano::task]
     impl Task<S> for PlainA {
-        async fn run(&self, _res: &Resources) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(S::B))
+        async fn run(&self, _res: &Resources) -> Result<S, CanoError> {
+            Ok(S::B)
         }
     }
     #[cano::task]
     impl Task<S> for PlainB {
-        async fn run(&self, _res: &Resources) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(S::C))
+        async fn run(&self, _res: &Resources) -> Result<S, CanoError> {
+            Ok(S::C)
         }
     }
     #[cano::task]
     impl Task<S> for PlainC {
-        async fn run(&self, _res: &Resources) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(S::Done))
+        async fn run(&self, _res: &Resources) -> Result<S, CanoError> {
+            Ok(S::Done)
         }
     }
 
@@ -667,20 +667,20 @@ fn bench_fsm_transitions(c: &mut Criterion) {
 
     #[cano::task]
     impl Task<S> for BareA {
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(S::B))
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(S::B)
         }
     }
     #[cano::task]
     impl Task<S> for BareB {
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(S::C))
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(S::C)
         }
     }
     #[cano::task]
     impl Task<S> for BareC {
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(S::Done))
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(S::Done)
         }
     }
 
@@ -734,8 +734,8 @@ fn bench_tracing_overhead(c: &mut Criterion) {
 
     #[cano::task]
     impl Task<S> for Noop {
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(S::Done))
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(S::Done)
         }
     }
 

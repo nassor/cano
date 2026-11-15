@@ -44,13 +44,11 @@ struct Charge {
 #[saga::task(state = u32)]
 impl Charge {
     type Output = (String, i64);
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
+
     fn name(&self) -> std::borrow::Cow<'static, str> {
         std::borrow::Cow::Owned(format!("charge-{}", self.idx))
     }
-    async fn run(&self, res: &Resources) -> Result<(TaskResult<u32>, (String, i64)), CanoError> {
+    async fn run(&self, res: &Resources) -> Result<(u32, (String, i64)), CanoError> {
         if self.idx == self.fail_at {
             return Err(CanoError::task_execution(format!(
                 "step {} failed",
@@ -59,10 +57,7 @@ impl Charge {
         }
         let ledger = res.get::<Ledger>()?;
         ledger.apply(&self.account, self.amount);
-        Ok((
-            TaskResult::Single(self.next),
-            (self.account.clone(), self.amount),
-        ))
+        Ok((self.next, (self.account.clone(), self.amount)))
     }
     async fn compensate(&self, res: &Resources, output: (String, i64)) -> Result<(), CanoError> {
         let (account, amount) = output;
@@ -172,17 +167,15 @@ mod recovery {
     #[saga::task(state = St)]
     impl Step {
         type Output = u32;
-        fn config(&self) -> TaskConfig {
-            TaskConfig::minimal()
-        }
+
         fn name(&self) -> std::borrow::Cow<'static, str> {
             std::borrow::Cow::Borrowed(self.name)
         }
-        async fn run(&self, _res: &Resources) -> Result<(TaskResult<St>, u32), CanoError> {
+        async fn run(&self, _res: &Resources) -> Result<(St, u32), CanoError> {
             if self.fail_forward {
                 return Err(CanoError::task_execution(format!("{} failed", self.name)));
             }
-            Ok((TaskResult::Single(self.next.clone()), self.value))
+            Ok((self.next.clone(), self.value))
         }
         async fn compensate(&self, res: &Resources, output: u32) -> Result<(), CanoError> {
             res.get::<LogRes>()?

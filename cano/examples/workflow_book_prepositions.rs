@@ -208,7 +208,7 @@ impl BookDownloaderTask {
         TaskConfig::new().with_fixed_retry(2, Duration::from_secs(1))
     }
 
-    async fn run(&self, res: &Resources) -> Result<TaskResult<BookPrepositionAction>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<BookPrepositionAction, CanoError> {
         let book_list = Self::get_book_list();
         println!("Prepared {} books for fetching", book_list.len());
 
@@ -252,7 +252,7 @@ impl BookDownloaderTask {
 
         store.put("downloaded_books", books.clone());
         println!("Stored {} books in memory for analysis", books.len());
-        Ok(TaskResult::Single(BookPrepositionAction::Analyze))
+        Ok(BookPrepositionAction::Analyze)
     }
 }
 
@@ -317,11 +317,7 @@ impl PrepositionTask {
 
 #[task(state = BookPrepositionAction)]
 impl PrepositionTask {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-
-    async fn run(&self, res: &Resources) -> Result<TaskResult<BookPrepositionAction>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<BookPrepositionAction, CanoError> {
         let store = res.get::<MemoryStore>()?;
         let books: Vec<Book> = store
             .get("downloaded_books")
@@ -364,7 +360,7 @@ impl PrepositionTask {
             "Stored {} book analyses and cleaned up raw content",
             analyses.len()
         );
-        Ok(TaskResult::Single(BookPrepositionAction::Rank))
+        Ok(BookPrepositionAction::Rank)
     }
 }
 
@@ -379,11 +375,7 @@ impl BookRankingByPrepositionTask {
 
 #[task(state = BookPrepositionAction)]
 impl BookRankingByPrepositionTask {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-
-    async fn run(&self, res: &Resources) -> Result<TaskResult<BookPrepositionAction>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<BookPrepositionAction, CanoError> {
         let store = res.get::<MemoryStore>()?;
         let analyses: Vec<BookAnalysis> = store
             .get("book_analyses")
@@ -478,7 +470,7 @@ impl BookRankingByPrepositionTask {
         }
 
         println!("Book preposition analysis complete!");
-        Ok(TaskResult::Single(BookPrepositionAction::Complete))
+        Ok(BookPrepositionAction::Complete)
     }
 }
 
@@ -633,7 +625,7 @@ mod tests {
         let res = Resources::new().insert(store.clone());
         let result = analyzer.run(&res).await.unwrap();
 
-        assert_eq!(result, TaskResult::Single(BookPrepositionAction::Rank));
+        assert_eq!(result, BookPrepositionAction::Rank);
 
         // Verify analyses were stored
         let analyses: Vec<BookAnalysis> = store.get("book_analyses").unwrap();
@@ -684,7 +676,7 @@ mod tests {
         let res = Resources::new().insert(store.clone());
         let result = ranker.run(&res).await.unwrap();
 
-        assert_eq!(result, TaskResult::Single(BookPrepositionAction::Complete));
+        assert_eq!(result, BookPrepositionAction::Complete);
 
         // Verify rankings were stored and properly sorted
         let rankings: Vec<BookRanking> = store.get("book_rankings").unwrap();

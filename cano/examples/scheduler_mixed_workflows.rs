@@ -47,7 +47,7 @@ impl SimpleTask {
 
 #[cano::task]
 impl Task<TaskState> for SimpleTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<TaskState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TaskState, CanoError> {
         let prep_result = format!("Task {} prepared", self.task_id);
         let count = self.execution_count.fetch_add(1, Ordering::SeqCst) + 1;
 
@@ -58,7 +58,7 @@ impl Task<TaskState> for SimpleTask {
 
         let store = res.get::<MemoryStore>()?;
         store.put("last_execution", exec_result);
-        Ok(TaskResult::Single(TaskState::Complete))
+        Ok(TaskState::Complete)
     }
 }
 

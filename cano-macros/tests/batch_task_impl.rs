@@ -44,10 +44,10 @@ impl InherentInferred {
         &self,
         _res: &Resources,
         outputs: Vec<Result<String, CanoError>>,
-    ) -> Result<TaskResult<Step>, CanoError> {
+    ) -> Result<Step, CanoError> {
         let strings: Vec<String> = outputs.into_iter().map(|r| r.unwrap()).collect();
         assert_eq!(strings, vec!["10", "20", "30"]);
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -78,8 +78,8 @@ fn inherent_inferred_has_default_name() {
 fn inherent_inferred_companion_task_forwards_config() {
     // Task::config should delegate to BatchTask::config
     let max_attempts = Task::config(&InherentInferred).retry_mode.max_attempts();
-    // Default TaskConfig has 4 max_attempts (3 retries + initial)
-    assert_eq!(max_attempts, 4);
+    // Default TaskConfig runs once (no retries)
+    assert_eq!(max_attempts, 1);
 }
 
 #[test]
@@ -91,7 +91,7 @@ fn inherent_inferred_companion_task_forwards_name() {
 async fn inherent_inferred_task_run_works() {
     let res = Resources::new();
     let result = Task::run(&InherentInferred, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::Done));
+    assert_eq!(result, Step::Done);
 }
 
 #[tokio::test]
@@ -129,10 +129,10 @@ impl InherentExplicitTypes {
         &self,
         _res: &Resources,
         outputs: Vec<Result<i64, CanoError>>,
-    ) -> Result<TaskResult<Step>, CanoError> {
+    ) -> Result<Step, CanoError> {
         let vals: Vec<i64> = outputs.into_iter().map(|r| r.unwrap()).collect();
         assert_eq!(vals, vec![1, 0, 1]);
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -140,7 +140,7 @@ impl InherentExplicitTypes {
 async fn explicit_types_compile_and_run() {
     let res = Resources::new();
     let result = Task::run(&InherentExplicitTypes, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::Done));
+    assert_eq!(result, Step::Done);
 }
 
 // ---------------------------------------------------------------------------
@@ -165,10 +165,10 @@ impl InherentWithKey {
         &self,
         _res: &Resources,
         outputs: Vec<Result<u32, CanoError>>,
-    ) -> Result<TaskResult<Step>, CanoError> {
+    ) -> Result<Step, CanoError> {
         let doubled: Vec<u32> = outputs.into_iter().map(|r| r.unwrap()).collect();
         assert_eq!(doubled, vec![2, 4, 6]);
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -179,7 +179,7 @@ async fn inherent_with_key_uses_custom_resource_key() {
     let resources = Resources::new().insert(store);
 
     let result = Task::run(&InherentWithKey, &resources).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::Done));
+    assert_eq!(result, Step::Done);
 }
 
 #[tokio::test]
@@ -232,14 +232,14 @@ impl InherentWithOverrides {
         &self,
         _res: &Resources,
         outputs: Vec<Result<u32, CanoError>>,
-    ) -> Result<TaskResult<Step>, CanoError> {
+    ) -> Result<Step, CanoError> {
         // All 4 items should succeed after retry
         assert_eq!(outputs.len(), 4);
         assert!(
             outputs.iter().all(|r| r.is_ok()),
             "all items should succeed"
         );
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -272,7 +272,7 @@ async fn inherent_overrides_retry_recovers_first_item() {
     };
     let res = Resources::new();
     let result = Task::run(&task, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::Done));
+    assert_eq!(result, Step::Done);
     // First item fails once, retries once; items 2-4 succeed first try.
     // So: 2 calls for item 1 (order may vary with concurrency=4) + 1 each for others.
     // Total >= 5 calls.
@@ -287,10 +287,6 @@ struct InherentCustomMeta;
 
 #[task::batch(state = Step)]
 impl InherentCustomMeta {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-
     fn name(&self) -> Cow<'static, str> {
         Cow::Borrowed("my-batch-processor")
     }
@@ -307,8 +303,8 @@ impl InherentCustomMeta {
         &self,
         _res: &Resources,
         _outputs: Vec<Result<u32, CanoError>>,
-    ) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    ) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 
@@ -327,7 +323,7 @@ fn inherent_custom_name_forwarded_to_task() {
 
 #[test]
 fn inherent_custom_config_minimal_forwarded_to_task() {
-    // TaskConfig::minimal() → 1 max_attempt (no retries)
+    // TaskConfig::new() → 1 max_attempt (no retries)
     assert_eq!(
         Task::config(&InherentCustomMeta).retry_mode.max_attempts(),
         1
@@ -361,10 +357,10 @@ impl BatchTask<Step> for TraitBatch {
         &self,
         _res: &Resources,
         outputs: Vec<Result<Self::ItemOutput, CanoError>>,
-    ) -> Result<TaskResult<Step>, CanoError> {
+    ) -> Result<Step, CanoError> {
         let vals: Vec<u32> = outputs.into_iter().map(|r| r.unwrap()).collect();
         assert_eq!(vals, vec![101, 201, 301]);
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -372,7 +368,7 @@ impl BatchTask<Step> for TraitBatch {
 async fn trait_form_batch_task_run_works() {
     let res = Resources::new();
     let result = Task::run(&TraitBatch, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::Done));
+    assert_eq!(result, Step::Done);
 }
 
 #[tokio::test]
@@ -380,7 +376,7 @@ async fn trait_form_batch_task_as_dyn_task() {
     let task: Arc<dyn Task<Step>> = Arc::new(TraitBatch);
     let res = Resources::new();
     let result = Task::run(task.as_ref(), &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::Done));
+    assert_eq!(result, Step::Done);
 }
 
 #[tokio::test]
@@ -417,7 +413,7 @@ impl PartialFailInherent {
         &self,
         _res: &Resources,
         outputs: Vec<Result<u32, CanoError>>,
-    ) -> Result<TaskResult<Step>, CanoError> {
+    ) -> Result<Step, CanoError> {
         // Partial success policy: collect Oks, tolerate Errs.
         assert_eq!(outputs.len(), 3);
         assert!(outputs[0].is_ok());
@@ -426,7 +422,7 @@ impl PartialFailInherent {
 
         let sum: u32 = outputs.into_iter().filter_map(|r| r.ok()).sum();
         assert_eq!(sum, 40); // 10 + 30
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -434,7 +430,7 @@ impl PartialFailInherent {
 async fn partial_failure_err_slot_reaches_finish_and_task_succeeds() {
     let res = Resources::new();
     let result = Task::run(&PartialFailInherent, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::Done));
+    assert_eq!(result, Step::Done);
 }
 
 // ---------------------------------------------------------------------------
@@ -459,10 +455,10 @@ impl LoadErrInherent {
         &self,
         _res: &Resources,
         _outputs: Vec<Result<u32, CanoError>>,
-    ) -> Result<TaskResult<Step>, CanoError> {
+    ) -> Result<Step, CanoError> {
         self.finish_called
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -510,11 +506,11 @@ impl LoadStep {
         &self,
         res: &Resources,
         outputs: Vec<Result<u32, CanoError>>,
-    ) -> Result<TaskResult<Step>, CanoError> {
+    ) -> Result<Step, CanoError> {
         let doubled: Vec<u32> = outputs.into_iter().map(|r| r.unwrap()).collect();
         let store = res.get::<MemoryStore>()?;
         store.put("output", doubled);
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 

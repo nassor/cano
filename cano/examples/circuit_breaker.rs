@@ -61,14 +61,14 @@ impl Task<Step> for CallTask {
     fn config(&self) -> TaskConfig {
         // Disable retries so each orchestrate() = exactly one call against the breaker.
         // Real workloads usually keep a small retry budget here; we drop it for clarity.
-        TaskConfig::minimal().with_circuit_breaker(Arc::clone(&self.breaker))
+        TaskConfig::new().with_circuit_breaker(Arc::clone(&self.breaker))
     }
 
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
         let client = res.get::<FlakyClient>()?;
         let payload = client.fetch().await?;
         println!("    → got: {payload}");
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 

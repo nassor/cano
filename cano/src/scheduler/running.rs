@@ -308,7 +308,7 @@ mod tests {
     use crate::scheduler::test_support::*;
     use crate::scheduler::{BackoffPolicy, Scheduler};
     use crate::task;
-    use crate::task::{Task, TaskResult};
+    use crate::task::Task;
     use crate::workflow::Workflow;
     use std::sync::atomic::{AtomicU32, Ordering};
     use tokio::time::{Duration, sleep};
@@ -582,9 +582,9 @@ mod tests {
 
         #[task]
         impl Task<TestState> for SlowTask {
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run(&self) -> Result<TestState, CanoError> {
                 sleep(Duration::from_millis(300)).await;
-                Ok(TaskResult::Single(TestState::Complete))
+                Ok(TestState::Complete)
             }
         }
 
@@ -670,13 +670,13 @@ mod tests {
         // Disable retries so each scheduler dispatch is a single attempt.
         // The scheduler's BackoffPolicy is the only retry layer under test.
         fn config(&self) -> crate::task::TaskConfig {
-            crate::task::TaskConfig::minimal()
+            crate::task::TaskConfig::new()
         }
 
-        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+        async fn run(&self) -> Result<TestState, CanoError> {
             let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
             if attempt >= self.succeed_after {
-                Ok(TaskResult::Single(TestState::Complete))
+                Ok(TestState::Complete)
             } else {
                 Err(CanoError::TaskExecution("flaky".to_string()))
             }
@@ -1351,13 +1351,13 @@ mod tests {
     #[task]
     impl Task<TestState> for CancellableSlow {
         fn config(&self) -> crate::task::TaskConfig {
-            crate::task::TaskConfig::minimal()
+            crate::task::TaskConfig::new()
         }
-        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+        async fn run(&self) -> Result<TestState, CanoError> {
             self.started.fetch_add(1, Ordering::SeqCst);
             sleep(Duration::from_secs(30)).await;
             self.completed.fetch_add(1, Ordering::SeqCst);
-            Ok(TaskResult::Single(TestState::Complete))
+            Ok(TestState::Complete)
         }
     }
 
@@ -1582,12 +1582,12 @@ mod tests {
     #[task]
     impl Task<TestState> for Sleeper {
         fn config(&self) -> crate::task::TaskConfig {
-            crate::task::TaskConfig::minimal()
+            crate::task::TaskConfig::new()
         }
-        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+        async fn run(&self) -> Result<TestState, CanoError> {
             sleep(self.dur).await;
             self.done.store(true, Ordering::SeqCst);
-            Ok(TaskResult::Single(TestState::Complete))
+            Ok(TestState::Complete)
         }
     }
 
@@ -1613,14 +1613,14 @@ mod tests {
     impl crate::saga::CompensatableTask<TestState> for Stubborn {
         type Output = ();
         fn config(&self) -> crate::task::TaskConfig {
-            crate::task::TaskConfig::minimal()
+            crate::task::TaskConfig::new()
         }
         async fn run(
             &self,
             _res: &crate::resource::Resources,
-        ) -> Result<(TaskResult<TestState>, ()), CanoError> {
+        ) -> Result<(TestState, ()), CanoError> {
             sleep(Duration::from_secs(60)).await;
-            Ok((TaskResult::Single(TestState::Complete), ()))
+            Ok((TestState::Complete, ()))
         }
         async fn compensate(
             &self,
@@ -1759,8 +1759,8 @@ mod tests {
         struct OtherTask;
         #[task]
         impl Task<Other> for OtherTask {
-            async fn run_bare(&self) -> Result<TaskResult<Other>, CanoError> {
-                Ok(TaskResult::Single(Other::End))
+            async fn run(&self) -> Result<Other, CanoError> {
+                Ok(Other::End)
             }
         }
         let other = Workflow::bare()

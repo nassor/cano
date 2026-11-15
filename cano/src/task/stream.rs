@@ -62,13 +62,13 @@
 //! cursor. The window *after* that cursor may be partially processed then replayed —
 //! [`open`](StreamTask::open), [`process_item`](StreamTask::process_item), and
 //! [`on_close`](StreamTask::on_close) **must be idempotent**. `config` defaults to
-//! [`TaskConfig::minimal()`] (no outer retry) because an outer retry would re-invoke
+//! [`TaskConfig::new()`] (no outer retry) because an outer retry would re-invoke
 //! `open()` and re-consume the stream; only [`attempt_timeout`](crate::task::TaskConfig)
 //! is honored — as a per-[`process_item`](StreamTask::process_item) bound.
 
 use crate::error::CanoError;
 use crate::resource::Resources;
-use crate::task::{TaskConfig, TaskResult};
+use crate::task::TaskConfig;
 use futures_util::Stream;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -131,9 +131,6 @@ pub enum StreamWindow {
     Duration(std::time::Duration),
 }
 
-/// Alias for [`StreamWindow::Count`] — emphasises the batching semantics.
-pub type StreamBatch = StreamWindow;
-
 /// The result of one [`flush_window`](StreamTask::flush_window) call.
 #[derive(Debug)]
 pub enum WindowSignal<TState> {
@@ -141,7 +138,7 @@ pub enum WindowSignal<TState> {
     Continue,
     /// Stop and transition the FSM to this result. The driver commits the window's
     /// cursor first.
-    Stop(TaskResult<TState>),
+    Stop(TState),
 }
 
 /// Why the consume loop is ending — passed to [`on_close`](StreamTask::on_close).
@@ -196,7 +193,7 @@ where
         StreamErrorPolicy::FailFast
     }
 
-    /// Task configuration. Defaults to [`TaskConfig::minimal()`].
+    /// Task configuration. Defaults to [`TaskConfig::new()`].
     ///
     /// Only [`attempt_timeout`](crate::task::TaskConfig) is applied — as a bound on each
     /// [`process_item`](StreamTask::process_item) call (a timeout becomes an item error
@@ -207,13 +204,13 @@ where
     /// The per-item error policy, the `CancellationToken`, and the window loop are the
     /// resilience surface.
     fn config(&self) -> TaskConfig {
-        crate::task::minimal_task_config()
+        TaskConfig::new()
     }
 
     /// Human-readable identifier, reported to
     /// [`WorkflowObserver`](crate::observer::WorkflowObserver) hooks.
     fn name(&self) -> Cow<'static, str> {
-        crate::task::default_task_name::<Self>()
+        Cow::Borrowed(std::any::type_name::<Self>())
     }
 
     /// Open (or resume) the source stream. `cursor` is the last committed position, or
@@ -245,8 +242,8 @@ where
 
     /// Close hook, called after the in-flight partial window has been flushed.
     ///
-    /// - [`CloseReason::Exhausted`]: the returned [`TaskResult`] is the **next state**.
-    /// - [`CloseReason::Cancelled`]: a **cleanup** hook — the returned `TaskResult` is
+    /// - [`CloseReason::Exhausted`]: the returned state is the **next state**.
+    /// - [`CloseReason::Cancelled`]: a **cleanup** hook — the returned state is
     ///   **ignored** and the run ends as
     ///   [`CanoError::Cancelled`](crate::error::CanoError::Cancelled) (an `Err` returned
     ///   here *is* propagated). Use it to release resources / commit final offsets. It
@@ -274,11 +271,7 @@ where
     /// universal cleanup hook for every exit; for error exits, rely on
     /// [`open`](StreamTask::open) / [`process_item`](StreamTask::process_item) being
     /// idempotent and on the at-least-once resume contract to replay the lost window.
-    async fn on_close(
-        &self,
-        res: &Resources,
-        reason: CloseReason,
-    ) -> Result<TaskResult<TState>, CanoError>;
+    async fn on_close(&self, res: &Resources, reason: CloseReason) -> Result<TState, CanoError>;
 
     /// Drive the in-memory windowed loop (no cursor persistence, no cancellation). Used by
     /// the macro-synthesised `impl Task::run` so a `StreamTask` can be
@@ -291,7 +284,7 @@ where
     fn run_in_memory<'life0, 'life1, 'async_trait>(
         &'life0 self,
         res: &'life1 Resources,
-    ) -> Pin<Box<dyn Future<Output = Result<TaskResult<TState>, CanoError>> + Send + 'async_trait>>
+    ) -> Pin<Box<dyn Future<Output = Result<TState, CanoError>> + Send + 'async_trait>>
     where
         'life0: 'async_trait,
         'life1: 'async_trait,
@@ -314,7 +307,7 @@ pub(crate) enum WindowStep<TCursor, TState> {
     /// `final_cursor` (if any), then transition to `result`.
     Done {
         final_cursor: Option<TCursor>,
-        result: TaskResult<TState>,
+        result: TState,
     },
     /// The run was cancelled: the in-flight window was flushed and `on_close` ran for
     /// cleanup. Commit `final_cursor` (if any), then end as
@@ -549,7 +542,7 @@ where
 
 /// In-memory companion loop: drive windows with no token (no cancellation), no
 /// cursor persistence. Backs [`StreamTask::run_in_memory`].
-async fn run_stream_in_memory<T, S>(task: &T, res: &Resources) -> Result<TaskResult<S>, CanoError>
+async fn run_stream_in_memory<T, S>(task: &T, res: &Resources) -> Result<S, CanoError>
 where
     T: StreamTask<S> + ?Sized,
     S: Clone + fmt::Debug + Send + Sync + 'static,
@@ -559,7 +552,7 @@ where
     let attempt_timeout = task.config().attempt_timeout;
     let mut consecutive_errors: u32 = 0;
 
-    let result: Result<TaskResult<S>, CanoError> = async {
+    let result: Result<S, CanoError> = async {
         let mut stream = task.open(res, None).await?;
         loop {
             match drive_window(
@@ -604,7 +597,7 @@ pub enum ErasedWindowStep<TState> {
     /// Natural termination: persist `final_cursor` (if any) then transition to `result`.
     Done {
         final_cursor: Option<Vec<u8>>,
-        result: TaskResult<TState>,
+        result: TState,
     },
     /// Cancelled: persist `final_cursor` (if any) then end as `CanoError::Cancelled`.
     Cancelled { final_cursor: Option<Vec<u8>> },
@@ -831,8 +824,8 @@ mod tests {
             &self,
             _res: &Resources,
             _reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        ) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -841,7 +834,7 @@ mod tests {
         let task = Collector::default();
         let res = Resources::new();
         let result = Task::run(&task, &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::Done));
+        assert_eq!(result, Step::Done);
         assert_eq!(*task.seen.lock().unwrap(), vec![10, 20, 30, 40, 50]);
         // Count(2): windows [20,40], [60,80], then the partial [100] flushed on close.
         assert_eq!(
@@ -894,8 +887,8 @@ mod tests {
             &self,
             _res: &Resources,
             _reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        ) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -918,7 +911,7 @@ mod tests {
         };
         let res = Resources::new();
         let result = Task::run(&task, &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::Done));
+        assert_eq!(result, Step::Done);
         // item 2 dropped; 1 and 3 survive.
         assert_eq!(*task.flushed.lock().unwrap(), vec![1u32, 3]);
     }
@@ -950,14 +943,14 @@ mod tests {
             _outputs: Vec<u32>,
         ) -> Result<WindowSignal<Step>, CanoError> {
             // Window is Count(1); stop after the very first window.
-            Ok(WindowSignal::Stop(TaskResult::Single(Step::Done)))
+            Ok(WindowSignal::Stop(Step::Done))
         }
 
         async fn on_close(
             &self,
             _res: &Resources,
             _reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
+        ) -> Result<Step, CanoError> {
             panic!("on_close must not run when a window returns Stop");
         }
     }
@@ -966,7 +959,7 @@ mod tests {
     async fn window_stop_short_circuits() {
         let res = Resources::new();
         let result = Task::run(&StopAfterFirst, &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::Done));
+        assert_eq!(result, Step::Done);
     }
 
     #[tokio::test]
@@ -1069,15 +1062,11 @@ mod tests {
             Ok(WindowSignal::Continue)
         }
 
-        async fn on_close(
-            &self,
-            _res: &Resources,
-            reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
+        async fn on_close(&self, _res: &Resources, reason: CloseReason) -> Result<Step, CanoError> {
             if reason == CloseReason::Cancelled {
                 self.closed_cancelled.store(true, Ordering::SeqCst);
             }
-            Ok(TaskResult::Single(Step::Done))
+            Ok(Step::Done)
         }
     }
 
@@ -1161,8 +1150,8 @@ mod tests {
             &self,
             _res: &Resources,
             _reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        ) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -1254,16 +1243,12 @@ mod tests {
             _res: &Resources,
             _outputs: Vec<u32>,
         ) -> Result<WindowSignal<S3>, CanoError> {
-            Ok(WindowSignal::Stop(TaskResult::Single(S3::ViaStop)))
+            Ok(WindowSignal::Stop(S3::ViaStop))
         }
 
-        async fn on_close(
-            &self,
-            _res: &Resources,
-            _reason: CloseReason,
-        ) -> Result<TaskResult<S3>, CanoError> {
+        async fn on_close(&self, _res: &Resources, _reason: CloseReason) -> Result<S3, CanoError> {
             // Must NOT run: the terminal partial flush returned Stop.
-            Ok(TaskResult::Single(S3::ViaClose))
+            Ok(S3::ViaClose)
         }
     }
 
@@ -1371,8 +1356,8 @@ mod tests {
             &self,
             _res: &Resources,
             _reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        ) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -1444,13 +1429,9 @@ mod tests {
             Err(CanoError::task_execution("flush failed during drain"))
         }
 
-        async fn on_close(
-            &self,
-            _res: &Resources,
-            reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
+        async fn on_close(&self, _res: &Resources, reason: CloseReason) -> Result<Step, CanoError> {
             *self.on_close_reason.lock() = Some(reason);
-            Ok(TaskResult::Single(Step::Done))
+            Ok(Step::Done)
         }
     }
 
@@ -1575,9 +1556,9 @@ mod tests {
             &self,
             _res: &Resources,
             _reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
+        ) -> Result<Step, CanoError> {
             self.on_close_called.store(true, Ordering::SeqCst);
-            Ok(TaskResult::Single(Step::Done))
+            Ok(Step::Done)
         }
     }
 
@@ -1633,7 +1614,7 @@ mod tests {
         type Cursor = u64;
 
         fn config(&self) -> TaskConfig {
-            TaskConfig::minimal().with_attempt_timeout(std::time::Duration::from_millis(10))
+            TaskConfig::new().with_attempt_timeout(std::time::Duration::from_millis(10))
         }
 
         async fn open(
@@ -1662,8 +1643,8 @@ mod tests {
             &self,
             _res: &Resources,
             _reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        ) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -1767,8 +1748,8 @@ mod tests {
             &self,
             _res: &Resources,
             _reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        ) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -1882,16 +1863,12 @@ mod tests {
             _res: &Resources,
             _outputs: Vec<u64>,
         ) -> Result<WindowSignal<S3>, CanoError> {
-            Ok(WindowSignal::Stop(TaskResult::Single(S3::ViaStop)))
+            Ok(WindowSignal::Stop(S3::ViaStop))
         }
 
-        async fn on_close(
-            &self,
-            _res: &Resources,
-            _reason: CloseReason,
-        ) -> Result<TaskResult<S3>, CanoError> {
+        async fn on_close(&self, _res: &Resources, _reason: CloseReason) -> Result<S3, CanoError> {
             self.on_close_ran.store(true, Ordering::SeqCst);
-            Ok(TaskResult::Single(S3::ViaClose))
+            Ok(S3::ViaClose)
         }
     }
 
@@ -1984,8 +1961,8 @@ mod tests {
             &self,
             _res: &Resources,
             _reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        ) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -2002,7 +1979,7 @@ mod tests {
         };
         let res = Resources::new();
         let result = Task::run(&task, &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::Done));
+        assert_eq!(result, Step::Done);
         assert_eq!(
             *flushed.lock().unwrap(),
             vec![1u64, 4],
@@ -2037,7 +2014,7 @@ mod tests {
         };
         let res = Resources::new();
         let result = Task::run(&task, &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::Done));
+        assert_eq!(result, Step::Done);
     }
 
     #[tokio::test]
@@ -2068,7 +2045,7 @@ mod tests {
         type Cursor = u64;
 
         fn config(&self) -> TaskConfig {
-            TaskConfig::minimal().with_attempt_timeout(std::time::Duration::from_millis(10))
+            TaskConfig::new().with_attempt_timeout(std::time::Duration::from_millis(10))
         }
 
         fn on_item_error(&self) -> StreamErrorPolicy {
@@ -2104,8 +2081,8 @@ mod tests {
             &self,
             _res: &Resources,
             _reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        ) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -2120,7 +2097,7 @@ mod tests {
         };
         let res = Resources::new();
         let result = Task::run(&task, &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::Done));
+        assert_eq!(result, Step::Done);
         assert_eq!(
             *flushed.lock().unwrap(),
             vec![2u64, 3],
@@ -2211,8 +2188,8 @@ mod tests {
             &self,
             _res: &Resources,
             _reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        ) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -2226,7 +2203,7 @@ mod tests {
         };
         let res = Resources::new();
         let result = Task::run(&task, &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::Done));
+        assert_eq!(result, Step::Done);
         assert_eq!(
             *windows.lock().unwrap(),
             vec![vec![1u64], vec![2], vec![3]],
@@ -2281,8 +2258,8 @@ mod tests {
             &self,
             _res: &Resources,
             _reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        ) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -2416,19 +2393,15 @@ mod tests {
         ) -> Result<WindowSignal<S3>, CanoError> {
             self.flushed.lock().unwrap().push(outputs);
             if self.stop_on_flush {
-                Ok(WindowSignal::Stop(TaskResult::Single(S3::ViaStop)))
+                Ok(WindowSignal::Stop(S3::ViaStop))
             } else {
                 Ok(WindowSignal::Continue)
             }
         }
 
-        async fn on_close(
-            &self,
-            _res: &Resources,
-            reason: CloseReason,
-        ) -> Result<TaskResult<S3>, CanoError> {
+        async fn on_close(&self, _res: &Resources, reason: CloseReason) -> Result<S3, CanoError> {
             *self.close_reason.lock().unwrap() = Some(reason);
-            Ok(TaskResult::Single(S3::ViaClose))
+            Ok(S3::ViaClose)
         }
     }
 
@@ -2536,18 +2509,14 @@ mod tests {
             Ok(WindowSignal::Continue)
         }
 
-        async fn on_close(
-            &self,
-            _res: &Resources,
-            reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
+        async fn on_close(&self, _res: &Resources, reason: CloseReason) -> Result<Step, CanoError> {
             if reason == CloseReason::Cancelled {
                 self.closed_cancelled.store(true, Ordering::SeqCst);
                 if self.close_errors {
                     return Err(CanoError::task_execution("cleanup failed"));
                 }
             }
-            Ok(TaskResult::Single(Step::Done))
+            Ok(Step::Done)
         }
     }
 
@@ -2657,8 +2626,8 @@ mod tests {
             &self,
             _res: &Resources,
             _reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        ) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -2699,57 +2668,8 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Engine-arm error paths: Split rejection, corrupt cursor, append failure, panic.
+    // Engine-arm error paths: corrupt cursor, append failure, panic.
     // -----------------------------------------------------------------------
-
-    struct SplitOnClose;
-
-    #[task::stream]
-    impl StreamTask<Step> for SplitOnClose {
-        type Item = u64;
-        type Output = u64;
-        type Cursor = u64;
-
-        async fn open(
-            &self,
-            _res: &Resources,
-            _cursor: Option<u64>,
-        ) -> Result<Pin<Box<dyn Stream<Item = u64> + Send>>, CanoError> {
-            Ok(Box::pin(stream::iter(vec![1u64])) as Pin<Box<dyn Stream<Item = u64> + Send>>)
-        }
-
-        async fn process_item(&self, _res: &Resources, item: u64) -> Result<(u64, u64), CanoError> {
-            Ok((item, item))
-        }
-
-        async fn flush_window(
-            &self,
-            _res: &Resources,
-            _outputs: Vec<u64>,
-        ) -> Result<WindowSignal<Step>, CanoError> {
-            Ok(WindowSignal::Continue)
-        }
-
-        async fn on_close(
-            &self,
-            _res: &Resources,
-            _reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Split(vec![Step::Done, Step::Done]))
-        }
-    }
-
-    #[tokio::test]
-    async fn stream_split_result_is_rejected() {
-        use crate::workflow::Workflow;
-
-        let workflow = Workflow::bare()
-            .register_stream(Step::Consume, SplitOnClose)
-            .add_exit_state(Step::Done);
-        let err = workflow.orchestrate(Step::Consume).await.unwrap_err();
-        assert_eq!(err.category(), "workflow");
-        assert!(err.to_string().contains("split"), "got {err}");
-    }
 
     /// Count(1) over [1,2]; the [2] window flush fails so run 1 crashes after committing
     /// cursor 1 — giving a StepCursor row to corrupt before resume.
@@ -2788,8 +2708,8 @@ mod tests {
             &self,
             _res: &Resources,
             _reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        ) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -2908,8 +2828,8 @@ mod tests {
             &self,
             _res: &Resources,
             _reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        ) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -2944,7 +2864,7 @@ mod tests {
 
         fn config(&self) -> TaskConfig {
             // max_attempts = 3 — must NOT be applied to a stream (no re-open / re-consume).
-            TaskConfig::minimal().with_fixed_retry(2, std::time::Duration::from_millis(1))
+            TaskConfig::new().with_fixed_retry(2, std::time::Duration::from_millis(1))
         }
 
         async fn open(
@@ -2976,8 +2896,8 @@ mod tests {
             &self,
             _res: &Resources,
             _reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        ) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -3061,8 +2981,8 @@ mod tests {
             &self,
             _res: &Resources,
             _reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        ) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -3193,8 +3113,8 @@ mod tests {
             &self,
             _res: &Resources,
             _reason: CloseReason,
-        ) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        ) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -3298,8 +3218,8 @@ mod tests {
                 &self,
                 _res: &Resources,
                 _reason: CloseReason,
-            ) -> Result<TaskResult<Step>, CanoError> {
-                Ok(TaskResult::Single(Step::Done))
+            ) -> Result<Step, CanoError> {
+                Ok(Step::Done)
             }
         }
 
@@ -3370,12 +3290,8 @@ mod metrics_tests {
             Ok(WindowSignal::Continue)
         }
 
-        async fn on_close(
-            &self,
-            _res: &Resources,
-            _reason: CloseReason,
-        ) -> Result<TaskResult<St>, CanoError> {
-            Ok(TaskResult::Single(St::Done))
+        async fn on_close(&self, _res: &Resources, _reason: CloseReason) -> Result<St, CanoError> {
+            Ok(St::Done)
         }
     }
 
@@ -3440,12 +3356,8 @@ mod metrics_tests {
             Ok(WindowSignal::Continue)
         }
 
-        async fn on_close(
-            &self,
-            _res: &Resources,
-            _reason: CloseReason,
-        ) -> Result<TaskResult<St>, CanoError> {
-            Ok(TaskResult::Single(St::Done))
+        async fn on_close(&self, _res: &Resources, _reason: CloseReason) -> Result<St, CanoError> {
+            Ok(St::Done)
         }
     }
 
@@ -3506,12 +3418,8 @@ mod metrics_tests {
             Ok(WindowSignal::Continue)
         }
 
-        async fn on_close(
-            &self,
-            _res: &Resources,
-            _reason: CloseReason,
-        ) -> Result<TaskResult<St>, CanoError> {
-            Ok(TaskResult::Single(St::Done))
+        async fn on_close(&self, _res: &Resources, _reason: CloseReason) -> Result<St, CanoError> {
+            Ok(St::Done)
         }
     }
 
@@ -3574,12 +3482,8 @@ mod metrics_tests {
             Ok(WindowSignal::Continue)
         }
 
-        async fn on_close(
-            &self,
-            _res: &Resources,
-            _reason: CloseReason,
-        ) -> Result<TaskResult<St>, CanoError> {
-            Ok(TaskResult::Single(St::Done))
+        async fn on_close(&self, _res: &Resources, _reason: CloseReason) -> Result<St, CanoError> {
+            Ok(St::Done)
         }
     }
 

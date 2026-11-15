@@ -89,7 +89,7 @@ impl ParseUrls {
         &self,
         res: &Resources,
         outputs: Vec<Result<String, CanoError>>,
-    ) -> Result<TaskResult<Step>, CanoError> {
+    ) -> Result<Step, CanoError> {
         let valid: Vec<String> = outputs.into_iter().filter_map(|r| r.ok()).collect();
         println!("parse urls : {} valid URLs after validation", valid.len());
 
@@ -99,7 +99,7 @@ impl ParseUrls {
 
         let store = res.get::<MemoryStore>()?;
         store.put("valid_urls", valid);
-        Ok(TaskResult::Single(Step::FetchUrls))
+        Ok(Step::FetchUrls)
     }
 }
 
@@ -143,13 +143,13 @@ impl FetchUrls {
         &self,
         res: &Resources,
         outputs: Vec<Result<(String, usize), CanoError>>,
-    ) -> Result<TaskResult<Step>, CanoError> {
+    ) -> Result<Step, CanoError> {
         let results: Vec<(String, usize)> = outputs.into_iter().filter_map(|r| r.ok()).collect();
         println!("fetch urls : {} URLs fetched successfully", results.len());
 
         let store = res.get::<MemoryStore>()?;
         store.put("fetch_results", results);
-        Ok(TaskResult::Single(Step::Summarise))
+        Ok(Step::Summarise)
     }
 }
 
@@ -180,7 +180,7 @@ impl Summarise {
         &self,
         _res: &Resources,
         outputs: Vec<Result<usize, CanoError>>,
-    ) -> Result<TaskResult<Step>, CanoError> {
+    ) -> Result<Step, CanoError> {
         let total_bytes: usize = outputs.iter().filter_map(|r| r.as_ref().ok()).sum();
         let success_count = outputs.iter().filter(|r| r.is_ok()).count();
         let pct = (success_count * 100)
@@ -197,7 +197,7 @@ impl Summarise {
             )));
         }
 
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 

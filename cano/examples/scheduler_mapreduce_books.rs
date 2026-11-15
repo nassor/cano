@@ -241,7 +241,7 @@ struct InitBatchTask {
 
 #[task(state = BookAnalysisState)]
 impl InitBatchTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<BookAnalysisState, CanoError> {
         let store = res.get::<MemoryStore>()?;
         println!(
             "\n🎯 [{0}] Initializing batch with {1} books",
@@ -252,7 +252,7 @@ impl InitBatchTask {
         store.put("batch_name", self.batch_name.clone());
         store.put("book_metadata", self.books.clone());
 
-        Ok(TaskResult::Single(BookAnalysisState::DownloadBatch))
+        Ok(BookAnalysisState::DownloadBatch)
     }
 }
 
@@ -266,20 +266,20 @@ struct DownloadTask {
 
 #[task(state = BookAnalysisState)]
 impl DownloadTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<BookAnalysisState, CanoError> {
         let store = res.get::<MemoryStore>()?;
         match download_book(self.book_id, self.title.clone(), self.batch_name.clone()).await {
             Ok(book) => {
                 // Store individual book
                 store.put(&format!("book_{}", self.book_id), book);
-                Ok(TaskResult::Single(BookAnalysisState::AnalyzeBatch))
+                Ok(BookAnalysisState::AnalyzeBatch)
             }
             // The bundled corpus deliberately omits one book. Skip it (rather than failing
             // the `All` download join) so the absent book surfaces at the analyze phase,
             // where the `Percentage(0.75)` join demonstrates partial-results tolerance.
             Err(e) => {
                 println!("  ⚠️  [{}] Skipping unavailable book: {e}", self.batch_name);
-                Ok(TaskResult::Single(BookAnalysisState::AnalyzeBatch))
+                Ok(BookAnalysisState::AnalyzeBatch)
             }
         }
     }
@@ -293,7 +293,7 @@ struct AnalyzeTask {
 
 #[task(state = BookAnalysisState)]
 impl AnalyzeTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<BookAnalysisState, CanoError> {
         let store = res.get::<MemoryStore>()?;
         let book: Book = store
             .get(&format!("book_{}", self.book_id))
@@ -309,7 +309,7 @@ impl AnalyzeTask {
         // Store analysis
         store.put(&format!("analysis_{}", self.book_id), analysis);
 
-        Ok(TaskResult::Single(BookAnalysisState::SummarizeBatch))
+        Ok(BookAnalysisState::SummarizeBatch)
     }
 }
 
@@ -321,7 +321,7 @@ struct SummarizeBatchTask {
 
 #[task(state = BookAnalysisState)]
 impl SummarizeBatchTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<BookAnalysisState, CanoError> {
         let store = res.get::<MemoryStore>()?;
         let batch_name: String = store.get("batch_name")?;
         let books: Vec<BookMetadata> = store.get("book_metadata")?;
@@ -369,7 +369,7 @@ impl SummarizeBatchTask {
         // Add to global results
         self.global_results.add_batch(summary).await;
 
-        Ok(TaskResult::Single(BookAnalysisState::Complete))
+        Ok(BookAnalysisState::Complete)
     }
 }
 

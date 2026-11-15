@@ -55,15 +55,15 @@ struct WorkTask;
 
 #[task(state = Step)]
 impl StartTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
         res.get::<SideEffects>()?.record("Start");
-        Ok(TaskResult::Single(Step::Work))
+        Ok(Step::Work)
     }
 }
 
 #[task(state = Step)]
 impl WorkTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
         res.get::<SideEffects>()?.record("Work");
         println!("WORK_SIDEFX_WRITTEN");
         let _ = std::io::stdout().flush();
@@ -72,7 +72,7 @@ impl WorkTask {
             // already durable (it's written on state entry, before this task).
             tokio::time::sleep(Duration::from_secs(3600)).await;
         }
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 

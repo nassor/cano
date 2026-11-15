@@ -46,11 +46,7 @@ impl ReportTask {
 
 #[task(state = WorkflowAction)]
 impl ReportTask {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-
-    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowAction>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<WorkflowAction, CanoError> {
         let store = res.get::<MemoryStore>()?;
         println!("Preparing {} report...", self.report_type);
         store.put("report_start_time", Utc::now().to_rfc3339());
@@ -62,7 +58,7 @@ impl ReportTask {
 
         println!("Report completed: {}", result);
         store.put("report_result", result);
-        Ok(TaskResult::Single(WorkflowAction::Complete))
+        Ok(WorkflowAction::Complete)
     }
 }
 
@@ -82,11 +78,7 @@ impl CleanupTask {
 
 #[task(state = WorkflowAction)]
 impl CleanupTask {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-
-    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowAction>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<WorkflowAction, CanoError> {
         let store = res.get::<MemoryStore>()?;
         println!("Scanning for {} cleanup...", self.cleanup_type);
         store.put("cleanup_start", Utc::now().to_rfc3339());
@@ -103,7 +95,7 @@ impl CleanupTask {
         let count = items.len();
         println!("Cleanup completed: {} items removed", count);
         store.put("cleanup_count", count.to_string());
-        Ok(TaskResult::Single(WorkflowAction::Complete))
+        Ok(WorkflowAction::Complete)
     }
 }
 
@@ -123,11 +115,7 @@ impl ManualTask {
 
 #[task(state = WorkflowAction)]
 impl ManualTask {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-
-    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowAction>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<WorkflowAction, CanoError> {
         let store = res.get::<MemoryStore>()?;
         println!("Starting manual task: {}", self.task_name);
         store.put("manual_task_start", Utc::now().to_rfc3339());
@@ -140,7 +128,7 @@ impl ManualTask {
         let result = format!("{} completed", prep);
         println!("Manual task finished: {}", result);
         store.put("manual_task_result", result);
-        Ok(TaskResult::Single(WorkflowAction::Complete))
+        Ok(WorkflowAction::Complete)
     }
 }
 
@@ -160,11 +148,7 @@ impl SetupTask {
 
 #[task(state = WorkflowAction)]
 impl SetupTask {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-
-    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowAction>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<WorkflowAction, CanoError> {
         let store = res.get::<MemoryStore>()?;
         println!("Preparing {} setup...", self.setup_type);
         store.put("setup_start", Utc::now().to_rfc3339());
@@ -180,7 +164,7 @@ impl SetupTask {
 
         println!("Setup completed successfully");
         store.put("setup_complete", "true".to_string());
-        Ok(TaskResult::Single(WorkflowAction::Complete))
+        Ok(WorkflowAction::Complete)
     }
 }
 

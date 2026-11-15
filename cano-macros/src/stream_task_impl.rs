@@ -22,6 +22,12 @@ const MODEL: Model = Model {
     required: &["open", "process_item", "flush_window", "on_close"],
     optional: &["window", "on_item_error", "config", "name"],
     assoc: &["Item", "Output", "Cursor"],
+    res_first: &[
+        ("open", 2),
+        ("process_item", 2),
+        ("flush_window", 2),
+        ("on_close", 2),
+    ],
     infer_assoc,
     companion_run: Some(|state| {
         let stream = trait_path("StreamTask", state);
@@ -195,7 +201,7 @@ mod tests {
                     &self,
                     _res: &Resources,
                     _reason: CloseReason,
-                ) -> Result<TaskResult<TestState>, CanoError> {
+                ) -> Result<TestState, CanoError> {
                     unimplemented!()
                 }
             }

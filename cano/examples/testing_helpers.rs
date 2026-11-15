@@ -28,18 +28,18 @@ enum Step {
 struct StartTask;
 #[task(state = Step)]
 impl StartTask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Work))
+    async fn run(&self) -> Result<Step, CanoError> {
+        Ok(Step::Work)
     }
 }
 
 struct WorkTask;
 #[task(state = Step)]
 impl WorkTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
         let store = res.get::<MemoryStore>()?;
         store.put("processed", 42_u32);
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -60,8 +60,8 @@ struct Reserve;
 #[saga::task(state = Step)]
 impl Reserve {
     type Output = Unit;
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Unit), CanoError> {
-        Ok((TaskResult::Single(Step::Work), Unit))
+    async fn run(&self, _res: &Resources) -> Result<(Step, Unit), CanoError> {
+        Ok((Step::Work, Unit))
     }
     async fn compensate(&self, res: &Resources, _out: Unit) -> Result<(), CanoError> {
         res.get::<CompensationLog>()?
@@ -77,8 +77,8 @@ struct Charge;
 #[saga::task(state = Step)]
 impl Charge {
     type Output = Unit;
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Unit), CanoError> {
-        Ok((TaskResult::Single(Step::Finish), Unit))
+    async fn run(&self, _res: &Resources) -> Result<(Step, Unit), CanoError> {
+        Ok((Step::Finish, Unit))
     }
     async fn compensate(&self, res: &Resources, _out: Unit) -> Result<(), CanoError> {
         res.get::<CompensationLog>()?
@@ -93,10 +93,7 @@ impl Charge {
 struct Boom;
 #[task(state = Step)]
 impl Boom {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         Err(CanoError::task_execution("boom"))
     }
 }

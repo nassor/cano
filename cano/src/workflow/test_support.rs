@@ -21,7 +21,7 @@ use crate::observer::WorkflowObserver;
 use crate::recovery::{CheckpointRow, CheckpointStore};
 use crate::resource::Resources;
 use crate::store::MemoryStore;
-use crate::task::{Task, TaskResult};
+use crate::task::Task;
 
 /// Test workflow states
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -58,9 +58,9 @@ impl SimpleTask {
 
 #[task]
 impl Task<TestState> for SimpleTask {
-    async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+    async fn run(&self) -> Result<TestState, CanoError> {
         self.counter.fetch_add(1, Ordering::SeqCst);
-        Ok(TaskResult::Single(self.next_state.clone()))
+        Ok(self.next_state.clone())
     }
 }
 
@@ -84,10 +84,10 @@ impl DataTask {
 
 #[task]
 impl Task<TestState> for DataTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TestState, CanoError> {
         let store = res.get::<MemoryStore>()?;
         store.put(&self.key, self.value.clone());
-        Ok(TaskResult::Single(self.next_state.clone()))
+        Ok(self.next_state.clone())
     }
 }
 
@@ -105,11 +105,11 @@ impl FailTask {
 
 #[task]
 impl Task<TestState> for FailTask {
-    async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+    async fn run(&self) -> Result<TestState, CanoError> {
         if self.should_fail {
             Err(CanoError::task_execution("Task intentionally failed"))
         } else {
-            Ok(TaskResult::Single(TestState::Complete))
+            Ok(TestState::Complete)
         }
     }
 }
@@ -522,19 +522,19 @@ impl CompTask {
 impl crate::saga::CompensatableTask<TestState> for CompTask {
     type Output = u32;
     fn config(&self) -> crate::task::TaskConfig {
-        crate::task::TaskConfig::minimal()
+        crate::task::TaskConfig::new()
     }
     fn name(&self) -> std::borrow::Cow<'static, str> {
         std::borrow::Cow::Borrowed(self.name)
     }
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<TestState>, u32), CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<(TestState, u32), CanoError> {
         if self.fail_forward {
             return Err(CanoError::task_execution(format!(
                 "{} forward failed",
                 self.name
             )));
         }
-        Ok((TaskResult::Single(self.next_state.clone()), self.value))
+        Ok((self.next_state.clone(), self.value))
     }
     async fn compensate(&self, _res: &Resources, output: u32) -> Result<(), CanoError> {
         self.log

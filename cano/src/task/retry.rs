@@ -190,15 +190,10 @@ impl RetryMode {
     }
 }
 
+/// The default is [`RetryMode::None`]: a task runs once unless it opts into retries.
 impl Default for RetryMode {
     fn default() -> Self {
-        Self::ExponentialBackoff {
-            max_retries: 3,
-            base_delay: Duration::from_millis(100),
-            multiplier: 2.0,
-            max_delay: Duration::from_secs(30),
-            jitter: 0.1,
-        }
+        Self::None
     }
 }
 
@@ -236,22 +231,9 @@ pub struct TaskConfig {
 }
 
 impl TaskConfig {
-    /// Create a new TaskConfig with default configuration
+    /// A configuration with one attempt, no retries, no timeout and no circuit breaker.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Create a minimal configuration with no retries
-    ///
-    /// Useful for tasks that should fail fast without any retry attempts.
-    pub fn minimal() -> Self {
-        Self {
-            retry_mode: RetryMode::None,
-            attempt_timeout: None,
-            circuit_breaker: None,
-            observers: None,
-            task_name: None,
-        }
     }
 
     /// Set the retry mode for this configuration
@@ -529,7 +511,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::task::TaskResult;
     use std::sync::Arc;
 
     // Tests for RetryMode and TaskConfig
@@ -813,35 +794,11 @@ mod tests {
     }
 
     #[test]
-    fn test_retry_mode_default() {
-        let retry_mode = RetryMode::default();
-
-        // Default should be exponential backoff with 3 retries
-        assert_eq!(retry_mode.max_attempts(), 4);
-
-        // Should have delays for first 3 attempts
-        assert!(retry_mode.delay_for_attempt(0).is_some());
-        assert!(retry_mode.delay_for_attempt(1).is_some());
-        assert!(retry_mode.delay_for_attempt(2).is_some());
-        assert!(retry_mode.delay_for_attempt(3).is_none());
-    }
-
-    #[test]
-    fn test_task_config_creation() {
-        let config = TaskConfig::new();
-        assert_eq!(config.retry_mode.max_attempts(), 4);
-    }
-
-    #[test]
-    fn test_task_config_default() {
-        let config = TaskConfig::default();
-        assert_eq!(config.retry_mode.max_attempts(), 4);
-    }
-
-    #[test]
-    fn test_task_config_minimal() {
-        let config = TaskConfig::minimal();
-        assert_eq!(config.retry_mode.max_attempts(), 1);
+    fn default_config_runs_once() {
+        assert_eq!(RetryMode::default().max_attempts(), 1);
+        assert!(RetryMode::default().delay_for_attempt(0).is_none());
+        assert_eq!(TaskConfig::new().retry_mode.max_attempts(), 1);
+        assert_eq!(TaskConfig::default().retry_mode.max_attempts(), 1);
     }
 
     #[test]
@@ -862,21 +819,21 @@ mod tests {
     async fn test_run_with_retries_success() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let config = TaskConfig::minimal();
+        let config = TaskConfig::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = Arc::clone(&counter);
 
-        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+        let result = run_with_retries::<String, _, _>(&config, || {
             let counter = Arc::clone(&counter_clone);
             async move {
                 counter.fetch_add(1, Ordering::SeqCst);
-                Ok::<TaskResult<String>, CanoError>(TaskResult::Single("success".to_string()))
+                Ok::<String, CanoError>("success".to_string())
             }
         })
         .await
         .unwrap();
 
-        assert_eq!(result, TaskResult::Single("success".to_string()));
+        assert_eq!(result, "success".to_string());
         assert_eq!(counter.load(Ordering::SeqCst), 1);
     }
 
@@ -888,21 +845,21 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = Arc::clone(&counter);
 
-        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+        let result = run_with_retries::<String, _, _>(&config, || {
             let counter = Arc::clone(&counter_clone);
             async move {
                 let count = counter.fetch_add(1, Ordering::SeqCst);
                 if count < 2 {
                     Err(CanoError::task_execution("failure"))
                 } else {
-                    Ok::<TaskResult<String>, CanoError>(TaskResult::Single("success".to_string()))
+                    Ok::<String, CanoError>("success".to_string())
                 }
             }
         })
         .await
         .unwrap();
 
-        assert_eq!(result, TaskResult::Single("success".to_string()));
+        assert_eq!(result, "success".to_string());
         assert_eq!(counter.load(Ordering::SeqCst), 3); // 1 initial + 2 retries
     }
 
@@ -914,11 +871,11 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = Arc::clone(&counter);
 
-        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+        let result = run_with_retries::<String, _, _>(&config, || {
             let counter = Arc::clone(&counter_clone);
             async move {
                 counter.fetch_add(1, Ordering::SeqCst);
-                Err::<TaskResult<String>, CanoError>(CanoError::task_execution("always fails"))
+                Err::<String, CanoError>(CanoError::task_execution("always fails"))
             }
         })
         .await;
@@ -931,15 +888,15 @@ mod tests {
     async fn test_run_with_retries_mode_none() {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
-        let config = TaskConfig::minimal();
+        let config = TaskConfig::new();
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = Arc::clone(&counter);
 
-        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+        let result = run_with_retries::<String, _, _>(&config, || {
             let counter = Arc::clone(&counter_clone);
             async move {
                 counter.fetch_add(1, Ordering::SeqCst);
-                Err::<TaskResult<String>, CanoError>(CanoError::task_execution("immediate fail"))
+                Err::<String, CanoError>(CanoError::task_execution("immediate fail"))
             }
         })
         .await;
@@ -964,12 +921,12 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = Arc::clone(&counter);
 
-        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+        let result = run_with_retries::<String, _, _>(&config, || {
             let counter = Arc::clone(&counter_clone);
             async move {
                 counter.fetch_add(1, Ordering::SeqCst);
                 tokio::time::sleep(Duration::from_millis(200)).await;
-                Ok::<TaskResult<String>, CanoError>(TaskResult::Single("never".to_string()))
+                Ok::<String, CanoError>("never".to_string())
             }
         })
         .await;
@@ -994,13 +951,13 @@ mod tests {
         let config = TaskConfig::new();
         assert!(config.attempt_timeout.is_none());
 
-        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || async {
+        let result = run_with_retries::<String, _, _>(&config, || async {
             tokio::time::sleep(Duration::from_millis(5)).await;
-            Ok::<TaskResult<String>, CanoError>(TaskResult::Single("ok".to_string()))
+            Ok::<String, CanoError>("ok".to_string())
         })
         .await
         .unwrap();
-        assert_eq!(result, TaskResult::Single("ok".to_string()));
+        assert_eq!(result, "ok".to_string());
     }
 
     #[tokio::test]
@@ -1015,19 +972,19 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = Arc::clone(&counter);
 
-        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+        let result = run_with_retries::<String, _, _>(&config, || {
             let counter = Arc::clone(&counter_clone);
             async move {
                 let n = counter.fetch_add(1, Ordering::SeqCst);
                 if n == 0 {
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
-                Ok::<TaskResult<String>, CanoError>(TaskResult::Single("ok".to_string()))
+                Ok::<String, CanoError>("ok".to_string())
             }
         })
         .await
         .unwrap();
-        assert_eq!(result, TaskResult::Single("ok".to_string()));
+        assert_eq!(result, "ok".to_string());
         assert_eq!(counter.load(Ordering::SeqCst), 2);
     }
 
@@ -1039,13 +996,11 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = Arc::clone(&counter);
 
-        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+        let result = run_with_retries::<String, _, _>(&config, || {
             let counter = Arc::clone(&counter_clone);
             async move {
                 counter.fetch_add(1, Ordering::SeqCst);
-                Err::<TaskResult<String>, CanoError>(CanoError::task_execution(
-                    "persistent failure",
-                ))
+                Err::<String, CanoError>(CanoError::task_execution("persistent failure"))
             }
         })
         .await;
@@ -1096,16 +1051,16 @@ mod tests {
         // Threshold = 3, no retries, so the first three failing calls trip the breaker
         // and the fourth call must return CircuitOpen *without* invoking the task body.
         let breaker = Arc::new(CircuitBreaker::new(cb_policy_stable_open(3)));
-        let config = TaskConfig::minimal().with_circuit_breaker(Arc::clone(&breaker));
+        let config = TaskConfig::new().with_circuit_breaker(Arc::clone(&breaker));
         let counter = Arc::new(AtomicUsize::new(0));
 
         for _ in 0..3 {
             let counter = Arc::clone(&counter);
-            let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+            let result = run_with_retries::<String, _, _>(&config, || {
                 let counter = Arc::clone(&counter);
                 async move {
                     counter.fetch_add(1, Ordering::SeqCst);
-                    Err::<TaskResult<String>, CanoError>(CanoError::task_execution("boom"))
+                    Err::<String, CanoError>(CanoError::task_execution("boom"))
                 }
             })
             .await;
@@ -1116,11 +1071,11 @@ mod tests {
 
         // Fourth call: short-circuited.
         let counter_before = counter.load(Ordering::SeqCst);
-        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+        let result = run_with_retries::<String, _, _>(&config, || {
             let counter = Arc::clone(&counter);
             async move {
                 counter.fetch_add(1, Ordering::SeqCst);
-                Ok::<TaskResult<String>, CanoError>(TaskResult::Single("never".into()))
+                Ok::<String, CanoError>("never".into())
             }
         })
         .await;
@@ -1153,16 +1108,16 @@ mod tests {
         // returns immediately with raw CircuitOpen — the remaining 4 retry slots
         // are *not* consumed. We discard the outcome here and verify the
         // short-circuit explicitly with the second call below.
-        let _ = run_with_retries::<TaskResult<String>, _, _>(&config, || async {
-            Err::<TaskResult<String>, CanoError>(CanoError::task_execution("boom"))
+        let _ = run_with_retries::<String, _, _>(&config, || async {
+            Err::<String, CanoError>(CanoError::task_execution("boom"))
         })
         .await;
         assert!(matches!(breaker.state(), CircuitState::Open { .. }));
 
         // Second call: breaker rejects on the very first attempt — surface CircuitOpen
         // raw, not wrapped in RetryExhausted.
-        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || async {
-            Ok::<TaskResult<String>, CanoError>(TaskResult::Single("never".into()))
+        let result = run_with_retries::<String, _, _>(&config, || async {
+            Ok::<String, CanoError>("never".into())
         })
         .await;
         let err = result.unwrap_err();
@@ -1177,12 +1132,12 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let breaker = Arc::new(CircuitBreaker::new(cb_policy(2)));
-        let config = TaskConfig::minimal().with_circuit_breaker(Arc::clone(&breaker));
+        let config = TaskConfig::new().with_circuit_breaker(Arc::clone(&breaker));
 
         // Trip the breaker.
         for _ in 0..2 {
-            let _ = run_with_retries::<TaskResult<String>, _, _>(&config, || async {
-                Err::<TaskResult<String>, CanoError>(CanoError::task_execution("boom"))
+            let _ = run_with_retries::<String, _, _>(&config, || async {
+                Err::<String, CanoError>(CanoError::task_execution("boom"))
             })
             .await;
         }
@@ -1193,16 +1148,16 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(40)).await;
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = Arc::clone(&counter);
-        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+        let result = run_with_retries::<String, _, _>(&config, || {
             let counter = Arc::clone(&counter_clone);
             async move {
                 counter.fetch_add(1, Ordering::SeqCst);
-                Ok::<TaskResult<String>, CanoError>(TaskResult::Single("ok".into()))
+                Ok::<String, CanoError>("ok".into())
             }
         })
         .await
         .unwrap();
-        assert_eq!(result, TaskResult::Single("ok".to_string()));
+        assert_eq!(result, "ok".to_string());
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         assert_eq!(breaker.state(), CircuitState::Closed);
     }
@@ -1213,12 +1168,12 @@ mod tests {
 
         // Two tasks share one Arc<CircuitBreaker>; failures from task A trip it for B.
         let breaker = Arc::new(CircuitBreaker::new(cb_policy_stable_open(3)));
-        let config_a = TaskConfig::minimal().with_circuit_breaker(Arc::clone(&breaker));
-        let config_b = TaskConfig::minimal().with_circuit_breaker(Arc::clone(&breaker));
+        let config_a = TaskConfig::new().with_circuit_breaker(Arc::clone(&breaker));
+        let config_b = TaskConfig::new().with_circuit_breaker(Arc::clone(&breaker));
 
         for _ in 0..3 {
-            let _ = run_with_retries::<TaskResult<String>, _, _>(&config_a, || async {
-                Err::<TaskResult<String>, CanoError>(CanoError::task_execution("A failed"))
+            let _ = run_with_retries::<String, _, _>(&config_a, || async {
+                Err::<String, CanoError>(CanoError::task_execution("A failed"))
             })
             .await;
         }
@@ -1226,11 +1181,11 @@ mod tests {
 
         let b_invocations = Arc::new(AtomicUsize::new(0));
         let b_invocations_clone = Arc::clone(&b_invocations);
-        let result = run_with_retries::<TaskResult<String>, _, _>(&config_b, || {
+        let result = run_with_retries::<String, _, _>(&config_b, || {
             let b = Arc::clone(&b_invocations_clone);
             async move {
                 b.fetch_add(1, Ordering::SeqCst);
-                Ok::<TaskResult<String>, CanoError>(TaskResult::Single("B ok".into()))
+                Ok::<String, CanoError>("B ok".into())
             }
         })
         .await;
@@ -1260,11 +1215,11 @@ mod tests {
         let counter = Arc::new(AtomicUsize::new(0));
         let counter_clone = Arc::clone(&counter);
 
-        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+        let result = run_with_retries::<String, _, _>(&config, || {
             let counter = Arc::clone(&counter_clone);
             async move {
                 counter.fetch_add(1, Ordering::SeqCst);
-                Err::<TaskResult<String>, CanoError>(CanoError::task_execution("boom"))
+                Err::<String, CanoError>(CanoError::task_execution("boom"))
             }
         })
         .await;
@@ -1288,12 +1243,12 @@ mod tests {
         let config = TaskConfig::new().with_fixed_retry(1, Duration::from_millis(1));
         assert!(config.circuit_breaker.is_none());
 
-        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || async {
-            Ok::<TaskResult<String>, CanoError>(TaskResult::Single("ok".into()))
+        let result = run_with_retries::<String, _, _>(&config, || async {
+            Ok::<String, CanoError>("ok".into())
         })
         .await
         .unwrap();
-        assert_eq!(result, TaskResult::Single("ok".into()));
+        assert_eq!(result, "ok");
     }
 
     #[tokio::test]
@@ -1306,19 +1261,19 @@ mod tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let breaker = Arc::new(CircuitBreaker::new(cb_policy_stable_open(2)));
-        let config = TaskConfig::minimal()
+        let config = TaskConfig::new()
             .with_attempt_timeout(Duration::from_millis(10))
             .with_circuit_breaker(Arc::clone(&breaker));
         let invocations = Arc::new(AtomicUsize::new(0));
 
         for _ in 0..2 {
             let invocations = Arc::clone(&invocations);
-            let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+            let result = run_with_retries::<String, _, _>(&config, || {
                 let invocations = Arc::clone(&invocations);
                 async move {
                     invocations.fetch_add(1, Ordering::SeqCst);
                     tokio::time::sleep(Duration::from_millis(100)).await;
-                    Ok::<TaskResult<String>, CanoError>(TaskResult::Single("never".into()))
+                    Ok::<String, CanoError>("never".into())
                 }
             })
             .await;
@@ -1335,11 +1290,11 @@ mod tests {
 
         // Third call: breaker open → short-circuit, body not invoked.
         let before = invocations.load(Ordering::SeqCst);
-        let result = run_with_retries::<TaskResult<String>, _, _>(&config, || {
+        let result = run_with_retries::<String, _, _>(&config, || {
             let invocations = Arc::clone(&invocations);
             async move {
                 invocations.fetch_add(1, Ordering::SeqCst);
-                Ok::<TaskResult<String>, CanoError>(TaskResult::Single("never".into()))
+                Ok::<String, CanoError>("never".into())
             }
         })
         .await;
@@ -1408,7 +1363,7 @@ mod metrics_tests {
         }));
         let p = breaker.try_acquire().unwrap();
         breaker.record_failure(p);
-        let config = TaskConfig::minimal().with_circuit_breaker(Arc::clone(&breaker));
+        let config = TaskConfig::new().with_circuit_breaker(Arc::clone(&breaker));
         let (res, rows) = run_with_recorder(move || async move {
             run_with_retries::<u8, _, _>(&config, || async { Ok(1u8) }).await
         });

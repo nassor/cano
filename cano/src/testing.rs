@@ -35,8 +35,8 @@
 //! struct OkTask;
 //! #[task]
 //! impl Task<S> for OkTask {
-//!     async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-//!         Ok(TaskResult::Single(S::Done))
+//!     async fn run(&self) -> Result<S, CanoError> {
+//!         Ok(S::Done)
 //!     }
 //! }
 //!
@@ -61,7 +61,7 @@ use parking_lot::Mutex;
 use crate::error::CanoError;
 use crate::observer::WorkflowObserver;
 use crate::recovery::{CheckpointRow, CheckpointStore};
-use crate::task::{Task, TaskConfig, TaskResult};
+use crate::task::{Task, TaskConfig};
 
 /// A single event captured by [`RecordingObserver`].
 ///
@@ -383,7 +383,7 @@ pub struct PanicOnAttempt<TState> {
 }
 
 impl<TState> PanicOnAttempt<TState> {
-    /// Override the retry configuration (default: [`TaskConfig::minimal`], no retries).
+    /// Override the retry configuration (default: [`TaskConfig::new`], no retries).
     ///
     /// Mostly useful to assert that panics are *not* retried — the engine fails a panicking
     /// task fast regardless of the policy set here.
@@ -421,7 +421,7 @@ pub fn panic_on_attempt<TState>(panics: u32, next_state: TState) -> PanicOnAttem
         panics,
         next_state,
         attempts: AtomicU32::new(0),
-        config: TaskConfig::minimal(),
+        config: TaskConfig::new(),
     }
 }
 
@@ -438,12 +438,12 @@ where
         "PanicOnAttempt".into()
     }
 
-    async fn run_bare(&self) -> Result<TaskResult<TState>, CanoError> {
+    async fn run(&self) -> Result<TState, CanoError> {
         let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
         if attempt <= self.panics {
             panic!("panic_on_attempt: forced panic on attempt {attempt}");
         }
-        Ok(TaskResult::Single(self.next_state.clone()))
+        Ok(self.next_state.clone())
     }
 }
 
@@ -492,8 +492,8 @@ mod tests {
     struct OkTask;
     #[task]
     impl Task<S> for OkTask {
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(S::Done))
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(S::Done)
         }
         fn name(&self) -> Cow<'static, str> {
             "OkTask".into()
@@ -505,8 +505,8 @@ mod tests {
     struct Go(S);
     #[task]
     impl Task<S> for Go {
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(self.0.clone()))
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(self.0.clone())
         }
     }
 
@@ -611,7 +611,7 @@ mod tests {
         // driving the task's future through the same `catch_panic_to_error` wrapper.
         let task = panic_on_attempt(1, S::Done);
         let err = crate::workflow::catch_panic_to_error(
-            <PanicOnAttempt<S> as Task<S>>::run_bare(&task),
+            <PanicOnAttempt<S> as Task<S>>::run(&task, &crate::Resources::new()),
             "Single task",
         )
         .await

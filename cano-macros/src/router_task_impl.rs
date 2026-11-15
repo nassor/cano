@@ -13,6 +13,7 @@ const MODEL: Model = Model {
     required: &["route"],
     optional: &["config", "name"],
     assoc: &[],
+    res_first: &[("route", 1)],
     infer_assoc: no_assoc,
     companion_run: Some(|state| {
         let router = trait_path("RouterTask", state);

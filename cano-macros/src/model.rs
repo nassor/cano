@@ -52,6 +52,11 @@ pub(crate) struct Model {
     pub optional: &'static [&'static str],
     /// Associated types the inherent form may spell.
     pub assoc: &'static [&'static str],
+    /// Methods whose trait signature takes `res: &Resources` first: `(name, number of
+    /// non-receiver parameters the trait declares)`. A user method with exactly one
+    /// parameter fewer gets `_res: &::cano::Resources` inserted, so resource-free code
+    /// can omit it.
+    pub res_first: &'static [(&'static str, usize)],
     /// Inherent form: `type X = …;` items for associated types the user omitted.
     pub infer_assoc: fn(&ItemImpl) -> syn::Result<Vec<ImplItem>>,
     /// Expression producing the companion `Task::run` boxed future; `None` = no
@@ -131,6 +136,8 @@ pub(crate) fn expand(
                 return Ok(async_rewrite::rewrite_impl(item_impl));
             }
             let state = trait_state(model, &item_impl, &last.arguments)?;
+            let mut item_impl = item_impl;
+            insert_res_params(model, &mut item_impl);
             let companion = companion(model, &item_impl, &state);
             let rewritten = async_rewrite::rewrite_impl(item_impl);
             Ok(quote! { #rewritten #companion })
@@ -178,6 +185,25 @@ fn trait_state(
                 format!("{trait_ident} impl requires a type argument (the state type)"),
             )
         })
+}
+
+/// See [`Model::res_first`].
+fn insert_res_params(model: &Model, item_impl: &mut ItemImpl) {
+    for item in &mut item_impl.items {
+        let ImplItem::Fn(f) = item else { continue };
+        let Some(&(_, declared)) = model.res_first.iter().find(|(name, _)| f.sig.ident == name)
+        else {
+            continue;
+        };
+        let has_receiver = f.sig.receiver().is_some();
+        let params = f.sig.inputs.len() - usize::from(has_receiver);
+        if params + 1 == declared {
+            f.sig.inputs.insert(
+                usize::from(has_receiver),
+                syn::parse_quote!(_res: &::cano::Resources),
+            );
+        }
+    }
 }
 
 fn expand_inherent(
@@ -249,6 +275,7 @@ fn expand_inherent(
         return Err(combine_errors(errors));
     }
 
+    insert_res_params(model, &mut item_impl);
     let inferred = (model.infer_assoc)(&item_impl)?;
     item_impl.items.splice(0..0, inferred);
     let path = trait_path(model.trait_ident, &state);
@@ -285,7 +312,7 @@ fn companion(model: &Model, item_impl: &ItemImpl, state: &Type) -> TokenStream {
                 res: &'life1 ::cano::Resources,
             ) -> ::core::pin::Pin<::std::boxed::Box<
                 dyn ::core::future::Future<
-                    Output = ::std::result::Result<::cano::TaskResult<#state>, ::cano::CanoError>
+                    Output = ::std::result::Result<#state, ::cano::CanoError>
                 > + ::core::marker::Send + 'async_trait
             >>
             where

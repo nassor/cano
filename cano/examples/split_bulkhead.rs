@@ -81,7 +81,7 @@ struct Worker {
 
 #[task(state = Step)]
 impl Worker {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
         let log = res.get::<TimestampLog>()?;
 
         let start = Instant::now();
@@ -102,7 +102,7 @@ impl Worker {
         );
 
         log.record(self.id, start, finish);
-        Ok(TaskResult::Single(Step::Summarize))
+        Ok(Step::Summarize)
     }
 }
 
@@ -114,7 +114,7 @@ struct Summarize;
 
 #[task(state = Step)]
 impl Summarize {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
         let log = res.get::<TimestampLog>()?;
         let entries = log.snapshot();
 
@@ -144,7 +144,7 @@ impl Summarize {
         );
         println!("  bulkhead=2 respected (max_concurrent={max_concurrent} <= 2)");
 
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 

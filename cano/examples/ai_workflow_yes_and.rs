@@ -252,7 +252,7 @@ impl Actor1Task {
 
 #[task(state = ConversationState)]
 impl Actor1Task {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<ConversationState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<ConversationState, CanoError> {
         let store = res.get::<MemoryStore>()?;
         let cuca = res.get::<CucaResource>()?;
         let history = get_conversation_history(store)?;
@@ -295,7 +295,7 @@ impl Actor1Task {
             ConversationState::Actor2Turn
         };
 
-        Ok(TaskResult::Single(next))
+        Ok(next)
     }
 }
 
@@ -325,7 +325,7 @@ impl Actor2Task {
 
 #[task(state = ConversationState)]
 impl Actor2Task {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<ConversationState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<ConversationState, CanoError> {
         let store = res.get::<MemoryStore>()?;
         let cuca = res.get::<CucaResource>()?;
         let history = get_conversation_history(store)?;
@@ -346,7 +346,7 @@ impl Actor2Task {
 
         println!("Actor2: {response}\n");
 
-        Ok(TaskResult::Single(ConversationState::Actor1Turn))
+        Ok(ConversationState::Actor1Turn)
     }
 }
 

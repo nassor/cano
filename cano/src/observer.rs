@@ -191,7 +191,7 @@ pub trait WorkflowObserver: Send + Sync + 'static {
 /// # #[derive(Clone)] struct Work;
 /// # #[task(state = Step)]
 /// # impl Work {
-/// #     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> { Ok(TaskResult::Single(Step::Done)) }
+/// #     async fn run(&self) -> Result<Step, CanoError> { Ok(Step::Done) }
 /// # }
 /// let workflow = Workflow::bare()
 ///     .register(Step::Start, Work)
@@ -348,8 +348,8 @@ mod tests {
     struct OkTask;
     #[task]
     impl Task<S> for OkTask {
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(S::Done))
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(S::Done)
         }
         fn name(&self) -> Cow<'static, str> {
             "OkTask".into()
@@ -359,7 +359,7 @@ mod tests {
     struct FailTask;
     #[task]
     impl Task<S> for FailTask {
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+        async fn run(&self) -> Result<S, CanoError> {
             Err(CanoError::task_execution("boom"))
         }
         fn config(&self) -> TaskConfig {
@@ -375,11 +375,11 @@ mod tests {
     }
     #[task]
     impl Task<S> for CircuitTask {
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(S::Done))
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(S::Done)
         }
         fn config(&self) -> TaskConfig {
-            TaskConfig::minimal().with_circuit_breaker(Arc::clone(&self.breaker))
+            TaskConfig::new().with_circuit_breaker(Arc::clone(&self.breaker))
         }
         fn name(&self) -> Cow<'static, str> {
             "CircuitTask".into()
@@ -512,8 +512,8 @@ mod tests {
         struct Anon;
         #[task]
         impl Task<S> for Anon {
-            async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-                Ok(TaskResult::Single(S::Done))
+            async fn run(&self) -> Result<S, CanoError> {
+                Ok(S::Done)
             }
         }
         assert!(Anon.name().contains("Anon"), "{}", Anon.name());
@@ -586,8 +586,8 @@ mod metrics_observer_tests {
         fn name(&self) -> std::borrow::Cow<'static, str> {
             std::borrow::Cow::Borrowed("GoTo")
         }
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(self.0.clone()))
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(self.0.clone())
         }
     }
 
@@ -638,12 +638,10 @@ mod metrics_observer_tests {
             fn name(&self) -> std::borrow::Cow<'static, str> {
                 std::borrow::Cow::Borrowed("SlowTask")
             }
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
-            async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+
+            async fn run(&self) -> Result<S, CanoError> {
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                Ok(TaskResult::Single(S::Done))
+                Ok(S::Done)
             }
         }
         let (res, rows) = run_with_recorder(|| async {
@@ -687,11 +685,11 @@ mod metrics_observer_tests {
             fn config(&self) -> TaskConfig {
                 TaskConfig::new().with_fixed_retry(3, std::time::Duration::from_millis(1))
             }
-            async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+            async fn run(&self) -> Result<S, CanoError> {
                 if self.0.fetch_add(1, Ordering::SeqCst) < 2 {
                     Err(CanoError::task_execution("transient"))
                 } else {
-                    Ok(TaskResult::Single(S::Done))
+                    Ok(S::Done)
                 }
             }
         }

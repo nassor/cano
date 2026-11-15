@@ -59,7 +59,7 @@ impl FlakyPoller {
 impl FlakyPoller {
     fn config(&self) -> TaskConfig {
         // No outer retry wrapper — the PollErrorPolicy IS the resilience mechanism.
-        TaskConfig::minimal()
+        TaskConfig::new()
     }
 
     fn on_poll_error(&self) -> PollErrorPolicy {
@@ -85,7 +85,7 @@ impl FlakyPoller {
                 call_number - 1,
                 self.error_streak
             );
-            Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
+            Ok(PollOutcome::Ready(Step::Done))
         }
     }
 }
@@ -180,7 +180,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                     _ => {
                         println!("  poll #{n}: Ready");
-                        Ok(PollOutcome::Ready(TaskResult::Single(Step::Done)))
+                        Ok(PollOutcome::Ready(Step::Done))
                     }
                 }
             }

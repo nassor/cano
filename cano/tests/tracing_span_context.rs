@@ -217,7 +217,7 @@ impl Probe {
             branch,
             next,
             fail_once: None,
-            config: TaskConfig::minimal(),
+            config: TaskConfig::new(),
             script: &[],
             cancel: None,
             calls: Arc::new(AtomicU32::new(0)),
@@ -330,8 +330,8 @@ impl Task<S> for Probe {
     fn config(&self) -> TaskConfig {
         self.config.clone()
     }
-    async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-        self.body().await.map(TaskResult::Single)
+    async fn run(&self) -> Result<S, CanoError> {
+        self.body().await
     }
 }
 
@@ -343,11 +343,9 @@ struct CompProbe(Probe);
 #[saga::task(state = S)]
 impl CompProbe {
     type Output = ();
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<S>, ()), CanoError> {
-        Ok((TaskResult::Single(self.0.body().await?), ()))
+
+    async fn run(&self, _res: &Resources) -> Result<(S, ()), CanoError> {
+        Ok((self.0.body().await?, ()))
     }
     async fn compensate(&self, _res: &Resources, _output: ()) -> Result<(), CanoError> {
         self.0.emit_compensation("start");
@@ -465,7 +463,7 @@ fn resume_user_span(id: String) -> Run {
 /// shifts which attempt is the last).
 fn retry(id: String) -> Run {
     Box::pin(async move {
-        let config = TaskConfig::minimal()
+        let config = TaskConfig::new()
             .with_fixed_retry(5, Duration::from_millis(1))
             .with_attempt_timeout(Duration::from_millis(100));
         Workflow::bare()

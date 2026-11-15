@@ -10,7 +10,6 @@ use std::time::{Duration, Instant};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step {
     Wait,
-    Next,
     Done,
 }
 
@@ -25,8 +24,8 @@ impl InherentTimer {
     async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
         Ok(TimerOutcome::Duration(Duration::from_millis(30)))
     }
-    async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 
@@ -59,7 +58,7 @@ async fn inherent_timer_duration_waits_then_transitions() {
     let result = Task::run(&InherentTimer, &res).await.unwrap();
     let elapsed = start.elapsed();
 
-    assert_eq!(result, TaskResult::Single(Step::Done));
+    assert_eq!(result, Step::Done);
     assert!(
         elapsed >= Duration::from_millis(30),
         "timer should sleep at least the requested duration, virtual elapsed = {elapsed:?}"
@@ -79,8 +78,8 @@ impl PastInstantTimer {
             Instant::now() - Duration::from_secs(60),
         ))
     }
-    async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 
@@ -89,34 +88,11 @@ async fn inherent_timer_until_past_instant_completes_immediately() {
     let res = Resources::new();
     let start = Instant::now();
     let result = Task::run(&PastInstantTimer, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::Done));
+    assert_eq!(result, Step::Done);
     assert!(
         start.elapsed() < Duration::from_millis(500),
         "a past Until instant must not sleep"
     );
-}
-
-// ---------------------------------------------------------------------------
-// after_wait can return Split
-// ---------------------------------------------------------------------------
-
-struct SplitTimer;
-
-#[task::timer(state = Step)]
-impl SplitTimer {
-    async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
-        Ok(TimerOutcome::Duration(Duration::ZERO))
-    }
-    async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Split(vec![Step::Wait, Step::Next]))
-    }
-}
-
-#[tokio::test]
-async fn inherent_timer_after_wait_transition() {
-    let res = Resources::new();
-    let result = Task::run(&SplitTimer, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Split(vec![Step::Wait, Step::Next]));
 }
 
 // ---------------------------------------------------------------------------
@@ -128,7 +104,7 @@ struct InherentCustomTimer;
 #[task::timer(state = Step)]
 impl InherentCustomTimer {
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal().with_attempt_timeout(Duration::from_secs(5))
+        TaskConfig::new().with_attempt_timeout(Duration::from_secs(5))
     }
     fn name(&self) -> Cow<'static, str> {
         Cow::Borrowed("my-inherent-timer")
@@ -136,8 +112,8 @@ impl InherentCustomTimer {
     async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
         Ok(TimerOutcome::Duration(Duration::ZERO))
     }
-    async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 
@@ -178,8 +154,8 @@ impl TimerTask<Step> for TraitTimer {
     async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
         Ok(TimerOutcome::Duration(Duration::ZERO))
     }
-    async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 
@@ -187,7 +163,7 @@ impl TimerTask<Step> for TraitTimer {
 async fn trait_form_timer_works() {
     let res = Resources::new();
     let result = Task::run(&TraitTimer, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::Done));
+    assert_eq!(result, Step::Done);
 }
 
 // ---------------------------------------------------------------------------
@@ -196,10 +172,10 @@ async fn trait_form_timer_works() {
 
 #[tokio::test]
 async fn inherent_timer_as_dyn_task() {
-    let timer: Arc<dyn Task<Step>> = Arc::new(SplitTimer);
+    let timer: Arc<dyn Task<Step>> = Arc::new(InherentTimer);
     let res = Resources::new();
     let result = Task::run(timer.as_ref(), &res).await.unwrap();
-    assert_eq!(result, TaskResult::Split(vec![Step::Wait, Step::Next]));
+    assert_eq!(result, Step::Done);
 }
 
 // ---------------------------------------------------------------------------
@@ -227,8 +203,8 @@ impl WaitErrorTimer {
     async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
         Err(CanoError::task_execution("wait failed deliberately"))
     }
-    async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 
@@ -246,7 +222,7 @@ impl AfterWaitErrorTimer {
     async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
         Ok(TimerOutcome::Duration(Duration::ZERO))
     }
-    async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+    async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
         Err(CanoError::task_execution("after_wait failed deliberately"))
     }
 }

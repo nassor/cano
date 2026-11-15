@@ -13,9 +13,9 @@
 //!   transform, files to upload) with bounded concurrency.
 //! - **Partial-failure tolerance**: decide in `finish` whether one failing item is
 //!   acceptable (skip it, count it, collect errors) or fatal (return `Err` to abort).
-//! - **Data-level parallelism in one state**: contrast with [`TaskResult::Split`], which
-//!   fans out over FSM *states* (re-entering the workflow engine); `BatchTask` fans out
-//!   over *data*, all within a single state transition.
+//! - **Data-level parallelism in one state**: contrast with
+//!   [`Workflow::register_split`](crate::workflow::Workflow::register_split), which fans out
+//!   over *tasks* and joins them; `BatchTask` fans out over *data*, all within a single task.
 //!
 //! Every [`BatchTask`] automatically implements [`Task`](crate::task::Task) via a
 //! per-impl-site companion `impl Task<S> for T` emitted by the `#[task::batch]` macro.
@@ -59,10 +59,10 @@
 //!         &self,
 //!         _res: &Resources,
 //!         outputs: Vec<Result<u32, CanoError>>,
-//!     ) -> Result<TaskResult<Step>, CanoError> {
+//!     ) -> Result<Step, CanoError> {
 //!         let sum: u32 = outputs.into_iter().filter_map(|r| r.ok()).sum();
 //!         assert_eq!(sum, 30); // 2+4+6+8+10
-//!         Ok(TaskResult::Single(Step::Done))
+//!         Ok(Step::Done)
 //!     }
 //! }
 //!
@@ -106,11 +106,11 @@
 //!         &self,
 //!         _res: &Resources,
 //!         outputs: Vec<Result<String, CanoError>>,
-//!     ) -> Result<TaskResult<Step>, CanoError> {
+//!     ) -> Result<Step, CanoError> {
 //!         // Partial failure: collect successes, skip errors.
 //!         let successes: Vec<_> = outputs.into_iter().filter_map(|r| r.ok()).collect();
 //!         assert_eq!(successes, vec!["ok-1", "ok-3"]);
-//!         Ok(TaskResult::Single(Step::Done))
+//!         Ok(Step::Done)
 //!     }
 //! }
 //!
@@ -154,42 +154,32 @@
 //!         &self,
 //!         _res: &Resources,
 //!         outputs: Vec<Result<u32, CanoError>>,
-//!     ) -> Result<TaskResult<Step>, CanoError> {
+//!     ) -> Result<Step, CanoError> {
 //!         assert_eq!(outputs.len(), 1);
 //!         assert!(outputs[0].is_ok());
-//!         Ok(TaskResult::Single(Step::Done))
+//!         Ok(Step::Done)
 //!     }
 //! }
 //! ```
 //!
-//! ## Contrast with `TaskResult::Split`
+//! ## Contrast with `register_split`
 //!
-//! | | `BatchTask` | `TaskResult::Split` |
+//! | | `BatchTask` | `register_split` |
 //! |---|---|---|
-//! | Fans out over | data items | FSM states |
-//! | Items processed | within one state | each item re-enters the FSM |
+//! | Fans out over | data items | registered tasks |
+//! | Items processed | within one task | one task per branch |
 //! | Result collected in | `finish` (same state) | `JoinConfig` at the split state's join |
 //! | Order guaranteed | yes — inputs order preserved | no — split tasks may settle in any order |
 
 use crate::error::CanoError;
 use crate::resource::Resources;
-use crate::task::{RetryMode, TaskConfig, TaskResult};
+use crate::task::{RetryMode, TaskConfig};
 use std::borrow::Cow;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
 // Default associated-type aliases
 // ---------------------------------------------------------------------------
-
-/// Default type alias for `DynBatchTask` associated type `Item`.
-///
-/// Pins the `Item` associated type to a heap-erased value so the trait is object-safe.
-pub type DefaultBatchItem = Box<dyn std::any::Any + Send + Sync>;
-
-/// Default type alias for `DynBatchTask` associated type `ItemOutput`.
-///
-/// Pins the `ItemOutput` associated type to a heap-erased value so the trait is object-safe.
-pub type DefaultBatchItemOutput = Box<dyn std::any::Any + Send>;
 
 // ---------------------------------------------------------------------------
 // BatchTask trait
@@ -237,10 +227,10 @@ pub type DefaultBatchItemOutput = Box<dyn std::any::Any + Send>;
 ///         &self,
 ///         _res: &Resources,
 ///         outputs: Vec<Result<usize, CanoError>>,
-///     ) -> Result<TaskResult<Step>, CanoError> {
+///     ) -> Result<Step, CanoError> {
 ///         let total: usize = outputs.into_iter().filter_map(|r| r.ok()).sum();
 ///         let _ = total;
-///         Ok(TaskResult::Single(Step::Done))
+///         Ok(Step::Done)
 ///     }
 /// }
 /// ```
@@ -278,9 +268,9 @@ where
     /// Retry configuration for the *enclosing* task dispatch (the whole
     /// `load → process → finish` cycle).
     ///
-    /// Defaults to [`TaskConfig::default()`] (exponential backoff with 3 retries).
+    /// Defaults to [`TaskConfig::new()`] (one attempt, no retries).
     fn config(&self) -> TaskConfig {
-        crate::task::default_task_config()
+        TaskConfig::new()
     }
 
     /// Human-readable identifier for this batch task, reported to
@@ -288,7 +278,7 @@ where
     ///
     /// Defaults to [`std::any::type_name`] of the implementing type.
     fn name(&self) -> Cow<'static, str> {
-        crate::task::default_task_name::<Self>()
+        Cow::Borrowed(std::any::type_name::<Self>())
     }
 
     /// Produce the work items.
@@ -313,13 +303,13 @@ where
     /// regardless of which item finished processing first.
     ///
     /// This is where the partial-failure policy lives: return `Err` to abort and
-    /// propagate a hard failure, or return `Ok(TaskResult::Single(next))` even in the
+    /// propagate a hard failure, or return `Ok(next)` even in the
     /// presence of per-item errors if the policy allows partial success.
     async fn finish(
         &self,
         res: &Resources,
         outputs: Vec<Result<Self::ItemOutput, CanoError>>,
-    ) -> Result<TaskResult<TState>, CanoError>;
+    ) -> Result<TState, CanoError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -344,7 +334,8 @@ where
 ///
 /// Items whose `process_item` returns `Err` (after exhausting per-item retries) are
 /// placed in the `Err` slot of `outputs` — they do not abort the batch.
-pub async fn run_batch<B, S>(b: &B, res: &Resources) -> Result<TaskResult<S>, CanoError>
+#[doc(hidden)]
+pub async fn run_batch<B, S>(b: &B, res: &Resources) -> Result<S, CanoError>
 where
     B: BatchTask<S> + ?Sized,
     S: Clone + fmt::Debug + Send + Sync + 'static,
@@ -354,7 +345,7 @@ where
 
     // Wrap the load→process→finish body in an inner async block so that a `load`
     // failure (early `?` return) still reaches the `batch_run` metric emit below.
-    let result: Result<TaskResult<S>, CanoError> = async {
+    let result: Result<S, CanoError> = async {
         let items: Arc<Vec<B::Item>> = Arc::new(b.load(res).await?);
 
         let retry_mode = b.item_retry();
@@ -431,19 +422,6 @@ where
 // Type aliases
 // ---------------------------------------------------------------------------
 
-/// Type alias for a dynamic [`BatchTask`] trait object with associated types pinned for
-/// object safety.
-///
-/// Both `Item` and `ItemOutput` are pinned to heap-erased boxes so that
-/// `dyn BatchTask<TState>` can exist without knowing the concrete
-/// associated types. Prefer `dyn Task<TState>` for ordinary workflow use.
-pub type DynBatchTask<TState> = dyn BatchTask<TState, Item = DefaultBatchItem, ItemOutput = DefaultBatchItemOutput>
-    + Send
-    + Sync;
-
-/// Type alias for an `Arc`-wrapped dynamic [`BatchTask`] trait object.
-pub type BatchTaskObject<TState> = std::sync::Arc<DynBatchTask<TState>>;
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -498,11 +476,11 @@ mod tests {
             &self,
             _res: &Resources,
             outputs: Vec<Result<Self::ItemOutput, CanoError>>,
-        ) -> Result<TaskResult<Step>, CanoError> {
+        ) -> Result<Step, CanoError> {
             let got: Vec<usize> = outputs.into_iter().map(|r| r.unwrap()).collect();
             let expected: Vec<usize> = (0..self.n).collect();
             assert_eq!(got, expected, "finish must receive items in input order");
-            Ok(TaskResult::Single(Step::Done))
+            Ok(Step::Done)
         }
     }
 
@@ -511,7 +489,7 @@ mod tests {
         let task = IndexedBatch { n: 5 };
         let res = Resources::new();
         let result = Task::run(&task, &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::Done));
+        assert_eq!(result, Step::Done);
     }
 
     // -----------------------------------------------------------------------
@@ -550,14 +528,14 @@ mod tests {
             &self,
             _res: &Resources,
             outputs: Vec<Result<Self::ItemOutput, CanoError>>,
-        ) -> Result<TaskResult<Step>, CanoError> {
+        ) -> Result<Step, CanoError> {
             let got: Vec<usize> = outputs.into_iter().map(|r| r.unwrap()).collect();
             let expected: Vec<usize> = (0..self.n).collect();
             assert_eq!(
                 got, expected,
                 "concurrent batch must preserve input order in finish"
             );
-            Ok(TaskResult::Single(Step::Done))
+            Ok(Step::Done)
         }
     }
 
@@ -566,7 +544,7 @@ mod tests {
         let task = ConcurrentBatch { n: 4 };
         let res = Resources::new();
         let result = Task::run(&task, &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::Done));
+        assert_eq!(result, Step::Done);
     }
 
     // -----------------------------------------------------------------------
@@ -597,13 +575,13 @@ mod tests {
             &self,
             _res: &Resources,
             outputs: Vec<Result<Self::ItemOutput, CanoError>>,
-        ) -> Result<TaskResult<Step>, CanoError> {
+        ) -> Result<Step, CanoError> {
             assert_eq!(outputs.len(), 3);
             assert!(outputs[0].is_ok(), "item 0 should be Ok");
             assert!(outputs[1].is_err(), "item 1 should be Err");
             assert!(outputs[2].is_ok(), "item 2 should be Ok");
             // Partial success: proceed despite one error
-            Ok(TaskResult::Single(Step::Done))
+            Ok(Step::Done)
         }
     }
 
@@ -613,7 +591,7 @@ mod tests {
         let res = Resources::new();
         // Task::run should succeed (finish returned Ok) even though one item failed
         let result = Task::run(&task, &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::Done));
+        assert_eq!(result, Step::Done);
     }
 
     // -----------------------------------------------------------------------
@@ -651,14 +629,14 @@ mod tests {
             &self,
             _res: &Resources,
             outputs: Vec<Result<Self::ItemOutput, CanoError>>,
-        ) -> Result<TaskResult<Step>, CanoError> {
+        ) -> Result<Step, CanoError> {
             assert_eq!(outputs.len(), 1);
             assert_eq!(
                 outputs[0].as_ref().unwrap(),
                 &42,
                 "flaky item should succeed after retries"
             );
-            Ok(TaskResult::Single(Step::Done))
+            Ok(Step::Done)
         }
     }
 
@@ -669,7 +647,7 @@ mod tests {
         };
         let res = Resources::new();
         let result = Task::run(&task, &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::Done));
+        assert_eq!(result, Step::Done);
         // 2 failures + 1 success = 3 total calls
         assert_eq!(task.call_count.load(Ordering::Relaxed), 3);
     }
@@ -699,9 +677,9 @@ mod tests {
             &self,
             _res: &Resources,
             _outputs: Vec<Result<Self::ItemOutput, CanoError>>,
-        ) -> Result<TaskResult<Step>, CanoError> {
+        ) -> Result<Step, CanoError> {
             self.finish_called.store(true, Ordering::Relaxed);
-            Ok(TaskResult::Single(Step::Done))
+            Ok(Step::Done)
         }
     }
 
@@ -746,7 +724,7 @@ mod tests {
             &self,
             _res: &Resources,
             _outputs: Vec<Result<Self::ItemOutput, CanoError>>,
-        ) -> Result<TaskResult<Step>, CanoError> {
+        ) -> Result<Step, CanoError> {
             Err(CanoError::task_execution("finish failed"))
         }
     }
@@ -789,9 +767,9 @@ mod tests {
             &self,
             _res: &Resources,
             outputs: Vec<Result<Self::ItemOutput, CanoError>>,
-        ) -> Result<TaskResult<Step>, CanoError> {
+        ) -> Result<Step, CanoError> {
             assert_eq!(outputs.len(), 3);
-            Ok(TaskResult::Single(Step::Done))
+            Ok(Step::Done)
         }
     }
 
@@ -800,7 +778,7 @@ mod tests {
         let task = ZeroConcurrencyBatch;
         let res = Resources::new();
         let result = Task::run(&task, &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::Done));
+        assert_eq!(result, Step::Done);
     }
 
     // -----------------------------------------------------------------------
@@ -826,10 +804,10 @@ mod tests {
             &self,
             _res: &Resources,
             outputs: Vec<Result<Self::ItemOutput, CanoError>>,
-        ) -> Result<TaskResult<Step>, CanoError> {
+        ) -> Result<Step, CanoError> {
             let val = outputs[0].as_ref().unwrap();
             assert_eq!(*val, 7);
-            Ok(TaskResult::Single(Step::Done))
+            Ok(Step::Done)
         }
     }
 
@@ -838,7 +816,7 @@ mod tests {
         let task: Arc<dyn Task<Step>> = Arc::new(SimpleBatch);
         let res = Resources::new();
         let result = Task::run(task.as_ref(), &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::Done));
+        assert_eq!(result, Step::Done);
     }
 
     // -----------------------------------------------------------------------
@@ -867,7 +845,7 @@ mod tests {
         let res = Resources::new();
         // Can call run_batch via a reference to the trait object
         let result = run_batch::<SimpleBatch, Step>(&task, &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::Done));
+        assert_eq!(result, Step::Done);
     }
 }
 
@@ -910,8 +888,8 @@ mod metrics_tests {
             &self,
             _res: &Resources,
             _outputs: Vec<Result<Self::ItemOutput, CanoError>>,
-        ) -> Result<TaskResult<St>, CanoError> {
-            Ok(TaskResult::Single(St::Done))
+        ) -> Result<St, CanoError> {
+            Ok(St::Done)
         }
     }
 
@@ -961,8 +939,8 @@ mod metrics_tests {
             &self,
             _res: &Resources,
             _outputs: Vec<Result<Self::ItemOutput, CanoError>>,
-        ) -> Result<TaskResult<St>, CanoError> {
-            Ok(TaskResult::Single(St::Done))
+        ) -> Result<St, CanoError> {
+            Ok(St::Done)
         }
     }
 

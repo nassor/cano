@@ -49,14 +49,14 @@ struct ShipOrder;
 #[saga::task(state = Step)]
 impl ReserveInventory {
     type Output = Reservation;
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<(Step, Reservation), CanoError> {
         let r = Reservation {
             order_id: "ord-1001".into(),
             sku: "WIDGET-7".into(),
             qty: 3,
         };
         println!("reserve  : holding {} × {}", r.qty, r.sku);
-        Ok((TaskResult::Single(Step::Validate), r))
+        Ok((Step::Validate, r))
     }
     async fn compensate(&self, _res: &Resources, r: Reservation) -> Result<(), CanoError> {
         println!("reserve  : releasing {} × {}  (rollback)", r.qty, r.sku);
@@ -69,23 +69,23 @@ impl ReserveInventory {
 // later step fails.
 #[task(state = Step)]
 impl ValidateOrder {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         println!("validate : order ok");
-        Ok(TaskResult::Single(Step::Charge))
+        Ok(Step::Charge)
     }
 }
 
 #[saga::task(state = Step)]
 impl ChargeCard {
     type Output = Charge;
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Charge), CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<(Step, Charge), CanoError> {
         let charge = Charge {
             order_id: "ord-1001".into(),
             txn_id: "tx-7788".into(),
             amount_cents: 4_200,
         };
         println!("charge   : $42.00 charged ({})", charge.txn_id);
-        Ok((TaskResult::Single(Step::Ship), charge))
+        Ok((Step::Ship, charge))
     }
     async fn compensate(&self, _res: &Resources, c: Charge) -> Result<(), CanoError> {
         println!(
@@ -101,9 +101,9 @@ impl ChargeCard {
 #[task(state = Step)]
 impl ShipOrder {
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal() // fail-fast — let the original error escape `orchestrate`
+        TaskConfig::new() // fail-fast — let the original error escape `orchestrate`
     }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         println!("ship     : dispatching → courier unavailable");
         Err(CanoError::task_execution("courier unavailable"))
     }

@@ -26,9 +26,9 @@ struct FetchTask;
 
 #[task]
 impl Task<Step> for FetchTask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         tokio::time::sleep(Duration::from_millis(5)).await;
-        Ok(TaskResult::Single(Step::Process))
+        Ok(Step::Process)
     }
 }
 
@@ -36,9 +36,9 @@ struct ProcessTask;
 
 #[task]
 impl Task<Step> for ProcessTask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         tokio::time::sleep(Duration::from_millis(3)).await;
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 

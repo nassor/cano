@@ -31,12 +31,12 @@ struct DailyTask;
 
 #[task(state = TaskState)]
 impl DailyTask {
-    async fn run_bare(&self) -> Result<TaskResult<TaskState>, CanoError> {
+    async fn run(&self) -> Result<TaskState, CanoError> {
         println!(
             "Daily task executed at {}",
             chrono::Utc::now().format("%H:%M:%S")
         );
-        Ok(TaskResult::Single(TaskState::Complete))
+        Ok(TaskState::Complete)
     }
 }
 
@@ -45,12 +45,12 @@ struct HourlyTask;
 
 #[task(state = TaskState)]
 impl HourlyTask {
-    async fn run_bare(&self) -> Result<TaskResult<TaskState>, CanoError> {
+    async fn run(&self) -> Result<TaskState, CanoError> {
         println!(
             "Hourly task executed at {}",
             chrono::Utc::now().format("%H:%M:%S")
         );
-        Ok(TaskResult::Single(TaskState::Complete))
+        Ok(TaskState::Complete)
     }
 }
 
@@ -59,12 +59,12 @@ struct FrequentTask;
 
 #[task(state = TaskState)]
 impl FrequentTask {
-    async fn run_bare(&self) -> Result<TaskResult<TaskState>, CanoError> {
+    async fn run(&self) -> Result<TaskState, CanoError> {
         println!(
             "Frequent task executed at {}",
             chrono::Utc::now().format("%H:%M:%S")
         );
-        Ok(TaskResult::Single(TaskState::Complete))
+        Ok(TaskState::Complete)
     }
 }
 

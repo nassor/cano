@@ -74,12 +74,12 @@ impl Worker {
 
 #[task(state = Step)]
 impl Worker {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
         let store = res.get::<MemoryStore>()?;
         sleep(Duration::from_millis(self.delay_ms)).await;
         store.put(self.id, format!("done after {}ms", self.delay_ms));
         println!("  [+] worker {} done ({}ms)", self.id, self.delay_ms);
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 

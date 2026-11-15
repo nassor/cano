@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use cano_macros::task;
 
 use crate::error::CanoError;
-use crate::task::{Task, TaskResult};
+use crate::task::Task;
 use crate::workflow::Workflow;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -32,9 +32,9 @@ impl TestTask {
 
 #[task]
 impl Task<TestState> for TestTask {
-    async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+    async fn run(&self) -> Result<TestState, CanoError> {
         self.execution_count.fetch_add(1, Ordering::Relaxed);
-        Ok(TaskResult::Single(TestState::Complete))
+        Ok(TestState::Complete)
     }
 }
 

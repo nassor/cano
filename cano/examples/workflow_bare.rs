@@ -1,14 +1,12 @@
 //! # Bare Workflow Example
 //!
-//! Demonstrates three ergonomic features for resource-free tasks:
+//! Demonstrates two ergonomic features for resource-free tasks:
 //!
-//! - **`Task::run_bare()`** — override instead of `run()` when the task needs no resources.
-//!   The default `run()` delegates to `run_bare()`, so bare tasks work in any workflow.
+//! - **`async fn run(&self)`** — leave out the resources parameter when the task needs
+//!   none; the `#[task]` macro adds it, so such tasks work in any workflow.
 //! - **`Workflow::bare()`** — construct a workflow with no resources.
-//! - **`Resources::empty()`** — named constructor alternative to `Workflow::bare()`.
 //!
-//! Use `run_bare()` for pure computation; use `run()` when the task accesses the store
-//! or any other resource. Bare tasks can be mixed freely with resource tasks.
+//! Resource-free tasks can be mixed freely with tasks that take `res: &Resources`.
 //!
 //! Run with:
 //! ```bash
@@ -26,14 +24,14 @@ enum Stage {
     Done,
 }
 
-// Bare tasks override `run_bare()` — no resources needed, no unused `_res` parameter.
+// Resource-free tasks write `run(&self)` — no unused `_res` parameter.
 
 /// Validates that a hardcoded input passes business rules (pure computation).
 struct ValidateTask;
 
 #[task(state = Stage)]
 impl ValidateTask {
-    async fn run_bare(&self) -> CanoResult<TaskResult<Stage>> {
+    async fn run(&self) -> CanoResult<Stage> {
         println!("ValidateTask: checking input constraints...");
         // Pure logic — no resources accessed.
         let value: i32 = 42;
@@ -41,7 +39,7 @@ impl ValidateTask {
             return Err(CanoError::task_execution("value must be non-negative"));
         }
         println!("  value={value} -- OK");
-        Ok(TaskResult::Single(Stage::Sanitize))
+        Ok(Stage::Sanitize)
     }
 }
 
@@ -50,12 +48,12 @@ struct SanitizeTask;
 
 #[task(state = Stage)]
 impl SanitizeTask {
-    async fn run_bare(&self) -> CanoResult<TaskResult<Stage>> {
+    async fn run(&self) -> CanoResult<Stage> {
         println!("SanitizeTask: clamping value to [0, 100]...");
         let raw: i32 = 42;
         let clamped = raw.clamp(0, 100);
         println!("  raw={raw} -> clamped={clamped}");
-        Ok(TaskResult::Single(Stage::Persist))
+        Ok(Stage::Persist)
     }
 }
 
@@ -66,13 +64,13 @@ struct PersistTask;
 
 #[task(state = Stage)]
 impl PersistTask {
-    async fn run(&self, res: &Resources) -> CanoResult<TaskResult<Stage>> {
+    async fn run(&self, res: &Resources) -> CanoResult<Stage> {
         let store = res.get::<MemoryStore>()?;
         println!("PersistTask: writing result to store...");
         let result: i32 = 42_i32.clamp(0, 100);
         store.put("sanitized_value", result);
         println!("  stored sanitized_value={result}");
-        Ok(TaskResult::Single(Stage::Done))
+        Ok(Stage::Done)
     }
 }
 
@@ -97,7 +95,7 @@ async fn main() -> CanoResult<()> {
 
     println!("=== Mixed workflow (bare tasks + resource task) ===\n");
 
-    // Bare tasks work in any workflow — the default run() delegates to run_bare().
+    // Resource-free tasks work in any workflow, next to tasks that use resources.
     let store = MemoryStore::new();
     let workflow = Workflow::new(Resources::new().insert(store.clone()))
         .register(Stage::Validate, ValidateTask) // bare task

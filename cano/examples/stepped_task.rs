@@ -92,7 +92,7 @@ impl Cruncher {
         };
 
         if next.processed >= next.total {
-            Ok(StepOutcome::Done(TaskResult::Single(Stage::Report)))
+            Ok(StepOutcome::Done(Stage::Report))
         } else {
             Ok(StepOutcome::More(next))
         }
@@ -109,12 +109,12 @@ struct Reporter {
 
 #[task(state = Stage)]
 impl Reporter {
-    async fn run_bare(&self) -> Result<TaskResult<Stage>, CanoError> {
+    async fn run(&self) -> Result<Stage, CanoError> {
         println!(
             "report  : all {} items processed — transitioning to Done",
             self.total
         );
-        Ok(TaskResult::Single(Stage::Done))
+        Ok(Stage::Done)
     }
 }
 

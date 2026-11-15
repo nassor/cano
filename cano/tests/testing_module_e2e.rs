@@ -24,8 +24,8 @@ enum S {
 struct Go(S);
 #[task(state = S)]
 impl Go {
-    async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-        Ok(TaskResult::Single(self.0.clone()))
+    async fn run(&self) -> Result<S, CanoError> {
+        Ok(self.0.clone())
     }
 }
 
@@ -60,13 +60,13 @@ struct FlakyWork(Arc<AtomicUsize>);
 #[task(state = S)]
 impl FlakyWork {
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal() // fail fast so the run stops and the log persists
+        TaskConfig::new() // fail fast so the run stops and the log persists
     }
-    async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+    async fn run(&self) -> Result<S, CanoError> {
         if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
             Err(CanoError::task_execution("crash before Done"))
         } else {
-            Ok(TaskResult::Single(S::Done))
+            Ok(S::Done)
         }
     }
 }
@@ -140,8 +140,8 @@ struct Step1;
 #[saga::task(state = S)]
 impl Step1 {
     type Output = Unit;
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<S>, Unit), CanoError> {
-        Ok((TaskResult::Single(S::Work), Unit))
+    async fn run(&self, _res: &Resources) -> Result<(S, Unit), CanoError> {
+        Ok((S::Work, Unit))
     }
     async fn compensate(&self, res: &Resources, _o: Unit) -> Result<(), CanoError> {
         res.get::<Log>()?.0.lock().unwrap().push("step1".into());
@@ -153,8 +153,8 @@ struct Step2;
 #[saga::task(state = S)]
 impl Step2 {
     type Output = Unit;
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<S>, Unit), CanoError> {
-        Ok((TaskResult::Single(S::Finish), Unit))
+    async fn run(&self, _res: &Resources) -> Result<(S, Unit), CanoError> {
+        Ok((S::Finish, Unit))
     }
     async fn compensate(&self, res: &Resources, _o: Unit) -> Result<(), CanoError> {
         res.get::<Log>()?.0.lock().unwrap().push("step2".into());
@@ -165,10 +165,7 @@ impl Step2 {
 struct Fail;
 #[task(state = S)]
 impl Fail {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-    async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+    async fn run(&self) -> Result<S, CanoError> {
         Err(CanoError::task_execution("boom"))
     }
 }

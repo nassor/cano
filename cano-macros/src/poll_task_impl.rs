@@ -13,6 +13,7 @@ const MODEL: Model = Model {
     required: &["poll"],
     optional: &["config", "name", "on_poll_error"],
     assoc: &[],
+    res_first: &[("poll", 1)],
     infer_assoc: no_assoc,
     companion_run: Some(
         |state| quote!(::std::boxed::Box::pin(::cano::task::poll::run_poll_loop::<Self, #state>(self, res))),

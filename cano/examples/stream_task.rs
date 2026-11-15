@@ -103,18 +103,14 @@ impl CalmMode {
         println!("calm  : window {temps:?} → avg {avg:.1}°");
         if hottest >= HIGH {
             println!("calm  : {hottest}° ≥ {HIGH}° — flipping to ALERT");
-            return Ok(WindowSignal::Stop(TaskResult::Single(Mode::Alert)));
+            return Ok(WindowSignal::Stop(Mode::Alert));
         }
         Ok(WindowSignal::Continue)
     }
 
-    async fn on_close(
-        &self,
-        _res: &Resources,
-        reason: CloseReason,
-    ) -> Result<TaskResult<Mode>, CanoError> {
+    async fn on_close(&self, _res: &Resources, reason: CloseReason) -> Result<Mode, CanoError> {
         println!("calm  : source closed ({reason:?}) → Done");
-        Ok(TaskResult::Single(Mode::Done))
+        Ok(Mode::Done)
     }
 }
 
@@ -153,18 +149,14 @@ impl AlertMode {
         println!("alert : reading {temp}° ({over:+}° vs HIGH) — handling individually");
         if temp <= COOL {
             println!("alert : {temp}° ≤ {COOL}° — cooled off, flipping back to CALM");
-            return Ok(WindowSignal::Stop(TaskResult::Single(Mode::Calm)));
+            return Ok(WindowSignal::Stop(Mode::Calm));
         }
         Ok(WindowSignal::Continue)
     }
 
-    async fn on_close(
-        &self,
-        _res: &Resources,
-        reason: CloseReason,
-    ) -> Result<TaskResult<Mode>, CanoError> {
+    async fn on_close(&self, _res: &Resources, reason: CloseReason) -> Result<Mode, CanoError> {
         println!("alert : source closed ({reason:?}) → Done");
-        Ok(TaskResult::Single(Mode::Done))
+        Ok(Mode::Done)
     }
 }
 

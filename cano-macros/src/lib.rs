@@ -85,7 +85,11 @@ pub fn derive_from_resources(input: TokenStream) -> TokenStream {
 ///    writes the trait header.
 /// 2. **Inherent-impl form:** `#[task(state = S)] impl X { ... }` —
 ///    user writes only the inherent block; the macro builds the trait header
-///    and enforces that exactly one of `run` / `run_bare` is present.
+///    and requires `run`.
+///
+/// In both forms `run` may omit the resources parameter (`async fn run(&self)`);
+/// the macro inserts `_res: &Resources`. On any other trait impl the macro only
+/// performs the async rewrite.
 ///
 /// For compensatable (saga) tasks, use [`#[cano::saga::task]`](compensatable_task)
 /// instead.
@@ -97,27 +101,16 @@ pub fn derive_from_resources(input: TokenStream) -> TokenStream {
 ///
 /// #[task(state = MyState)]
 /// impl MyTask {
-///     async fn run_bare(&self) -> Result<TaskResult<MyState>, CanoError> {
-///         Ok(TaskResult::Single(MyState::Done))
+///     async fn run(&self) -> Result<MyState, CanoError> {
+///         Ok(MyState::Done)
 ///     }
 /// }
 /// ```
 #[proc_macro_attribute]
 pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
-    // Try the inherent-impl path when attr args are present, OR when the impl
-    // block is an inherent (non-trait) impl. Otherwise fall through to the
-    // plain async rewriter.
-    if let Ok(item_impl) = syn::parse::<syn::ItemImpl>(item.clone()) {
-        let attr2: proc_macro2::TokenStream = attr.into();
-        let has_attr = !attr2.is_empty();
-        let is_inherent = item_impl.trait_.is_none();
-        if has_attr || is_inherent {
-            return task_impl::expand(attr2, item.into())
-                .unwrap_or_else(syn::Error::into_compile_error)
-                .into();
-        }
-    }
-    async_rewrite::rewrite(item)
+    task_impl::expand(attr.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
 }
 
 /// Apply to `impl Resource for ...` blocks (or the `Resource` trait definition itself).
@@ -174,21 +167,15 @@ pub fn checkpoint_store(_attr: TokenStream, item: TokenStream) -> TokenStream {
 ///    `impl CompensatableTask<S> for T` header from the attribute args and enforces that
 ///    `type Output`, `run`, and `compensate` are present (`config` / `name` may be overridden).
 ///
-/// Either way, every `async fn` is rewritten to return
+/// `run` / `compensate` may omit the resources parameter; the macro inserts
+/// `_res: &Resources`. Either way, every `async fn` is rewritten to return
 /// `Pin<Box<dyn Future<Output = ...> + Send + 'async_trait>>`. On the trait definition the macro
 /// just performs that rewrite.
 #[proc_macro_attribute]
 pub fn compensatable_task(attr: TokenStream, item: TokenStream) -> TokenStream {
-    if let Ok(item_impl) = syn::parse::<syn::ItemImpl>(item.clone()) {
-        let attr2: proc_macro2::TokenStream = attr.into();
-        let is_inherent = item_impl.trait_.is_none();
-        if is_inherent || !attr2.is_empty() {
-            return compensatable_task_impl::expand(attr2, item.into())
-                .unwrap_or_else(syn::Error::into_compile_error)
-                .into();
-        }
-    }
-    async_rewrite::rewrite(item)
+    compensatable_task_impl::expand(attr.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
 }
 
 /// Apply to the `RouterTask` trait definition, an
@@ -277,9 +264,6 @@ pub fn batch_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Because a blanket `impl<P: PollTask<..>> Task<..> for P` would conflict (E0119) with the
 /// analogous blanket impls for the other specialized task traits — a type can implement more than
 /// one — the companion `Task` impl is generated per-use-site rather than as a blanket.
-///
-/// The default `config()` injected by the inherent form is [`TaskConfig::minimal()`]
-/// (no retries) — the poll loop itself is the resilience mechanism.
 #[proc_macro_attribute]
 pub fn poll_task(attr: TokenStream, item: TokenStream) -> TokenStream {
     poll_task_impl::expand(attr.into(), item.into())
@@ -310,9 +294,6 @@ pub fn poll_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Because a blanket `impl<T: TimerTask<..>> Task<..> for T` would conflict (E0119) with the
 /// analogous blanket impls for the other specialized task traits — a type can implement more than
 /// one — the companion `Task` impl is generated per-use-site rather than as a blanket.
-///
-/// The default `config()` injected by the inherent form is [`TaskConfig::minimal()`]
-/// (no retries) — a single scheduled sleep needs no outer retry wrapping.
 ///
 /// Both forms route `Task::run` through `::cano::task::timer::run_timer`, so the user crate
 /// needs no direct `tokio` dependency.
@@ -345,9 +326,6 @@ pub fn timer_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Because a blanket `impl<S: SteppedTask<..>> Task<..> for S` would conflict (E0119) with the
 /// analogous blanket impls for the other specialized task traits — a type can implement more than
 /// one — the companion `Task` impl is generated per-use-site rather than as a blanket.
-///
-/// The default `config()` injected by the inherent form is [`TaskConfig::default()`]
-/// (exponential backoff with 3 retries).
 #[proc_macro_attribute]
 pub fn stepped_task(attr: TokenStream, item: TokenStream) -> TokenStream {
     stepped_task_impl::expand(attr.into(), item.into())
@@ -373,9 +351,6 @@ pub fn stepped_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 ///    companion `impl Task<S> for T` whose `run` forwards to `StreamTask::run_in_memory`.
 ///
 /// On a trait definition the macro just performs the async-fn-in-trait rewrite.
-///
-/// The default `config()` injected by the inherent form is [`TaskConfig::minimal()`]
-/// (no outer retry — like `PollTask`; an outer retry would re-invoke `open()`).
 #[proc_macro_attribute]
 pub fn stream_task(attr: TokenStream, item: TokenStream) -> TokenStream {
     stream_task_impl::expand(attr.into(), item.into())

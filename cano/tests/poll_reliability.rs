@@ -44,7 +44,7 @@ impl PollTask<Flow> for ScriptedProbe {
         match self.script.get(n).copied().unwrap_or(Probe::Ready) {
             Probe::Fail => Err(CanoError::task_execution(format!("probe {n} refused"))),
             Probe::Pending => Ok(PollOutcome::Pending { delay_ms: 0 }),
-            Probe::Ready => Ok(PollOutcome::Ready(TaskResult::Single(Flow::Done))),
+            Probe::Ready => Ok(PollOutcome::Ready(Flow::Done)),
         }
     }
 }
@@ -109,7 +109,7 @@ struct StuckProbe;
 #[task::poll]
 impl PollTask<Flow> for StuckProbe {
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal().with_attempt_timeout(Duration::from_millis(200))
+        TaskConfig::new().with_attempt_timeout(Duration::from_millis(200))
     }
 
     async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Flow>, CanoError> {

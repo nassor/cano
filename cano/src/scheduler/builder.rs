@@ -31,8 +31,8 @@ use super::{
 /// # struct Noop;
 /// # #[task]
 /// # impl Task<Step> for Noop {
-/// #     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-/// #         Ok(TaskResult::Single(Step::Done))
+/// #     async fn run(&self) -> Result<Step, CanoError> {
+/// #         Ok(Step::Done)
 /// #     }
 /// # }
 /// # #[tokio::main]

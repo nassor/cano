@@ -87,7 +87,7 @@ struct ParseTask;
 
 #[task(state = TextPipelineState)]
 impl ParseTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<TextPipelineState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TextPipelineState, CanoError> {
         let store = res.get::<MemoryStore>()?;
         let params = res.get::<RequestParams>()?;
 
@@ -98,7 +98,7 @@ impl ParseTask {
         // Store the validated text for the next stage
         store.put("validated_text", params.text.clone());
 
-        Ok(TaskResult::Single(TextPipelineState::Transform))
+        Ok(TextPipelineState::Transform)
     }
 }
 
@@ -109,7 +109,7 @@ struct TransformTask;
 
 #[task(state = TextPipelineState)]
 impl TransformTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<TextPipelineState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TextPipelineState, CanoError> {
         let store = res.get::<MemoryStore>()?;
 
         let text: String = store
@@ -122,7 +122,7 @@ impl TransformTask {
         store.put("word_count", word_count);
         store.put("uppercased", uppercased);
 
-        Ok(TaskResult::Single(TextPipelineState::Done))
+        Ok(TextPipelineState::Done)
     }
 }
 

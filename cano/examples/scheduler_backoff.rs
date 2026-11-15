@@ -34,10 +34,10 @@ impl FlakyJob {
         // Disable per-task retries so the scheduler-level backoff is the only
         // retry layer in play. Otherwise each scheduled dispatch would already
         // retry internally before reaching the scheduler.
-        TaskConfig::minimal()
+        TaskConfig::new()
     }
 
-    async fn run_bare(&self) -> Result<TaskResult<FlowState>, CanoError> {
+    async fn run(&self) -> Result<FlowState, CanoError> {
         let n = self.runs.fetch_add(1, Ordering::SeqCst) + 1;
         let succeeded = n > self.fail_count;
         println!(
@@ -46,7 +46,7 @@ impl FlakyJob {
             if succeeded { "OK" } else { "FAIL" }
         );
         if succeeded {
-            Ok(TaskResult::Single(FlowState::Done))
+            Ok(FlowState::Done)
         } else {
             Err(CanoError::task_execution("flaky job failure"))
         }

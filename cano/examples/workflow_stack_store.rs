@@ -45,7 +45,7 @@ pub struct MetricsTask;
 
 #[task(state = RequestState)]
 impl MetricsTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<RequestState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<RequestState, CanoError> {
         let store = res.get::<MemoryStore>()?;
 
         // Get request data from store
@@ -79,7 +79,7 @@ impl MetricsTask {
         store.put("processing_time_ms", processing_time_ms);
 
         println!("MetricsTask: Stored metrics in shared store");
-        Ok(TaskResult::Single(RequestState::MetricsExtracted))
+        Ok(RequestState::MetricsExtracted)
     }
 }
 
@@ -89,7 +89,7 @@ pub struct ResponseTask;
 
 #[task(state = RequestState)]
 impl ResponseTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<RequestState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<RequestState, CanoError> {
         let store = res.get::<MemoryStore>()?;
 
         // Read metrics from shared store
@@ -130,7 +130,7 @@ impl ResponseTask {
         println!("ResponseTask: Stored response in shared store");
         println!("Response: {}", response_message);
 
-        Ok(TaskResult::Single(RequestState::Complete))
+        Ok(RequestState::Complete)
     }
 }
 

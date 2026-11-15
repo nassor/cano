@@ -63,14 +63,11 @@ struct LongTask {
 }
 #[task(state = Step)]
 impl LongTask {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         self.started.store(true, Ordering::SeqCst);
         tokio::time::sleep(Duration::from_secs(10)).await;
         self.completed.store(true, Ordering::SeqCst);
-        Ok(TaskResult::Single(self.next.clone()))
+        Ok(self.next.clone())
     }
 }
 
@@ -92,14 +89,14 @@ impl CompStep {
     fn name(&self) -> Cow<'static, str> {
         Cow::Borrowed(self.name)
     }
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, ()), CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<(Step, ()), CanoError> {
         self.started.store(true, Ordering::SeqCst);
         if self.run_sleep_ms > 0 {
             tokio::time::sleep(Duration::from_millis(self.run_sleep_ms)).await;
         }
         self.log.lock().unwrap().push(format!("run:{}", self.name));
         self.completed.store(true, Ordering::SeqCst);
-        Ok((TaskResult::Single(self.next.clone()), ()))
+        Ok((self.next.clone(), ()))
     }
     async fn compensate(&self, _res: &Resources, _out: ()) -> Result<(), CanoError> {
         if self.comp_sleep_ms > 0 {
@@ -369,14 +366,11 @@ struct SplitChild {
 }
 #[task(state = Step)]
 impl SplitChild {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         self.started.fetch_add(1, Ordering::SeqCst);
         tokio::time::sleep(Duration::from_secs(10)).await;
         self.completed.fetch_add(1, Ordering::SeqCst);
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -714,10 +708,10 @@ struct SlowRouter {
 }
 #[task::router(state = Step)]
 impl SlowRouter {
-    async fn route(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+    async fn route(&self, _res: &Resources) -> Result<Step, CanoError> {
         self.started.store(true, Ordering::SeqCst);
         tokio::time::sleep(Duration::from_secs(10)).await;
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -796,9 +790,9 @@ impl SlowTimer {
         self.started.store(true, Ordering::SeqCst);
         Ok(TimerOutcome::Duration(Duration::from_secs(10)))
     }
-    async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+    async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
         self.fired.store(true, Ordering::SeqCst);
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -855,9 +849,9 @@ impl SlowBatch {
         &self,
         _res: &Resources,
         _outputs: Vec<Result<(), CanoError>>,
-    ) -> Result<TaskResult<Step>, CanoError> {
+    ) -> Result<Step, CanoError> {
         self.finished.store(true, Ordering::SeqCst);
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -908,7 +902,7 @@ impl SlowStepper {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let n = cursor.unwrap_or(0);
         if n >= 10_000 {
-            Ok(StepOutcome::Done(TaskResult::Single(Step::Done)))
+            Ok(StepOutcome::Done(Step::Done))
         } else {
             Ok(StepOutcome::More(n + 1))
         }
@@ -957,14 +951,11 @@ async fn resume_from_honors_precancelled_token() {
     }
     #[task(state = Step)]
     impl CountingLong {
-        fn config(&self) -> TaskConfig {
-            TaskConfig::minimal()
-        }
-        async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+        async fn run(&self) -> Result<Step, CanoError> {
             self.runs.fetch_add(1, Ordering::SeqCst);
             self.started.store(true, Ordering::SeqCst);
             tokio::time::sleep(Duration::from_secs(10)).await;
-            Ok(TaskResult::Single(Step::Done))
+            Ok(Step::Done)
         }
     }
 

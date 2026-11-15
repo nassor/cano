@@ -91,10 +91,10 @@ struct ManualTask;
 impl Task<Step> for ManualTask {
     fn config(&self) -> TaskConfig {
         // No automatic retry or circuit-breaker wiring — we do it ourselves.
-        TaskConfig::minimal()
+        TaskConfig::new()
     }
 
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
         let breaker = res.get_arc::<CircuitBreaker>()?;
         let client = res.get::<FlakyClient>()?;
 
@@ -108,7 +108,7 @@ impl Task<Step> for ManualTask {
                 // counter in Closed, or advances the success counter in HalfOpen.
                 breaker.record_success(permit);
                 println!("    -> got: {payload}");
-                Ok(TaskResult::Single(Step::Done))
+                Ok(Step::Done)
             }
             Err(e) => {
                 // Step 3b: failure — tell the breaker; this increments the failure

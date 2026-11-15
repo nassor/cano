@@ -37,7 +37,7 @@ impl SteppedTask<Flow> for PagedMigration {
     type Cursor = u32;
 
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal().with_fixed_retry(2, Duration::from_millis(1)) // 3 attempts/step
+        TaskConfig::new().with_fixed_retry(2, Duration::from_millis(1)) // 3 attempts/step
     }
 
     async fn step(
@@ -52,7 +52,7 @@ impl SteppedTask<Flow> for PagedMigration {
         }
         let n = cursor.unwrap_or(0);
         if n >= 5 {
-            Ok(StepOutcome::Done(TaskResult::Single(Flow::Done)))
+            Ok(StepOutcome::Done(Flow::Done))
         } else {
             Ok(StepOutcome::More(n + 1))
         }
@@ -111,7 +111,7 @@ impl SteppedTask<Flow> for BlockingMigration {
     type Cursor = u32;
 
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal() // one attempt per step: fail fast to the workflow
+        TaskConfig::new() // one attempt per step: fail fast to the workflow
     }
 
     async fn step(
@@ -125,7 +125,7 @@ impl SteppedTask<Flow> for BlockingMigration {
         }
         let n = cursor.unwrap_or(0);
         if n >= 6 {
-            Ok(StepOutcome::Done(TaskResult::Single(Flow::Done)))
+            Ok(StepOutcome::Done(Flow::Done))
         } else {
             Ok(StepOutcome::More(n + 1))
         }

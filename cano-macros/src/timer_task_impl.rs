@@ -14,6 +14,7 @@ const MODEL: Model = Model {
     required: &["wait", "after_wait"],
     optional: &["config", "name"],
     assoc: &[],
+    res_first: &[("wait", 1), ("after_wait", 1)],
     infer_assoc: no_assoc,
     companion_run: Some(
         |state| quote!(::std::boxed::Box::pin(::cano::task::timer::run_timer::<Self, #state>(self, res))),

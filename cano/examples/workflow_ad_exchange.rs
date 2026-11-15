@@ -85,7 +85,7 @@ struct ValidateRequestTask;
 
 #[task(state = AdExchangeState)]
 impl ValidateRequestTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<AdExchangeState, CanoError> {
         let store = res.get::<MemoryStore>()?;
         let request: AdRequest = store.get("ad_request")?;
 
@@ -94,16 +94,16 @@ impl ValidateRequestTask {
         // Validation logic
         if request.placement_id.is_empty() {
             println!("❌ Invalid placement ID");
-            return Ok(TaskResult::Single(AdExchangeState::InvalidResponse));
+            return Ok(AdExchangeState::InvalidResponse);
         }
 
         if request.floor_price < 0.01 {
             println!("❌ Floor price too low");
-            return Ok(TaskResult::Single(AdExchangeState::InvalidResponse));
+            return Ok(AdExchangeState::InvalidResponse);
         }
 
         println!("✅ Request validated");
-        Ok(TaskResult::Single(AdExchangeState::GatherContext))
+        Ok(AdExchangeState::GatherContext)
     }
 }
 
@@ -121,7 +121,7 @@ enum ContextTask {
 
 #[task(state = AdExchangeState)]
 impl ContextTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<AdExchangeState, CanoError> {
         let store = res.get::<MemoryStore>()?;
         match self {
             ContextTask::FetchUser => {
@@ -132,7 +132,7 @@ impl ContextTask {
 
                 store.put("user_context", user);
                 println!("  ✅ User profile loaded");
-                Ok(TaskResult::Single(AdExchangeState::RequestBids))
+                Ok(AdExchangeState::RequestBids)
             }
             ContextTask::FetchGeo => {
                 println!("  🌍 Fetching geo data...");
@@ -142,7 +142,7 @@ impl ContextTask {
 
                 store.put("geo_context", geo);
                 println!("  ✅ Geo data loaded");
-                Ok(TaskResult::Single(AdExchangeState::RequestBids))
+                Ok(AdExchangeState::RequestBids)
             }
             ContextTask::DetectDevice => {
                 println!("  📱 Detecting device...");
@@ -152,7 +152,7 @@ impl ContextTask {
 
                 store.put("device_context", device);
                 println!("  ✅ Device detected");
-                Ok(TaskResult::Single(AdExchangeState::RequestBids))
+                Ok(AdExchangeState::RequestBids)
             }
         }
     }
@@ -170,7 +170,7 @@ struct ContactDSPTask {
 
 #[task(state = AdExchangeState)]
 impl ContactDSPTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<AdExchangeState, CanoError> {
         let store = res.get::<MemoryStore>()?;
         println!("  📡 Requesting bid from {}...", self.partner_id);
 
@@ -196,7 +196,7 @@ impl ContactDSPTask {
         store.put("bids", bids);
 
         println!("  ✅ {} bid: ${:.2}", self.partner_id, bid.price);
-        Ok(TaskResult::Single(AdExchangeState::ScoreBids))
+        Ok(AdExchangeState::ScoreBids)
     }
 }
 
@@ -211,7 +211,7 @@ struct ScoreBidTask {
 
 #[task(state = AdExchangeState)]
 impl ScoreBidTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<AdExchangeState, CanoError> {
         let store = res.get::<MemoryStore>()?;
         let bids: Vec<BidResponse> = store.get("bids")?;
 
@@ -248,7 +248,7 @@ impl ScoreBidTask {
         store.put("scored_bids", scored_bids);
 
         println!("  ✅ Bid scored: ${:.2}", score_value);
-        Ok(TaskResult::Single(AdExchangeState::RunAuction))
+        Ok(AdExchangeState::RunAuction)
     }
 }
 
@@ -261,7 +261,7 @@ struct RunAuctionTask;
 
 #[task(state = AdExchangeState)]
 impl RunAuctionTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<AdExchangeState, CanoError> {
         let store = res.get::<MemoryStore>()?;
         println!("\n  🎯 Running auction...");
 
@@ -280,7 +280,7 @@ impl RunAuctionTask {
                 auction_time_ms: start.elapsed().as_millis() as u64,
             };
             store.put("auction_result", result);
-            return Ok(TaskResult::Single(AdExchangeState::ErrorTracking));
+            return Ok(AdExchangeState::ErrorTracking);
         }
 
         // Sort by score (descending)
@@ -304,7 +304,7 @@ impl RunAuctionTask {
         };
 
         store.put("auction_result", result);
-        Ok(TaskResult::Single(AdExchangeState::TrackResults))
+        Ok(AdExchangeState::TrackResults)
     }
 }
 
@@ -323,7 +323,7 @@ enum TrackingTask {
 
 #[task(state = AdExchangeState)]
 impl TrackingTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<AdExchangeState, CanoError> {
         let store = res.get::<MemoryStore>()?;
         match self {
             TrackingTask::LogAnalytics => {
@@ -332,14 +332,14 @@ impl TrackingTask {
 
                 let result: AuctionResult = store.get("auction_result")?;
                 println!("  ✅ Analytics logged: {} bids", result.total_bids);
-                Ok(TaskResult::Single(AdExchangeState::BuildResponse))
+                Ok(AdExchangeState::BuildResponse)
             }
             TrackingTask::UpdateMetrics => {
                 println!("  📊 Updating metrics...");
                 tokio::time::sleep(Duration::from_millis(25)).await;
 
                 println!("  ✅ Metrics updated");
-                Ok(TaskResult::Single(AdExchangeState::BuildResponse))
+                Ok(AdExchangeState::BuildResponse)
             }
             TrackingTask::NotifyWinner => {
                 println!("  📬 Notifying winner...");
@@ -350,14 +350,14 @@ impl TrackingTask {
                     println!("  ✅ Winner {} notified", winner.bid.partner_id);
                 }
 
-                Ok(TaskResult::Single(AdExchangeState::BuildResponse))
+                Ok(AdExchangeState::BuildResponse)
             }
             TrackingTask::StoreAuction => {
                 println!("  💾 Storing auction data...");
                 tokio::time::sleep(Duration::from_millis(35)).await;
 
                 println!("  ✅ Auction data stored");
-                Ok(TaskResult::Single(AdExchangeState::BuildResponse))
+                Ok(AdExchangeState::BuildResponse)
             }
         }
     }
@@ -372,7 +372,7 @@ struct BuildResponseTask;
 
 #[task(state = AdExchangeState)]
 impl BuildResponseTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<AdExchangeState, CanoError> {
         let store = res.get::<MemoryStore>()?;
         println!("\n  📦 Building response...");
 
@@ -392,7 +392,7 @@ impl BuildResponseTask {
             println!("  Result: No Fill");
         }
 
-        Ok(TaskResult::Single(AdExchangeState::Complete))
+        Ok(AdExchangeState::Complete)
     }
 }
 
@@ -405,10 +405,10 @@ struct NoFillTask;
 
 #[task(state = AdExchangeState)]
 impl NoFillTask {
-    async fn run(&self, _res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<AdExchangeState, CanoError> {
         println!("\n⚠️  No Fill Response");
         println!("Unable to complete ad request due to timeout or insufficient data.\n");
-        Ok(TaskResult::Single(AdExchangeState::Complete))
+        Ok(AdExchangeState::Complete)
     }
 }
 
@@ -421,10 +421,10 @@ struct InvalidResponseTask;
 
 #[task(state = AdExchangeState)]
 impl InvalidResponseTask {
-    async fn run(&self, _res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<AdExchangeState, CanoError> {
         println!("\n⚠️  Invalid Request");
         println!("Request validation failed.\n");
-        Ok(TaskResult::Single(AdExchangeState::Complete))
+        Ok(AdExchangeState::Complete)
     }
 }
 
@@ -441,7 +441,7 @@ enum ErrorTrackingTask {
 
 #[task(state = AdExchangeState)]
 impl ErrorTrackingTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<AdExchangeState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<AdExchangeState, CanoError> {
         let store = res.get::<MemoryStore>()?;
         match self {
             ErrorTrackingTask::LogError => {
@@ -456,14 +456,14 @@ impl ErrorTrackingTask {
                 };
 
                 println!("  ✅ Error logged: {}", error_type);
-                Ok(TaskResult::Single(AdExchangeState::NoFill))
+                Ok(AdExchangeState::NoFill)
             }
             ErrorTrackingTask::UpdateErrorMetrics => {
                 println!("  📊 Updating error metrics...");
                 tokio::time::sleep(Duration::from_millis(25)).await;
 
                 println!("  ✅ Error metrics updated");
-                Ok(TaskResult::Single(AdExchangeState::NoFill))
+                Ok(AdExchangeState::NoFill)
             }
         }
     }

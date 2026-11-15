@@ -15,7 +15,7 @@ use futures_util::FutureExt;
 use crate::error::CanoError;
 use crate::recovery::RowKind;
 use crate::saga::{CompensationEntry, ErasedCompensatable};
-use crate::task::{TaskResult, run_with_retries};
+use crate::task::run_with_retries;
 use tokio_util::sync::CancellationToken;
 
 use super::{Workflow, notify_observers, panic_payload_message};
@@ -454,15 +454,7 @@ where
         // a migration), corrupting every trace on the runtime.
         #[cfg(feature = "tracing")]
         let run = run.instrument(task_span);
-        let result: Result<(TaskResult<TState>, Vec<u8>), CanoError> = run.await;
-
-        let outcome: Result<(TState, Vec<u8>), CanoError> = match result {
-            Ok((TaskResult::Single(next_state), blob)) => Ok((next_state, blob)),
-            Ok((TaskResult::Split(_), _)) => Err(CanoError::workflow(
-                "Compensatable task returned a split result — split states cannot be compensatable",
-            )),
-            Err(e) => Err(e),
-        };
+        let outcome: Result<(TState, Vec<u8>), CanoError> = run.await;
 
         if let Some(ref slice) = observers {
             match &outcome {
@@ -986,17 +978,14 @@ mod tests {
     async fn router_state_produces_no_checkpoint_row_and_sequences_are_dense() {
         // Note: inside the `cano` crate the inherent `#[task::router(state = S)]` form emits
         // `::cano::RouterTask<...>` paths that don't resolve. Use the trait-impl form instead.
-        use crate::task::{RouterTask, TaskConfig};
+        use crate::task::RouterTask;
 
         struct RouteToWork;
 
         #[task_mod::router]
         impl RouterTask<TestState> for RouteToWork {
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
-            async fn route(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
-                Ok(TaskResult::Single(TestState::Process))
+            async fn route(&self, _res: &Resources) -> Result<TestState, CanoError> {
+                Ok(TestState::Process)
             }
         }
 
@@ -1046,17 +1035,14 @@ mod tests {
         // Seed a run that was interrupted after `Process` (sequence 0). No Route row exists
         // because `Start` was a router state (skipped). `resume_from` should re-enter at
         // `Process` and finish normally.
-        use crate::task::{RouterTask, TaskConfig};
+        use crate::task::RouterTask;
 
         struct RouteToWork;
 
         #[task_mod::router]
         impl RouterTask<TestState> for RouteToWork {
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
-            async fn route(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
-                Ok(TaskResult::Single(TestState::Process))
+            async fn route(&self, _res: &Resources) -> Result<TestState, CanoError> {
+                Ok(TestState::Process)
             }
         }
 
@@ -1696,7 +1682,7 @@ mod tests {
     impl CompensatableTask<TestState> for CompFault {
         type Output = u32;
         fn config(&self) -> TaskConfig {
-            let cfg = TaskConfig::minimal();
+            let cfg = TaskConfig::new();
             match self.attempt_timeout {
                 Some(d) => cfg.with_attempt_timeout(d),
                 None => cfg,
@@ -1705,8 +1691,8 @@ mod tests {
         fn name(&self) -> Cow<'static, str> {
             Cow::Borrowed(self.name)
         }
-        async fn run(&self, _res: &Resources) -> Result<(TaskResult<TestState>, u32), CanoError> {
-            Ok((TaskResult::Single(self.next.clone()), self.value))
+        async fn run(&self, _res: &Resources) -> Result<(TestState, u32), CanoError> {
+            Ok((self.next.clone(), self.value))
         }
         async fn compensate(&self, _res: &Resources, _output: u32) -> Result<(), CanoError> {
             match self.on_compensate {
@@ -1918,17 +1904,12 @@ mod tests {
         #[saga::task]
         impl CompensatableTask<TestState> for SlowCompensate {
             type Output = u32;
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
+
             fn name(&self) -> Cow<'static, str> {
                 Cow::Borrowed(self.name)
             }
-            async fn run(
-                &self,
-                _res: &Resources,
-            ) -> Result<(TaskResult<TestState>, u32), CanoError> {
-                Ok((TaskResult::Single(self.next_state.clone()), self.value))
+            async fn run(&self, _res: &Resources) -> Result<(TestState, u32), CanoError> {
+                Ok((self.next_state.clone(), self.value))
             }
             async fn compensate(&self, _res: &Resources, output: u32) -> Result<(), CanoError> {
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -2188,9 +2169,9 @@ mod tests {
         struct SlowProcess;
         #[task]
         impl Task<TestState> for SlowProcess {
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run(&self) -> Result<TestState, CanoError> {
                 tokio::time::sleep(Duration::from_millis(500)).await;
-                Ok(TaskResult::Single(TestState::Complete))
+                Ok(TestState::Complete)
             }
         }
 
@@ -2239,7 +2220,7 @@ mod tests {
     async fn cross_model_chain_router_poll_batch_stepped_interop() {
         use crate::PollOutcome;
         use crate::recovery::RowKind;
-        use crate::task::{BatchTask, PollTask, RouterTask, StepOutcome, SteppedTask, TaskConfig};
+        use crate::task::{BatchTask, PollTask, RouterTask, StepOutcome, SteppedTask};
         use serde::{Deserialize, Serialize};
         use std::sync::atomic::AtomicU32;
 
@@ -2259,11 +2240,8 @@ mod tests {
 
         #[task_mod::router]
         impl RouterTask<TourStage> for TourRouter {
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
-            async fn route(&self, _res: &Resources) -> Result<TaskResult<TourStage>, CanoError> {
-                Ok(TaskResult::Single(TourStage::Wait))
+            async fn route(&self, _res: &Resources) -> Result<TourStage, CanoError> {
+                Ok(TourStage::Wait)
             }
         }
 
@@ -2275,13 +2253,10 @@ mod tests {
 
         #[task_mod::poll]
         impl PollTask<TourStage> for TourPoller {
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
             async fn poll(&self, _res: &Resources) -> Result<PollOutcome<TourStage>, CanoError> {
                 let n = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
                 if n >= 2 {
-                    Ok(PollOutcome::Ready(TaskResult::Single(TourStage::Crunch)))
+                    Ok(PollOutcome::Ready(TourStage::Crunch))
                 } else {
                     Ok(PollOutcome::Pending { delay_ms: 0 })
                 }
@@ -2297,9 +2272,6 @@ mod tests {
             type Item = u32;
             type ItemOutput = u32;
 
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
             fn concurrency(&self) -> usize {
                 4
             }
@@ -2313,10 +2285,10 @@ mod tests {
                 &self,
                 _res: &Resources,
                 outputs: Vec<Result<u32, CanoError>>,
-            ) -> Result<TaskResult<TourStage>, CanoError> {
+            ) -> Result<TourStage, CanoError> {
                 let sum: u32 = outputs.into_iter().filter_map(|r| r.ok()).sum();
                 assert_eq!(sum, 1 + 4 + 9, "1²+2²+3² = 14");
-                Ok(TaskResult::Single(TourStage::Grind))
+                Ok(TourStage::Grind)
             }
         }
 
@@ -2331,9 +2303,6 @@ mod tests {
         impl SteppedTask<TourStage> for TourStepper {
             type Cursor = GrindCursor;
 
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
             async fn step(
                 &self,
                 _res: &Resources,
@@ -2341,7 +2310,7 @@ mod tests {
             ) -> Result<StepOutcome<GrindCursor, TourStage>, CanoError> {
                 let n = cursor.map(|c| c.0).unwrap_or(0);
                 if n >= 3 {
-                    Ok(StepOutcome::Done(TaskResult::Single(TourStage::Done)))
+                    Ok(StepOutcome::Done(TourStage::Done))
                 } else {
                     Ok(StepOutcome::More(GrindCursor(n + 1)))
                 }
@@ -2460,10 +2429,7 @@ mod tests {
         struct FailFast;
         #[task]
         impl Task<TestState> for FailFast {
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run(&self) -> Result<TestState, CanoError> {
                 Err(CanoError::task_execution("boom"))
             }
         }
@@ -2495,17 +2461,15 @@ mod tests {
         #[saga::task]
         impl CompensatableTask<u32> for NumComp {
             type Output = u32;
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
+
             fn name(&self) -> Cow<'static, str> {
                 Cow::Owned(format!("n{}", self.idx))
             }
-            async fn run(&self, _res: &Resources) -> Result<(TaskResult<u32>, u32), CanoError> {
+            async fn run(&self, _res: &Resources) -> Result<(u32, u32), CanoError> {
                 if self.fail {
                     return Err(CanoError::task_execution(format!("n{} failed", self.idx)));
                 }
-                Ok((TaskResult::Single(self.idx + 1), self.idx))
+                Ok((self.idx + 1, self.idx))
             }
             async fn compensate(&self, _res: &Resources, output: u32) -> Result<(), CanoError> {
                 self.log.lock().unwrap().push(output);
@@ -2547,17 +2511,15 @@ mod tests {
         #[saga::task]
         impl CompensatableTask<u32> for Step {
             type Output = u32;
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
+
             fn name(&self) -> Cow<'static, str> {
                 Cow::Owned(format!("s{}", self.idx))
             }
-            async fn run(&self, _res: &Resources) -> Result<(TaskResult<u32>, u32), CanoError> {
+            async fn run(&self, _res: &Resources) -> Result<(u32, u32), CanoError> {
                 if self.idx == self.fail_at {
                     return Err(CanoError::task_execution(format!("s{} failed", self.idx)));
                 }
-                Ok((TaskResult::Single(self.idx + 1), self.idx))
+                Ok((self.idx + 1, self.idx))
             }
             async fn compensate(&self, _res: &Resources, output: u32) -> Result<(), CanoError> {
                 self.log.lock().unwrap().push(output);
@@ -2627,9 +2589,7 @@ mod tests {
     #[task_mod::stepped]
     impl SteppedTask<TestState> for CountStepper {
         type Cursor = u32;
-        fn config(&self) -> TaskConfig {
-            TaskConfig::minimal()
-        }
+
         async fn step(
             &self,
             _res: &Resources,
@@ -2638,7 +2598,7 @@ mod tests {
             self.calls.fetch_add(1, AtomicOrdering::Relaxed);
             let n = cursor.unwrap_or(0) + 1;
             if n >= self.target {
-                Ok(StepOutcome::Done(TaskResult::Single(TestState::Complete)))
+                Ok(StepOutcome::Done(TestState::Complete))
             } else {
                 Ok(StepOutcome::More(n))
             }
@@ -2854,9 +2814,7 @@ mod tests {
         #[task_mod::stepped]
         impl SteppedTask<TestState> for FailingStepper {
             type Cursor = u32;
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
+
             async fn step(
                 &self,
                 _res: &Resources,
@@ -3103,16 +3061,13 @@ mod tests {
         impl CompensatableTask<TestState> for HangingCompensator {
             type Output = u32;
             fn config(&self) -> TaskConfig {
-                TaskConfig::minimal().with_attempt_timeout(Duration::from_millis(30))
+                TaskConfig::new().with_attempt_timeout(Duration::from_millis(30))
             }
             fn name(&self) -> Cow<'static, str> {
                 Cow::Borrowed("HangingCompensator")
             }
-            async fn run(
-                &self,
-                _res: &Resources,
-            ) -> Result<(TaskResult<TestState>, u32), CanoError> {
-                Ok((TaskResult::Single(TestState::Process), 1))
+            async fn run(&self, _res: &Resources) -> Result<(TestState, u32), CanoError> {
+                Ok((TestState::Process, 1))
             }
             async fn compensate(&self, _res: &Resources, _o: u32) -> Result<(), CanoError> {
                 self.began.store(true, Ordering::SeqCst);
@@ -3174,15 +3129,15 @@ mod tests {
         #[crate::task]
         impl Task<TestState> for YieldingTask {
             fn config(&self) -> TaskConfig {
-                TaskConfig::minimal().with_attempt_timeout(Duration::from_millis(30))
+                TaskConfig::new().with_attempt_timeout(Duration::from_millis(30))
             }
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run(&self) -> Result<TestState, CanoError> {
                 self.started.store(true, Ordering::SeqCst);
                 // Yield well past the attempt_timeout — the future is dropped
                 // here and the `finished` flip below never executes.
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 self.finished.store(true, Ordering::SeqCst);
-                Ok(TaskResult::Single(TestState::Complete))
+                Ok(TestState::Complete)
             }
         }
 
@@ -3228,16 +3183,11 @@ mod tests {
         #[saga::task]
         impl CompensatableTask<TestState> for LeakyTask {
             type Output = u32;
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
+
             fn name(&self) -> Cow<'static, str> {
                 Cow::Borrowed("LeakyTask")
             }
-            async fn run(
-                &self,
-                _res: &Resources,
-            ) -> Result<(TaskResult<TestState>, u32), CanoError> {
+            async fn run(&self, _res: &Resources) -> Result<(TestState, u32), CanoError> {
                 // Simulate the contract violation: commit FIRST, panic SECOND.
                 self.committed.store(true, Ordering::SeqCst);
                 panic!("commit happened, never reached Ok");
@@ -3344,13 +3294,13 @@ mod tests {
             fn config(&self) -> TaskConfig {
                 // Configure a per-attempt timeout that USED to cancel inline
                 // compensate. The fix is that compensate ignores it.
-                TaskConfig::minimal().with_attempt_timeout(Duration::from_millis(30))
+                TaskConfig::new().with_attempt_timeout(Duration::from_millis(30))
             }
             async fn run(
                 &self,
                 _res: &Resources,
-            ) -> Result<(TaskResult<TestState>, NeverSerialize), CanoError> {
-                Ok((TaskResult::Single(TestState::Complete), NeverSerialize))
+            ) -> Result<(TestState, NeverSerialize), CanoError> {
+                Ok((TestState::Complete, NeverSerialize))
             }
             async fn compensate(
                 &self,
@@ -3401,14 +3351,12 @@ mod tests {
         #[saga::task]
         impl CompensatableTask<TestState> for PanickyCompensate {
             type Output = NeverSerialize;
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
+
             async fn run(
                 &self,
                 _res: &Resources,
-            ) -> Result<(TaskResult<TestState>, NeverSerialize), CanoError> {
-                Ok((TaskResult::Single(TestState::Complete), NeverSerialize))
+            ) -> Result<(TestState, NeverSerialize), CanoError> {
+                Ok((TestState::Complete, NeverSerialize))
             }
             async fn compensate(
                 &self,
@@ -3455,14 +3403,12 @@ mod tests {
         #[saga::task]
         impl CompensatableTask<TestState> for InlineFailingCompensate {
             type Output = NeverSerialize;
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
+
             async fn run(
                 &self,
                 _res: &Resources,
-            ) -> Result<(TaskResult<TestState>, NeverSerialize), CanoError> {
-                Ok((TaskResult::Single(TestState::Complete), NeverSerialize))
+            ) -> Result<(TestState, NeverSerialize), CanoError> {
+                Ok((TestState::Complete, NeverSerialize))
             }
             async fn compensate(
                 &self,
@@ -3530,68 +3476,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compensatable_split_return_triggers_inline_compensate() {
-        // A CompensatableTask returning Split is rejected by the adapter BEFORE
-        // serialize, and the side effect committed in `run` is rolled back via
-        // the inline-compensate path — mirroring the serialize-failure case.
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        type Effect = Arc<Mutex<Vec<&'static str>>>;
-
-        #[derive(Clone)]
-        struct LeakySplit {
-            log: Effect,
-            charged: Arc<AtomicBool>,
-        }
-        #[saga::task]
-        impl CompensatableTask<TestState> for LeakySplit {
-            type Output = u32;
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
-            async fn run(
-                &self,
-                _res: &Resources,
-            ) -> Result<(TaskResult<TestState>, u32), CanoError> {
-                self.log.lock().unwrap().push("charged");
-                self.charged.store(true, Ordering::SeqCst);
-                // Misuse: a saga task must never return Split. Pre-fix the
-                // FSM rejected this *after* the run already committed, leaking
-                // the side effect. Now the adapter rejects it AND calls
-                // compensate inline.
-                Ok((TaskResult::Split(vec![TestState::Process]), 7))
-            }
-            async fn compensate(&self, _res: &Resources, _o: u32) -> Result<(), CanoError> {
-                self.log.lock().unwrap().push("refunded");
-                Ok(())
-            }
-        }
-
-        let log: Effect = Arc::new(Mutex::new(Vec::new()));
-        let charged = Arc::new(AtomicBool::new(false));
-        let workflow = Workflow::bare()
-            .register_with_compensation(
-                TestState::Start,
-                LeakySplit {
-                    log: log.clone(),
-                    charged: charged.clone(),
-                },
-            )
-            .add_exit_state(TestState::Complete);
-
-        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
-        assert!(charged.load(Ordering::SeqCst));
-        // The error mentions the split rejection.
-        assert!(err.message().contains("split"), "got: {err}");
-        // Crucially: compensate ran inline → side effect undone.
-        assert_eq!(
-            *log.lock().unwrap(),
-            vec!["charged", "refunded"],
-            "Split-return must trigger inline compensate, not leak the side effect"
-        );
-    }
-
-    #[tokio::test]
     async fn compensatable_serialize_failure_runs_inline_compensate() {
         // When the adapter cannot serialize `Output` into a checkpoint blob,
         // the forward `run` has already executed and any committed side effect
@@ -3607,19 +3491,17 @@ mod tests {
         #[saga::task]
         impl CompensatableTask<TestState> for LeakyCharge {
             type Output = NeverSerialize;
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
+
             fn name(&self) -> Cow<'static, str> {
                 Cow::Borrowed("LeakyCharge")
             }
             async fn run(
                 &self,
                 _res: &Resources,
-            ) -> Result<(TaskResult<TestState>, NeverSerialize), CanoError> {
+            ) -> Result<(TestState, NeverSerialize), CanoError> {
                 // Simulated commit of an external side effect.
                 self.log.lock().unwrap().push("charged");
-                Ok((TaskResult::Single(TestState::Complete), NeverSerialize))
+                Ok((TestState::Complete, NeverSerialize))
             }
             async fn compensate(
                 &self,
@@ -4371,7 +4253,7 @@ mod rehydrated_run_tests {
 mod metrics_tests {
     use crate::metrics::test_support::*;
     use crate::prelude::*;
-    use crate::task::TaskConfig;
+
     use crate::workflow::test_support::{CompLog, CompTask, MemCheckpoints, SimpleTask, TestState};
     use std::sync::{Arc, Mutex};
 
@@ -4414,10 +4296,7 @@ mod metrics_tests {
 
     #[crate::task]
     impl Task<TestState> for AlwaysFailTask {
-        fn config(&self) -> TaskConfig {
-            TaskConfig::minimal()
-        }
-        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+        async fn run(&self) -> Result<TestState, CanoError> {
             Err(CanoError::task_execution(
                 "intentional failure for saga test",
             ))

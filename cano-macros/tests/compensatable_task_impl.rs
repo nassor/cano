@@ -20,8 +20,8 @@ struct Reserve(Arc<AtomicBool>);
 #[saga::task(state = Step)]
 impl Reserve {
     type Output = u32;
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, u32), CanoError> {
-        Ok((TaskResult::Single(Step::Boom), 42))
+    async fn run(&self, _res: &Resources) -> Result<(Step, u32), CanoError> {
+        Ok((Step::Boom, 42))
     }
     async fn compensate(&self, _res: &Resources, output: u32) -> Result<(), CanoError> {
         assert_eq!(output, 42);
@@ -37,14 +37,12 @@ struct ReserveNamed;
 #[saga::task(state = Step)]
 impl ReserveNamed {
     type Output = ();
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
+
     fn name(&self) -> Cow<'static, str> {
         "reserve-named".into()
     }
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, ()), CanoError> {
-        Ok((TaskResult::Single(Step::Done), ()))
+    async fn run(&self, _res: &Resources) -> Result<(Step, ()), CanoError> {
+        Ok((Step::Done, ()))
     }
     async fn compensate(&self, _res: &Resources, _output: ()) -> Result<(), CanoError> {
         Ok(())
@@ -57,9 +55,9 @@ struct Boom;
 #[task(state = Step)]
 impl Boom {
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal() // fail-fast so the original error surfaces directly
+        TaskConfig::new() // fail-fast so the original error surfaces directly
     }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         Err(CanoError::task_execution("boom"))
     }
 }

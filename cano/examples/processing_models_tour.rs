@@ -105,11 +105,11 @@ struct Router;
 
 #[task::router(state = Stage)]
 impl Router {
-    async fn route(&self, res: &Resources) -> Result<TaskResult<Stage>, CanoError> {
+    async fn route(&self, res: &Resources) -> Result<Stage, CanoError> {
         let config = res.get::<Config>()?;
         if config.proceed {
             println!("route      : config.proceed=true → Wait");
-            Ok(TaskResult::Single(Stage::Wait))
+            Ok(Stage::Wait)
         } else {
             // In this example the flag is always true, but branching is possible.
             Err(CanoError::configuration(
@@ -132,7 +132,7 @@ impl Waiter {
         let counter = res.get::<Counter>()?;
         if counter.is_done() {
             println!("wait       : counter reached threshold → Crunch");
-            Ok(PollOutcome::Ready(TaskResult::Single(Stage::Crunch)))
+            Ok(PollOutcome::Ready(Stage::Crunch))
         } else {
             Ok(PollOutcome::Pending { delay_ms: 5 })
         }
@@ -166,10 +166,10 @@ impl Cruncher {
         &self,
         _res: &Resources,
         outputs: Vec<Result<u32, CanoError>>,
-    ) -> Result<TaskResult<Stage>, CanoError> {
+    ) -> Result<Stage, CanoError> {
         let sum: u32 = outputs.into_iter().filter_map(|r| r.ok()).sum();
         println!("crunch     : sum of squares 1²+…+8² = {sum} → Grind");
-        Ok(TaskResult::Single(Stage::Grind))
+        Ok(Stage::Grind)
     }
 }
 
@@ -194,7 +194,7 @@ impl Grinder {
         println!("grind      : step {}", n + 1);
         if n >= 6 {
             println!("grind      : complete → Done");
-            Ok(StepOutcome::Done(TaskResult::Single(Stage::Done)))
+            Ok(StepOutcome::Done(Stage::Done))
         } else {
             Ok(StepOutcome::More(n + 1))
         }

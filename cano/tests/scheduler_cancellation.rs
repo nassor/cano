@@ -64,14 +64,11 @@ struct Long {
 }
 #[task(state = Step)]
 impl Long {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         self.started.store(true, SeqCst);
         tokio::time::sleep(Duration::from_secs(30)).await;
         self.completed.store(true, SeqCst);
-        Ok(TaskResult::Single(self.next.clone()))
+        Ok(self.next.clone())
     }
 }
 
@@ -84,9 +81,9 @@ struct Reserve {
 #[saga::task(state = Step)]
 impl Reserve {
     type Output = ();
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, ()), CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<(Step, ()), CanoError> {
         self.log.lock().unwrap().push("run:reserve".into());
-        Ok((TaskResult::Single(Step::Charge), ()))
+        Ok((Step::Charge, ()))
     }
     async fn compensate(&self, _res: &Resources, _o: ()) -> Result<(), CanoError> {
         self.log.lock().unwrap().push("rollback:reserve".into());
@@ -104,9 +101,9 @@ struct Charge {
 #[saga::task(state = Step)]
 impl Charge {
     type Output = ();
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, ()), CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<(Step, ()), CanoError> {
         self.log.lock().unwrap().push("run:charge".into());
-        Ok((TaskResult::Single(Step::Ship), ()))
+        Ok((Step::Ship, ()))
     }
     async fn compensate(&self, _res: &Resources, _o: ()) -> Result<(), CanoError> {
         self.log.lock().unwrap().push("rollback:charge".into());
@@ -262,14 +259,11 @@ struct SplitChild {
 }
 #[task(state = Step)]
 impl SplitChild {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         self.started.fetch_add(1, SeqCst);
         tokio::time::sleep(Duration::from_secs(30)).await;
         self.completed.fetch_add(1, SeqCst);
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -333,7 +327,7 @@ impl SlowStepper {
         tokio::time::sleep(Duration::from_millis(50)).await;
         let n = cursor.unwrap_or(0);
         if n >= 100_000 {
-            Ok(StepOutcome::Done(TaskResult::Single(Step::Done)))
+            Ok(StepOutcome::Done(Step::Done))
         } else {
             Ok(StepOutcome::More(n + 1))
         }
@@ -382,9 +376,9 @@ impl SlowTimer {
         self.started.store(true, SeqCst);
         Ok(TimerOutcome::Duration(Duration::from_secs(30)))
     }
-    async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+    async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
         self.fired.store(true, SeqCst);
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -484,9 +478,9 @@ impl SlowBatch {
         &self,
         _res: &Resources,
         _outputs: Vec<Result<(), CanoError>>,
-    ) -> Result<TaskResult<Step>, CanoError> {
+    ) -> Result<Step, CanoError> {
         self.finished.store(true, SeqCst);
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -611,13 +605,10 @@ struct CountingLong {
 }
 #[task(state = Step)]
 impl CountingLong {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         self.started.fetch_add(1, SeqCst);
         tokio::time::sleep(Duration::from_secs(30)).await;
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 

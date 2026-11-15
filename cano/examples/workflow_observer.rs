@@ -89,11 +89,11 @@ impl Task<Step> for FlakyLoad {
     fn name(&self) -> Cow<'static, str> {
         "load".into()
     }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         if self.remaining_failures.fetch_sub(1, Ordering::SeqCst) > 0 {
             return Err(CanoError::task_execution("upstream not ready yet"));
         }
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -109,14 +109,14 @@ struct GuardedProbe {
 #[task]
 impl Task<Step> for GuardedProbe {
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal().with_circuit_breaker(Arc::clone(&self.breaker))
+        TaskConfig::new().with_circuit_breaker(Arc::clone(&self.breaker))
     }
     fn name(&self) -> Cow<'static, str> {
         "probe".into()
     }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         // Never reached while the breaker is open.
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 

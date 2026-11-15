@@ -20,7 +20,7 @@
 //! - Pair with a plain `#[task]` for the post-poll processing step.
 //!
 //! For a wall-clock cap, `config()` can return
-//! `TaskConfig::minimal().with_attempt_timeout(dur)`. That timeout is enforced
+//! `TaskConfig::new().with_attempt_timeout(dur)`. That timeout is enforced
 //! by the workflow engine when the task is dispatched via `orchestrate()`.
 
 use std::sync::Arc;
@@ -93,7 +93,7 @@ impl AwaitJob {
 
         if done >= total {
             println!("await job  : complete ({done}/{total} ticks)");
-            Ok(PollOutcome::Ready(TaskResult::Single(Step::Process)))
+            Ok(PollOutcome::Ready(Step::Process))
         } else {
             // Adaptive delay: poll more frequently when close to completion.
             let remaining = total - done;
@@ -105,7 +105,7 @@ impl AwaitJob {
         // To bound the entire poll loop by wall-clock time, override `config()`:
         //
         //   fn config(&self) -> TaskConfig {
-        //       TaskConfig::minimal().with_attempt_timeout(Duration::from_secs(5))
+        //       TaskConfig::new().with_attempt_timeout(Duration::from_secs(5))
         //   }
         //
         // `CanoError::Timeout` is returned if the loop does not finish within
@@ -123,9 +123,9 @@ struct Process;
 
 #[task(state = Step)]
 impl Process {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         println!("process    : handling completed job results");
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 

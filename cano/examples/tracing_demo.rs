@@ -53,7 +53,7 @@ impl TracedDataProcessorTask {
         TaskConfig::default()
     }
 
-    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<WorkflowState, CanoError> {
         let store = res.get::<MemoryStore>()?;
 
         info!(processor_id = %self.processor_id, "Starting data preparation");
@@ -88,7 +88,7 @@ impl TracedDataProcessorTask {
         tokio::time::sleep(Duration::from_millis(30)).await;
         info!(processor_id = %self.processor_id, processed_count = processed_data.len(), "Post-processing completed");
 
-        Ok(TaskResult::Single(WorkflowState::Complete))
+        Ok(WorkflowState::Complete)
     }
 }
 
@@ -106,17 +106,17 @@ impl ValidationTask {
 
 #[task(state = WorkflowState)]
 impl ValidationTask {
-    async fn run_bare(&self) -> Result<TaskResult<WorkflowState>, CanoError> {
+    async fn run(&self) -> Result<WorkflowState, CanoError> {
         info!("Preparing validation");
         info!(should_pass = self.should_pass, "Running validation");
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         if self.should_pass {
             info!("Validation passed");
-            Ok(TaskResult::Single(WorkflowState::Processing))
+            Ok(WorkflowState::Processing)
         } else {
             warn!("Validation failed");
-            Ok(TaskResult::Single(WorkflowState::Error))
+            Ok(WorkflowState::Error)
         }
     }
 }
@@ -143,7 +143,7 @@ impl SimpleMathTask {
         TaskConfig::default().with_fixed_retry(2, Duration::from_millis(100))
     }
 
-    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<WorkflowState, CanoError> {
         let store = res.get::<MemoryStore>()?;
 
         info!(task_id = %self.task_id, operation = %self.operation, "Starting math task");
@@ -177,7 +177,7 @@ impl SimpleMathTask {
             "Math task completed"
         );
 
-        Ok(TaskResult::Single(WorkflowState::Complete))
+        Ok(WorkflowState::Complete)
     }
 }
 

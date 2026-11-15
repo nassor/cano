@@ -73,8 +73,8 @@ struct StartTask;
 
 #[task]
 impl Task<St> for StartTask {
-    async fn run_bare(&self) -> Result<TaskResult<St>, CanoError> {
-        Ok(TaskResult::Single(St::Done))
+    async fn run(&self) -> Result<St, CanoError> {
+        Ok(St::Done)
     }
 }
 

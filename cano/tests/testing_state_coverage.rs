@@ -22,19 +22,16 @@ enum S {
 struct Go(S);
 #[task]
 impl Task<S> for Go {
-    async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-        Ok(TaskResult::Single(self.0.clone()))
+    async fn run(&self) -> Result<S, CanoError> {
+        Ok(self.0.clone())
     }
 }
 
 struct RouteTo(S);
 #[task::router]
 impl RouterTask<S> for RouteTo {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-    async fn route(&self, _res: &Resources) -> Result<TaskResult<S>, CanoError> {
-        Ok(TaskResult::Single(self.0.clone()))
+    async fn route(&self, _res: &Resources) -> Result<S, CanoError> {
+        Ok(self.0.clone())
     }
 }
 

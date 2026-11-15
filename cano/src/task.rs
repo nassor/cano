@@ -1,14 +1,15 @@
 //! # Task API - Workflow Processing Interface
 //!
 //! This module provides the [`Task`] trait, the single interface for workflow processing units.
-//! A [`Task`] requires implementing one of `run` / `run_bare`, giving you direct control over the execution flow.
+//! A [`Task`] implements `run`, giving you direct control over the execution flow; it returns
+//! the FSM's next state.
 //!
-//! Tasks support retry strategies via [`TaskConfig`].
+//! Tasks support retry strategies via [`TaskConfig`]; by default a task runs once (no retries).
 //!
 //! ## Example
 //!
-//! When your task needs no external resources, implement [`Task::run_bare`] to avoid the
-//! unused `_res` parameter:
+//! When your task needs no external resources, leave out the resources parameter — the
+//! `#[task]` macro adds it:
 //!
 //! ```rust
 //! use cano::prelude::*;
@@ -20,17 +21,14 @@
 //!
 //! #[task]
 //! impl Task<Step> for SimpleTask {
-//!     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+//!     async fn run(&self) -> Result<Step, CanoError> {
 //!         // All work happens here with no external I/O
-//!         Ok(TaskResult::Single(Step::Done))
+//!         Ok(Step::Done)
 //!     }
 //! }
 //! ```
 //!
-//! Use [`Task::run`] when the task needs resources (store, config, HTTP client, etc.):
-//!
-//! - **`run_bare()`** — for pure computation with no external dependencies
-//! - **`run()`** — for tasks that read from or write to [`Resources`] (store, params, clients)
+//! Take `res: &Resources` when the task needs resources (store, config, HTTP client, etc.):
 //!
 //! ## Using Params and Store as Resources
 //!
@@ -51,12 +49,12 @@
 //!
 //! #[task]
 //! impl Task<Step> for FetchTask {
-//!     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+//!     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
 //!         let store = res.get::<MemoryStore>()?;
 //!         let params = res.get::<FetchParams>()?;
 //!         let data: Vec<u32> = (0..params.limit as u32).collect();
 //!         store.put("data", data);
-//!         Ok(TaskResult::Single(Step::Done))
+//!         Ok(Step::Done)
 //!     }
 //! }
 //!
@@ -90,21 +88,13 @@ pub mod stepped;
 pub mod stream;
 pub mod timer;
 
-pub use batch::{
-    BatchTask, BatchTaskObject, DefaultBatchItem, DefaultBatchItemOutput, DynBatchTask, run_batch,
-};
-pub use poll::{
-    DynPollTask, PollErrorPolicy, PollOutcome, PollTask, PollTaskObject, run_poll_loop,
-};
+pub use batch::{BatchTask, run_batch};
+pub use poll::{PollErrorPolicy, PollOutcome, PollTask, run_poll_loop};
 pub use retry::{RetryMode, TaskConfig, run_with_retries};
-pub use router::{DynRouterTask, RouterTask, RouterTaskObject};
-pub use stepped::{
-    DefaultStepCursor, DynSteppedTask, StepOutcome, SteppedTask, SteppedTaskObject, run_stepped,
-};
-pub use stream::{
-    CloseReason, StreamBatch, StreamErrorPolicy, StreamTask, StreamWindow, WindowSignal,
-};
-pub use timer::{DynTimerTask, TimerOutcome, TimerTask, TimerTaskObject, run_timer};
+pub use router::RouterTask;
+pub use stepped::{StepOutcome, SteppedTask, run_stepped};
+pub use stream::{CloseReason, StreamErrorPolicy, StreamTask, StreamWindow, WindowSignal};
+pub use timer::{TimerOutcome, TimerTask, run_timer};
 
 // Attribute macros namespaced under `cano::task::` so that
 // `#[task::router]`, `#[task::poll]`, `#[task::timer]`, `#[task::batch]`,
@@ -118,29 +108,6 @@ pub use cano_macros::stepped_task as stepped;
 pub use cano_macros::stream_task as stream;
 pub use cano_macros::timer_task as timer;
 
-// ---------------------------------------------------------------------------
-// Shared task-model defaults
-// ---------------------------------------------------------------------------
-
-/// The default [`TaskConfig`] shared by the plain task models (`Task`,
-/// `BatchTask`, `SteppedTask`, `RouterTask`, `CompensatableTask`): exponential
-/// backoff with 3 retries — see [`TaskConfig::default`].
-pub(crate) fn default_task_config() -> TaskConfig {
-    TaskConfig::default()
-}
-
-/// The default [`TaskConfig`] shared by the polling-style models (`PollTask`,
-/// `TimerTask`, `StreamTask`): no retries, no timeout — see [`TaskConfig::minimal`].
-pub(crate) fn minimal_task_config() -> TaskConfig {
-    TaskConfig::minimal()
-}
-
-/// The default task name shared by every task model: [`std::any::type_name`] of
-/// the implementing type, e.g. `"my_crate::tasks::FetchTask"`.
-pub(crate) fn default_task_name<T: ?Sized>() -> Cow<'static, str> {
-    Cow::Borrowed(std::any::type_name::<T>())
-}
-
 /// One iteration of a step-style task loop ([`run_task_loop`]).
 ///
 /// The loop skeleton is deliberately dumb — it only re-invokes the step closure
@@ -149,7 +116,7 @@ pub(crate) fn default_task_name<T: ?Sized>() -> Cow<'static, str> {
 /// `run_stepped` share the same driver instead of each re-spelling the loop.
 pub(crate) enum TaskLoopStep<T> {
     /// Stop the loop and return this outcome.
-    Done(Result<TaskResult<T>, CanoError>),
+    Done(Result<T, CanoError>),
     /// Run the step closure again.
     Continue,
 }
@@ -163,10 +130,7 @@ pub(crate) enum TaskLoopStep<T> {
 /// checker) and no boxing. All model-specific bookkeeping (delays, error
 /// policies, cursors) lives in `state` and the closure body, so `run_poll_loop`
 /// and `run_stepped` share the same driver instead of each re-spelling the loop.
-pub(crate) async fn run_task_loop<T, S, F, Fut>(
-    mut state: S,
-    mut step: F,
-) -> Result<TaskResult<T>, CanoError>
+pub(crate) async fn run_task_loop<T, S, F, Fut>(mut state: S, mut step: F) -> Result<T, CanoError>
 where
     F: FnMut(S) -> Fut,
     Fut: std::future::Future<Output = (S, TaskLoopStep<T>)>,
@@ -181,19 +145,10 @@ where
     }
 }
 
-/// Result type for task execution that supports both single and split transitions
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TaskResult<TState> {
-    /// Transition to a single next state
-    Single(TState),
-    /// Split into multiple parallel states for concurrent execution
-    Split(Vec<TState>),
-}
-
 /// Task trait for workflow processing
 ///
-/// This is the single interface for workflow processing units. You implement one
-/// of `run` / `run_bare`, giving you direct control over the execution flow.
+/// This is the single interface for workflow processing units: implement `run`,
+/// which returns the FSM's next state.
 ///
 /// # Generic Types
 ///
@@ -217,7 +172,7 @@ pub enum TaskResult<TState> {
 ///
 /// #[task]
 /// impl Task<String> for DataProcessor {
-///     async fn run(&self, res: &Resources) -> Result<TaskResult<String>, CanoError> {
+///     async fn run(&self, res: &Resources) -> Result<String, CanoError> {
 ///         let store = res.get::<MemoryStore>()?;
 ///         // Load data
 ///         let input: i32 = store.get("input").unwrap_or(1);
@@ -230,9 +185,9 @@ pub enum TaskResult<TState> {
 ///
 ///         // Determine next state
 ///         if result > 100 {
-///             Ok(TaskResult::Single("large_result".to_string()))
+///             Ok("large_result".to_string())
 ///         } else {
-///             Ok(TaskResult::Single("small_result".to_string()))
+///             Ok("small_result".to_string())
 ///         }
 ///     }
 /// }
@@ -242,18 +197,13 @@ pub trait Task<TState>: Send + Sync
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
 {
-    /// Get the task configuration that controls execution behavior
+    /// Get the task configuration that controls execution behavior.
     ///
-    /// Returns the TaskConfig that determines how this task should be executed.
-    /// The default implementation returns `TaskConfig::default()` which configures
-    /// the task with standard retry logic.
-    ///
-    /// Override this method to customize execution behavior:
-    /// - Use `TaskConfig::minimal()` for fast-failing tasks with minimal retries
-    /// - Use `TaskConfig::new().with_fixed_retry(n, duration)` for custom retry behavior
-    /// - Return a custom configuration with specific retry/parameter settings
+    /// The default is [`TaskConfig::new()`]: one attempt, no retries, no timeout.
+    /// Override it to opt into retries or an attempt timeout, e.g.
+    /// `TaskConfig::new().with_exponential_retry(3)`.
     fn config(&self) -> TaskConfig {
-        default_task_config()
+        TaskConfig::new()
     }
 
     /// Human-readable identifier for this task, reported to
@@ -264,90 +214,19 @@ where
     /// stable, friendlier name — useful when the type name is long or when
     /// several workflow states share one task type.
     fn name(&self) -> Cow<'static, str> {
-        default_task_name::<Self>()
+        Cow::Borrowed(std::any::type_name::<Self>())
     }
 
-    /// Execute the task with access to shared resources.
+    /// Execute the task and return the next state.
     ///
-    /// Override this when the task needs resources. The default implementation
-    /// delegates to [`run_bare`](Self::run_bare) — **you must override one of the two**.
-    /// Implementing neither is a programmer error: the default `run_bare` returns a
-    /// [`CanoError::Configuration`] at runtime rather than panicking, so the
-    /// workflow's retry/error path can surface it cleanly.
+    /// With `#[task]`, a task that needs no resources may write `async fn run(&self)`;
+    /// the macro adds the `res` parameter.
     ///
     /// # Errors
     ///
     /// Returns a [`CanoError`] propagated from the task logic.
-    async fn run(&self, res: &Resources) -> Result<TaskResult<TState>, CanoError> {
-        let _ = res;
-        self.run_bare().await
-    }
-
-    /// Execute the task without resources.
-    ///
-    /// Override this instead of [`run`](Self::run) when the task needs no resources.
-    /// This avoids an unused `_res: &Resources` parameter.
-    ///
-    /// The default implementation returns a [`CanoError::Configuration`]; if you see
-    /// that error at runtime it means the [`Task`] impl forgot to override either
-    /// `run` or `run_bare`.
-    ///
-    /// # Errors
-    ///
-    /// Returns a [`CanoError`] propagated from the task logic.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use cano::prelude::*;
-    ///
-    /// #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-    /// enum Step { Count, Done }
-    ///
-    /// struct CountTask;
-    ///
-    /// #[task]
-    /// impl Task<Step> for CountTask {
-    ///     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-    ///         Ok(TaskResult::Single(Step::Done))
-    ///     }
-    /// }
-    /// ```
-    async fn run_bare(&self) -> Result<TaskResult<TState>, CanoError> {
-        Err(CanoError::configuration(format!(
-            "Task<{}>: neither `run` nor `run_bare` was implemented; override one of them",
-            std::any::type_name::<Self>(),
-        )))
-    }
+    async fn run(&self, res: &Resources) -> Result<TState, CanoError>;
 }
-
-/// Type alias for a dynamic task trait object.
-///
-/// Use this when you need to store different task types in the same collection.
-///
-/// ```
-/// use cano::prelude::*;
-///
-/// #[derive(Debug, Clone, PartialEq, Eq, Hash)] enum Step { Start, Done }
-///
-/// struct First;
-/// #[task]
-/// impl Task<Step> for First {
-///     async fn run(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-///         Ok(TaskResult::Single(Step::Done))
-///     }
-/// }
-///
-/// // Heterogeneous collection of tasks.
-/// let tasks: Vec<TaskObject<Step>> = vec![std::sync::Arc::new(First)];
-/// assert_eq!(tasks.len(), 1);
-/// ```
-pub type DynTask<TState> = dyn Task<TState> + Send + Sync;
-
-/// Type alias for an `Arc`-wrapped dynamic task trait object.
-///
-/// This alias simplifies working with dynamic task collections in workflows.
-pub type TaskObject<TState> = std::sync::Arc<DynTask<TState>>;
 
 #[cfg(test)]
 mod tests {
@@ -387,9 +266,9 @@ mod tests {
 
     #[task]
     impl Task<TestAction> for SimpleTask {
-        async fn run_bare(&self) -> Result<TaskResult<TestAction>, CanoError> {
+        async fn run(&self) -> Result<TestAction, CanoError> {
             self.execution_count.fetch_add(1, Ordering::SeqCst);
-            Ok(TaskResult::Single(TestAction::Complete))
+            Ok(TestAction::Complete)
         }
     }
 
@@ -406,25 +285,12 @@ mod tests {
 
     #[task]
     impl Task<TestAction> for FailingTask {
-        async fn run_bare(&self) -> Result<TaskResult<TestAction>, CanoError> {
+        async fn run(&self) -> Result<TestAction, CanoError> {
             if self.should_fail {
                 Err(CanoError::task_execution("Task intentionally failed"))
             } else {
-                Ok(TaskResult::Single(TestAction::Complete))
+                Ok(TestAction::Complete)
             }
-        }
-    }
-
-    // Task that returns Split result
-    struct SplitTask;
-
-    #[task]
-    impl Task<TestAction> for SplitTask {
-        async fn run_bare(&self) -> Result<TaskResult<TestAction>, CanoError> {
-            Ok(TaskResult::Split(vec![
-                TestAction::Continue,
-                TestAction::Complete,
-            ]))
         }
     }
 
@@ -432,8 +298,8 @@ mod tests {
     async fn test_simple_task_execution() {
         let task = SimpleTask::new();
 
-        let result = task.run_bare().await.unwrap();
-        assert_eq!(result, TaskResult::Single(TestAction::Complete));
+        let result = task.run(&Resources::new()).await.unwrap();
+        assert_eq!(result, TestAction::Complete);
         assert_eq!(task.execution_count(), 1);
     }
 
@@ -441,48 +307,16 @@ mod tests {
     async fn test_failing_task() {
         // Test successful task
         let success_task = FailingTask::new(false);
-        let result = success_task.run_bare().await.unwrap();
-        assert_eq!(result, TaskResult::Single(TestAction::Complete));
+        let result = success_task.run(&Resources::new()).await.unwrap();
+        assert_eq!(result, TestAction::Complete);
 
         // Test failing task
         let fail_task = FailingTask::new(true);
-        let result = fail_task.run_bare().await;
+        let result = fail_task.run(&Resources::new()).await;
         assert!(result.is_err());
 
         let error = result.unwrap_err();
         assert!(error.to_string().contains("Task intentionally failed"));
-    }
-
-    #[tokio::test]
-    async fn test_split_task() {
-        let task = SplitTask;
-
-        let result = task.run_bare().await.unwrap();
-        assert_eq!(
-            result,
-            TaskResult::Split(vec![TestAction::Continue, TestAction::Complete])
-        );
-    }
-
-    #[tokio::test]
-    async fn test_unimplemented_run_returns_configuration_error() {
-        // A Task that overrides neither `run` nor `run_bare` should surface a
-        // Configuration error rather than panic, so workflow retry/error paths
-        // can handle it cleanly.
-        struct ForgotToImplement;
-
-        #[task]
-        impl Task<TestAction> for ForgotToImplement {}
-
-        let task = ForgotToImplement;
-        let res = Resources::new();
-        let err = task.run(&res).await.unwrap_err();
-        assert_eq!(err.category(), "configuration");
-        assert!(
-            err.message().contains("ForgotToImplement"),
-            "error should name the offending type, got: {}",
-            err.message()
-        );
     }
 
     #[tokio::test]
@@ -497,7 +331,7 @@ mod tests {
         for _ in 0..10 {
             let task_clone = Arc::clone(&task);
 
-            let handle = task::spawn(async move { task_clone.run_bare().await });
+            let handle = task::spawn(async move { task_clone.run(&Resources::new()).await });
             handles.push(handle);
         }
 
@@ -505,7 +339,7 @@ mod tests {
         let mut success_count = 0;
         for handle in handles {
             let result = handle.await.unwrap();
-            if let Ok(TaskResult::Single(TestAction::Complete)) = result {
+            if let Ok(TestAction::Complete) = result {
                 success_count += 1;
             }
         }
@@ -520,60 +354,9 @@ mod tests {
 
         // Run the task multiple times
         for i in 1..=5 {
-            let result = task.run_bare().await.unwrap();
-            assert_eq!(result, TaskResult::Single(TestAction::Complete));
+            let result = task.run(&Resources::new()).await.unwrap();
+            assert_eq!(result, TestAction::Complete);
             assert_eq!(task.execution_count(), i);
         }
-    }
-
-    // ------------------------------------------------------------------
-    // run_bare delegation tests
-    // ------------------------------------------------------------------
-
-    struct BareTask;
-
-    #[task]
-    impl Task<TestAction> for BareTask {
-        async fn run_bare(&self) -> Result<TaskResult<TestAction>, CanoError> {
-            Ok(TaskResult::Single(TestAction::Complete))
-        }
-    }
-
-    struct ExplicitRunTask {
-        bare_called: Arc<AtomicU32>,
-    }
-
-    #[task]
-    impl Task<TestAction> for ExplicitRunTask {
-        async fn run(&self, _res: &Resources) -> Result<TaskResult<TestAction>, CanoError> {
-            Ok(TaskResult::Single(TestAction::Continue))
-        }
-
-        async fn run_bare(&self) -> Result<TaskResult<TestAction>, CanoError> {
-            self.bare_called.fetch_add(1, Ordering::SeqCst);
-            Ok(TaskResult::Single(TestAction::Error))
-        }
-    }
-
-    #[tokio::test]
-    async fn test_run_bare_called_when_run_not_overridden() {
-        let task = BareTask;
-        let res = Resources::new();
-        let result = task.run(&res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(TestAction::Complete));
-    }
-
-    #[tokio::test]
-    async fn test_run_overrides_bypass_bare() {
-        let bare_called = Arc::new(AtomicU32::new(0));
-        let task = ExplicitRunTask {
-            bare_called: Arc::clone(&bare_called),
-        };
-        let res = Resources::new();
-        let result = task.run(&res).await.unwrap();
-        // run() override returns Continue, not Error from run_bare
-        assert_eq!(result, TaskResult::Single(TestAction::Continue));
-        // run_bare must never have been called
-        assert_eq!(bare_called.load(Ordering::SeqCst), 0);
     }
 }

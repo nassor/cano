@@ -43,10 +43,10 @@ struct Charge;
 #[saga::task(state = Step)]
 impl Reserve {
     type Output = u32;
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, u32), CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<(Step, u32), CanoError> {
         let ticket = 42;
         println!("reserve  : holding inventory (ticket #{ticket})");
-        Ok((TaskResult::Single(Step::Charge), ticket))
+        Ok((Step::Charge, ticket))
     }
     async fn compensate(&self, _res: &Resources, ticket: u32) -> Result<(), CanoError> {
         println!("reserve  : releasing ticket #{ticket}  (rollback)");
@@ -57,10 +57,10 @@ impl Reserve {
 #[saga::task(state = Step)]
 impl Charge {
     type Output = String;
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, String), CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<(Step, String), CanoError> {
         let auth = "auth-XYZ".to_string();
         println!("charge   : capturing $42.00 (auth {auth})");
-        Ok((TaskResult::Single(Step::Ship), auth))
+        Ok((Step::Ship, auth))
     }
     async fn compensate(&self, _res: &Resources, auth: String) -> Result<(), CanoError> {
         println!("charge   : refunding auth {auth}  (rollback)");
@@ -75,15 +75,12 @@ struct Ship {
 }
 #[task(state = Step)]
 impl Ship {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         println!("ship     : dispatching shipment…  (a sibling task will cancel this)");
         self.started.store(true, Ordering::SeqCst);
         tokio::time::sleep(Duration::from_secs(2)).await;
         println!("ship     : this line should never print");
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 

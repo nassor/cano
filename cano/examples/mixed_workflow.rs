@@ -38,7 +38,7 @@ impl DataGeneratorTask {
 
 #[task(state = WorkflowState)]
 impl DataGeneratorTask {
-    async fn run(&self, res: &Resources) -> CanoResult<TaskResult<WorkflowState>> {
+    async fn run(&self, res: &Resources) -> CanoResult<WorkflowState> {
         let store = res.get::<MemoryStore>()?;
 
         println!("DataGeneratorTask: Generating {} data points...", self.size);
@@ -57,7 +57,7 @@ impl DataGeneratorTask {
         store.put("raw_data", data);
         store.put("generation_time", std::time::SystemTime::now());
 
-        Ok(TaskResult::Single(WorkflowState::ProcessData))
+        Ok(WorkflowState::ProcessData)
     }
 }
 
@@ -82,7 +82,7 @@ impl ProcessorTask {
 
 #[task(state = WorkflowState)]
 impl ProcessorTask {
-    async fn run(&self, res: &Resources) -> CanoResult<TaskResult<WorkflowState>> {
+    async fn run(&self, res: &Resources) -> CanoResult<WorkflowState> {
         let store = res.get::<MemoryStore>()?;
 
         println!(
@@ -128,14 +128,14 @@ impl ProcessorTask {
 
         if stats.count == 0 {
             println!("   No data survived processing — skipping validation");
-            return Ok(TaskResult::Single(WorkflowState::GenerateReport));
+            return Ok(WorkflowState::GenerateReport);
         }
 
         println!(
             "   Processing complete — {} points ready for validation",
             stats.count
         );
-        Ok(TaskResult::Single(WorkflowState::ValidateResults))
+        Ok(WorkflowState::ValidateResults)
     }
 }
 
@@ -144,7 +144,7 @@ struct ValidatorTask;
 
 #[task(state = WorkflowState)]
 impl ValidatorTask {
-    async fn run(&self, res: &Resources) -> CanoResult<TaskResult<WorkflowState>> {
+    async fn run(&self, res: &Resources) -> CanoResult<WorkflowState> {
         let store = res.get::<MemoryStore>()?;
 
         println!("ValidatorTask: Running validation checks...");
@@ -180,7 +180,7 @@ impl ValidatorTask {
             }
         }
 
-        Ok(TaskResult::Single(WorkflowState::GenerateReport))
+        Ok(WorkflowState::GenerateReport)
     }
 }
 
@@ -189,7 +189,7 @@ struct ReportTask;
 
 #[task(state = WorkflowState)]
 impl ReportTask {
-    async fn run(&self, res: &Resources) -> CanoResult<TaskResult<WorkflowState>> {
+    async fn run(&self, res: &Resources) -> CanoResult<WorkflowState> {
         let store = res.get::<MemoryStore>()?;
 
         println!("ReportTask: Generating report...");
@@ -222,7 +222,7 @@ impl ReportTask {
         store.put("final_report", report);
         println!("   Report generated successfully!");
 
-        Ok(TaskResult::Single(WorkflowState::Complete))
+        Ok(WorkflowState::Complete)
     }
 }
 

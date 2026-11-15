@@ -73,12 +73,8 @@ impl StreamTask<Flow> for MeterFeed {
         Ok(WindowSignal::Continue)
     }
 
-    async fn on_close(
-        &self,
-        _res: &Resources,
-        _reason: CloseReason,
-    ) -> Result<TaskResult<Flow>, CanoError> {
-        Ok(TaskResult::Single(Flow::Done))
+    async fn on_close(&self, _res: &Resources, _reason: CloseReason) -> Result<Flow, CanoError> {
+        Ok(Flow::Done)
     }
 }
 
@@ -194,13 +190,9 @@ impl StreamTask<Flow> for TickerFeed {
         Ok(WindowSignal::Continue)
     }
 
-    async fn on_close(
-        &self,
-        _res: &Resources,
-        reason: CloseReason,
-    ) -> Result<TaskResult<Flow>, CanoError> {
+    async fn on_close(&self, _res: &Resources, reason: CloseReason) -> Result<Flow, CanoError> {
         self.closes.lock().push(format!("{reason:?}"));
-        Ok(TaskResult::Single(Flow::Done))
+        Ok(Flow::Done)
     }
 }
 
@@ -317,12 +309,8 @@ impl StreamTask<Flow> for FlakyFeed {
         Ok(WindowSignal::Continue)
     }
 
-    async fn on_close(
-        &self,
-        _res: &Resources,
-        _reason: CloseReason,
-    ) -> Result<TaskResult<Flow>, CanoError> {
-        Ok(TaskResult::Single(Flow::Done))
+    async fn on_close(&self, _res: &Resources, _reason: CloseReason) -> Result<Flow, CanoError> {
+        Ok(Flow::Done)
     }
 }
 
@@ -398,7 +386,7 @@ impl StreamTask<Flow> for StallFeed {
     fn config(&self) -> TaskConfig {
         // For streams only attempt_timeout is honored — as a per-item bound. This
         // is also what bounds cancel latency when items can hang.
-        TaskConfig::minimal().with_attempt_timeout(Duration::from_millis(50))
+        TaskConfig::new().with_attempt_timeout(Duration::from_millis(50))
     }
 
     async fn open(
@@ -425,12 +413,8 @@ impl StreamTask<Flow> for StallFeed {
         Ok(WindowSignal::Continue)
     }
 
-    async fn on_close(
-        &self,
-        _res: &Resources,
-        _reason: CloseReason,
-    ) -> Result<TaskResult<Flow>, CanoError> {
-        Ok(TaskResult::Single(Flow::Done))
+    async fn on_close(&self, _res: &Resources, _reason: CloseReason) -> Result<Flow, CanoError> {
+        Ok(Flow::Done)
     }
 }
 

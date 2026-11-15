@@ -41,13 +41,9 @@ impl InherentInferred {
         Ok(WindowSignal::Continue)
     }
 
-    async fn on_close(
-        &self,
-        _res: &Resources,
-        reason: CloseReason,
-    ) -> Result<TaskResult<Step>, CanoError> {
+    async fn on_close(&self, _res: &Resources, reason: CloseReason) -> Result<Step, CanoError> {
         assert_eq!(reason, CloseReason::Exhausted);
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -69,7 +65,7 @@ fn inherent_default_error_policy_is_fail_fast() {
 
 #[test]
 fn inherent_default_config_is_minimal() {
-    // TaskConfig::minimal() → 1 attempt (no retries).
+    // TaskConfig::new() → 1 attempt (no retries).
     assert_eq!(Task::config(&InherentInferred).retry_mode.max_attempts(), 1);
 }
 
@@ -91,7 +87,7 @@ async fn inherent_runs_via_register_stream() {
 async fn inherent_runs_via_register_in_memory() {
     let res = Resources::new();
     let result = Task::run(&InherentInferred, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::Done));
+    assert_eq!(result, Step::Done);
 }
 
 // 2. Inherent form with an overridden window.
@@ -126,12 +122,8 @@ impl InherentWithKey {
         Ok(WindowSignal::Continue)
     }
 
-    async fn on_close(
-        &self,
-        _res: &Resources,
-        _reason: CloseReason,
-    ) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    async fn on_close(&self, _res: &Resources, _reason: CloseReason) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 
@@ -139,7 +131,7 @@ impl InherentWithKey {
 async fn inherent_with_key_runs() {
     let resources = Resources::new();
     let result = Task::run(&InherentWithKey, &resources).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::Done));
+    assert_eq!(result, Step::Done);
 }
 
 // 3. Trait-impl form with explicit associated types + an explicit `on_item_error`.
@@ -180,12 +172,8 @@ impl StreamTask<Step> for TraitStream {
         Ok(WindowSignal::Continue)
     }
 
-    async fn on_close(
-        &self,
-        _res: &Resources,
-        _reason: CloseReason,
-    ) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    async fn on_close(&self, _res: &Resources, _reason: CloseReason) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 
@@ -202,5 +190,5 @@ async fn trait_form_runs_and_is_dyn_task() {
     let task: Arc<dyn Task<Step>> = Arc::new(TraitStream);
     let res = Resources::new();
     let result = Task::run(task.as_ref(), &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::Done));
+    assert_eq!(result, Step::Done);
 }

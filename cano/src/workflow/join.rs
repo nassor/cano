@@ -9,7 +9,6 @@
 use std::time::Duration;
 
 use crate::error::CanoError;
-use crate::task::TaskResult;
 
 /// Strategy for joining parallel tasks
 #[derive(Clone, Debug, PartialEq)]
@@ -77,7 +76,7 @@ pub struct SplitTaskResult<TState> {
     /// Index of the task in the split tasks vector
     pub task_index: usize,
     /// Result of the task execution
-    pub result: Result<TaskResult<TState>, CanoError>,
+    pub result: Result<TState, CanoError>,
 }
 
 /// Collection of split task results with both successes and errors
@@ -257,11 +256,11 @@ mod tests {
 
         r.successes.push(SplitTaskResult {
             task_index: 0,
-            result: Ok(TaskResult::Single(1)),
+            result: Ok(1),
         });
         r.successes.push(SplitTaskResult {
             task_index: 1,
-            result: Ok(TaskResult::Single(2)),
+            result: Ok(2),
         });
         r.errors.push(SplitTaskResult {
             task_index: 2,

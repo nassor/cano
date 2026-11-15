@@ -15,6 +15,7 @@ const MODEL: Model = Model {
     required: &["step"],
     optional: &["config", "name"],
     assoc: &["Cursor"],
+    res_first: &[("step", 2)],
     infer_assoc,
     companion_run: Some(
         |state| quote!(::std::boxed::Box::pin(::cano::task::stepped::run_stepped::<Self, #state>(self, res))),

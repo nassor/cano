@@ -44,7 +44,7 @@ impl LongProcessingTask {
 
 #[task(state = MyState)]
 impl LongProcessingTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<MyState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<MyState, CanoError> {
         println!("Starting long task ({}s)", self.duration_secs);
 
         // Simulate long-running work with progress updates
@@ -57,7 +57,7 @@ impl LongProcessingTask {
         let result = format!("Long task finished after {}s", self.duration_secs);
         let store = res.get::<MemoryStore>()?;
         store.put("long_task_result", result);
-        Ok(TaskResult::Single(MyState::Processing))
+        Ok(MyState::Processing)
     }
 }
 
@@ -67,7 +67,7 @@ struct ProcessingTask;
 
 #[task(state = MyState)]
 impl ProcessingTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<MyState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<MyState, CanoError> {
         let store = res.get::<MemoryStore>()?;
         let result: String = store
             .get("long_task_result")
@@ -79,7 +79,7 @@ impl ProcessingTask {
         let processed = format!("Processed: {}", result);
         store.put("processed_result", processed);
         println!("Processing completed");
-        Ok(TaskResult::Single(MyState::End))
+        Ok(MyState::End)
     }
 }
 
@@ -89,10 +89,10 @@ struct QuickTask;
 
 #[task(state = MyState)]
 impl QuickTask {
-    async fn run_bare(&self) -> Result<TaskResult<MyState>, CanoError> {
+    async fn run(&self) -> Result<MyState, CanoError> {
         println!("Quick task starting");
         println!("Quick task completed");
-        Ok(TaskResult::Single(MyState::End))
+        Ok(MyState::End)
     }
 }
 

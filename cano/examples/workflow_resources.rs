@@ -173,7 +173,7 @@ struct InitTask;
 
 #[task(state = Step)]
 impl InitTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
         let store = res.get::<MemoryStore>()?;
         let params = res.get::<WorkflowParams>()?;
 
@@ -181,7 +181,7 @@ impl InitTask {
         store.put("value", value);
         println!("InitTask: stored value = {value}");
 
-        Ok(TaskResult::Single(Step::Process))
+        Ok(Step::Process)
     }
 }
 
@@ -191,7 +191,7 @@ struct ProcessTask;
 
 #[task(state = Step)]
 impl ProcessTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
         let store = res.get::<MemoryStore>()?;
         let counter = res.get::<CounterResource>()?;
 
@@ -200,7 +200,7 @@ impl ProcessTask {
         store.put("result", result);
         println!("ProcessTask: result = {result}");
 
-        Ok(TaskResult::Single(Step::Persist))
+        Ok(Step::Persist)
     }
 }
 
@@ -209,7 +209,7 @@ struct PersistTask;
 
 #[task(state = Step)]
 impl PersistTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
         let store = res.get::<MemoryStore>()?;
         let redb = res.get::<RedbResource>()?;
 
@@ -232,7 +232,7 @@ impl PersistTask {
             .map_err(|e| CanoError::Generic(format!("redb commit: {e}")))?;
 
         println!("PersistTask: committed final_result = {result} to redb");
-        Ok(TaskResult::Single(Step::Verify))
+        Ok(Step::Verify)
     }
 }
 
@@ -242,7 +242,7 @@ struct VerifyTask;
 
 #[task(state = Step)]
 impl VerifyTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
         let redb = res.get::<RedbResource>()?;
         let db = redb.db()?;
 
@@ -259,7 +259,7 @@ impl VerifyTask {
             .value();
 
         println!("VerifyTask: read back {value} from redb");
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 

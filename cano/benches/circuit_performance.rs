@@ -61,7 +61,7 @@ fn bench_run_with_retries_overhead(c: &mut Criterion) {
     let mut group = c.benchmark_group("circuit_run_with_retries");
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    let no_breaker = TaskConfig::minimal();
+    let no_breaker = TaskConfig::new();
     group.bench_function("no_breaker", |b| {
         b.to_async(&rt).iter(|| async {
             let _ = run_with_retries::<u32, _, _>(&no_breaker, || async { Ok(42u32) }).await;
@@ -69,7 +69,7 @@ fn bench_run_with_retries_overhead(c: &mut Criterion) {
     });
 
     let breaker = Arc::new(CircuitBreaker::new(fast_policy()));
-    let with_breaker = TaskConfig::minimal().with_circuit_breaker(Arc::clone(&breaker));
+    let with_breaker = TaskConfig::new().with_circuit_breaker(Arc::clone(&breaker));
     group.bench_function("with_breaker", |b| {
         b.to_async(&rt).iter(|| async {
             let _ = run_with_retries::<u32, _, _>(&with_breaker, || async { Ok(42u32) }).await;
@@ -120,7 +120,7 @@ fn bench_attempt_timeout_error_path(c: &mut Criterion) {
 
     // 1ms attempt_timeout + 5ms task body → every attempt times out.
     // 0 retries → exactly one attempt per `run_with_retries` call.
-    let config = TaskConfig::minimal().with_attempt_timeout(Duration::from_millis(1));
+    let config = TaskConfig::new().with_attempt_timeout(Duration::from_millis(1));
 
     group.bench_function("single_timeout", |b| {
         b.to_async(&rt).iter(|| async {
@@ -166,7 +166,7 @@ fn bench_run_with_retries_open_short_circuit(c: &mut Criterion) {
     let p = breaker.try_acquire().unwrap();
     breaker.record_failure(p);
 
-    let config = TaskConfig::minimal().with_circuit_breaker(Arc::clone(&breaker));
+    let config = TaskConfig::new().with_circuit_breaker(Arc::clone(&breaker));
     let calls = AtomicUsize::new(0);
 
     group.bench_function("rejected", |b| {

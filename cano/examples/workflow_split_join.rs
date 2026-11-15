@@ -32,7 +32,7 @@ struct DataLoader;
 
 #[task(state = DataProcessingState)]
 impl DataLoader {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<DataProcessingState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<DataProcessingState, CanoError> {
         let store = res.get::<MemoryStore>()?;
         println!("Loading initial data...");
 
@@ -41,7 +41,7 @@ impl DataLoader {
         store.put("input_data", data);
 
         println!("Data loaded: 10 numbers");
-        Ok(TaskResult::Single(DataProcessingState::ParallelProcessing))
+        Ok(DataProcessingState::ParallelProcessing)
     }
 }
 
@@ -59,7 +59,7 @@ impl ProcessorTask {
 
 #[task(state = DataProcessingState)]
 impl ProcessorTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<DataProcessingState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<DataProcessingState, CanoError> {
         let store = res.get::<MemoryStore>()?;
         println!("Processor {} starting...", self.task_id);
 
@@ -79,7 +79,7 @@ impl ProcessorTask {
             "Processor {} completed with result: {}",
             self.task_id, result
         );
-        Ok(TaskResult::Single(DataProcessingState::Aggregate))
+        Ok(DataProcessingState::Aggregate)
     }
 }
 
@@ -89,7 +89,7 @@ struct Aggregator;
 
 #[task(state = DataProcessingState)]
 impl Aggregator {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<DataProcessingState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<DataProcessingState, CanoError> {
         let store = res.get::<MemoryStore>()?;
         println!("Aggregating results...");
 
@@ -111,7 +111,7 @@ impl Aggregator {
             "Aggregation complete: {} processors completed, total: {}",
             count, total
         );
-        Ok(TaskResult::Single(DataProcessingState::Complete))
+        Ok(DataProcessingState::Complete)
     }
 }
 

@@ -73,7 +73,7 @@ struct GeneratorTask;
 
 #[task(state = WorkflowAction)]
 impl GeneratorTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowAction>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<WorkflowAction, CanoError> {
         // Load config
         let GeneratorDeps { config } = GeneratorDeps::from_resources(res)?;
         let mut rng = rand::rng();
@@ -91,7 +91,7 @@ impl GeneratorTask {
         let StoreDeps { store } = StoreDeps::from_resources(res)?;
         store.put("filtered_numbers", evens);
         println!("Generator task completed");
-        Ok(TaskResult::Single(WorkflowAction::Count))
+        Ok(WorkflowAction::Count)
     }
 }
 
@@ -105,7 +105,7 @@ struct CounterTask;
 
 #[task(state = WorkflowAction)]
 impl CounterTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowAction>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<WorkflowAction, CanoError> {
         let StoreDeps { store } = StoreDeps::from_resources(res)?;
         let numbers: Vec<u32> = store.get("filtered_numbers").map_err(|e| {
             CanoError::task_execution(format!("Failed to load filtered numbers: {e}"))
@@ -121,7 +121,7 @@ impl CounterTask {
             "Counter task completed — count {} stored, intermediate data cleaned",
             count
         );
-        Ok(TaskResult::Single(WorkflowAction::Complete))
+        Ok(WorkflowAction::Complete)
     }
 }
 

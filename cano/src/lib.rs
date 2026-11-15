@@ -26,23 +26,23 @@
 //!
 //! #[task]
 //! impl Task<Step> for FetchTask {
-//!     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+//!     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
 //!         let config = res.get::<FetchConfig>()?;
 //!         let store = res.get::<MemoryStore>()?;
 //!         // Produce `batch_size` items and store them for the next task.
 //!         let data: Vec<u32> = (1..=(config.batch_size as u32)).collect();
 //!         store.put("data", data);
-//!         Ok(TaskResult::Single(Step::Process))
+//!         Ok(Step::Process)
 //!     }
 //! }
 //!
 //! #[task]
 //! impl Task<Step> for ProcessTask {
-//!     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+//!     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
 //!         let store = res.get::<MemoryStore>()?;
 //!         let data: Vec<u32> = store.get("data")?;
 //!         store.put("sum", data.iter().sum::<u32>());
-//!         Ok(TaskResult::Single(Step::Done))
+//!         Ok(Step::Done)
 //!     }
 //! }
 //!
@@ -68,8 +68,8 @@
 //!
 //! ## Resource-Free Workflows
 //!
-//! When tasks do not need shared resources, use [`Workflow::bare`] and implement
-//! [`run_bare`](task::Task::run_bare) instead of `run`:
+//! When tasks do not need shared resources, use [`Workflow::bare`] and write
+//! `async fn run(&self)` — the `#[task]` macro adds the resources parameter:
 //!
 //! ```rust
 //! use cano::prelude::*;
@@ -81,11 +81,11 @@
 //!
 //! #[task]
 //! impl Task<Step> for ComputeTask {
-//!     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+//!     async fn run(&self) -> Result<Step, CanoError> {
 //!         // Pure computation — no resource lookup needed.
 //!         let result: u32 = (1..=100).sum();
 //!         assert_eq!(result, 5050);
-//!         Ok(TaskResult::Single(Step::Done))
+//!         Ok(Step::Done)
 //!     }
 //! }
 //!
@@ -110,14 +110,14 @@
 //!
 //! ### Tasks
 //!
-//! [`Task`] is the single interface for processing logic — implement one of `run` /
-//! `run_bare`. Several specialized task models build on it:
+//! [`Task`] is the single interface for processing logic — implement `run`. Several
+//! specialized task models build on it:
 //! - [`RouterTask`] trait: side-effect-free branching; reads resources, returns the next
 //!   state without writing anything. Registered with [`Workflow::register_router`] — the
 //!   engine dispatches it like a normal state but writes **no** `CheckpointRow`.
 //! - [`PollTask`] trait: "wait-until" loop; `poll()` returns [`PollOutcome::Ready`] or
 //!   [`PollOutcome::Pending { delay_ms }`](PollOutcome::Pending) on each call. Defaults to
-//!   [`TaskConfig::minimal()`](task::TaskConfig::minimal) (no retries). Registered with
+//!   [`TaskConfig::new()`](task::TaskConfig::new) (no retries). Registered with
 //!   [`Workflow::register`] — the engine applies `attempt_timeout` if set via `config()`.
 //! - [`TimerTask`] trait: wait-then-transition; `wait()` returns a [`TimerOutcome`] (a
 //!   [`Duration`](std::time::Duration) or monotonic [`Instant`](std::time::Instant)) and the
@@ -189,19 +189,19 @@
 //!
 //! ## Processing Lifecycle
 //!
-//! **Task**: Single `run()` / `run_bare()` method — full control over execution flow.
+//! **Task**: Single `run()` method — full control over execution flow.
 //!
 //! **RouterTask**: Single `route()` method — side-effect-free; reads resources, returns
 //! the next state. Dispatched like a normal state but leaves no checkpoint row.
 //!
-//! **PollTask**: Single `poll()` method — returns [`PollOutcome::Ready(TaskResult)`](PollOutcome::Ready)
+//! **PollTask**: Single `poll()` method — returns [`PollOutcome::Ready(state)`](PollOutcome::Ready)
 //! or [`PollOutcome::Pending { delay_ms }`](PollOutcome::Pending); the engine loops until `Ready`. Defaults
-//! to `TaskConfig::minimal()` (no retries). Use `config().with_attempt_timeout(dur)` to cap
+//! to `TaskConfig::new()` (no retries). Use `config().with_attempt_timeout(dur)` to cap
 //! total wall-clock time; registered with [`Workflow::register`] like any other task.
 //!
 //! **TimerTask**: `wait()` returns a [`TimerOutcome`] and `after_wait()` returns the next state —
 //! the engine schedules a single sleep between them (no polling loop). Defaults to
-//! `TaskConfig::minimal()`; an `attempt_timeout` caps the wait. Registered with
+//! `TaskConfig::new()`; an `attempt_timeout` caps the wait. Registered with
 //! [`Workflow::register`] like any other task.
 //!
 //! ### Timeouts
@@ -228,7 +228,7 @@
 //!
 //! ## Module Overview
 //!
-//! - [`mod@task`]: The [`Task`] trait — single `run()` / `run_bare()` method
+//! - [`mod@task`]: The [`Task`] trait — single `run()` method
 //! - [`task::router`]: The [`RouterTask`] trait — side-effect-free branching via `route()`; registered with [`Workflow::register_router`]
 //! - [`task::poll`]: The [`PollTask`] trait — wait-until loop via `poll()`; registered with [`Workflow::register`]
 //! - [`task::timer`]: The [`TimerTask`] trait — wait-then-transition via `wait()`/`after_wait()`; registered with [`Workflow::register`]
@@ -294,26 +294,18 @@ pub use rate_limit::{
 pub use recovery::{CheckpointRow, CheckpointStore, RowKind};
 pub use resource::{HealthStatus, Resource, Resources};
 pub use saga::{CompensatableTask, ErasedCompensatable};
-pub use task::batch::{
-    BatchTask, BatchTaskObject, DefaultBatchItem, DefaultBatchItemOutput, DynBatchTask, run_batch,
-};
-pub use task::poll::{
-    DynPollTask, PollErrorPolicy, PollOutcome, PollTask, PollTaskObject, run_poll_loop,
-};
-pub use task::router::{DynRouterTask, RouterTask, RouterTaskObject};
-pub use task::stepped::{
-    DefaultStepCursor, DynSteppedTask, StepOutcome, SteppedTask, SteppedTaskObject, run_stepped,
-};
-pub use task::stream::{
-    CloseReason, StreamBatch, StreamErrorPolicy, StreamTask, StreamWindow, WindowSignal,
-};
-pub use task::timer::{DynTimerTask, TimerOutcome, TimerTask, TimerTaskObject, run_timer};
+pub use task::batch::BatchTask;
+pub use task::poll::{PollErrorPolicy, PollOutcome, PollTask};
+pub use task::router::RouterTask;
+pub use task::stepped::{StepOutcome, SteppedTask};
+pub use task::stream::{CloseReason, StreamErrorPolicy, StreamTask, StreamWindow, WindowSignal};
+pub use task::timer::{TimerOutcome, TimerTask};
 pub use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "recovery")]
 pub use recovery::RedbCheckpointStore;
 pub use store::MemoryStore;
-pub use task::{DynTask, RetryMode, Task, TaskConfig, TaskObject, TaskResult};
+pub use task::{RetryMode, Task, TaskConfig};
 pub use workflow::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult, StateEntry, Workflow};
 
 #[cfg(feature = "tracing")]
@@ -388,10 +380,9 @@ pub mod prelude {
         HealthStatus, JoinConfig, JoinStrategy, MemoryStore, Meter, MeterStatus, MultiPermit,
         MultiRateLimiter, PollErrorPolicy, PollOutcome, PollTask, RateLimiter, RateLimiterPermit,
         RateLimiterPolicy, Reservation, Resource, Resources, RetryMode, RouterTask, RowKind,
-        SplitResult, SplitTaskResult, StateEntry, StepOutcome, SteppedTask, StreamBatch,
-        StreamErrorPolicy, StreamTask, StreamWindow, Task, TaskConfig, TaskObject, TaskResult,
-        Tier, TimerOutcome, TimerTask, WindowPermit, WindowPolicy, WindowSignal,
-        WindowedRateLimiter, Workflow, WorkflowObserver, run_stepped,
+        SplitResult, SplitTaskResult, StateEntry, StepOutcome, SteppedTask, StreamErrorPolicy,
+        StreamTask, StreamWindow, Task, TaskConfig, Tier, TimerOutcome, TimerTask, WindowPermit,
+        WindowPolicy, WindowSignal, WindowedRateLimiter, Workflow, WorkflowObserver,
     };
 
     #[cfg(feature = "scheduler")]

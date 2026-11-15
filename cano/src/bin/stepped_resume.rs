@@ -79,7 +79,7 @@ impl Cruncher {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         if n + 1 >= TARGET {
-            Ok(StepOutcome::Done(TaskResult::Single(State::Done)))
+            Ok(StepOutcome::Done(State::Done))
         } else {
             Ok(StepOutcome::More(n + 1))
         }

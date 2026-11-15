@@ -62,14 +62,14 @@ struct Classifier;
 
 #[task::router(state = Step)]
 impl Classifier {
-    async fn route(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+    async fn route(&self, res: &Resources) -> Result<Step, CanoError> {
         let config = res.get::<Config>()?;
         if config.use_fast_path {
             println!("classifier : fast path selected");
-            Ok(TaskResult::Single(Step::FastPath))
+            Ok(Step::FastPath)
         } else {
             println!("classifier : slow path selected");
-            Ok(TaskResult::Single(Step::SlowPath))
+            Ok(Step::SlowPath)
         }
     }
 }
@@ -82,9 +82,9 @@ struct FastProcessor;
 
 #[task(state = Step)]
 impl FastProcessor {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         println!("fast path  : processing quickly...");
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -92,9 +92,9 @@ struct SlowProcessor;
 
 #[task(state = Step)]
 impl SlowProcessor {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         println!("slow path  : processing thoroughly...");
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 

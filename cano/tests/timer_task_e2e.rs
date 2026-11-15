@@ -21,8 +21,8 @@ struct Process;
 
 #[task(state = Step)]
 impl Process {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    async fn run(&self) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 
@@ -37,8 +37,8 @@ impl ThirtySecondTimer {
     async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
         Ok(TimerOutcome::Duration(Duration::from_secs(30)))
     }
-    async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Process))
+    async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+        Ok(Step::Process)
     }
 }
 
@@ -79,8 +79,8 @@ impl NearFutureInstantTimer {
             Instant::now() + Duration::from_millis(40),
         ))
     }
-    async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Process))
+    async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+        Ok(Step::Process)
     }
 }
 
@@ -114,13 +114,13 @@ struct OneHourTimer;
 #[task::timer(state = Step)]
 impl OneHourTimer {
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal().with_attempt_timeout(Duration::from_millis(50))
+        TaskConfig::new().with_attempt_timeout(Duration::from_millis(50))
     }
     async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
         Ok(TimerOutcome::Duration(Duration::from_secs(3600)))
     }
-    async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Process))
+    async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+        Ok(Step::Process)
     }
 }
 

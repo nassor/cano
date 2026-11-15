@@ -47,7 +47,7 @@ use serde::de::DeserializeOwned;
 
 use crate::error::CanoError;
 use crate::resource::Resources;
-use crate::task::{TaskConfig, TaskResult};
+use crate::task::TaskConfig;
 
 /// A workflow task that records an `Output` when it succeeds and can later be
 /// undone via [`compensate`](Self::compensate).
@@ -73,9 +73,9 @@ use crate::task::{TaskConfig, TaskResult};
 /// #[saga::task(state = Step)]
 /// impl ReserveInventory {
 ///     type Output = Reservation;
-///     async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {
+///     async fn run(&self, _res: &Resources) -> Result<(Step, Reservation), CanoError> {
 ///         // ... actually reserve ...
-///         Ok((TaskResult::Single(Step::Ship), Reservation { sku: "ABC".into(), qty: 2 }))
+///         Ok((Step::Ship, Reservation { sku: "ABC".into(), qty: 2 }))
 ///     }
 ///     async fn compensate(&self, _res: &Resources, output: Reservation) -> Result<(), CanoError> {
 ///         // ... release `output.qty` of `output.sku` ...
@@ -102,13 +102,13 @@ where
     /// Retry / timeout / circuit configuration for the forward [`run`](Self::run).
     /// Defaults to the standard exponential-backoff policy (same as [`Task::config`](crate::task::Task::config)).
     fn config(&self) -> TaskConfig {
-        crate::task::default_task_config()
+        TaskConfig::new()
     }
 
     /// Stable identifier for this task: the compensation-stack key, and what shows up in
     /// observer events. Defaults to [`std::any::type_name`] of the implementing type.
     fn name(&self) -> Cow<'static, str> {
-        crate::task::default_task_name::<Self>()
+        Cow::Borrowed(std::any::type_name::<Self>())
     }
 
     /// Run the forward action. On success, return the next state **and** the output
@@ -126,9 +126,9 @@ where
     /// ```ignore
     /// let prepared = self.prepare_charge(res).await?;        // safe to retry
     /// let auth = self.commit_charge(prepared).await?;        // side effect
-    /// Ok((TaskResult::Single(NextState), auth))              // entry pushed
+    /// Ok((NextState, auth))              // entry pushed
     /// ```
-    async fn run(&self, res: &Resources) -> Result<(TaskResult<TState>, Self::Output), CanoError>;
+    async fn run(&self, res: &Resources) -> Result<(TState, Self::Output), CanoError>;
 
     /// Undo the effects of a successful [`run`](Self::run), given its `output`. Must be
     /// **idempotent** — it may run more than once (for example after a resume that re-ran
@@ -169,7 +169,7 @@ pub(crate) struct CompensationEntry {
 /// builds one of these so the engine can dispatch the forward run and replay
 /// compensations without naming the task's concrete `Output` type. **You should not need
 /// to implement or name this directly** — it's the saga analogue of
-/// [`TaskObject`](crate::task::TaskObject).
+/// `dyn Task`.
 pub trait ErasedCompensatable<TState>: Send + Sync
 where
     TState: Clone + Send + Sync + 'static,
@@ -188,14 +188,14 @@ where
 /// Future returned by [`ErasedCompensatable::run`] — yields the next state and the
 /// serialized [`Output`](CompensatableTask::Output).
 pub type ForwardRunFuture<'a, TState> =
-    Pin<Box<dyn Future<Output = Result<(TaskResult<TState>, Vec<u8>), CanoError>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<(TState, Vec<u8>), CanoError>> + Send + 'a>>;
 
 /// Future returned by [`ErasedCompensatable::compensate`].
 pub type CompensateFuture<'a> = Pin<Box<dyn Future<Output = Result<(), CanoError>> + Send + 'a>>;
 
 /// Run `task.compensate(output)` inline as the rollback for an irrecoverable
-/// failure detected by the adapter itself (serialize failed, or the task
-/// returned a Split). Mirrors the safeguards the standard drain applies:
+/// failure detected by the adapter itself (the output failed to serialize).
+/// Mirrors the safeguards the standard drain applies:
 ///
 /// - Wrapped in `catch_unwind` so a panicking `compensate` cannot escape.
 /// - `tracing::debug!`/`error!` events so the inline rollback is observable
@@ -310,17 +310,6 @@ where
                 },
                 None => forward_fut.await?,
             };
-            // Reject Split *before* serialization so its inline-compensate
-            // path is identical to the serialize-failure case. If we let the
-            // Split bubble up and be rejected by `execute_compensatable_task`,
-            // the side effect committed by `run` would have no rollback path.
-            if let TaskResult::Split(_) = &state {
-                let split_err = CanoError::workflow(format!(
-                    "Compensatable task `{}` returned a split result — split states cannot be compensatable",
-                    self.0.name()
-                ));
-                return Err(run_inline_compensate(self.0.as_ref(), res, output, split_err).await);
-            }
             match serde_json::to_vec(&output) {
                 Ok(blob) => Ok((state, blob)),
                 Err(serialize_err) => {
@@ -365,7 +354,6 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     enum S {
-        A,
         B,
     }
 
@@ -380,7 +368,6 @@ mod tests {
     #[derive(Clone)]
     struct Comp {
         output: u32,
-        forward_split: bool,
         forward_err: bool,
         comp_fail: bool,
         comp_panic: bool,
@@ -391,7 +378,6 @@ mod tests {
         fn ok(output: u32, log: &Log) -> Self {
             Self {
                 output,
-                forward_split: false,
                 forward_err: false,
                 comp_fail: false,
                 comp_panic: false,
@@ -403,17 +389,12 @@ mod tests {
     #[crate::saga::task]
     impl CompensatableTask<S> for Comp {
         type Output = u32;
-        fn config(&self) -> TaskConfig {
-            TaskConfig::minimal()
-        }
-        async fn run(&self, _res: &Resources) -> Result<(TaskResult<S>, u32), CanoError> {
+
+        async fn run(&self, _res: &Resources) -> Result<(S, u32), CanoError> {
             if self.forward_err {
                 return Err(CanoError::task_execution("forward failed"));
             }
-            if self.forward_split {
-                return Ok((TaskResult::Split(vec![S::A]), self.output));
-            }
-            Ok((TaskResult::Single(S::B), self.output))
+            Ok((S::B, self.output))
         }
         async fn compensate(&self, _res: &Resources, output: u32) -> Result<(), CanoError> {
             self.log.lock().unwrap().push(output);
@@ -456,8 +437,8 @@ mod tests {
     #[crate::saga::task]
     impl CompensatableTask<S> for UnserTask {
         type Output = FailSer;
-        async fn run(&self, _res: &Resources) -> Result<(TaskResult<S>, FailSer), CanoError> {
-            Ok((TaskResult::Single(S::B), FailSer))
+        async fn run(&self, _res: &Resources) -> Result<(S, FailSer), CanoError> {
+            Ok((S::B, FailSer))
         }
         async fn compensate(&self, _res: &Resources, _output: FailSer) -> Result<(), CanoError> {
             self.log.lock().unwrap().push(999); // mark that inline compensate ran
@@ -471,11 +452,11 @@ mod tests {
     impl CompensatableTask<S> for SlowTask {
         type Output = u32;
         fn config(&self) -> TaskConfig {
-            TaskConfig::minimal().with_attempt_timeout(Duration::from_millis(20))
+            TaskConfig::new().with_attempt_timeout(Duration::from_millis(20))
         }
-        async fn run(&self, _res: &Resources) -> Result<(TaskResult<S>, u32), CanoError> {
+        async fn run(&self, _res: &Resources) -> Result<(S, u32), CanoError> {
             tokio::time::sleep(Duration::from_secs(5)).await;
-            Ok((TaskResult::Single(S::B), 1))
+            Ok((S::B, 1))
         }
         async fn compensate(&self, _res: &Resources, _output: u32) -> Result<(), CanoError> {
             Ok(())
@@ -507,7 +488,7 @@ mod tests {
         let res = Resources::new();
 
         let (state, blob) = adapter.run(&res).await.expect("forward run ok");
-        assert!(matches!(state, TaskResult::Single(S::B)));
+        assert!(matches!(state, S::B));
         assert_eq!(serde_json::from_slice::<u32>(&blob).unwrap(), 42);
 
         adapter
@@ -553,37 +534,16 @@ mod tests {
     // ----- inline-compensate safety paths -----
 
     #[tokio::test]
-    async fn split_result_runs_inline_compensate_then_returns_split_error() {
+    async fn inline_compensate_failure_yields_compensation_failed() {
         let l = log();
         let mut task = Comp::ok(7, &l);
-        task.forward_split = true;
-        let adapter = CompensatableAdapter(Arc::new(task));
-        let res = Resources::new();
-
-        let err = adapter.run(&res).await.unwrap_err();
-        assert!(
-            err.to_string().contains("split result")
-                || err
-                    .to_string()
-                    .contains("split states cannot be compensatable"),
-            "got: {err}"
-        );
-        // The committed side effect was undone inline: compensate ran with the typed output.
-        assert_eq!(*l.lock().unwrap(), vec![7]);
-    }
-
-    #[tokio::test]
-    async fn split_with_failing_compensate_yields_compensation_failed() {
-        let l = log();
-        let mut task = Comp::ok(7, &l);
-        task.forward_split = true;
         task.comp_fail = true;
-        let adapter = CompensatableAdapter(Arc::new(task));
         let res = Resources::new();
 
-        match adapter.run(&res).await.unwrap_err() {
+        let original = CanoError::task_execution("the real failure");
+        match run_inline_compensate(&task, &res, 7, original).await {
             CanoError::CompensationFailed { errors } => {
-                assert_eq!(errors.len(), 2, "original split error + compensate error");
+                assert_eq!(errors.len(), 2, "original error + compensate error");
                 assert!(errors[1].to_string().contains("compensate failed"));
             }
             other => panic!("expected CompensationFailed, got {other:?}"),
@@ -612,12 +572,11 @@ mod tests {
     async fn inline_compensate_panic_becomes_compensation_failed() {
         let l = log();
         let mut task = Comp::ok(7, &l);
-        task.forward_split = true;
         task.comp_panic = true;
-        let adapter = CompensatableAdapter(Arc::new(task));
         let res = Resources::new();
 
-        match adapter.run(&res).await.unwrap_err() {
+        let original = CanoError::task_execution("the real failure");
+        match run_inline_compensate(&task, &res, 7, original).await {
             CanoError::CompensationFailed { errors } => {
                 assert_eq!(errors.len(), 2);
                 assert!(

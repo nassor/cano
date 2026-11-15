@@ -27,7 +27,7 @@ struct GeneratorTask;
 
 #[task(state = Action)]
 impl GeneratorTask {
-    async fn run(&self, res: &Resources) -> CanoResult<TaskResult<Action>> {
+    async fn run(&self, res: &Resources) -> CanoResult<Action> {
         let store = res.get::<MemoryStore>()?;
 
         println!("GeneratorTask: Creating random numbers...");
@@ -42,7 +42,7 @@ impl GeneratorTask {
         store.put("even_numbers", even_numbers);
         println!("GeneratorTask: Stored even numbers, moving to Count\n");
 
-        Ok(TaskResult::Single(Action::Count))
+        Ok(Action::Count)
     }
 }
 
@@ -51,7 +51,7 @@ struct CounterTask;
 
 #[task(state = Action)]
 impl CounterTask {
-    async fn run(&self, res: &Resources) -> CanoResult<TaskResult<Action>> {
+    async fn run(&self, res: &Resources) -> CanoResult<Action> {
         let store = res.get::<MemoryStore>()?;
 
         println!("CounterTask: Counting numbers...");
@@ -66,7 +66,7 @@ impl CounterTask {
         store.put("sum", sum);
         println!("CounterTask: Processing complete!\n");
 
-        Ok(TaskResult::Single(Action::Complete))
+        Ok(Action::Complete)
     }
 }
 

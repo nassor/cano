@@ -51,8 +51,8 @@
 //! # struct MyTask;
 //! # #[task]
 //! # impl Task<State> for MyTask {
-//! #     async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> {
-//! #         Ok(TaskResult::Single(State::Complete))
+//! #     async fn run(&self) -> Result<State, CanoError> {
+//! #         Ok(State::Complete)
 //! #     }
 //! # }
 //! # async fn example() -> Result<(), CanoError> {
@@ -301,8 +301,8 @@ where
     ///
     /// #[task]
     /// impl Task<Step> for NoopTask {
-    ///     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-    ///         Ok(TaskResult::Single(Step::Done))
+    ///     async fn run(&self) -> Result<Step, CanoError> {
+    ///         Ok(Step::Done)
     ///     }
     /// }
     ///
@@ -346,9 +346,9 @@ where
     /// # struct Slow;
     /// # #[task]
     /// # impl Task<Step> for Slow {
-    /// #     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    /// #     async fn run(&self) -> Result<Step, CanoError> {
     /// #         tokio::time::sleep(Duration::from_millis(50)).await;
-    /// #         Ok(TaskResult::Single(Step::Done))
+    /// #         Ok(Step::Done)
     /// #     }
     /// # }
     /// #
@@ -394,8 +394,8 @@ where
     /// # struct Noop;
     /// # #[task]
     /// # impl Task<Step> for Noop {
-    /// #     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-    /// #         Ok(TaskResult::Single(Step::Done))
+    /// #     async fn run(&self) -> Result<Step, CanoError> {
+    /// #         Ok(Step::Done)
     /// #     }
     /// # }
     /// let workflow = Workflow::bare()
@@ -663,8 +663,8 @@ where
     /// struct NoopTask;
     /// #[task]
     /// impl Task<Step> for NoopTask {
-    ///     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-    ///         Ok(TaskResult::Single(Step::Done))
+    ///     async fn run(&self) -> Result<Step, CanoError> {
+    ///         Ok(Step::Done)
     ///     }
     /// }
     ///
@@ -752,8 +752,8 @@ where
     /// # struct MyTask;
     /// # #[task]
     /// # impl Task<State> for MyTask {
-    /// #     async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> {
-    /// #         Ok(TaskResult::Single(State::Done))
+    /// #     async fn run(&self) -> Result<State, CanoError> {
+    /// #         Ok(State::Done)
     /// #     }
     /// # }
     /// let workflow = Workflow::bare()
@@ -871,8 +871,8 @@ where
     /// # struct MyTask;
     /// # #[task]
     /// # impl Task<State> for MyTask {
-    /// #     async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> {
-    /// #         Ok(TaskResult::Single(State::Done))
+    /// #     async fn run(&self) -> Result<State, CanoError> {
+    /// #         Ok(State::Done)
     /// #     }
     /// # }
     /// let workflow = Workflow::bare()
@@ -932,8 +932,8 @@ where
     /// # struct MyTask;
     /// # #[task]
     /// # impl Task<State> for MyTask {
-    /// #     async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> {
-    /// #         Ok(TaskResult::Single(State::Done))
+    /// #     async fn run(&self) -> Result<State, CanoError> {
+    /// #         Ok(State::Done)
     /// #     }
     /// # }
     /// let workflow = Workflow::bare()
@@ -962,8 +962,7 @@ where
     ///
     /// # Errors
     ///
-    /// - [`CanoError::Workflow`] -- no handler is registered for the current state, a single
-    ///   task returned a `TaskResult::Split` (use [`Workflow::register_split`] instead), the
+    /// - [`CanoError::Workflow`] -- no handler is registered for the current state, the
     ///   global workflow timeout was exceeded, or a split strategy was misconfigured
     /// - Any [`CanoError`] variant propagated from a task during execution
     pub async fn orchestrate(&self, initial_state: TState) -> Result<TState, CanoError> {
@@ -1182,17 +1181,14 @@ mod metrics_tests {
     struct GoTo(S);
     #[crate::task]
     impl Task<S> for GoTo {
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(self.0.clone()))
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(self.0.clone())
         }
     }
     struct Boom;
     #[crate::task]
     impl Task<S> for Boom {
-        fn config(&self) -> TaskConfig {
-            TaskConfig::minimal()
-        }
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+        async fn run(&self) -> Result<S, CanoError> {
             Err(CanoError::task_execution("boom"))
         }
     }
@@ -1271,14 +1267,11 @@ mod metrics_tests {
     }
     #[crate::task]
     impl Task<S> for Branch {
-        fn config(&self) -> TaskConfig {
-            TaskConfig::minimal()
-        }
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+        async fn run(&self) -> Result<S, CanoError> {
             if self.fail {
                 Err(CanoError::task_execution("nope"))
             } else {
-                Ok(TaskResult::Single(S::Done))
+                Ok(S::Done)
             }
         }
     }
@@ -1342,7 +1335,7 @@ mod tests {
     use super::*;
     use crate::resource::Resources;
     use crate::task;
-    use crate::task::{Task, TaskResult};
+    use crate::task::Task;
     use cano_macros::task as task_macro;
     use tokio;
 
@@ -1608,20 +1601,20 @@ mod tests {
     // Edge case coverage tests
 
     // ------------------------------------------------------------------
-    // Workflow::bare() + Task::run_bare() integration
+    // Workflow::bare() + resource-free `run(&self)` integration
     // ------------------------------------------------------------------
 
     struct BareWorkflowTask;
 
     #[task_macro]
     impl Task<TestState> for BareWorkflowTask {
-        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
-            Ok(TaskResult::Single(TestState::Complete))
+        async fn run(&self) -> Result<TestState, CanoError> {
+            Ok(TestState::Complete)
         }
     }
 
     #[tokio::test]
-    async fn test_workflow_bare_runs_task_with_run_bare() {
+    async fn test_workflow_bare_runs_resource_free_task() {
         let result = Workflow::bare()
             .register(TestState::Start, BareWorkflowTask)
             .add_exit_state(TestState::Complete)
@@ -1640,18 +1633,15 @@ mod tests {
 
     #[tokio::test]
     async fn test_register_router_orchestration_round_trip() {
-        use crate::task::{RouterTask, TaskConfig};
+        use crate::task::RouterTask;
 
         // A router that unconditionally routes Start → Process → Complete.
         struct RouteToProcess;
 
         #[task::router]
         impl RouterTask<TestState> for RouteToProcess {
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
-            async fn route(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
-                Ok(TaskResult::Single(TestState::Process))
+            async fn route(&self, _res: &Resources) -> Result<TestState, CanoError> {
+                Ok(TestState::Process)
             }
         }
 
@@ -1668,16 +1658,13 @@ mod tests {
 
     #[test]
     fn registered_states_returns_all_registered_keys() {
-        use crate::task::{RouterTask, TaskConfig};
+        use crate::task::RouterTask;
 
         struct GoRoute;
         #[task::router]
         impl RouterTask<TestState> for GoRoute {
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
-            async fn route(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
-                Ok(TaskResult::Single(TestState::Process))
+            async fn route(&self, _res: &Resources) -> Result<TestState, CanoError> {
+                Ok(TestState::Process)
             }
         }
 
@@ -1701,17 +1688,14 @@ mod tests {
 
     #[test]
     fn test_validate_passes_with_router_state() {
-        use crate::task::{RouterTask, TaskConfig};
+        use crate::task::RouterTask;
 
         struct RouteToComplete;
 
         #[task::router]
         impl RouterTask<TestState> for RouteToComplete {
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
-            async fn route(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
-                Ok(TaskResult::Single(TestState::Complete))
+            async fn route(&self, _res: &Resources) -> Result<TestState, CanoError> {
+                Ok(TestState::Complete)
             }
         }
 
@@ -1890,24 +1874,6 @@ mod tests {
         );
     }
 
-    struct ReturnsSplit;
-    #[task_macro]
-    impl Task<TestState> for ReturnsSplit {
-        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
-            Ok(TaskResult::Split(vec![TestState::Complete]))
-        }
-    }
-
-    #[tokio::test]
-    async fn single_task_returning_split_errors() {
-        // A non-split state whose task returns TaskResult::Split is a misuse -> clear error.
-        let wf = Workflow::bare()
-            .register(TestState::Start, ReturnsSplit)
-            .add_exit_state(TestState::Complete);
-        let err = wf.orchestrate(TestState::Start).await.unwrap_err();
-        assert!(err.to_string().contains("use register_split"), "got: {err}");
-    }
-
     #[tokio::test]
     async fn register_replaces_a_prior_handler_for_the_same_state() {
         let first = SimpleTask::new(TestState::Process); // would route to an unregistered state
@@ -1926,13 +1892,13 @@ mod tests {
     }
     #[task_macro]
     impl Task<TestState> for LoopUntil {
-        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+        async fn run(&self) -> Result<TestState, CanoError> {
             use std::sync::atomic::Ordering;
             let n = self.count.fetch_add(1, Ordering::SeqCst) + 1;
             if n >= self.limit {
-                Ok(TaskResult::Single(TestState::Complete))
+                Ok(TestState::Complete)
             } else {
-                Ok(TaskResult::Single(TestState::Start)) // self-loop
+                Ok(TestState::Start) // self-loop
             }
         }
     }

@@ -45,7 +45,7 @@ impl BatchTask<Flow> for Uploads {
     }
 
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal() // no outer retry: isolate per-item semantics
+        TaskConfig::new() // no outer retry: isolate per-item semantics
     }
 
     async fn load(&self, _res: &Resources) -> Result<Vec<u32>, CanoError> {
@@ -78,10 +78,10 @@ impl BatchTask<Flow> for Uploads {
         &self,
         _res: &Resources,
         outputs: Vec<Result<u32, CanoError>>,
-    ) -> Result<TaskResult<Flow>, CanoError> {
+    ) -> Result<Flow, CanoError> {
         *self.slots.lock() = outputs.into_iter().map(|r| r.ok()).collect();
         // Partial-failure policy lives HERE: one bad upload is acceptable.
-        Ok(TaskResult::Single(Flow::Done))
+        Ok(Flow::Done)
     }
 }
 
@@ -162,7 +162,7 @@ impl BatchTask<Flow> for CommitBatch {
 
     fn config(&self) -> TaskConfig {
         // Outer retry of the WHOLE cycle: 1 retry → 2 attempts.
-        TaskConfig::minimal().with_fixed_retry(1, Duration::from_millis(1))
+        TaskConfig::new().with_fixed_retry(1, Duration::from_millis(1))
     }
 
     async fn load(&self, _res: &Resources) -> Result<Vec<u32>, CanoError> {
@@ -179,7 +179,7 @@ impl BatchTask<Flow> for CommitBatch {
         &self,
         _res: &Resources,
         outputs: Vec<Result<u32, CanoError>>,
-    ) -> Result<TaskResult<Flow>, CanoError> {
+    ) -> Result<Flow, CanoError> {
         self.finish_calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(outputs.len(), 4);
         if self.finish_failures_remaining.load(Ordering::SeqCst) > 0 {
@@ -187,7 +187,7 @@ impl BatchTask<Flow> for CommitBatch {
                 .fetch_sub(1, Ordering::SeqCst);
             return Err(CanoError::task_execution("commit endpoint 503"));
         }
-        Ok(TaskResult::Single(Flow::Done))
+        Ok(Flow::Done)
     }
 }
 

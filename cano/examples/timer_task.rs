@@ -17,7 +17,7 @@
 //! deliberate delay — a cool-down between phases, a debounce, or resuming after a known delay via
 //! a monotonic [`Instant`](std::time::Instant) and [`TimerOutcome::Until`].
 //!
-//! To cap the wait, `config()` can return `TaskConfig::minimal().with_attempt_timeout(dur)`; the
+//! To cap the wait, `config()` can return `TaskConfig::new().with_attempt_timeout(dur)`; the
 //! engine enforces it and produces `CanoError::Timeout` if the timer hasn't fired in time.
 //!
 //! Note: a `TimerTask` is checkpointed like any single-task state, so a resumed run re-runs
@@ -60,10 +60,10 @@ impl CoolDown {
         Ok(TimerOutcome::Duration(self.delay))
     }
 
-    async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+    async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
         // `wait` can also return `TimerOutcome::Until(instant)`; see the module docs.
         println!("cool down  : elapsed — continuing");
-        Ok(TaskResult::Single(Step::Process))
+        Ok(Step::Process)
     }
 }
 
@@ -76,9 +76,9 @@ struct Process;
 
 #[task(state = Step)]
 impl Process {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         println!("process    : handling work after the cool-down");
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
