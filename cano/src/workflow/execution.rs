@@ -2410,14 +2410,14 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // register_stepped tests — no-store path (in-memory loop via engine)
+    // stepped tests — no-store path
     // ------------------------------------------------------------------
 
     use crate::task::stepped::{StepOutcome, SteppedTask};
 
     #[tokio::test]
-    async fn test_register_stepped_no_store_runs_to_completion() {
-        // register_stepped with no checkpoint store behaves like register (in-memory loop).
+    async fn test_stepped_no_store_runs_to_completion() {
+        // A stepped task with no checkpoint store runs to completion and writes no rows.
         struct Counter {
             target: u32,
         }

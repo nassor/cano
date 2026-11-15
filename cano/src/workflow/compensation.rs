@@ -2703,7 +2703,7 @@ mod tests {
 
     #[tokio::test]
     async fn stepped_no_store_path_unchanged() {
-        // Without a checkpoint store, register_stepped behaves like register (no rows written).
+        // Without a checkpoint store a stepped task writes no rows.
         let (stepper, calls) = CountStepper::new(3);
 
         let result = Workflow::bare()
@@ -2719,7 +2719,7 @@ mod tests {
     #[tokio::test]
     async fn stepped_cursor_rows_do_not_become_compensation_entries() {
         // Verifies the existing regression test still passes with the full engine path
-        // (StepCursor rows from register_stepped must not pollute the compensation stack).
+        // (StepCursor rows from a stepped task must not pollute the compensation stack).
         let store = Arc::new(InMemoryCheckpointStore::new());
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
 
@@ -4192,7 +4192,9 @@ mod metrics_tests {
     use crate::metrics::test_support::*;
     use crate::prelude::*;
 
-    use crate::workflow::test_support::{CompLog, CompTask, InMemoryCheckpointStore, SimpleTask, TestState};
+    use crate::workflow::test_support::{
+        CompLog, CompTask, InMemoryCheckpointStore, SimpleTask, TestState,
+    };
     use std::sync::{Arc, Mutex};
 
     // ---- Recovery: checkpoint append + clear counters ----

@@ -772,7 +772,7 @@ mod metrics_tests {
 
     /// Test via Workflow::register (engine-owned step loop in execute_stepped_task)
     #[test]
-    fn step_iterations_counted_via_register_stepped() {
+    fn step_iterations_counted_via_register() {
         let (result, rows) = run_with_recorder(|| async {
             let workflow = Workflow::bare()
                 .register(St::Work, TwoMoreOneDone)
@@ -783,12 +783,12 @@ mod metrics_tests {
         assert_eq!(
             counter(&rows, "cano_step_iterations_total", &[("outcome", "more")]),
             2,
-            "expected 2 more iterations (via register_stepped)"
+            "expected 2 more iterations (via register)"
         );
         assert_eq!(
             counter(&rows, "cano_step_iterations_total", &[("outcome", "done")]),
             1,
-            "expected 1 done iteration (via register_stepped)"
+            "expected 1 done iteration (via register)"
         );
     }
 }

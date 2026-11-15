@@ -75,7 +75,7 @@ fn inherent_default_name_contains_type_name() {
 }
 
 #[tokio::test]
-async fn inherent_runs_via_register_stream() {
+async fn inherent_runs_via_register() {
     let workflow = Workflow::bare()
         .register(Step::Consume, InherentInferred)
         .add_exit_state(Step::Done);

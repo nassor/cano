@@ -126,7 +126,10 @@ pub(crate) fn audit_rows(store: &InMemoryCheckpointStore, workflow_id: &str) -> 
 }
 
 /// `(sequence, state)` of every row ever appended for `workflow_id`, in append order.
-pub(crate) fn audit_states(store: &InMemoryCheckpointStore, workflow_id: &str) -> Vec<(u64, String)> {
+pub(crate) fn audit_states(
+    store: &InMemoryCheckpointStore,
+    workflow_id: &str,
+) -> Vec<(u64, String)> {
     audit_rows(store, workflow_id)
         .into_iter()
         .map(|r| (r.sequence, r.state))

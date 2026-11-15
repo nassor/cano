@@ -971,7 +971,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Engine-path tests: register_stream + cancellation + cursor persistence
+    // Engine-path tests: register + cancellation + cursor persistence
     // -----------------------------------------------------------------------
 
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -2998,10 +2998,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn register_stream_without_store_completes() {
+    async fn stream_without_store_completes() {
         use crate::workflow::Workflow;
 
-        // register_stream with neither a checkpoint store nor a workflow id: cursor
+        // A stream registered with neither a checkpoint store nor a workflow id: cursor
         // persistence is simply skipped and the run completes normally.
         let task = CountingFlush {
             len: 3,

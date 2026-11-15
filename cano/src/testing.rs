@@ -336,10 +336,12 @@ impl WorkflowObserver for RecordingObserver {
             .push(RecordedEvent::WorkflowTimeout { elapsed, limit });
     }
     fn on_checkpoint_clear_failed(&self, workflow_id: &str, error: &CanoError) {
-        self.events.lock().push(RecordedEvent::CheckpointClearFailed {
-            workflow_id: workflow_id.into(),
-            error: error.to_string(),
-        });
+        self.events
+            .lock()
+            .push(RecordedEvent::CheckpointClearFailed {
+                workflow_id: workflow_id.into(),
+                error: error.to_string(),
+            });
     }
     fn on_unknown_resume_state(&self, workflow_id: &str, sequence: u64, state: &str) {
         self.events.lock().push(RecordedEvent::UnknownResumeState {

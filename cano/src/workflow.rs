@@ -1490,14 +1490,14 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // register_router tests
+    // router tests
     // ------------------------------------------------------------------
 
     // Note: inside the `cano` crate the inherent `#[task::router(state = S)]` form emits
     // `::cano::RouterTask<...>` paths that don't resolve. Use the trait-impl form instead.
 
     #[tokio::test]
-    async fn test_register_router_orchestration_round_trip() {
+    async fn test_router_orchestration_round_trip() {
         use crate::task::RouterTask;
 
         // A router that unconditionally routes Start → Process → Complete.
