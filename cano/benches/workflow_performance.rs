@@ -628,6 +628,102 @@ fn bench_large_split_collect(c: &mut Criterion) {
     group.finish();
 }
 
+/// Engine cost of a 3-hop FSM (A → B → C → Done): dispatch, transition
+/// bookkeeping and the observer fan-out. Unlike `orchestrate_overhead`, every
+/// iteration executes three tasks through the full engine loop.
+fn bench_fsm_transitions(c: &mut Criterion) {
+    use std::sync::Arc;
+
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    enum S {
+        A,
+        B,
+        C,
+        Done,
+    }
+
+    struct PlainA;
+    struct PlainB;
+    struct PlainC;
+
+    #[cano::task]
+    impl Task<S> for PlainA {
+        async fn run(&self, _res: &Resources) -> Result<TaskResult<S>, CanoError> {
+            Ok(TaskResult::Single(S::B))
+        }
+    }
+    #[cano::task]
+    impl Task<S> for PlainB {
+        async fn run(&self, _res: &Resources) -> Result<TaskResult<S>, CanoError> {
+            Ok(TaskResult::Single(S::C))
+        }
+    }
+    #[cano::task]
+    impl Task<S> for PlainC {
+        async fn run(&self, _res: &Resources) -> Result<TaskResult<S>, CanoError> {
+            Ok(TaskResult::Single(S::Done))
+        }
+    }
+
+    struct BareA;
+    struct BareB;
+    struct BareC;
+
+    #[cano::task]
+    impl Task<S> for BareA {
+        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+            Ok(TaskResult::Single(S::B))
+        }
+    }
+    #[cano::task]
+    impl Task<S> for BareB {
+        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+            Ok(TaskResult::Single(S::C))
+        }
+    }
+    #[cano::task]
+    impl Task<S> for BareC {
+        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+            Ok(TaskResult::Single(S::Done))
+        }
+    }
+
+    struct NoopObserver;
+    impl WorkflowObserver for NoopObserver {}
+
+    let plain = || {
+        Workflow::new(Resources::new())
+            .register(S::A, PlainA)
+            .register(S::B, PlainB)
+            .register(S::C, PlainC)
+            .add_exit_state(S::Done)
+    };
+    let bare = Workflow::bare()
+        .register(S::A, BareA)
+        .register(S::B, BareB)
+        .register(S::C, BareC)
+        .add_exit_state(S::Done);
+    let observed = plain().with_observer(Arc::new(NoopObserver));
+    let plain = plain();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut group = c.benchmark_group("fsm_transitions");
+    for (id, wf) in [
+        ("plain_3_states", &plain),
+        ("bare_3_states", &bare),
+        ("observed_3_states", &observed),
+    ] {
+        group.bench_function(id, |b| {
+            b.to_async(&rt).iter(|| async {
+                wf.orchestrate(S::A, CancellationToken::disabled())
+                    .await
+                    .unwrap()
+            });
+        });
+    }
+    group.finish();
+}
+
 /// Measures cost of info_span! / debug! macros when tracing feature is enabled
 /// but no subscriber is attached. Without optimization, span allocations
 /// happen even with no consumer. Gate for change 3.2 (skip span when no subscriber).
@@ -681,6 +777,7 @@ criterion_group!(
     bench_cpu_bound_workflows,
     bench_orchestrate_overhead,
     bench_large_split_collect,
+    bench_fsm_transitions,
     bench_mixed_workload_workflows,
 );
 
