@@ -152,8 +152,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     let workflow = Workflow::bare()
-        .register_with_compensation(Step::Reserve, ReserveItem)
-        .register_with_compensation(Step::Authorize, AuthorizePayment)
+        .register(Step::Reserve, ReserveItem)
+        .register(Step::Authorize, AuthorizePayment)
         .register(Step::Charge, ChargePayment) // plain — always fails
         .add_exit_state(Step::Done)
         .with_checkpoint_store(checkpoint_store.clone())

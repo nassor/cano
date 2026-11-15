@@ -72,7 +72,7 @@ const PER_STEP: i64 = 100;
 fn saga(ledger: Ledger, account: &str, fail_at: u32) -> Workflow<u32> {
     let mut wf = Workflow::new(Resources::new().insert(ledger)).add_exit_state(STEPS);
     for i in 0..STEPS {
-        wf = wf.register_with_compensation(
+        wf = wf.register(
             i,
             Charge {
                 idx: i,
@@ -222,7 +222,7 @@ mod recovery {
         // opening a *second* `Database` on the file (which redb would reject).
         let store = Arc::new(RedbCheckpointStore::new(&db).unwrap());
         let wf = Workflow::new(Resources::new().insert(LogRes(log.clone())))
-            .register_with_compensation(
+            .register(
                 St::Start,
                 Step {
                     name: "A",
@@ -231,7 +231,7 @@ mod recovery {
                     fail_forward: false,
                 },
             )
-            .register_with_compensation(
+            .register(
                 St::Process,
                 Step {
                     name: "B",
@@ -240,7 +240,7 @@ mod recovery {
                     fail_forward: false,
                 },
             )
-            .register_with_compensation(
+            .register(
                 St::Split,
                 Step {
                     name: "C",

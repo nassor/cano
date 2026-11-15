@@ -107,9 +107,9 @@ fn build_workflow(use_fast_path: bool) -> Workflow<Step> {
     let resources = Resources::new().insert(config);
 
     Workflow::new(resources)
-        // `register_router` stores the task as a Router state entry:
+        // `register` stores the task as a Router state entry:
         // dispatched like a normal state but writes no CheckpointRow.
-        .register_router(Step::Classify, Classifier)
+        .register(Step::Classify, Classifier)
         .register(Step::FastPath, FastProcessor)
         .register(Step::SlowPath, SlowProcessor)
         .add_exit_state(Step::Done)

@@ -100,7 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let is_resume = mode == "resume";
 
     let workflow = Workflow::bare()
-        .register_stepped(State::Crunch, Cruncher::new(is_resume))
+        .register(State::Crunch, Cruncher::new(is_resume))
         .add_exit_state(State::Done)
         .with_checkpoint_store(store)
         .with_workflow_id(WORKFLOW_ID);

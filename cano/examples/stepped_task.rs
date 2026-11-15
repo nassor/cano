@@ -134,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== stepped_task example ({TOTAL} items) ===\n");
 
     let workflow = Workflow::bare()
-        .register_stepped(Stage::Crunch, Cruncher { total: TOTAL })
+        .register(Stage::Crunch, Cruncher { total: TOTAL })
         .register(Stage::Report, Reporter { total: TOTAL })
         .add_exit_state(Stage::Done)
         .with_checkpoint_store(checkpoint_store.clone())

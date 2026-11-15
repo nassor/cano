@@ -291,25 +291,18 @@ where
     S: Clone + fmt::Debug + Send + Sync + 'static,
 {
     let policy = p.on_poll_error();
-
-    // The loop skeleton (re-invoke until the step says done) is shared with
-    // `run_stepped` via `run_task_loop`; the state tuple carries the
-    // poll-specific bookkeeping: the error policy and the consecutive-error
-    // counter.
-    crate::task::run_task_loop((0u32, policy), |(mut errors, policy)| async move {
+    let mut consecutive_errors = 0u32;
+    loop {
         match p.poll(res).await {
             Ok(PollOutcome::Ready(result)) => {
                 #[cfg(feature = "metrics")]
                 crate::metrics::poll_iteration(true);
-                (
-                    (errors, policy),
-                    crate::task::TaskLoopStep::Done(Ok(result)),
-                )
+                return Ok(result);
             }
             Ok(PollOutcome::Pending { delay_ms }) => {
                 #[cfg(feature = "metrics")]
                 crate::metrics::poll_iteration(false);
-                errors = 0;
+                consecutive_errors = 0;
                 if delay_ms > 0 {
                     tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 } else {
@@ -320,27 +313,21 @@ where
                     // the polled condition can never be scheduled — a livelock.
                     tokio::task::yield_now().await;
                 }
-                ((errors, policy), crate::task::TaskLoopStep::Continue)
             }
             Err(e) => match &policy {
-                PollErrorPolicy::FailFast => {
-                    ((errors, policy), crate::task::TaskLoopStep::Done(Err(e)))
-                }
+                PollErrorPolicy::FailFast => return Err(e),
                 PollErrorPolicy::RetryOnError { max_errors } => {
-                    errors += 1;
-                    if errors > *max_errors {
-                        ((errors, policy), crate::task::TaskLoopStep::Done(Err(e)))
-                    } else {
-                        // Yield before the next poll so a synchronously-erroring poll
-                        // body can't spin the executor either.
-                        tokio::task::yield_now().await;
-                        ((errors, policy), crate::task::TaskLoopStep::Continue)
+                    consecutive_errors += 1;
+                    if consecutive_errors > *max_errors {
+                        return Err(e);
                     }
+                    // Yield before the next poll so a synchronously-erroring poll
+                    // body can't spin the executor either.
+                    tokio::task::yield_now().await;
                 }
             },
         }
-    })
-    .await
+    }
 }
 
 // ---------------------------------------------------------------------------

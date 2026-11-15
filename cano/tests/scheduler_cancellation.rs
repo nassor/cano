@@ -116,14 +116,14 @@ async fn cancel_flow_drains_scheduled_saga_and_returns_to_idle() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let ship_started = flag();
     let wf = Workflow::bare()
-        .register_with_compensation(
+        .register(
             Step::Reserve,
             Reserve {
                 log: log.clone(),
                 fail_comp: false,
             },
         )
-        .register_with_compensation(Step::Charge, Charge { log: log.clone() })
+        .register(Step::Charge, Charge { log: log.clone() })
         .register(
             Step::Ship,
             Long {
@@ -166,7 +166,7 @@ async fn cancel_flow_dirty_rollback_saga_parks_in_backoff() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let ship_started = flag();
     let wf = Workflow::bare()
-        .register_with_compensation(
+        .register(
             Step::Reserve,
             Reserve {
                 log: log.clone(),
@@ -175,7 +175,7 @@ async fn cancel_flow_dirty_rollback_saga_parks_in_backoff() {
         )
         // Reserve.run transitions to Charge, so Charge must be registered for the
         // chain to reach the long Ship step where the cancel lands.
-        .register_with_compensation(Step::Charge, Charge { log: log.clone() })
+        .register(Step::Charge, Charge { log: log.clone() })
         .register(
             Step::Ship,
             Long {
@@ -210,14 +210,14 @@ async fn graceful_stop_rolls_back_in_flight_saga() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let ship_started = flag();
     let wf = Workflow::bare()
-        .register_with_compensation(
+        .register(
             Step::Reserve,
             Reserve {
                 log: log.clone(),
                 fail_comp: false,
             },
         )
-        .register_with_compensation(Step::Charge, Charge { log: log.clone() })
+        .register(Step::Charge, Charge { log: log.clone() })
         .register(
             Step::Ship,
             Long {
@@ -338,7 +338,7 @@ impl SlowStepper {
 async fn cancel_flow_cancels_in_flight_stepped_flow() {
     let started = flag();
     let wf = Workflow::bare()
-        .register_stepped(
+        .register(
             Step::Work,
             SlowStepper {
                 started: started.clone(),
@@ -623,7 +623,7 @@ async fn cancel_flow_cancels_checkpointed_stepped_flow() {
     let wf = Workflow::bare()
         .with_checkpoint_store(store.clone())
         .with_workflow_id("stepped-ckpt")
-        .register_stepped(
+        .register(
             Step::Work,
             SlowStepper {
                 started: started.clone(),

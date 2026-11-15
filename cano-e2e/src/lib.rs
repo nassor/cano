@@ -369,7 +369,7 @@ impl Reserve {
     async fn run(&self, res: &Resources) -> Result<(Phase, i64), CanoError> {
         let db = res.get::<Db>()?;
         db.record_event(&self.wf, "run:Reserve").await?;
-        maybe_pause(&self.faults, Phase::Reserve, &db, &self.wf).await;
+        maybe_pause(&self.faults, Phase::Reserve, db, &self.wf).await;
         if self.faults.fail_at == Some(Phase::Reserve) {
             return Err(CanoError::task_execution("Reserve failed"));
         }
@@ -398,7 +398,7 @@ impl Ship {
     async fn run(&self, res: &Resources) -> Result<Phase, CanoError> {
         let db = res.get::<Db>()?;
         db.record_event(&self.wf, "run:Ship").await?;
-        maybe_pause(&self.faults, Phase::Ship, &db, &self.wf).await;
+        maybe_pause(&self.faults, Phase::Ship, db, &self.wf).await;
         if self.faults.fail_at == Some(Phase::Ship) {
             return Err(CanoError::task_execution("Ship failed"));
         }
@@ -424,7 +424,7 @@ pub fn build_workflow(
 ) -> Workflow<Phase> {
     let resources = Resources::new().insert(Db(store.client()));
     Workflow::new(resources)
-        .register_with_compensation(
+        .register(
             Phase::Reserve,
             Reserve {
                 wf: workflow_id.to_string(),

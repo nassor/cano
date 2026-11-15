@@ -18,6 +18,7 @@ const MODEL: Model = Model {
     companion_run: Some(
         |state| quote!(::std::boxed::Box::pin(::cano::task::poll::run_poll_loop::<Self, #state>(self, res))),
     ),
+    entry: "single",
 };
 
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {

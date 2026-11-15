@@ -66,7 +66,7 @@ impl Boom {
 async fn inherent_compensatable_impl_registers_and_compensates() {
     let compensated = Arc::new(AtomicBool::new(false));
     let workflow = Workflow::bare()
-        .register_with_compensation(Step::Reserve, Reserve(compensated.clone()))
+        .register(Step::Reserve, Reserve(compensated.clone()))
         .register(Step::Boom, Boom)
         .add_exit_state(Step::Done);
 
@@ -80,7 +80,7 @@ async fn inherent_compensatable_impl_registers_and_compensates() {
     // ReserveNamed exercises the config/name overrides + `Output = ()` in the inherent
     // form; it runs straight through to the exit state with nothing to compensate.
     let workflow = Workflow::bare()
-        .register_with_compensation(Step::Reserve, ReserveNamed)
+        .register(Step::Reserve, ReserveNamed)
         .add_exit_state(Step::Done);
     assert_eq!(
         workflow.orchestrate(Step::Reserve).await.unwrap(),

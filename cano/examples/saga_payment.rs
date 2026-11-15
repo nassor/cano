@@ -64,7 +64,7 @@ impl ReserveInventory {
     }
 }
 
-// A plain task: registered with `register`, not `register_with_compensation`. It has no
+// A plain task: registered with `register`, not `register`. It has no
 // side effect to undo, so it never gets a compensation-stack entry and is left alone if a
 // later step fails.
 #[task(state = Step)]
@@ -112,9 +112,9 @@ impl ShipOrder {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let workflow = Workflow::bare()
-        .register_with_compensation(Step::Reserve, ReserveInventory)
+        .register(Step::Reserve, ReserveInventory)
         .register(Step::Validate, ValidateOrder) // plain — no compensation
-        .register_with_compensation(Step::Charge, ChargeCard)
+        .register(Step::Charge, ChargeCard)
         .register(Step::Ship, ShipOrder) // plain — and it fails
         .add_exit_state(Step::Done);
 

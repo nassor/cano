@@ -1,6 +1,6 @@
 //! Reliability contracts of [`StreamTask`] under critical scenarios.
 //!
-//! Black-box integration tests (public API only, engine-driven `register_stream`
+//! Black-box integration tests (public API only, engine-driven `register`
 //! path) documenting how the stream processing model behaves when things go wrong
 //! mid-flight:
 //!
@@ -96,7 +96,7 @@ async fn stream_crash_loses_only_uncommitted_window_and_resumes_from_cursor() {
 
     let store = Arc::new(MemStore::default());
     let workflow = Workflow::bare()
-        .register_stream(Flow::Work, task)
+        .register(Flow::Work, task)
         .add_exit_state(Flow::Done)
         .with_checkpoint_store(store.clone())
         .with_workflow_id("stream-crash");
@@ -219,7 +219,7 @@ async fn stream_cancel_drains_partial_window_commits_cursor_and_resume_dedups() 
 
     let store = Arc::new(MemStore::default());
     let workflow = Workflow::bare()
-        .register_stream(Flow::Work, task)
+        .register(Flow::Work, task)
         .add_exit_state(Flow::Done)
         .with_checkpoint_store(store.clone())
         .with_workflow_id("stream-cancel");
@@ -324,7 +324,7 @@ async fn stream_error_budget_drops_failed_items_resets_on_success_and_kills_on_b
     // the rotten items are simply missing from the output.
     let flushed = Arc::new(Mutex::new(Vec::new()));
     let workflow = Workflow::bare()
-        .register_stream(
+        .register(
             Flow::Work,
             FlakyFeed {
                 fail_items: vec![2, 5, 6],
@@ -345,7 +345,7 @@ async fn stream_error_budget_drops_failed_items_resets_on_success_and_kills_on_b
     // propagates and the buffered-but-unflushed item 4 is discarded with the run.
     let flushed = Arc::new(Mutex::new(Vec::new()));
     let workflow = Workflow::bare()
-        .register_stream(
+        .register(
             Flow::Work,
             FlakyFeed {
                 fail_items: vec![5, 6, 7],
@@ -426,7 +426,7 @@ impl StreamTask<Flow> for StallFeed {
 async fn stream_hung_item_is_bounded_by_attempt_timeout() {
     let flushed = Arc::new(Mutex::new(Vec::new()));
     let workflow = Workflow::bare()
-        .register_stream(
+        .register(
             Flow::Work,
             StallFeed {
                 flushed: flushed.clone(),

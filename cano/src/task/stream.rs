@@ -46,14 +46,13 @@
 //!
 //! ## Cursor persistence & resume
 //!
-//! Register with [`Workflow::register_stream`](crate::workflow::Workflow::register_stream)
+//! Register with [`Workflow::register`](crate::workflow::Workflow::register)
 //! and attach a [`CheckpointStore`](crate::recovery::CheckpointStore) + a workflow id: the
 //! engine persists the cursor returned by the **last item of each flushed window** (as a
 //! [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row), and a resumed run
-//! re-opens the source from that position. Registering via plain
-//! [`Workflow::register`](crate::workflow::Workflow::register) runs the in-memory loop
-//! with **no** persistence and **no** cancellation — the companion `Task` path is for
-//! convenience / tests only.
+//! re-opens the source from that position. The macro-emitted companion `Task` impl
+//! (used by [`Workflow::register_split`](crate::workflow::Workflow::register_split)) runs
+//! an in-memory loop with **no** persistence and **no** cancellation.
 //!
 //! ## Idempotency (at-least-once)
 //!
@@ -255,10 +254,9 @@ where
     /// between `on_close` and the cursor commit replays the boundary window). It **must be
     /// idempotent** — e.g. committing final offsets here must tolerate a repeat.
     ///
-    /// **Panic safety:** when registered via [`Workflow::register_stream`] (engine-driven
-    /// path), panics in `on_close` are caught and converted to [`CanoError`]. When
-    /// registered via plain [`Workflow::register`] (in-memory companion), panics propagate.
-    /// Always use `register_stream` for production workloads.
+    /// **Panic safety:** when registered via [`Workflow::register`] (engine-driven
+    /// path), panics in `on_close` are caught and converted to [`CanoError`]. In the
+    /// in-memory companion loop (`register_split`), panics propagate to the split branch.
     ///
     /// **Not called on error exits.** If the loop terminates because an item failed
     /// ([`FailFast`](StreamErrorPolicy::FailFast) or a [`RetryOnError`](StreamErrorPolicy::RetryOnError)
@@ -274,9 +272,8 @@ where
     async fn on_close(&self, res: &Resources, reason: CloseReason) -> Result<TState, CanoError>;
 
     /// Drive the in-memory windowed loop (no cursor persistence, no cancellation). Used by
-    /// the macro-synthesised `impl Task::run` so a `StreamTask` can be
-    /// [`register`](crate::workflow::Workflow::register)ed like any task. The durable,
-    /// cancellable path is [`Workflow::register_stream`](crate::workflow::Workflow::register_stream).
+    /// the macro-synthesised `impl Task::run` (the `register_split` path). The durable,
+    /// cancellable path is [`Workflow::register`](crate::workflow::Workflow::register).
     ///
     /// Written as a hand-desugared `fn` (not `async fn`) so no `for<'async_trait>` binder
     /// is introduced; it returns the future produced by the crate-private driver.
@@ -587,13 +584,14 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// Type-erased infrastructure (for StateEntry::Stream / register_stream)
+// Type-erased infrastructure (for the engine's `Stream` entry)
 // ---------------------------------------------------------------------------
 
-/// One erased window step: serialized cursor bytes in place of the concrete `Cursor`.
-pub enum ErasedWindowStep<TState> {
+/// One erased window step: serialized cursor bytes in place of the concrete `Cursor`
+/// (`None` everywhere when the session was asked not to persist).
+pub(crate) enum ErasedWindowStep<TState> {
     /// A full window flushed; persist `cursor` and continue.
-    Window { cursor: Vec<u8> },
+    Window { cursor: Option<Vec<u8>> },
     /// Natural termination: persist `final_cursor` (if any) then transition to `result`.
     Done {
         final_cursor: Option<Vec<u8>>,
@@ -604,35 +602,35 @@ pub enum ErasedWindowStep<TState> {
 }
 
 /// Future returned by [`ErasedStreamSession::next_window`].
-pub type WindowFuture<'a, TState> =
+pub(crate) type WindowFuture<'a, TState> =
     Pin<Box<dyn Future<Output = Result<ErasedWindowStep<TState>, CanoError>> + Send + 'a>>;
 
 /// Object-safe view of an opened stream session. The engine advances it one window at a
 /// time, persisting the returned cursor between windows.
-pub trait ErasedStreamSession<TState>: Send
+pub(crate) trait ErasedStreamSession<TState>: Send
 where
     TState: Clone + Send + Sync + 'static,
 {
-    /// Consume until one window flushes (or the loop terminates).
+    /// Consume until one window flushes (or the loop terminates). Cursors are
+    /// serialized only when `persist` is set.
     fn next_window<'a>(
         &'a mut self,
         res: &'a Resources,
         token: Option<&'a CancellationToken>,
+        persist: bool,
     ) -> WindowFuture<'a, TState>;
 }
 
 /// Future returned by [`ErasedStreamTask::open_session`].
-pub type OpenSessionFuture<'a, TState> = Pin<
+pub(crate) type OpenSessionFuture<'a, TState> = Pin<
     Box<dyn Future<Output = Result<Box<dyn ErasedStreamSession<TState>>, CanoError>> + Send + 'a>,
 >;
 
-/// Object-safe, type-erased view of a [`StreamTask`] for the engine's
-/// [`StateEntry::Stream`](crate::workflow::execution::StateEntry) path.
-pub trait ErasedStreamTask<TState>: Send + Sync
+/// Object-safe, type-erased view of a [`StreamTask`] for the engine's `Stream` entry.
+pub(crate) trait ErasedStreamTask<TState>: Send + Sync
 where
     TState: Clone + Send + Sync + 'static,
 {
-    fn name(&self) -> Cow<'static, str>;
     /// Open (or resume) the source from `cursor_bytes`, returning a driven session.
     /// `attempt_timeout` (from the registered `config()`) bounds each `process_item`.
     fn open_session<'a>(
@@ -667,6 +665,7 @@ where
         &'a mut self,
         res: &'a Resources,
         token: Option<&'a CancellationToken>,
+        persist: bool,
     ) -> WindowFuture<'a, S> {
         Box::pin(async move {
             let step = drive_window(
@@ -680,23 +679,24 @@ where
                 token,
             )
             .await?;
+            let task = &*self.task;
+            let encode = |cursor: Option<T::Cursor>| match cursor {
+                Some(c) if persist => encode_cursor(&c, &task.name()).map(Some),
+                _ => Ok(None),
+            };
             Ok(match step {
                 WindowStep::Window { cursor } => ErasedWindowStep::Window {
-                    cursor: encode_cursor(&cursor, &self.task.name())?,
+                    cursor: encode(Some(cursor))?,
                 },
                 WindowStep::Done {
                     final_cursor,
                     result,
                 } => ErasedWindowStep::Done {
-                    final_cursor: final_cursor
-                        .map(|c| encode_cursor(&c, &self.task.name()))
-                        .transpose()?,
+                    final_cursor: encode(final_cursor)?,
                     result,
                 },
                 WindowStep::Cancelled { final_cursor } => ErasedWindowStep::Cancelled {
-                    final_cursor: final_cursor
-                        .map(|c| encode_cursor(&c, &self.task.name()))
-                        .transpose()?,
+                    final_cursor: encode(final_cursor)?,
                 },
             })
         })
@@ -712,9 +712,6 @@ where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
     T: StreamTask<TState> + 'static,
 {
-    fn name(&self) -> Cow<'static, str> {
-        self.0.name()
-    }
     fn open_session<'a>(
         &'a self,
         res: &'a Resources,
@@ -1083,7 +1080,7 @@ mod tests {
         let token = CancellationToken::new();
         let handle = token.clone();
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, task)
+            .register(Step::Consume, task)
             .add_exit_state(Step::Done);
 
         tokio::spawn(async move {
@@ -1169,7 +1166,7 @@ mod tests {
         };
         let store = Arc::new(InMemoryStore::default());
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, task)
+            .register(Step::Consume, task)
             .add_exit_state(Step::Done)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("resume-test");
@@ -1257,7 +1254,7 @@ mod tests {
         use crate::workflow::Workflow;
 
         let workflow = Workflow::bare()
-            .register_stream(S3::Consume, StopOnFinalWindow)
+            .register(S3::Consume, StopOnFinalWindow)
             .add_exit_states([S3::ViaStop, S3::ViaClose]);
         let result = workflow.orchestrate(S3::Consume).await.unwrap();
         assert_eq!(
@@ -1295,7 +1292,7 @@ mod tests {
         let token = CancellationToken::new();
         let handle = token.clone();
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, task)
+            .register(Step::Consume, task)
             .add_exit_state(Step::Done)
             .with_observer(counter.clone());
 
@@ -1367,7 +1364,7 @@ mod tests {
 
         let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, ZeroWindow { seen: seen.clone() })
+            .register(Step::Consume, ZeroWindow { seen: seen.clone() })
             .add_exit_state(Step::Done);
 
         // A zero-duration window's tick arm would otherwise always be ready in the
@@ -1447,7 +1444,7 @@ mod tests {
         let token = CancellationToken::new();
         let handle = token.clone();
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, task)
+            .register(Step::Consume, task)
             .add_exit_state(Step::Done);
 
         tokio::spawn(async move {
@@ -1486,7 +1483,7 @@ mod tests {
         let closed = Arc::clone(&task.closed_cancelled);
         let store = Arc::new(InMemoryStore::default());
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, task)
+            .register(Step::Consume, task)
             .add_exit_state(Step::Done)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("total-timeout")
@@ -1571,7 +1568,7 @@ mod tests {
         let token = CancellationToken::new();
         let handle = token.clone();
         let workflow = Workflow::bare()
-            .register_stream(
+            .register(
                 Step::Consume,
                 HangingOpen {
                     on_close_called: on_close_called.clone(),
@@ -1653,7 +1650,7 @@ mod tests {
         use crate::workflow::Workflow;
 
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, SlowItem)
+            .register(Step::Consume, SlowItem)
             .add_exit_state(Step::Done);
         // FailFast (default) → the timed-out item fails the run promptly.
         let result = tokio::time::timeout(
@@ -1768,7 +1765,7 @@ mod tests {
             windows: Arc::clone(&windows),
         };
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, task)
+            .register(Step::Consume, task)
             .add_exit_state(Step::Done)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("dur-rearm");
@@ -1807,7 +1804,7 @@ mod tests {
             windows: Arc::clone(&windows),
         };
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, task)
+            .register(Step::Consume, task)
             .add_exit_state(Step::Done);
 
         tokio::spawn(async move {
@@ -1885,7 +1882,7 @@ mod tests {
             on_close_ran: Arc::clone(&on_close_ran),
         };
         let workflow = Workflow::bare()
-            .register_stream(S3::Consume, task)
+            .register(S3::Consume, task)
             .add_exit_states([S3::ViaStop, S3::ViaClose]);
 
         tokio::spawn(async move {
@@ -2135,7 +2132,7 @@ mod tests {
         };
         let store = Arc::new(InMemoryStore::default());
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, task)
+            .register(Step::Consume, task)
             .add_exit_state(Step::Done)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("skip-cursor");
@@ -2277,7 +2274,7 @@ mod tests {
         };
         let store = Arc::new(InMemoryStore::default());
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, task)
+            .register(Step::Consume, task)
             .add_exit_state(Step::Done)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("empty");
@@ -2307,7 +2304,7 @@ mod tests {
         };
         let store = Arc::new(InMemoryStore::default());
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, task)
+            .register(Step::Consume, task)
             .add_exit_state(Step::Done)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("exact");
@@ -2331,7 +2328,7 @@ mod tests {
         };
         let store = Arc::new(InMemoryStore::default());
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, task)
+            .register(Step::Consume, task)
             .add_exit_state(Step::Done)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("partial");
@@ -2427,7 +2424,7 @@ mod tests {
             close_reason: Arc::clone(&close_reason),
         };
         let workflow = Workflow::bare()
-            .register_stream(S3::Consume, task)
+            .register(S3::Consume, task)
             .add_exit_states([S3::ViaStop, S3::ViaClose]);
         let result = workflow.orchestrate_with_token(S3::Consume, &token).await;
         assert!(
@@ -2461,7 +2458,7 @@ mod tests {
             close_reason: Arc::new(Mutex::new(None)),
         };
         let workflow = Workflow::bare()
-            .register_stream(S3::Consume, task)
+            .register(S3::Consume, task)
             .add_exit_states([S3::ViaStop, S3::ViaClose]);
         let result = workflow.orchestrate_with_token(S3::Consume, &token).await;
         assert!(
@@ -2535,7 +2532,7 @@ mod tests {
             closed_cancelled: Arc::clone(&closed),
         };
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, task)
+            .register(Step::Consume, task)
             .add_exit_state(Step::Done);
         let result = workflow.orchestrate_with_token(Step::Consume, &token).await;
         assert!(
@@ -2563,7 +2560,7 @@ mod tests {
             closed_cancelled: Arc::new(AtomicBool::new(false)),
         };
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, task)
+            .register(Step::Consume, task)
             .add_exit_state(Step::Done);
         let err = workflow
             .orchestrate_with_token(Step::Consume, &token)
@@ -2646,7 +2643,7 @@ mod tests {
         };
         let store = Arc::new(InMemoryStore::default());
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, task)
+            .register(Step::Consume, task)
             .add_exit_state(Step::Done)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("cancel-resume");
@@ -2719,7 +2716,7 @@ mod tests {
 
         let store = Arc::new(InMemoryStore::default());
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, CrashAfterFirstWindow)
+            .register(Step::Consume, CrashAfterFirstWindow)
             .add_exit_state(Step::Done)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("corrupt");
@@ -2784,7 +2781,7 @@ mod tests {
             flushes: Arc::new(Mutex::new(Vec::new())),
         };
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, task)
+            .register(Step::Consume, task)
             .add_exit_state(Step::Done)
             .with_checkpoint_store(Arc::new(CursorAppendFails))
             .with_workflow_id("append-fail");
@@ -2840,7 +2837,7 @@ mod tests {
         // The engine wraps the session in catch_panic_to_error: a panic becomes a CanoError
         // (so resource teardown runs) instead of unwinding past the FSM.
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, PanicInFlush)
+            .register(Step::Consume, PanicInFlush)
             .add_exit_state(Step::Done);
         let err = workflow.orchestrate(Step::Consume).await.unwrap_err();
         assert_eq!(err.category(), "task_execution");
@@ -2910,7 +2907,7 @@ mod tests {
             opened: Arc::clone(&opened),
         };
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, task)
+            .register(Step::Consume, task)
             .add_exit_state(Step::Done);
         let result = workflow.orchestrate(Step::Consume).await;
         assert!(result.is_err(), "FailFast item error fails the run");
@@ -2992,7 +2989,7 @@ mod tests {
 
         let log = Arc::new(EventLog::default());
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, NamedExhaust)
+            .register(Step::Consume, NamedExhaust)
             .add_exit_state(Step::Done)
             .with_observer(log.clone());
         workflow.orchestrate(Step::Consume).await.unwrap();
@@ -3024,7 +3021,7 @@ mod tests {
         };
         let log = Arc::new(EventLog::default());
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, task)
+            .register(Step::Consume, task)
             .add_exit_state(Step::Done)
             .with_observer(log.clone());
         let result = workflow.orchestrate_with_token(Step::Consume, &token).await;
@@ -3054,7 +3051,7 @@ mod tests {
             flushes: Arc::new(Mutex::new(Vec::new())),
         };
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, task)
+            .register(Step::Consume, task)
             .add_exit_state(Step::Done);
         let result = workflow.orchestrate(Step::Consume).await.unwrap();
         assert_eq!(result, Step::Done);
@@ -3130,7 +3127,7 @@ mod tests {
             items: vec![1, 2, 3],
         };
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, task)
+            .register(Step::Consume, task)
             .add_exit_state(Step::Done);
         let result = workflow.orchestrate(Step::Consume).await.unwrap();
         assert_eq!(result, Step::Done);
@@ -3228,7 +3225,7 @@ mod tests {
             opened_cursor: std::sync::Arc::clone(&opened_cursor),
         };
         let workflow = Workflow::bare()
-            .register_stream(Step::Consume, task)
+            .register(Step::Consume, task)
             .add_exit_state(Step::Done)
             .with_checkpoint_store(Arc::new(PreExistingCursor))
             .with_workflow_id("crash-resume");
@@ -3299,7 +3296,7 @@ mod metrics_tests {
     fn stream_metrics_counted_correctly() {
         let (result, rows) = run_with_recorder(|| async {
             let workflow = Workflow::bare()
-                .register_stream(St::Consume, FiveItems)
+                .register(St::Consume, FiveItems)
                 .add_exit_state(St::Done);
             workflow.orchestrate(St::Consume).await
         });
@@ -3367,7 +3364,7 @@ mod metrics_tests {
         let handle = token.clone();
         let (result, rows) = run_with_recorder(|| async move {
             let workflow = Workflow::bare()
-                .register_stream(St::Consume, SelfCancel { handle })
+                .register(St::Consume, SelfCancel { handle })
                 .add_exit_state(St::Done);
             workflow.orchestrate_with_token(St::Consume, &token).await
         });
@@ -3427,7 +3424,7 @@ mod metrics_tests {
     fn total_timeout_stream_records_failed_not_cancelled() {
         let (result, rows) = run_with_recorder(|| async {
             let workflow = Workflow::bare()
-                .register_stream(St::Consume, NeverStops)
+                .register(St::Consume, NeverStops)
                 .add_exit_state(St::Done)
                 .with_total_timeout(std::time::Duration::from_nanos(1));
             workflow.orchestrate(St::Consume).await
@@ -3491,7 +3488,7 @@ mod metrics_tests {
     fn failed_stream_records_failed_outcome_and_err_item() {
         let (result, rows) = run_with_recorder(|| async {
             let workflow = Workflow::bare()
-                .register_stream(St::Consume, FailSecond)
+                .register(St::Consume, FailSecond)
                 .add_exit_state(St::Done);
             workflow.orchestrate(St::Consume).await
         });

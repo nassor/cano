@@ -339,7 +339,7 @@ pub fn stepped_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Use as `#[cano::task::stream]`. `StreamTask` is a genuine stream-processing model:
 /// consume an `impl Stream` continuously, flush per [`StreamWindow`] window, run until
 /// the workflow's `CancellationToken` fires, and persist a resumable cursor (via
-/// [`Workflow::register_stream`]). Per-item errors are governed by [`StreamErrorPolicy`].
+/// [`Workflow::register`]). Per-item errors are governed by [`StreamErrorPolicy`].
 ///
 /// Two surface forms on impl blocks:
 ///

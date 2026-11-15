@@ -23,7 +23,7 @@
 //!   Calm ⇄ Alert ⇄ Calm … ──(source exhausted)──► Done
 //! ```
 //!
-//! Registering these with [`Workflow::register_stream`] + a checkpoint store would
+//! Registering these with [`Workflow::register`] + a checkpoint store would
 //! additionally persist each window's cursor for crash-resume (omitted here to keep
 //! the example focused on mode-flipping and to run under default features).
 
@@ -180,8 +180,8 @@ async fn main() -> CanoResult<()> {
     });
 
     let workflow = Workflow::new(resources)
-        .register_stream(Mode::Calm, CalmMode)
-        .register_stream(Mode::Alert, AlertMode)
+        .register(Mode::Calm, CalmMode)
+        .register(Mode::Alert, AlertMode)
         .add_exit_state(Mode::Done);
 
     let result = workflow.orchestrate(Mode::Calm).await?;

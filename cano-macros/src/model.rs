@@ -62,6 +62,9 @@ pub(crate) struct Model {
     /// Expression producing the companion `Task::run` boxed future; `None` = no
     /// companion impl.
     pub companion_run: Option<fn(state: &Type) -> TokenStream>,
+    /// `StateEntry` constructor the emitted `Registrable` impl calls (`"single"`,
+    /// `"router"`, `"stepped"`, `"stream"`, `"compensatable"`).
+    pub entry: &'static str,
 }
 
 /// `::cano::{ident}<S>`.
@@ -139,8 +142,9 @@ pub(crate) fn expand(
             let mut item_impl = item_impl;
             insert_res_params(model, &mut item_impl);
             let companion = companion(model, &item_impl, &state);
+            let registrable = registrable(model, &item_impl, &state);
             let rewritten = async_rewrite::rewrite_impl(item_impl);
-            Ok(quote! { #rewritten #companion })
+            Ok(quote! { #rewritten #companion #registrable })
         }
         None => {
             let state = args.state.ok_or_else(|| {
@@ -282,8 +286,38 @@ fn expand_inherent(
     item_impl.trait_ = Some((parse2(path)?, Default::default()));
 
     let companion = companion(model, &item_impl, &state);
+    let registrable = registrable(model, &item_impl, &state);
     let rewritten = async_rewrite::rewrite_impl(item_impl);
-    Ok(quote! { #rewritten #companion })
+    Ok(quote! { #rewritten #companion #registrable })
+}
+
+/// `impl ::cano::workflow::Registrable<S> for T`, selecting the engine path for the
+/// model. `Self: 'static` keeps types with lifetime parameters compiling (they are
+/// simply not registrable). The model-trait bound is written higher-ranked so it is
+/// not a trivially-checked bound: an attribute on an impl of some *other* trait with
+/// the same name (a local `trait Task`) still compiles, the impl is just unusable.
+fn registrable(model: &Model, item_impl: &ItemImpl, state: &Type) -> TokenStream {
+    let entry = format_ident!("{}", model.entry);
+    let model_trait = format_ident!("{}", model.trait_ident);
+    let generics = &item_impl.generics;
+    let self_ty = &item_impl.self_ty;
+    let predicates = item_impl
+        .generics
+        .where_clause
+        .as_ref()
+        .map(|w| &w.predicates);
+    quote! {
+        impl #generics ::cano::workflow::Registrable<#state> for #self_ty
+        where
+            Self: 'static,
+            for<'__cano> Self: ::cano::#model_trait<#state>,
+            #predicates
+        {
+            fn into_entry(self) -> ::cano::workflow::StateEntry<#state> {
+                ::cano::workflow::StateEntry::#entry(self)
+            }
+        }
+    }
 }
 
 /// `impl ::cano::Task<S> for T` forwarding `config` / `name` to the model trait and

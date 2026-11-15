@@ -33,6 +33,7 @@ const MODEL: Model = Model {
         let stream = trait_path("StreamTask", state);
         quote!(<Self as #stream>::run_in_memory(self, res))
     }),
+    entry: "stream",
 };
 
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {

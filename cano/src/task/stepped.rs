@@ -4,7 +4,7 @@
 //! [`step`](SteppedTask::step) either advances the cursor (`StepOutcome::More(cursor)`) or signals
 //! completion with a workflow state transition (`StepOutcome::Done(state)`). The cursor threading
 //! enables crash-resume: when registered via
-//! [`Workflow::register_stepped`](crate::workflow::Workflow::register_stepped) with a
+//! [`Workflow::register`](crate::workflow::Workflow::register) with a
 //! checkpoint store attached, each `StepOutcome::More` persists the cursor as a
 //! [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row so
 //! [`Workflow::resume_from`](crate::workflow::Workflow::resume_from) can continue from the
@@ -17,10 +17,9 @@
 //! - **Progress-saving long jobs**: the cursor captures exactly where to resume after a
 //!   restart.
 //!
-//! Every [`SteppedTask`] automatically implements [`Task`](crate::task::Task) via a
-//! per-impl-site companion `impl Task<S> for T` emitted by the `#[task::stepped]` macro.
-//! This means you can register a `SteppedTask` with
-//! [`Workflow::register`](crate::workflow::Workflow::register) exactly like any other task.
+//! The `#[task::stepped]` macro also emits a companion `impl Task<S> for T` running the
+//! step loop in memory (no cursor rows), which is what
+//! [`Workflow::register_split`](crate::workflow::Workflow::register_split) uses.
 //!
 //! ## Quick Start
 //!
@@ -73,7 +72,7 @@
 //! #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 //! enum MyState { Process, Done }
 //!
-//! #[derive(Serialize, Deserialize)]
+//! #[derive(Clone, Serialize, Deserialize)]
 //! struct MyCursor { offset: u64 }
 //!
 //! struct TraitStepper;
@@ -107,13 +106,12 @@
 use crate::error::CanoError;
 use crate::resource::Resources;
 use crate::task::TaskConfig;
+use crate::task::retry::{ObserverCtx, run_with_retries_observed};
+use futures_util::future::BoxFuture;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::borrow::Cow;
 use std::fmt;
-use std::future::Future;
-use std::pin::Pin;
-use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
 // StepOutcome<TCursor, TState> — the outcome of a single step() call
@@ -189,7 +187,7 @@ where
     /// The cursor type that tracks progress between steps.
     ///
     /// Must be serialisable so it can be persisted for crash-resume (Task 17).
-    type Cursor: Serialize + DeserializeOwned + Send + Sync + 'static;
+    type Cursor: Serialize + DeserializeOwned + Clone + Send + Sync + 'static;
 
     /// Get the task configuration that controls execution behaviour.
     ///
@@ -227,146 +225,130 @@ where
 }
 
 // ---------------------------------------------------------------------------
-// run_stepped — the loop body called by the macro-synthesised Task::run
+// drive_stepped — the one step loop
 // ---------------------------------------------------------------------------
 
-/// Run the [`SteppedTask`] step loop for `s`.
+/// Persists one serialized cursor (the engine's checkpoint writer).
+pub(crate) trait CursorSink: Send {
+    /// Save `cursor_json`, the JSON encoding of the cursor just returned by
+    /// [`StepOutcome::More`].
+    fn save<'a>(&'a mut self, cursor_json: Vec<u8>) -> BoxFuture<'a, Result<(), CanoError>>;
+}
+
+/// The step loop shared by the engine path ([`ErasedSteppedTask::drive`]) and the
+/// in-memory companion ([`run_stepped`]).
 ///
-/// The synthesised `Task::run` method emitted by `#[task::stepped]` delegates here so
-/// that the loop body lives in a single place. This in-memory loop is used when a
-/// `SteppedTask` is registered via [`Workflow::register`](crate::workflow::Workflow::register).
+/// With `retry = Some(..)` each `step` call runs under that config's retry policy
+/// (a retried step sees the same cursor again); with `None` a step error ends the
+/// loop. Every `More` cursor is serialized and saved to `sink`, when present, before
+/// the next step.
+pub(crate) async fn drive_stepped<T, S>(
+    task: &T,
+    res: &Resources,
+    retry: Option<(&TaskConfig, Option<ObserverCtx<'_>>)>,
+    mut cursor: Option<T::Cursor>,
+    mut sink: Option<&mut dyn CursorSink>,
+) -> Result<S, CanoError>
+where
+    T: SteppedTask<S> + ?Sized,
+    S: Clone + fmt::Debug + Send + Sync + 'static,
+{
+    loop {
+        let outcome = match retry {
+            Some((config, obs)) => {
+                run_with_retries_observed(config, obs, || task.step(res, cursor.clone())).await?
+            }
+            None => task.step(res, cursor.take()).await?,
+        };
+        match outcome {
+            StepOutcome::More(next) => {
+                #[cfg(feature = "metrics")]
+                crate::metrics::step_iteration(false);
+                if let Some(sink) = sink.as_deref_mut() {
+                    let json = serde_json::to_vec(&next).map_err(|e| {
+                        CanoError::task_execution(format!(
+                            "serialize cursor for `{}`: {e}",
+                            task.name()
+                        ))
+                    })?;
+                    sink.save(json).await?;
+                }
+                cursor = Some(next);
+            }
+            StepOutcome::Done(next_state) => {
+                #[cfg(feature = "metrics")]
+                crate::metrics::step_iteration(true);
+                return Ok(next_state);
+            }
+        }
+    }
+}
+
+/// Run the [`SteppedTask`] step loop for `s` in memory: no cursor persistence and
+/// no per-step retries (the caller's `run_with_retries` wraps the whole loop).
 ///
-/// For checkpoint-backed cursor persistence, register via
-/// [`Workflow::register_stepped`](crate::workflow::Workflow::register_stepped) instead;
-/// the engine will use [`ErasedSteppedTask`] to persist each cursor as a
-/// [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row after each `StepOutcome::More`.
-///
-/// The loop calls `s.step(res, cursor)` repeatedly:
-///
-/// - `StepOutcome::More(new_cursor)` → update the cursor and call `step` again.
-/// - `StepOutcome::Done(result)` → return `Ok(result)`.
-/// - `Err(e)` → return `Err(e)` immediately (outer retry wrapping, if any, is applied
-///   by the workflow dispatcher via `run_with_retries`).
+/// The synthesised `Task::run` emitted by `#[task::stepped]` delegates here; it
+/// serves [`Workflow::register_split`](crate::workflow::Workflow::register_split).
+/// `Workflow::register` uses the engine path, which persists each cursor as a
+/// [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row.
 #[doc(hidden)]
 pub async fn run_stepped<S, S2>(s: &S, res: &Resources) -> Result<S2, CanoError>
 where
     S: SteppedTask<S2> + ?Sized,
     S2: Clone + fmt::Debug + Send + Sync + 'static,
 {
-    // The loop skeleton (re-invoke until the step says done) is shared with
-    // `run_poll_loop` via `run_task_loop`; the state is the cursor threaded
-    // between `More` iterations.
-    crate::task::run_task_loop(None::<S::Cursor>, |mut cursor| async move {
-        match s.step(res, cursor.take()).await {
-            Err(e) => (cursor, crate::task::TaskLoopStep::Done(Err(e))),
-            Ok(StepOutcome::More(new_cursor)) => {
-                #[cfg(feature = "metrics")]
-                crate::metrics::step_iteration(false);
-                cursor = Some(new_cursor);
-                (cursor, crate::task::TaskLoopStep::Continue)
-            }
-            Ok(StepOutcome::Done(result)) => {
-                #[cfg(feature = "metrics")]
-                crate::metrics::step_iteration(true);
-                (cursor, crate::task::TaskLoopStep::Done(Ok(result)))
-            }
-        }
-    })
-    .await
+    drive_stepped(s, res, None, None, None).await
 }
 
 // ---------------------------------------------------------------------------
-// Default cursor type alias
+// Type-erased stepped-task infrastructure (for the engine's `Stepped` entry)
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Type aliases
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Type-erased stepped-task infrastructure (for StateEntry::Stepped)
-// ---------------------------------------------------------------------------
-
-/// The outcome of one erased step call: serialized cursor bytes (`More`) or the
-/// final next state (`Done`).
-pub enum ErasedStep<TState> {
-    /// More work remains; the opaque cursor bytes are passed to the next call.
-    More(Vec<u8>),
-    /// Processing is complete; carry the next state forward to the FSM.
-    Done(TState),
-}
-
-/// Future type returned by [`ErasedSteppedTask::step`].
-pub type StepFuture<'a, TState> =
-    Pin<Box<dyn Future<Output = Result<ErasedStep<TState>, CanoError>> + Send + 'a>>;
-
-/// Object-safe, type-erased view of a [`SteppedTask`].
-///
-/// All cursor serialization/deserialization is handled inside the internal
-/// adapter that bridges a concrete `SteppedTask` to this trait; callers work
-/// purely with `Vec<u8>` cursors.
-pub trait ErasedSteppedTask<TState>: Send + Sync
+/// Object-safe, type-erased view of a [`SteppedTask`]; cursors cross the boundary
+/// as JSON bytes.
+pub(crate) trait ErasedSteppedTask<TState>: Send + Sync
 where
     TState: Clone + Send + Sync + 'static,
 {
-    /// Human-readable identifier, forwarded from the underlying [`SteppedTask::name`].
-    fn name(&self) -> Cow<'static, str>;
-    /// Task configuration, forwarded from the underlying [`SteppedTask::config`].
-    fn config(&self) -> TaskConfig;
-    /// Execute one step with a type-erased, optionally `None` cursor.
-    ///
-    /// `cursor_bytes` is `None` on the first call; `Some(bytes)` on subsequent calls,
-    /// where `bytes` were returned by the previous `step` via [`ErasedStep::More`].
-    fn step<'a>(
+    /// Run the step loop from `resume` (the last persisted cursor, if any), each step
+    /// under `config`'s retry policy, saving every new cursor to `sink`.
+    fn drive<'a>(
         &'a self,
         res: &'a Resources,
-        cursor_bytes: Option<Vec<u8>>,
-    ) -> StepFuture<'a, TState>;
+        config: &'a TaskConfig,
+        obs: Option<ObserverCtx<'a>>,
+        resume: Option<Vec<u8>>,
+        sink: Option<&'a mut dyn CursorSink>,
+    ) -> BoxFuture<'a, Result<TState, CanoError>>;
 }
 
 /// Bridges a concrete [`SteppedTask`] to the object-safe [`ErasedSteppedTask`].
-///
-/// Handles `serde_json` cursor (de)serialization so the engine only sees `Vec<u8>`.
-pub(crate) struct SteppedAdapter<T>(pub Arc<T>);
+pub(crate) struct SteppedAdapter<T>(pub T);
 
 impl<TState, T> ErasedSteppedTask<TState> for SteppedAdapter<T>
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
     T: SteppedTask<TState> + 'static,
 {
-    fn name(&self) -> Cow<'static, str> {
-        self.0.name()
-    }
-    fn config(&self) -> TaskConfig {
-        self.0.config()
-    }
-    fn step<'a>(
+    fn drive<'a>(
         &'a self,
         res: &'a Resources,
-        cursor_bytes: Option<Vec<u8>>,
-    ) -> StepFuture<'a, TState> {
+        config: &'a TaskConfig,
+        obs: Option<ObserverCtx<'a>>,
+        resume: Option<Vec<u8>>,
+        sink: Option<&'a mut dyn CursorSink>,
+    ) -> BoxFuture<'a, Result<TState, CanoError>> {
         Box::pin(async move {
-            let cursor: Option<T::Cursor> = match cursor_bytes {
+            let cursor: Option<T::Cursor> = match resume {
                 None => None,
-                Some(ref b) => Some(serde_json::from_slice(b).map_err(|e| {
+                Some(bytes) => Some(serde_json::from_slice(&bytes).map_err(|e| {
                     CanoError::task_execution(format!(
                         "deserialize cursor for `{}`: {e}",
                         self.0.name()
                     ))
                 })?),
             };
-            match self.0.step(res, cursor).await? {
-                StepOutcome::More(c) => {
-                    let blob = serde_json::to_vec(&c).map_err(|e| {
-                        CanoError::task_execution(format!(
-                            "serialize cursor for `{}`: {e}",
-                            self.0.name()
-                        ))
-                    })?;
-                    Ok(ErasedStep::More(blob))
-                }
-                StepOutcome::Done(result) => Ok(ErasedStep::Done(result)),
-            }
+            drive_stepped(&self.0, res, Some((config, obs)), cursor, sink).await
         })
     }
 }
@@ -787,12 +769,12 @@ mod metrics_tests {
         );
     }
 
-    /// Test via Workflow::register_stepped (engine-owned step loop in execute_stepped_task)
+    /// Test via Workflow::register (engine-owned step loop in execute_stepped_task)
     #[test]
     fn step_iterations_counted_via_register_stepped() {
         let (result, rows) = run_with_recorder(|| async {
             let workflow = Workflow::bare()
-                .register_stepped(St::Work, TwoMoreOneDone)
+                .register(St::Work, TwoMoreOneDone)
                 .add_exit_state(St::Done);
             workflow.orchestrate(St::Work).await
         });

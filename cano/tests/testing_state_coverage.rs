@@ -39,8 +39,8 @@ impl RouterTask<S> for RouteTo {
 async fn router_hop_is_counted() {
     let observer = Arc::new(RecordingObserver::new());
     let wf = Workflow::bare()
-        .register_router(S::Start, RouteTo(S::Route))
-        .register_router(S::Route, RouteTo(S::Worker))
+        .register(S::Start, RouteTo(S::Route))
+        .register(S::Route, RouteTo(S::Worker))
         .register(S::Worker, Go(S::Done))
         .add_exit_state(S::Done)
         .with_observer(observer.clone());

@@ -152,7 +152,7 @@ async fn pipeline_resume_reenters_only_the_crashed_state() {
                 sums: sums.clone(),
             },
         )
-        .register_stream(
+        .register(
             Pipe::Pump,
             Pumper {
                 fail_once_at: Arc::new(Mutex::new(Some(5))),

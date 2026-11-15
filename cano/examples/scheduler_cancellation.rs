@@ -78,8 +78,8 @@ async fn main() -> CanoResult<()> {
     let ship_started = Arc::new(AtomicBool::new(false));
 
     let workflow = Workflow::bare()
-        .register_with_compensation(Step::Reserve, Reserve)
-        .register_with_compensation(Step::Charge, Charge)
+        .register(Step::Reserve, Reserve)
+        .register(Step::Charge, Charge)
         .register(
             Step::Ship,
             Ship {

@@ -15,10 +15,13 @@ use futures_util::FutureExt;
 
 use crate::error::CanoError;
 use crate::recovery::CheckpointRow;
-use crate::saga::{CompensationEntry, ErasedCompensatable};
-use crate::task::stepped::{ErasedStep, ErasedSteppedTask};
-use crate::task::stream::{ErasedStreamTask, ErasedWindowStep};
-use crate::task::{Task, run_with_retries};
+use crate::saga::{
+    CompensatableAdapter, CompensatableTask, CompensationEntry, ErasedCompensatable,
+};
+use crate::task::stepped::{CursorSink, ErasedSteppedTask, SteppedAdapter, SteppedTask};
+use crate::task::stream::{ErasedStreamTask, ErasedWindowStep, StreamAdapter, StreamTask};
+use crate::task::{ObserverCtx, RouterTask, Task, TaskConfig, run_with_retries_observed};
+use futures_util::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
 
 use super::compensation::resolve_compensation_deadline;
@@ -29,151 +32,156 @@ use super::{Workflow, notify_observers, panic_payload_message};
 use tracing::{Instrument, debug, info, info_span, warn};
 
 /// Entry in the workflow state machine
-pub enum StateEntry<TState>
-where
-    TState: Clone + Send + Sync + 'static,
-{
-    /// Single task execution
+/// What a state runs, as produced by [`Registrable::into_entry`](super::Registrable::into_entry).
+///
+/// Opaque: build one through `Workflow::register` (the task macros implement
+/// [`Registrable`](super::Registrable) for you).
+#[doc(hidden)]
+pub struct StateEntry<TState>(pub(crate) Entry<TState>);
+
+/// A registered state's engine path, with the task's name and config captured once
+/// at registration (no per-dispatch virtual calls).
+pub(crate) enum Entry<TState> {
+    /// A plain task. `checkpoint: false` marks a router: dispatched the same way, but
+    /// skipped by the checkpoint writer (no row, no sequence number) since it has no
+    /// side effects to recover.
     Single {
-        task: Arc<dyn Task<TState> + Send + Sync>,
-        /// TaskConfig captured at registration time. Avoids per-dispatch
-        /// virtual call through dyn Task to retrieve it.
-        config: Arc<crate::task::TaskConfig>,
+        task: Arc<dyn Task<TState>>,
+        config: TaskConfig,
+        name: Cow<'static, str>,
+        checkpoint: bool,
     },
-    /// Side-effect-free routing task (registered via
-    /// [`Workflow::register_router`](crate::workflow::Workflow::register_router)).
-    ///
-    /// A router only reads resources and returns the next state — it never
-    /// writes. Router states are dispatched like `Single` but skipped by the
-    /// checkpoint writer: no [`CheckpointRow`] is appended and no sequence
-    /// number is consumed when a router state is entered. The `on_state_enter`
-    /// observer is still fired (the FSM did enter the state).
-    ///
-    /// Note: if the initial state is a router and the workflow crashes before
-    /// any non-router state is entered, `resume_from` will find zero rows and
-    /// error. Restarting from the initial state is safe — routers have no side
-    /// effects.
-    Router {
-        task: Arc<dyn Task<TState> + Send + Sync>,
-        /// TaskConfig captured at registration time (same rationale as `Single`).
-        config: Arc<crate::task::TaskConfig>,
-    },
-    /// Split into parallel tasks with join configuration
+    /// Parallel tasks joined by `join_config` (`Workflow::register_split`).
     Split {
-        tasks: Vec<Arc<dyn Task<TState> + Send + Sync>>,
-        /// Per-task configs in the same order as `tasks`. Captured at
-        /// registration time (see `Single::config` for rationale).
-        configs: Arc<Vec<Arc<crate::task::TaskConfig>>>,
-        join_config: Arc<JoinConfig<TState>>,
+        tasks: Vec<Arc<dyn Task<TState>>>,
+        configs: Vec<Arc<TaskConfig>>,
+        names: Vec<Cow<'static, str>>,
+        join_config: JoinConfig<TState>,
     },
-    /// Single task that records an output and can be compensated (see
-    /// [`Workflow::register_with_compensation`]).
-    CompensatableSingle {
-        /// Type-erased compensatable task — exposes the forward run (returning the next
-        /// state plus the serialized output) and the compensation.
+    /// A task whose output is pushed onto the compensation stack.
+    Compensatable {
         task: Arc<dyn ErasedCompensatable<TState>>,
-        /// Forward-run config, captured at registration time (see `Single::config`).
-        config: Arc<crate::task::TaskConfig>,
+        config: TaskConfig,
+        name: Arc<str>,
     },
-    /// A [`SteppedTask`](crate::task::stepped::SteppedTask) registered via
-    /// [`Workflow::register_stepped`](crate::workflow::Workflow::register_stepped).
-    ///
-    /// The engine drives the step loop, persisting each cursor as a
-    /// [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row after each
-    /// `StepOutcome::More`. On
-    /// [`resume_from`](crate::workflow::Workflow::resume_from), the latest persisted
-    /// cursor for this state is rehydrated and passed to the first `step` call instead
-    /// of `None`, so processing continues from where it left off.
+    /// An engine-driven step loop persisting each cursor as a
+    /// [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row.
     Stepped {
-        /// Type-erased stepped task — exposes `name`, `config`, and `step`.
         task: Arc<dyn ErasedSteppedTask<TState>>,
-        /// Task config captured at registration time (same rationale as `Single::config`).
-        config: Arc<crate::task::TaskConfig>,
+        config: TaskConfig,
+        name: Cow<'static, str>,
     },
-    /// A [`StreamTask`](crate::task::stream::StreamTask) registered via
-    /// [`Workflow::register_stream`](crate::workflow::Workflow::register_stream).
-    ///
-    /// The engine drives the windowed consume loop, persisting the cursor of each flushed
-    /// window's last item as a [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor)
-    /// row. Unlike every other variant the driver observes the `CancellationToken` itself
-    /// (a cooperative drain: flush the in-flight window, commit its cursor, run `on_close`
-    /// for cleanup, then end as `Cancelled` so `resume_from` continues) rather than being
-    /// dropped mid-window by `dispatch_with_budget`. A
-    /// [`with_total_timeout`](crate::workflow::Workflow::with_total_timeout) budget is
-    /// folded into that same drain (a forwarded token firing on the real
-    /// `CancellationToken` OR the deadline, whichever is first), so a total-timeout trip
-    /// also flushes and commits cleanly instead of orphaning the in-flight window; it
-    /// surfaces as `CanoError::WorkflowTimeout` rather than `Cancelled`.
+    /// An engine-driven windowed stream; the driver observes the cancellation token
+    /// itself (a cooperative drain) instead of being dropped by `dispatch_with_budget`.
     Stream {
-        /// Type-erased stream task — exposes `name`, `config`, and `open_session`.
         task: Arc<dyn ErasedStreamTask<TState>>,
-        /// Task config captured at registration time (same rationale as `Single::config`).
-        config: Arc<crate::task::TaskConfig>,
+        config: TaskConfig,
+        name: Cow<'static, str>,
     },
 }
 
-impl<TState> Clone for StateEntry<TState>
-where
-    TState: Clone + Send + Sync + 'static,
-{
-    fn clone(&self) -> Self {
-        match self {
-            StateEntry::Single { task, config } => StateEntry::Single {
-                task: task.clone(),
-                config: Arc::clone(config),
-            },
-            StateEntry::Router { task, config } => StateEntry::Router {
-                task: task.clone(),
-                config: Arc::clone(config),
-            },
-            StateEntry::Split {
-                tasks,
-                configs,
-                join_config,
-            } => StateEntry::Split {
-                tasks: tasks.clone(),
-                configs: Arc::clone(configs),
-                join_config: join_config.clone(),
-            },
-            StateEntry::CompensatableSingle { task, config } => StateEntry::CompensatableSingle {
-                task: Arc::clone(task),
-                config: Arc::clone(config),
-            },
-            StateEntry::Stepped { task, config } => StateEntry::Stepped {
-                task: Arc::clone(task),
-                config: Arc::clone(config),
-            },
-            StateEntry::Stream { task, config } => StateEntry::Stream {
-                task: Arc::clone(task),
-                config: Arc::clone(config),
-            },
-        }
-    }
-}
-
+#[doc(hidden)]
 impl<TState> StateEntry<TState>
 where
     TState: Clone + std::fmt::Debug + Send + Sync + 'static,
 {
-    /// The task identifier for this state entry, or an empty `String` for
-    /// variants with no single task (`Split`) or for variants that are
-    /// unreachable at this call site (e.g. `Router` when called from
-    /// checkpoint code that has already excluded them).
-    ///
-    /// This method centralises the task-name extraction logic so future
-    /// `StateEntry` variants cannot silently produce an empty `task_id`
-    /// through a missing match arm.
-    pub(crate) fn task_id(&self) -> String {
+    /// A plain task (also used for poll, timer and batch tasks).
+    pub fn single<T: Task<TState> + 'static>(task: T) -> Self {
+        Self(Entry::Single {
+            config: task.config(),
+            name: task.name(),
+            task: Arc::new(task),
+            checkpoint: true,
+        })
+    }
+
+    /// A router: dispatched like [`single`](Self::single) but never checkpointed.
+    pub fn router<T: RouterTask<TState> + Task<TState> + 'static>(task: T) -> Self {
+        Self(Entry::Single {
+            config: Task::config(&task),
+            name: Task::name(&task),
+            task: Arc::new(task),
+            checkpoint: false,
+        })
+    }
+
+    /// An engine-driven stepped task.
+    pub fn stepped<T: SteppedTask<TState> + 'static>(task: T) -> Self {
+        Self(Entry::Stepped {
+            config: SteppedTask::config(&task),
+            name: SteppedTask::name(&task),
+            task: Arc::new(SteppedAdapter(task)),
+        })
+    }
+
+    /// An engine-driven stream task.
+    pub fn stream<T: StreamTask<TState> + 'static>(task: T) -> Self {
+        Self(Entry::Stream {
+            config: StreamTask::config(&task),
+            name: StreamTask::name(&task),
+            task: Arc::new(StreamAdapter(Arc::new(task))),
+        })
+    }
+
+    /// A compensatable (saga) task. The retry loop's config drops `attempt_timeout`:
+    /// the adapter applies it to the forward call only, so a timeout can never drop
+    /// the inline-compensate path and lose the typed output.
+    pub fn compensatable<T: CompensatableTask<TState> + 'static>(task: T) -> Self {
+        Self(Entry::Compensatable {
+            config: TaskConfig {
+                attempt_timeout: None,
+                ..task.config()
+            },
+            name: Arc::from(task.name()),
+            task: Arc::new(CompensatableAdapter(Arc::new(task))),
+        })
+    }
+}
+
+impl<TState> Entry<TState> {
+    /// The `task_id` recorded on this state's checkpoint rows (`""` for a split).
+    pub(crate) fn task_id(&self) -> &str {
         match self {
-            StateEntry::Single { task, .. } => task.name().into_owned(),
-            StateEntry::CompensatableSingle { task, .. } => task.name().into_owned(),
-            StateEntry::Stepped { task, .. } => task.name().into_owned(),
-            StateEntry::Stream { task, .. } => task.name().into_owned(),
-            // Router is unreachable from checkpoint code (excluded by the
-            // `is_router` guard in `execute_workflow_from`); Split has no
-            // single task identifier. Both fall to the empty-string default.
-            StateEntry::Router { .. } | StateEntry::Split { .. } => String::new(),
+            Entry::Single { name, .. }
+            | Entry::Stepped { name, .. }
+            | Entry::Stream { name, .. } => name,
+            Entry::Compensatable { name, .. } => name,
+            Entry::Split { .. } => "",
         }
+    }
+}
+
+/// Writes a stepped task's cursors as [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor)
+/// rows through [`Workflow::append_row`].
+pub(super) struct CheckpointSink<'a, TState>
+where
+    TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
+{
+    workflow: &'a Workflow<TState>,
+    workflow_id: &'a str,
+    state_label: &'a str,
+    task_name: &'a str,
+    sequence: &'a mut u64,
+}
+
+impl<TState> CursorSink for CheckpointSink<'_, TState>
+where
+    TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
+{
+    fn save<'a>(&'a mut self, cursor_json: Vec<u8>) -> BoxFuture<'a, Result<(), CanoError>> {
+        Box::pin(async move {
+            let row = CheckpointRow::new(*self.sequence, self.state_label, self.task_name)
+                .with_cursor(cursor_json)
+                .with_workflow_version(self.workflow.workflow_version);
+            self.workflow
+                .append_row(
+                    self.workflow_id,
+                    self.sequence,
+                    row,
+                    "step cursor checkpoint",
+                )
+                .await
+        })
     }
 }
 
@@ -338,58 +346,46 @@ where
                 notify_observers(&self.observers, |o| o.on_state_enter(label));
             }
 
-            // Router states are pure routing: no side effects, nothing to
-            // recover. Skip the checkpoint write and do not consume a sequence
-            // number so that sequence numbers remain dense for `resume_from`.
-            // `on_state_enter` was already fired above — the FSM did enter the
-            // state; only the recovery footprint is suppressed.
-            //
-            // All other variants (Single, Split, CompensatableSingle, Stepped, Stream) are
-            // checkpointed.
-            let is_router = matches!(
-                self.states.get(&current_state).map(|e| e.as_ref()),
-                Some(StateEntry::Router { .. }),
-            );
+            // One map lookup per iteration; everything below borrows from it.
+            let entry: Option<&Entry<TState>> = self.states.get(&current_state).map(|e| &**e);
 
-            // Checkpoint this state entry before touching its task. One row per
-            // state — a split is one state, hence one row regardless of fan-out.
-            // Skipped for Router states (see above).
-            if !is_router && let Some(ref store) = self.checkpoint_store {
-                let wf_id = match workflow_id.as_deref() {
-                    Some(id) => id,
-                    None => {
-                        let err = CanoError::checkpoint_store(
-                            "checkpointing requires a workflow id (call with_workflow_id)",
-                        );
-                        return self
-                            .wrap_and_drain(
-                                workflow_id.as_deref(),
-                                compensation_stack,
-                                &current_state,
-                                &transitions_so_far,
-                                err,
-                                total_budget,
-                            )
-                            .await;
-                    }
+            // Checkpoint this state entry before touching its task. One row per state —
+            // a split is one state, hence one row regardless of fan-out. Router states
+            // (`checkpoint: false`) are pure routing with nothing to recover: no row and
+            // no sequence number, so sequence numbers stay dense for `resume_from`.
+            // `on_state_enter` already fired above — the FSM did enter the state.
+            if self.checkpoint_store.is_some()
+                && !matches!(
+                    entry,
+                    Some(Entry::Single {
+                        checkpoint: false,
+                        ..
+                    })
+                )
+            {
+                let Some(wf_id) = workflow_id.as_deref() else {
+                    let err = CanoError::checkpoint_store(
+                        "checkpointing requires a workflow id (call with_workflow_id)",
+                    );
+                    return self
+                        .wrap_and_drain(
+                            workflow_id.as_deref(),
+                            compensation_stack,
+                            &current_state,
+                            &transitions_so_far,
+                            err,
+                            total_budget,
+                        )
+                        .await;
                 };
                 // `state_label` is always `Some` here (checkpoint_store ⇒ label computed).
                 let label = state_label.as_deref().unwrap_or_default();
-                let task_id = self
-                    .states
-                    .get(&current_state)
-                    .map_or(String::new(), |entry| entry.task_id());
-                let append_result = store
-                    .append(
-                        wf_id,
-                        CheckpointRow::new(sequence, label, task_id)
-                            .with_workflow_version(self.workflow_version),
-                    )
-                    .await;
-                #[cfg(feature = "metrics")]
-                crate::metrics::checkpoint_append(append_result.is_ok());
-                if let Err(e) = append_result {
-                    let err = CanoError::checkpoint_store(format!("append checkpoint: {e}"));
+                let row = CheckpointRow::new(sequence, label, entry.map_or("", Entry::task_id))
+                    .with_workflow_version(self.workflow_version);
+                if let Err(err) = self
+                    .append_row(wf_id, &mut sequence, row, "checkpoint")
+                    .await
+                {
                     return self
                         .wrap_and_drain(
                             workflow_id.as_deref(),
@@ -401,8 +397,6 @@ where
                         )
                         .await;
                 }
-                notify_observers(&self.observers, |o| o.on_checkpoint(wf_id, sequence));
-                sequence += 1;
             }
 
             // Reached an exit state — the run succeeded. Clear the log (best-effort) and return.
@@ -413,25 +407,21 @@ where
                 return Ok(current_state);
             }
 
-            // Get the state entry — borrow from the map, clone only Arc handles below.
-            let state_entry = match self.states.get(&current_state) {
-                Some(e) => e,
-                None => {
-                    let err = CanoError::workflow(format!(
-                        "No task registered for state: {:?}",
-                        current_state
-                    ));
-                    return self
-                        .wrap_and_drain(
-                            workflow_id.as_deref(),
-                            compensation_stack,
-                            &current_state,
-                            &transitions_so_far,
-                            err,
-                            total_budget,
-                        )
-                        .await;
-                }
+            let Some(entry) = entry else {
+                let err = CanoError::workflow(format!(
+                    "No task registered for state: {:?}",
+                    current_state
+                ));
+                return self
+                    .wrap_and_drain(
+                        workflow_id.as_deref(),
+                        compensation_stack,
+                        &current_state,
+                        &transitions_so_far,
+                        err,
+                        total_budget,
+                    )
+                    .await;
             };
 
             #[cfg(feature = "tracing")]
@@ -450,10 +440,11 @@ where
             // `on_task_failure` / `on_workflow_timeout` observer fan-out
             // live in `Self::dispatch_with_budget`; each branch supplies
             // only the failure-name fan-out specific to its shape.
-            let step: Result<TState, CanoError> = match state_entry.as_ref() {
-                StateEntry::Single { task, config } => {
-                    let task_name = task.name();
-                    let fut = self.execute_single_task(task.clone(), Arc::clone(config));
+            let step: Result<TState, CanoError> = match entry {
+                Entry::Single {
+                    task, config, name, ..
+                } => {
+                    let fut = self.execute_single_task(task.as_ref(), config, name);
                     Self::dispatch_with_budget(
                         step_budget,
                         token,
@@ -464,38 +455,18 @@ where
                             // `execute_single_task` fired `on_task_start` inside the
                             // dropped future; pair it with `on_task_failure` so observer
                             // gauges (`active_tasks` etc.) remain balanced.
-                            o.on_task_failure(task_name.as_ref(), err);
+                            o.on_task_failure(name, err);
                         },
                     )
                     .await
                 }
-                StateEntry::Router { task, config } => {
-                    // Dispatched like Single; checkpoint write is skipped in the
-                    // block above (is_router guard).
-                    let task_name = task.name();
-                    let fut = self.execute_single_task(task.clone(), Arc::clone(config));
-                    Self::dispatch_with_budget(
-                        step_budget,
-                        token,
-                        state_label.as_deref(),
-                        &self.observers,
-                        fut,
-                        |o, err| {
-                            o.on_task_failure(task_name.as_ref(), err);
-                        },
-                    )
-                    .await
-                }
-                StateEntry::Split {
+                Entry::Split {
                     tasks,
                     configs,
+                    names,
                     join_config,
                 } => {
-                    let fut = self.execute_split_join(
-                        tasks.clone(),
-                        Arc::clone(configs),
-                        join_config.clone(),
-                    );
+                    let fut = self.execute_split_join(tasks, configs, names, join_config);
                     // Pre-format branch ids once (instead of per observer) — the
                     // helper invokes `task_failure_fan_out` once per observer, so
                     // formatting inside the closure would re-allocate every time.
@@ -508,10 +479,10 @@ where
                     let branch_ids: Vec<String> = if (step_budget.is_some() || token.is_some())
                         && !self.observers.is_empty()
                     {
-                        tasks
+                        names
                             .iter()
                             .enumerate()
-                            .map(|(idx, t)| format!("{}[{}]", t.name(), idx))
+                            .map(|(idx, name)| format!("{name}[{idx}]"))
                             .collect()
                     } else {
                         Vec::new()
@@ -530,7 +501,7 @@ where
                     )
                     .await
                 }
-                StateEntry::CompensatableSingle { task, config } => {
+                Entry::Compensatable { task, config, name } => {
                     // Saga safety: do NOT wrap `execute_compensatable_task` in `timeout_at`.
                     // The compensation entry is pushed onto the stack *after* the task body
                     // returns its serialized output (see the `Ok((next_state, output_blob))`
@@ -540,8 +511,9 @@ where
                     // level — there the task author controls the commit-vs-yield ordering.
                     // The cost is at most one task duration of total-budget drift; the
                     // alternative — losing track of a committed side effect — is worse.
-                    let fut = self.execute_compensatable_task(task.clone(), Arc::clone(config));
-                    let comp_result: Result<(TState, Vec<u8>), CanoError> = fut.await;
+                    let comp_result = self
+                        .execute_compensatable_task(task.as_ref(), config, name)
+                        .await;
                     #[cfg(feature = "metrics")]
                     crate::metrics::task_dispatch_duration(
                         _state_label,
@@ -550,25 +522,26 @@ where
                     );
                     match comp_result {
                         Ok((next_state, output_blob)) => {
-                            let task_name: Arc<str> = Arc::from(task.name());
                             // Persist a completion row carrying the output so a resumed
                             // run rehydrates this compensation entry.
-                            if let (Some(store), Some(wf_id)) =
-                                (&self.checkpoint_store, workflow_id.as_deref())
+                            if self.checkpoint_store.is_some()
+                                && let Some(wf_id) = workflow_id.as_deref()
                             {
                                 let label = state_label.as_deref().unwrap_or_default();
-                                let row = CheckpointRow::new(sequence, label, &*task_name)
+                                let row = CheckpointRow::new(sequence, label, &**name)
                                     .with_output(output_blob.clone())
                                     .with_workflow_version(self.workflow_version);
-                                let comp_append_result = store.append(wf_id, row).await;
-                                #[cfg(feature = "metrics")]
-                                crate::metrics::checkpoint_append(comp_append_result.is_ok());
-                                if let Err(e) = comp_append_result {
-                                    let err = CanoError::checkpoint_store(format!(
-                                        "append compensation checkpoint: {e}"
-                                    ));
+                                if let Err(err) = self
+                                    .append_row(
+                                        wf_id,
+                                        &mut sequence,
+                                        row,
+                                        "compensation checkpoint",
+                                    )
+                                    .await
+                                {
                                     compensation_stack.push(CompensationEntry {
-                                        task_id: task_name,
+                                        task_id: Arc::clone(name),
                                         output_blob,
                                     });
                                     return self
@@ -582,13 +555,9 @@ where
                                         )
                                         .await;
                                 }
-                                notify_observers(&self.observers, |o| {
-                                    o.on_checkpoint(wf_id, sequence)
-                                });
-                                sequence += 1;
                             }
                             compensation_stack.push(CompensationEntry {
-                                task_id: task_name,
+                                task_id: Arc::clone(name),
                                 output_blob,
                             });
                             Ok(next_state)
@@ -596,18 +565,18 @@ where
                         Err(e) => Err(e),
                     }
                 }
-                StateEntry::Stepped { task, config } => {
+                Entry::Stepped { task, config, name } => {
                     // Pop the resume cursor for this state (if any). Using `remove` instead
                     // of `get` so that if the FSM visits the same state again later (e.g. a
                     // loop), that second visit starts fresh from `None`.
                     let resume_cursor = state_label
                         .as_deref()
                         .and_then(|label| resume_cursors.remove(label));
-                    let task_name = task.name();
                     let fut = self.execute_stepped_task(
-                        task.clone(),
-                        Arc::clone(config),
-                        &workflow_id,
+                        task.as_ref(),
+                        config,
+                        name,
+                        workflow_id.as_deref(),
                         state_label.as_deref().unwrap_or_default(),
                         &mut sequence,
                         resume_cursor,
@@ -619,15 +588,15 @@ where
                         &self.observers,
                         fut,
                         |o, err| {
-                            o.on_task_failure(task_name.as_ref(), err);
+                            o.on_task_failure(name, err);
                         },
                     )
                     .await
                 }
-                StateEntry::Stream { task, config } => {
+                Entry::Stream { task, config, name } => {
                     // A stream runs until cancelled/exhausted and must FLUSH the in-flight
                     // window + transition cleanly on cancel or timeout. So — like
-                    // CompensatableSingle — it is NOT wrapped in `dispatch_with_budget`'s
+                    // Compensatable — it is NOT wrapped in `dispatch_with_budget`'s
                     // drop-on-cancel `select!` (which would orphan the partial window).
                     // Instead `token` and `step_budget` are threaded INTO
                     // `execute_stream_task`, which folds them into one forwarded token
@@ -637,9 +606,10 @@ where
                         .as_deref()
                         .and_then(|label| resume_cursors.remove(label));
                     self.execute_stream_task(
-                        task.clone(),
-                        Arc::clone(config),
-                        &workflow_id,
+                        task.as_ref(),
+                        config,
+                        name,
+                        workflow_id.as_deref(),
                         state_label.as_deref().unwrap_or_default(),
                         &mut sequence,
                         resume_cursor,
@@ -650,16 +620,20 @@ where
                 }
             };
 
-            // CompensatableSingle records its own duration earlier (before the
+            // Compensatable records its own duration earlier (before the
             // completion-row append) so it is excluded here to avoid double-counting.
             #[cfg(feature = "metrics")]
-            if let Some(kind) = match state_entry.as_ref() {
-                StateEntry::Single { .. } => Some("single"),
-                StateEntry::Router { .. } => Some("router"),
-                StateEntry::Split { .. } => Some("split"),
-                StateEntry::CompensatableSingle { .. } => None,
-                StateEntry::Stepped { .. } => Some("stepped"),
-                StateEntry::Stream { .. } => Some("stream"),
+            if let Some(kind) = match entry {
+                Entry::Single {
+                    checkpoint: true, ..
+                } => Some("single"),
+                Entry::Single {
+                    checkpoint: false, ..
+                } => Some("router"),
+                Entry::Split { .. } => Some("split"),
+                Entry::Compensatable { .. } => None,
+                Entry::Stepped { .. } => Some("stepped"),
+                Entry::Stream { .. } => Some("stream"),
             } {
                 crate::metrics::task_dispatch_duration(
                     _state_label,
@@ -873,18 +847,12 @@ where
 
     async fn execute_single_task(
         &self,
-        task: Arc<dyn Task<TState> + Send + Sync>,
-        config: Arc<crate::task::TaskConfig>,
+        task: &dyn Task<TState>,
+        config: &TaskConfig,
+        task_name: &str,
     ) -> Result<TState, CanoError> {
-        let observers = self.observer_slice();
-        let task_name = task.name();
-        if let Some(ref slice) = observers {
-            notify_observers(slice, |o| o.on_task_start(task_name.as_ref()));
-        }
-        // Stamp observers + task name onto a per-dispatch config so
-        // `run_with_retries` can emit `on_retry` / `on_circuit_open`. Zero-cost
-        // (returns the same Arc) when no observers are attached.
-        let config = Self::config_with_observers(&config, &observers, &task_name);
+        let obs = ObserverCtx::new(&self.observers, task_name);
+        notify_observers(&self.observers, |o| o.on_task_start(task_name));
 
         #[cfg(feature = "tracing")]
         let task_span = if tracing::enabled!(tracing::Level::INFO) {
@@ -893,21 +861,12 @@ where
             tracing::Span::none()
         };
 
-        // Wrap the retry-driving future in `catch_unwind` (via
-        // `catch_panic_to_error`) so a panic inside the task body becomes a
-        // `CanoError::TaskExecution` instead of unwinding through the
-        // workflow loop and aborting the runtime worker. Split tasks apply
-        // the same catch-unwind pattern inside each spawned task so their
-        // task index and panic payload are preserved.
-        let run_future = async {
-            run_with_retries(&config, || {
-                let task_clone = task.clone();
-                let resources_clone = Arc::clone(&self.resources);
-                async move { task_clone.run(&resources_clone).await }
-            })
-            .await
-        };
-
+        // `catch_panic_to_error` turns a panic inside the task body into a
+        // `CanoError::TaskExecution` instead of unwinding through the workflow loop.
+        // Split branches apply the same pattern inside each spawned task so their
+        // index and panic payload are preserved.
+        let resources = &*self.resources;
+        let run_future = run_with_retries_observed(config, obs, || task.run(resources));
         let run = super::catch_panic_to_error(run_future, "Single task");
         // Attach with `Instrument`, never `Span::enter()`: a guard held across `.await` stays
         // entered on this thread while other tasks run here (or exits on the wrong thread after
@@ -920,106 +879,91 @@ where
             debug!(next_state = ?next_state, "Single task completed");
         }
 
-        if let Some(ref slice) = observers {
-            match &outcome {
-                Ok(_) => notify_observers(slice, |o| o.on_task_success(task_name.as_ref())),
-                Err(e) => notify_observers(slice, |o| o.on_task_failure(task_name.as_ref(), e)),
-            }
+        match &outcome {
+            Ok(_) => notify_observers(&self.observers, |o| o.on_task_success(task_name)),
+            Err(e) => notify_observers(&self.observers, |o| o.on_task_failure(task_name, e)),
         }
         outcome
     }
 
-    /// Drive the step loop for a `Stepped` state, persisting each cursor as a
-    /// [`RowKind::StepCursor`] row after every `StepOutcome::More`.
-    ///
-    /// - `resume_cursor`: `Some(bytes)` when resuming from a prior cursor row; `None`
-    ///   on a fresh run or when no cursor was persisted for this state.
-    /// - `sequence`: mutated in-place — each persisted cursor row consumes one number.
-    ///   The caller already consumed one for the state-entry row before calling here.
-    ///
-    /// Returns the next `TState` on `StepOutcome::Done`, or an error on any task /
-    /// checkpoint failure.
+    /// Append `row` to the checkpoint log, then fire `on_checkpoint` and advance
+    /// `sequence`. `what` names the row in the error (`"append {what}: {e}"`).
+    /// A no-op without a checkpoint store.
+    pub(super) async fn append_row(
+        &self,
+        workflow_id: &str,
+        sequence: &mut u64,
+        row: CheckpointRow,
+        what: &str,
+    ) -> Result<(), CanoError> {
+        let Some(store) = &self.checkpoint_store else {
+            return Ok(());
+        };
+        let result = store.append(workflow_id, row).await;
+        #[cfg(feature = "metrics")]
+        crate::metrics::checkpoint_append(result.is_ok());
+        if let Err(e) = result {
+            return Err(CanoError::checkpoint_store(format!("append {what}: {e}")));
+        }
+        notify_observers(&self.observers, |o| o.on_checkpoint(workflow_id, *sequence));
+        *sequence += 1;
+        Ok(())
+    }
+
+    /// A cursor sink writing [`RowKind::StepCursor`] rows for this state, or `None`
+    /// when nothing is persisted (no checkpoint store or no workflow id).
+    fn cursor_sink<'a>(
+        &'a self,
+        workflow_id: Option<&'a str>,
+        state_label: &'a str,
+        task_name: &'a str,
+        sequence: &'a mut u64,
+    ) -> Option<CheckpointSink<'a, TState>> {
+        let workflow_id = workflow_id.filter(|_| self.checkpoint_store.is_some())?;
+        Some(CheckpointSink {
+            workflow: self,
+            workflow_id,
+            state_label,
+            task_name,
+            sequence,
+        })
+    }
+
+    /// Drive a `Stepped` state's step loop (each step under the task's retry
+    /// policy), persisting every `StepOutcome::More` cursor as a
+    /// [`RowKind::StepCursor`] row before the next step. `resume_cursor` is the last
+    /// persisted cursor when resuming; `sequence` advances once per row.
     #[allow(clippy::too_many_arguments)]
     async fn execute_stepped_task(
         &self,
-        task: Arc<dyn ErasedSteppedTask<TState>>,
-        config: Arc<crate::task::TaskConfig>,
-        workflow_id: &Option<Arc<str>>,
+        task: &dyn ErasedSteppedTask<TState>,
+        config: &TaskConfig,
+        task_name: &str,
+        workflow_id: Option<&str>,
         state_label: &str,
         sequence: &mut u64,
         resume_cursor: Option<Vec<u8>>,
     ) -> Result<TState, CanoError> {
-        let observers = self.observer_slice();
-        let task_name = task.name();
-        if let Some(ref slice) = observers {
-            notify_observers(slice, |o| o.on_task_start(task_name.as_ref()));
+        let obs = ObserverCtx::new(&self.observers, task_name);
+        notify_observers(&self.observers, |o| o.on_task_start(task_name));
+
+        let mut sink = self.cursor_sink(workflow_id, state_label, task_name, sequence);
+        let run = task.drive(
+            &self.resources,
+            config,
+            obs,
+            resume_cursor,
+            sink.as_mut().map(|s| s as &mut dyn CursorSink),
+        );
+        let outcome = super::catch_panic_to_error(run, "Stepped task").await;
+        #[cfg(feature = "tracing")]
+        if let Ok(next_state) = &outcome {
+            debug!(next_state = ?next_state, "Stepped task completed");
         }
-        let config = Self::config_with_observers(&config, &observers, &task_name);
 
-        // Current cursor: starts from the resume cursor (if any), advances each iteration.
-        let mut current_cursor: Option<Vec<u8>> = resume_cursor;
-
-        let outcome: Result<TState, CanoError> = loop {
-            // Capture the cursor for this attempt so that the retry closure can clone it.
-            let attempt_cursor = current_cursor.clone();
-            // Wrap the retry-driving future in `catch_unwind` so a panic
-            // inside the `step` body becomes a `CanoError::TaskExecution`
-            // instead of unwinding through the step loop and the FSM,
-            // bypassing the compensation drain and resource teardown.
-            // Matches the pattern in `execute_single_task`,
-            // `execute_split_join`, and `execute_compensatable_task`.
-            let run_future = async {
-                run_with_retries(&config, || {
-                    let c = attempt_cursor.clone();
-                    let t = Arc::clone(&task);
-                    let r = Arc::clone(&self.resources);
-                    async move { t.step(&r, c).await }
-                })
-                .await
-            };
-            let step_result = super::catch_panic_to_error(run_future, "Stepped task").await;
-
-            match step_result {
-                Err(e) => break Err(e),
-                Ok(ErasedStep::Done(next_state)) => {
-                    #[cfg(feature = "tracing")]
-                    tracing::debug!(next_state = ?next_state, "Stepped task completed");
-                    #[cfg(feature = "metrics")]
-                    crate::metrics::step_iteration(true);
-                    break Ok(next_state);
-                }
-                Ok(ErasedStep::More(new_cursor_bytes)) => {
-                    #[cfg(feature = "metrics")]
-                    crate::metrics::step_iteration(false);
-                    // Persist the cursor before advancing so a crash between steps
-                    // can resume from this exact position.
-                    if let (Some(store), Some(wf_id)) =
-                        (&self.checkpoint_store, workflow_id.as_deref())
-                    {
-                        let row = CheckpointRow::new(*sequence, state_label, task_name.as_ref())
-                            .with_cursor(new_cursor_bytes.clone())
-                            .with_workflow_version(self.workflow_version);
-                        let cursor_append_result = store.append(wf_id, row).await;
-                        #[cfg(feature = "metrics")]
-                        crate::metrics::checkpoint_append(cursor_append_result.is_ok());
-                        if let Err(e) = cursor_append_result {
-                            break Err(CanoError::checkpoint_store(format!(
-                                "append step cursor checkpoint: {e}"
-                            )));
-                        }
-                        notify_observers(&self.observers, |o| o.on_checkpoint(wf_id, *sequence));
-                        *sequence += 1;
-                    }
-                    current_cursor = Some(new_cursor_bytes);
-                }
-            }
-        };
-
-        if let Some(ref slice) = observers {
-            match &outcome {
-                Ok(_) => notify_observers(slice, |o| o.on_task_success(task_name.as_ref())),
-                Err(e) => notify_observers(slice, |o| o.on_task_failure(task_name.as_ref(), e)),
-            }
+        match &outcome {
+            Ok(_) => notify_observers(&self.observers, |o| o.on_task_success(task_name)),
+            Err(e) => notify_observers(&self.observers, |o| o.on_task_failure(task_name, e)),
         }
         outcome
     }
@@ -1046,9 +990,10 @@ where
     #[allow(clippy::too_many_arguments)]
     async fn execute_stream_task(
         &self,
-        task: Arc<dyn ErasedStreamTask<TState>>,
-        config: Arc<crate::task::TaskConfig>,
-        workflow_id: &Option<Arc<str>>,
+        task: &dyn ErasedStreamTask<TState>,
+        config: &TaskConfig,
+        task_name: &str,
+        workflow_id: Option<&str>,
         state_label: &str,
         sequence: &mut u64,
         resume_cursor: Option<Vec<u8>>,
@@ -1071,11 +1016,10 @@ where
             }
         }
 
-        let observers = self.observer_slice();
-        let task_name = task.name();
-        if let Some(slice) = &observers {
-            notify_observers(slice, |o| o.on_task_start(task_name.as_ref()));
-        }
+        notify_observers(&self.observers, |o| o.on_task_start(task_name));
+        // Cursor rows are written (and cursors encoded at all) only when they can be
+        // persisted: a checkpoint store and a workflow id.
+        let persist = self.checkpoint_store.is_some() && workflow_id.is_some();
 
         // Fold `token` and `step_budget` into one effective token so both a real cancel and
         // a total-timeout trip drive the SAME cooperative drain (flush the in-flight window,
@@ -1125,7 +1069,7 @@ where
                 // becomes a `CanoError` instead of unwinding past the FSM and skipping
                 // resource teardown — same discipline as the other drivers.
                 let step = super::catch_panic_to_error(
-                    session.next_window(&self.resources, effective_token),
+                    session.next_window(&self.resources, effective_token, persist),
                     "Stream task",
                 )
                 .await?;
@@ -1134,7 +1078,7 @@ where
                 // persisted. A cancelled stream commits its final cursor, then surfaces
                 // `Cancelled` (so the log is NOT cleared and `resume_from` continues).
                 let (cursor_to_commit, terminal) = match step {
-                    ErasedWindowStep::Window { cursor } => (Some(cursor), None),
+                    ErasedWindowStep::Window { cursor } => (cursor, None),
                     ErasedWindowStep::Done {
                         final_cursor,
                         result,
@@ -1146,24 +1090,15 @@ where
                 };
 
                 // Persist the window cursor before advancing so a crash/cancel resumes
-                // from this exact position. Gated on a store + workflow id both present.
+                // from this exact position. Cursors are only encoded when `persist`.
                 if let Some(bytes) = cursor_to_commit
-                    && let (Some(store), Some(wf_id)) =
-                        (&self.checkpoint_store, workflow_id.as_deref())
+                    && let Some(wf_id) = workflow_id
                 {
-                    let row = CheckpointRow::new(*sequence, state_label, task_name.as_ref())
+                    let row = CheckpointRow::new(*sequence, state_label, task_name)
                         .with_cursor(bytes)
                         .with_workflow_version(self.workflow_version);
-                    let append_result = store.append(wf_id, row).await;
-                    #[cfg(feature = "metrics")]
-                    crate::metrics::checkpoint_append(append_result.is_ok());
-                    if let Err(e) = append_result {
-                        return Err(CanoError::checkpoint_store(format!(
-                            "append stream cursor checkpoint: {e}"
-                        )));
-                    }
-                    notify_observers(&self.observers, |o| o.on_checkpoint(wf_id, *sequence));
-                    *sequence += 1;
+                    self.append_row(wf_id, sequence, row, "stream cursor checkpoint")
+                        .await?;
                 }
 
                 if let Some(result) = terminal {
@@ -1205,22 +1140,20 @@ where
             "failed"
         });
 
-        if let Some(slice) = &observers {
-            match &outcome {
-                Ok(_) => notify_observers(slice, |o| o.on_task_success(task_name.as_ref())),
-                Err(e) => {
-                    notify_observers(slice, |o| o.on_task_failure(task_name.as_ref(), e));
-                    if let Some((elapsed, limit)) = timed_out {
-                        // Mirrors `dispatch_with_budget`: a timeout fires
-                        // `on_workflow_timeout`, never `on_cancelled`.
-                        notify_observers(slice, |o| o.on_workflow_timeout(elapsed, limit));
-                    } else if cancelled {
-                        // The stream arm bypasses `dispatch_with_budget`, so it fires
-                        // `on_cancelled` itself — exactly once per cancelled run, mirroring
-                        // the fan-out + `on_cancelled` pairing dispatch does for other task
-                        // types.
-                        notify_observers(slice, |o| o.on_cancelled(state_label));
-                    }
+        match &outcome {
+            Ok(_) => notify_observers(&self.observers, |o| o.on_task_success(task_name)),
+            Err(e) => {
+                notify_observers(&self.observers, |o| o.on_task_failure(task_name, e));
+                if let Some((elapsed, limit)) = timed_out {
+                    // Mirrors `dispatch_with_budget`: a timeout fires
+                    // `on_workflow_timeout`, never `on_cancelled`.
+                    notify_observers(&self.observers, |o| o.on_workflow_timeout(elapsed, limit));
+                } else if cancelled {
+                    // The stream arm bypasses `dispatch_with_budget`, so it fires
+                    // `on_cancelled` itself — exactly once per cancelled run, mirroring
+                    // the fan-out + `on_cancelled` pairing dispatch does for other task
+                    // types.
+                    notify_observers(&self.observers, |o| o.on_cancelled(state_label));
                 }
             }
         }
@@ -1229,9 +1162,10 @@ where
 
     async fn execute_split_join(
         &self,
-        tasks: Vec<Arc<dyn Task<TState> + Send + Sync>>,
-        configs: Arc<Vec<Arc<crate::task::TaskConfig>>>,
-        join_config: Arc<JoinConfig<TState>>,
+        tasks: &[Arc<dyn Task<TState>>],
+        configs: &[Arc<TaskConfig>],
+        names: &[Cow<'static, str>],
+        join_config: &JoinConfig<TState>,
     ) -> Result<TState, CanoError> {
         let resources = Arc::clone(&self.resources);
         let total_tasks = tasks.len();
@@ -1246,7 +1180,7 @@ where
         // Validate strategy configuration before spawning tasks. `validate()`
         // catches these at build/start time; keep the execution-time check as
         // defense-in-depth for internal callers that bypass public orchestration.
-        Self::validate_join_config(join_config.as_ref(), total_tasks)?;
+        Self::validate_join_config(join_config, total_tasks)?;
 
         // Optional bulkhead: gate task bodies on a shared semaphore so at
         // most `n` split tasks execute concurrently.
@@ -1257,33 +1191,32 @@ where
         let mut join_set: tokio::task::JoinSet<(usize, Result<TState, CanoError>)> =
             tokio::task::JoinSet::new();
 
-        // Observer wiring. `task_ids[idx]` holds each split task's reported id
-        // (`"{name}[{idx}]"`); kept on the parent so `on_task_success` /
-        // `on_task_failure` can be fired from here once results are collected.
-        // Both stay empty / `None` and cost nothing when no observers are attached.
-        let observers = self.observer_slice();
-        let mut task_ids: Vec<Cow<'static, str>> = if observers.is_some() {
-            Vec::with_capacity(total_tasks)
+        // Observer wiring. `task_ids[idx]` is each branch's reported id
+        // (`"{name}[{idx}]"`); spawned branches report retries through a shared copy
+        // of the observer list, and `on_task_success` / `on_task_failure` fire from
+        // here once results are collected. Both stay empty / `None` and cost nothing
+        // when no observers are attached.
+        let observers: Option<Arc<[Arc<dyn crate::observer::WorkflowObserver>]>> =
+            (!self.observers.is_empty()).then(|| Arc::from(self.observers.as_slice()));
+        let task_ids: Vec<Arc<str>> = if observers.is_some() {
+            names
+                .iter()
+                .enumerate()
+                .map(|(idx, name)| Arc::from(format!("{name}[{idx}]")))
+                .collect()
         } else {
             Vec::new()
         };
 
         #[cfg_attr(not(feature = "tracing"), allow(unused_variables))]
-        for (idx, task) in tasks.into_iter().enumerate() {
-            let task_id: Cow<'static, str> = if observers.is_some() {
-                Cow::Owned(format!("{}[{}]", task.name(), idx))
-            } else {
-                Cow::Borrowed("<split-task>")
-            };
-            if let Some(ref slice) = observers {
-                notify_observers(slice, |o| o.on_task_start(&task_id));
+        for (idx, task) in tasks.iter().enumerate() {
+            let task_id = task_ids.get(idx).cloned();
+            if let Some(id) = &task_id {
+                notify_observers(&self.observers, |o| o.on_task_start(id));
             }
-            // Use cached config from registration time, with observers + task id
-            // stamped on when present (a no-op clone-free path otherwise).
-            let config = Self::config_with_observers(&configs[idx], &observers, &task_id);
-            if observers.is_some() {
-                task_ids.push(task_id);
-            }
+            let task = Arc::clone(task);
+            let config = Arc::clone(&configs[idx]);
+            let branch_observers = observers.clone();
             let resources_clone = Arc::clone(&resources);
             let bulkhead_clone = bulkhead.clone();
 
@@ -1318,12 +1251,13 @@ where
                         None => None,
                     };
 
-                    let result = run_with_retries(&config, || {
-                        let t = task.clone();
-                        let r = Arc::clone(&resources_clone);
-                        async move { t.run(&r).await }
-                    })
-                    .await;
+                    let obs = branch_observers
+                        .as_deref()
+                        .zip(task_id.as_deref())
+                        .and_then(|(observers, name)| ObserverCtx::new(observers, name));
+                    let resources = &*resources_clone;
+                    let result =
+                        run_with_retries_observed(&config, obs, || task.run(resources)).await;
 
                     #[cfg(feature = "tracing")]
                     match &result {
@@ -1359,7 +1293,7 @@ where
 
         // Collect results using the unified strategy handler
         let split_result = self
-            .collect_results(join_set, &join_config, total_tasks)
+            .collect_results(join_set, join_config, total_tasks)
             .await?;
 
         #[cfg(feature = "metrics")]
@@ -2502,7 +2436,7 @@ mod tests {
         }
 
         let result = Workflow::bare()
-            .register_stepped(TestState::Start, Counter { target: 5 })
+            .register(TestState::Start, Counter { target: 5 })
             .add_exit_state(TestState::Complete)
             .orchestrate(TestState::Start)
             .await
@@ -2599,7 +2533,7 @@ mod tests {
         }
 
         let workflow = Workflow::bare()
-            .register_router(TestState::Start, AlwaysRoute)
+            .register(TestState::Start, AlwaysRoute)
             .register(TestState::Process, FailTask::new(true))
             .add_exit_state(TestState::Complete);
 
@@ -2765,7 +2699,7 @@ mod tests {
 
         let workflow = Workflow::bare()
             .with_total_timeout(Duration::from_millis(40))
-            .register_with_compensation(TestState::Start, A { log: log.clone() })
+            .register(TestState::Start, A { log: log.clone() })
             .register(
                 TestState::Process,
                 SleepyTask {
@@ -2833,7 +2767,7 @@ mod tests {
 
         let workflow = Workflow::bare()
             .with_total_timeout(Duration::from_millis(20))
-            .register_with_compensation(TestState::Start, SlowComp { log: log.clone() })
+            .register(TestState::Start, SlowComp { log: log.clone() })
             .add_exit_state(TestState::Complete);
 
         // The compensatable task runs ~80ms despite the 20ms total budget — and the
@@ -3393,5 +3327,175 @@ mod dispatch_with_budget_tests {
             !labels.iter().any(|l| l.starts_with("cancelled:")),
             "on_cancelled must not fire without a state label: {labels:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod register_paths_tests {
+    use crate::error::CanoError;
+    use crate::recovery::RowKind;
+    use crate::resource::Resources;
+    use crate::task::poll::PollOutcome;
+    use crate::task::stepped::StepOutcome;
+    use crate::task::stream::{CloseReason, WindowSignal};
+    use crate::task::{self, TaskConfig};
+    use crate::workflow::Workflow;
+    use crate::workflow::test_support::MemCheckpoints;
+    use futures_util::stream::{self, Stream};
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    enum S {
+        Route,
+        Poll,
+        Step,
+        Stream,
+        Saga,
+        Fail,
+        Done,
+    }
+
+    struct Route;
+    #[task::router(state = S)]
+    impl Route {
+        async fn route(&self) -> Result<S, CanoError> {
+            Ok(S::Poll)
+        }
+    }
+
+    struct Poll;
+    #[task::poll(state = S)]
+    impl Poll {
+        async fn poll(&self) -> Result<PollOutcome<S>, CanoError> {
+            Ok(PollOutcome::Ready(S::Step))
+        }
+    }
+
+    struct Stepper;
+    #[task::stepped(state = S)]
+    impl Stepper {
+        async fn step(&self, cursor: Option<u32>) -> Result<StepOutcome<u32, S>, CanoError> {
+            Ok(match cursor {
+                None => StepOutcome::More(1),
+                Some(1) => StepOutcome::More(2),
+                Some(_) => StepOutcome::Done(S::Stream),
+            })
+        }
+    }
+
+    struct Feed;
+    #[task::stream(state = S)]
+    impl Feed {
+        async fn open(
+            &self,
+            _cursor: Option<u32>,
+        ) -> Result<Pin<Box<dyn Stream<Item = u32> + Send>>, CanoError> {
+            Ok(Box::pin(stream::iter(vec![1u32, 2])) as Pin<Box<dyn Stream<Item = u32> + Send>>)
+        }
+        async fn process_item(&self, item: u32) -> Result<(u32, u32), CanoError> {
+            Ok((item, item))
+        }
+        async fn flush_window(&self, _outputs: Vec<u32>) -> Result<WindowSignal<S>, CanoError> {
+            Ok(WindowSignal::Continue)
+        }
+        async fn on_close(&self, _reason: CloseReason) -> Result<S, CanoError> {
+            Ok(S::Saga)
+        }
+    }
+
+    struct Saga(Arc<Mutex<Vec<u32>>>);
+    #[crate::saga::task(state = S)]
+    impl Saga {
+        type Output = u32;
+        async fn run(&self) -> Result<(S, u32), CanoError> {
+            Ok((S::Fail, 7))
+        }
+        async fn compensate(&self, output: u32) -> Result<(), CanoError> {
+            self.0.lock().unwrap().push(output);
+            Ok(())
+        }
+    }
+
+    struct Fail;
+    #[cano_macros::task]
+    impl crate::task::Task<S> for Fail {
+        async fn run(&self) -> Result<S, CanoError> {
+            Err(CanoError::task_execution("boom"))
+        }
+    }
+
+    /// Every model goes through the one `register`, and each lands on its engine
+    /// path: routers write no row, stepped and stream tasks write cursor rows, and the
+    /// compensatable task's output is rolled back when a later state fails.
+    #[tokio::test]
+    async fn register_selects_the_engine_path_per_model() {
+        let store = Arc::new(MemCheckpoints::default());
+        let compensated = Arc::new(Mutex::new(Vec::new()));
+        let workflow = Workflow::bare()
+            .with_checkpoint_store(store.clone())
+            .with_workflow_id("models")
+            .register(S::Route, Route)
+            .register(S::Poll, Poll)
+            .register(S::Step, Stepper)
+            .register(S::Stream, Feed)
+            .register(S::Saga, Saga(Arc::clone(&compensated)))
+            .register(S::Fail, Fail)
+            .add_exit_state(S::Done);
+
+        let err = workflow.orchestrate(S::Route).await.unwrap_err();
+        assert!(err.to_string().contains("boom"), "{err}");
+        assert_eq!(*compensated.lock().unwrap(), vec![7]);
+
+        let rows = store.audit_rows("models");
+        let cursor_rows = |state: &str| {
+            rows.iter()
+                .filter(|r| r.state == state && r.kind == RowKind::StepCursor)
+                .count()
+        };
+        assert!(rows.iter().all(|r| r.state != "Route"), "{rows:?}");
+        assert_eq!(cursor_rows("Step"), 2, "{rows:?}");
+        assert!(cursor_rows("Stream") >= 1, "{rows:?}");
+    }
+
+    struct FlakyStepper {
+        failed_once: AtomicU32,
+        seen_none: Arc<AtomicU32>,
+    }
+    #[task::stepped(state = S)]
+    impl FlakyStepper {
+        fn config(&self) -> TaskConfig {
+            TaskConfig::new().with_fixed_retry(1, Duration::ZERO)
+        }
+        async fn step(&self, cursor: Option<u32>) -> Result<StepOutcome<u32, S>, CanoError> {
+            match cursor {
+                None => {
+                    self.seen_none.fetch_add(1, Ordering::SeqCst);
+                    Ok(StepOutcome::More(1))
+                }
+                Some(1) => Ok(StepOutcome::More(2)),
+                Some(2) if self.failed_once.fetch_add(1, Ordering::SeqCst) == 0 => {
+                    Err(CanoError::task_execution("transient"))
+                }
+                Some(_) => Ok(StepOutcome::Done(S::Done)),
+            }
+        }
+    }
+
+    /// A retried step re-runs from its own cursor, not from the start of the loop.
+    #[tokio::test]
+    async fn stepped_retry_repeats_only_the_failed_step() {
+        let seen_none = Arc::new(AtomicU32::new(0));
+        let task = FlakyStepper {
+            failed_once: AtomicU32::new(0),
+            seen_none: Arc::clone(&seen_none),
+        };
+        let workflow = Workflow::new(Resources::new())
+            .register(S::Step, task)
+            .add_exit_state(S::Done);
+        assert_eq!(workflow.orchestrate(S::Step).await.unwrap(), S::Done);
+        assert_eq!(seen_none.load(Ordering::SeqCst), 1);
     }
 }

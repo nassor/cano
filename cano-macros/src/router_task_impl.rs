@@ -19,6 +19,7 @@ const MODEL: Model = Model {
         let router = trait_path("RouterTask", state);
         quote!(<Self as #router>::route(self, res))
     }),
+    entry: "router",
 };
 
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {

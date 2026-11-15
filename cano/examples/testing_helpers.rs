@@ -141,8 +141,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = log.clone();
     let saga_resources = Resources::new().insert(log);
     let saga = Workflow::new(saga_resources)
-        .register_with_compensation(Step::Start, Reserve)
-        .register_with_compensation(Step::Work, Charge)
+        .register(Step::Start, Reserve)
+        .register(Step::Work, Charge)
         .register(Step::Finish, Boom) // fails → drains the compensation stack in reverse
         .add_exit_state(Step::Done);
     let _ = saga.orchestrate(Step::Start).await; // expected to fail and roll back

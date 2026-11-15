@@ -20,6 +20,7 @@ const MODEL: Model = Model {
     companion_run: Some(
         |state| quote!(::std::boxed::Box::pin(::cano::task::stepped::run_stepped::<Self, #state>(self, res))),
     ),
+    entry: "stepped",
 };
 
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {

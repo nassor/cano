@@ -81,10 +81,8 @@ use crate::error::CanoError;
 use crate::observer::WorkflowObserver;
 use crate::recovery::CheckpointStore;
 use crate::resource::Resources;
-use crate::saga::{CompensatableTask, ErasedCompensatable};
-use crate::task::stepped::{ErasedSteppedTask, SteppedAdapter, SteppedTask};
-use crate::task::stream::{ErasedStreamTask, StreamAdapter, StreamTask};
-use crate::task::{RouterTask, Task};
+use crate::saga::ErasedCompensatable;
+use crate::task::{Task, TaskConfig};
 
 #[cfg(feature = "tracing")]
 use tracing::{Instrument, Span, info_span};
@@ -95,8 +93,21 @@ mod join;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+use execution::Entry;
 pub use execution::StateEntry;
 pub use join::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult};
+
+/// A task that [`Workflow::register`] accepts.
+///
+/// The task macros implement it for every model (`#[task]`, `#[task::router]`,
+/// `#[task::poll]`, `#[task::timer]`, `#[task::batch]`, `#[task::stepped]`,
+/// `#[task::stream]`, `#[saga::task]`), choosing the engine path for the model. A
+/// hand-written [`Task`] impl (no macro) adds
+/// `impl Registrable<S> for T { fn into_entry(self) -> StateEntry<S> { StateEntry::single(self) } }`.
+pub trait Registrable<TState> {
+    /// The state entry this task registers as.
+    fn into_entry(self) -> StateEntry<TState>;
+}
 
 /// Invoke `f` for each observer in `observers`. Used at every workflow event site;
 /// a no-op when the list is empty (the common case — observers are opt-in).
@@ -192,21 +203,14 @@ where
     }
 }
 
-/// Immutable observer snapshot: `None` = no observers attached (the zero-cost
-/// common case), `Some(slice)` = the workflow's observer list frozen into an
-/// `Arc` slice so `observer_slice()` allocates once and clones cheaply.
-type ObserverSlice = Arc<[Arc<dyn WorkflowObserver>]>;
-
 /// State machine workflow orchestration with split/join support.
 #[must_use]
 pub struct Workflow<TState>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
 {
-    /// State machine with support for split/join.
-    /// Arc-wrapped so the FSM loop clones the entry as a cheap refcount bump
-    /// rather than cloning the inner `Vec<Arc<dyn Task>>` on every iteration.
-    states: HashMap<TState, Arc<StateEntry<TState>>>,
+    /// What each state runs. `Arc`-wrapped so cloning a workflow shares the entries.
+    states: HashMap<TState, Arc<Entry<TState>>>,
     /// Shared resources for all tasks
     pub(crate) resources: Arc<Resources>,
     /// Total wall-clock budget for the entire `orchestrate` / `resume_from` call.
@@ -227,15 +231,7 @@ where
     /// Observers notified of lifecycle and failure events. Empty by default;
     /// each event is delivered to every observer in registration order.
     observers: Vec<Arc<dyn WorkflowObserver>>,
-    /// Cached `Arc` slice snapshot of [`observers`](Self::observers), built on
-    /// first use. `observer_slice()` allocates an `Arc<[...]>` on every call,
-    /// so without this cache each state transition / split task with observers
-    /// attached paid one heap allocation; the slice is immutable once
-    /// `orchestrate` starts (observers are only added via the builder), so a
-    /// `OnceLock` is sound. `None` inside means "no observers" (the common
-    /// case — zero overhead, no allocation).
-    observer_slice_cache: OnceLock<Option<ObserverSlice>>,
-    /// Compensators for every state registered via [`register_with_compensation`](Self::register_with_compensation),
+    /// Compensators for every state registered via [`register`](Self::register),
     /// keyed by the task's [`name`](crate::saga::CompensatableTask::name). Used to look a
     /// compensator up by id when draining the compensation stack — including a stack
     /// rehydrated from a checkpoint log, where only the `task_id` string is available.
@@ -274,7 +270,6 @@ where
             exit_states: Vec::new(),
             validated: OnceLock::new(),
             observers: Vec::new(),
-            observer_slice_cache: OnceLock::new(),
             compensators: HashMap::new(),
             checkpoint_store: None,
             workflow_id: None,
@@ -410,66 +405,50 @@ where
         self
     }
 
-    /// Register a single task for a state.
+    /// Register the task that runs when the workflow enters `state`.
     ///
-    /// Associates `task` with `state`. If a handler was already registered for `state`,
-    /// it is replaced. This method is infallible.
-    pub fn register<T>(mut self, state: TState, task: T) -> Self
-    where
-        T: Task<TState> + Send + Sync + 'static,
-    {
+    /// Accepts any [`Registrable`] task; the task macros (`#[task]`, `#[task::router]`,
+    /// `#[task::poll]`, `#[task::timer]`, `#[task::batch]`, `#[task::stepped]`,
+    /// `#[task::stream]`, `#[saga::task]`) implement it and pick the engine path for
+    /// the model:
+    ///
+    /// - **Router** tasks are dispatched like any task but **skipped by the checkpoint
+    ///   writer**: no [`CheckpointRow`](crate::recovery::CheckpointRow) is appended and
+    ///   no sequence number is consumed (`on_state_enter` still fires). If the *initial*
+    ///   state is a router and the run crashes before any other state is checkpointed,
+    ///   `resume_from` finds zero rows and errors; restarting is safe, routers have no
+    ///   side effects.
+    /// - **Stepped** tasks run each `step` under the task's retry policy and, with a
+    ///   [checkpoint store](Self::with_checkpoint_store) and
+    ///   [workflow id](Self::with_workflow_id), persist every cursor as a
+    ///   [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row;
+    ///   [`resume_from`](Self::resume_from) continues from the last one.
+    /// - **Stream** tasks are windowed by the engine, observe the run's
+    ///   [`CancellationToken`](crate::CancellationToken) (flushing the in-flight window)
+    ///   and, with a store and workflow id, persist each flushed window's cursor.
+    /// - **Compensatable** (saga) tasks push `(task name, serialized output)` onto the
+    ///   run's compensation stack on success; if a later state fails, the stack drains
+    ///   in reverse and each [`compensate`](crate::saga::CompensatableTask::compensate) runs. With a
+    ///   store the output is persisted too, so a resumed run can still compensate it.
+    ///   Compensation covers single-task states only.
+    ///
+    /// Replaces any handler previously registered for `state`. Infallible.
+    pub fn register<T: Registrable<TState>>(mut self, state: TState, task: T) -> Self {
         self.forget_compensator_for(&state);
-        let config = Arc::new(task.config());
-        self.states.insert(
-            state,
-            Arc::new(StateEntry::Single {
-                task: Arc::new(task),
-                config,
-            }),
-        );
-        self
-    }
-
-    /// Register a side-effect-free routing task for a state.
-    ///
-    /// A router only reads resources and returns the next state — it never writes.
-    /// Use this for conditional branching without side effects. Router states are
-    /// dispatched like [`StateEntry::Single`] but **skipped by the checkpoint writer**:
-    /// no [`CheckpointRow`](crate::recovery::CheckpointRow) is appended and no sequence
-    /// number is consumed when a router state is entered. The `on_state_enter` observer
-    /// is still fired.
-    ///
-    /// **Recovery note:** if the *initial* state is a router and the workflow crashes
-    /// before any non-router state has been checkpointed, `resume_from` will find zero
-    /// rows and return an error. Restarting from the initial state is safe because
-    /// routers have no side effects.
-    ///
-    /// `T` must implement both [`RouterTask`] (signals read-only intent) and [`Task`]
-    /// (provides the `run` method the engine calls). Use the `#[task::router]` macro to
-    /// derive the companion [`Task`] impl from your [`RouterTask`] implementation.
-    ///
-    /// Associates `task` with `state`. If a handler was already registered for `state`,
-    /// it is replaced. This method is infallible.
-    pub fn register_router<T>(mut self, state: TState, task: T) -> Self
-    where
-        T: RouterTask<TState> + Task<TState> + 'static,
-    {
-        self.forget_compensator_for(&state);
-        let config = Arc::new(Task::config(&task));
-        self.states.insert(
-            state,
-            Arc::new(StateEntry::Router {
-                task: Arc::new(task),
-                config,
-            }),
-        );
+        let entry = task.into_entry().0;
+        if let Entry::Compensatable { task, name, .. } = &entry {
+            self.compensators.insert(Arc::clone(name), Arc::clone(task));
+        }
+        self.states.insert(state, Arc::new(entry));
         self
     }
 
     /// Register multiple tasks that execute in parallel with a join configuration.
     ///
     /// `tasks` accepts any [`IntoIterator`] (a `Vec`, an array, a `(0..n).map(…)` chain,
-    /// etc.); the tasks are collected eagerly at registration time.
+    /// etc.); the tasks are collected eagerly at registration time. Every task model's
+    /// macro emits a [`Task`] impl, so stepped, stream and other model tasks run their
+    /// in-memory loops here (no cursor persistence).
     pub fn register_split<T>(
         mut self,
         state: TState,
@@ -477,137 +456,38 @@ where
         join_config: JoinConfig<TState>,
     ) -> Self
     where
-        T: Task<TState> + Send + Sync + 'static,
+        T: Task<TState> + 'static,
     {
         self.forget_compensator_for(&state);
-        let mut configs: Vec<Arc<crate::task::TaskConfig>> = Vec::new();
-        let mut arc_tasks: Vec<Arc<dyn Task<TState> + Send + Sync>> = Vec::new();
+        let mut configs: Vec<Arc<TaskConfig>> = Vec::new();
+        let mut names: Vec<Cow<'static, str>> = Vec::new();
+        let mut arc_tasks: Vec<Arc<dyn Task<TState>>> = Vec::new();
         for t in tasks {
             configs.push(Arc::new(t.config()));
-            arc_tasks.push(Arc::new(t) as Arc<_>);
+            names.push(t.name());
+            arc_tasks.push(Arc::new(t));
         }
 
         self.states.insert(
             state,
-            Arc::new(StateEntry::Split {
+            Arc::new(Entry::Split {
                 tasks: arc_tasks,
-                configs: Arc::new(configs),
-                join_config: Arc::new(join_config),
+                configs,
+                names,
+                join_config,
             }),
         );
         self
     }
 
-    /// If `state` currently holds a [`StateEntry::CompensatableSingle`], drop that task's
-    /// (now-stale) entry from the [`compensators`](Self::compensators) registry, so a later
+    /// If `state` currently holds a compensatable task, drop that task's (now-stale)
+    /// entry from the [`compensators`](Self::compensators) registry, so a later
     /// `register*` for the same state doesn't leave a dangling compensator reachable by id.
     fn forget_compensator_for(&mut self, state: &TState) {
-        let stale_name: Option<Arc<str>> =
-            if let Some(StateEntry::CompensatableSingle { task, .. }) =
-                self.states.get(state).map(|e| e.as_ref())
-            {
-                Some(Arc::from(task.name()))
-            } else {
-                None
-            };
-        if let Some(name) = stale_name {
+        if let Some(Entry::Compensatable { name, .. }) = self.states.get(state).map(|e| &**e) {
+            let name = Arc::clone(name);
             self.compensators.remove(&*name);
         }
-    }
-
-    /// Register a [`CompensatableTask`] for a state.
-    ///
-    /// Like [`register`](Self::register), but the engine captures the task's
-    /// [`Output`](CompensatableTask::Output) when it succeeds and pushes
-    /// `(task name, serialized output)` onto the run's compensation stack. If a *later*
-    /// state's task then fails, the stack is drained in reverse and each
-    /// [`compensate`](CompensatableTask::compensate) runs. With a
-    /// [`checkpoint store`](Self::with_checkpoint_store) attached, the serialized output
-    /// is also persisted, so a [resumed](Self::resume_from) run can still compensate it.
-    ///
-    /// Replaces any handler previously registered for `state`. Infallible.
-    ///
-    /// **Compensation is supported for single-task states only** — there is no
-    /// `register_split_with_compensation` in this version.
-    pub fn register_with_compensation<T>(mut self, state: TState, task: T) -> Self
-    where
-        T: CompensatableTask<TState> + 'static,
-    {
-        self.forget_compensator_for(&state);
-        let config = Arc::new(task.config());
-        let name: Arc<str> = Arc::from(task.name());
-        let erased: Arc<dyn ErasedCompensatable<TState>> =
-            Arc::new(crate::saga::CompensatableAdapter(Arc::new(task)));
-        self.compensators.insert(name, Arc::clone(&erased));
-        self.states.insert(
-            state,
-            Arc::new(StateEntry::CompensatableSingle {
-                task: erased,
-                config,
-            }),
-        );
-        self
-    }
-
-    /// Register a [`SteppedTask`] for a state with cursor-level checkpoint persistence.
-    ///
-    /// Unlike [`register`](Self::register), which runs the step loop in-memory via the
-    /// macro-synthesised `Task::run`, this method hands the step loop to the engine so
-    /// it can persist each cursor as a
-    /// [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row after every
-    /// `StepOutcome::More`. A subsequent [`resume_from`](Self::resume_from) rehydrates the
-    /// latest cursor for this state and passes it to the first `step` call, so
-    /// processing resumes from exactly where it left off rather than from `None`.
-    ///
-    /// When no [`checkpoint store`](Self::with_checkpoint_store) is attached the
-    /// behavior is identical to `register` — the step loop runs in-memory with no
-    /// cursor persistence.
-    ///
-    /// Replaces any handler previously registered for `state`. Infallible.
-    pub fn register_stepped<T>(mut self, state: TState, task: T) -> Self
-    where
-        T: SteppedTask<TState> + 'static,
-    {
-        self.forget_compensator_for(&state);
-        let config = Arc::new(SteppedTask::config(&task));
-        let erased: Arc<dyn ErasedSteppedTask<TState>> = Arc::new(SteppedAdapter(Arc::new(task)));
-        self.states.insert(
-            state,
-            Arc::new(StateEntry::Stepped {
-                task: erased,
-                config,
-            }),
-        );
-        self
-    }
-
-    /// Register a [`StreamTask`](crate::task::stream::StreamTask) for `state`, with
-    /// engine-driven windowing, cooperative cancellation, and cursor persistence.
-    ///
-    /// Unlike `register` (which runs a `StreamTask`'s in-memory companion loop with no
-    /// persistence and no cancellation), this drives the stream through the FSM engine: it
-    /// observes the run's [`CancellationToken`](crate::CancellationToken), and —
-    /// when a [`checkpoint store`](Self::with_checkpoint_store) + a
-    /// [`workflow id`](Self::with_workflow_id) are attached — persists the cursor of each
-    /// flushed window so a crashed or cancelled run resumes from the last committed
-    /// position via [`resume_from`](Self::resume_from).
-    ///
-    /// Replaces any handler previously registered for `state`. Infallible.
-    pub fn register_stream<T>(mut self, state: TState, task: T) -> Self
-    where
-        T: StreamTask<TState> + 'static,
-    {
-        self.forget_compensator_for(&state);
-        let config = Arc::new(StreamTask::config(&task));
-        let erased: Arc<dyn ErasedStreamTask<TState>> = Arc::new(StreamAdapter(Arc::new(task)));
-        self.states.insert(
-            state,
-            Arc::new(StateEntry::Stream {
-                task: erased,
-                config,
-            }),
-        );
-        self
     }
 
     /// Add exit state
@@ -632,11 +512,8 @@ where
     }
 
     /// Iterate over every state that has a registered handler — every key in the
-    /// internal state map populated by [`register`](Self::register),
-    /// [`register_router`](Self::register_router),
-    /// [`register_split`](Self::register_split),
-    /// [`register_with_compensation`](Self::register_with_compensation), and
-    /// [`register_stepped`](Self::register_stepped). **Exit-only states** added via
+    /// internal state map populated by [`register`](Self::register) and
+    /// [`register_split`](Self::register_split). **Exit-only states** added via
     /// [`add_exit_state`](Self::add_exit_state) without a handler are *not* yielded.
     ///
     /// Iteration order is unspecified (backing storage is a `HashMap`).
@@ -775,50 +652,6 @@ where
         self
     }
 
-    /// A shareable snapshot of the registered observers, or `None` when none are
-    /// attached. The `None` fast path keeps observer-free workflows allocation-free
-    /// per dispatch. The snapshot is cached in a `OnceLock` so observer-attached
-    /// workflows pay the `Arc<[...]>` allocation exactly once instead of once per
-    /// state transition / split task.
-    fn observer_slice(&self) -> Option<ObserverSlice> {
-        self.observer_slice_cache
-            .get_or_init(|| {
-                if self.observers.is_empty() {
-                    None
-                } else {
-                    Some(Arc::from(self.observers.as_slice()))
-                }
-            })
-            .clone()
-    }
-
-    /// Return `base` unchanged when no observers are attached; otherwise a cloned
-    /// config carrying the observer slice and task name so [`run_with_retries`]
-    /// can emit `on_retry` / `on_circuit_open`.
-    ///
-    /// [`run_with_retries`]: crate::task::run_with_retries
-    // `&Cow<'static, str>` is deliberate here: cloning a borrowed type-name
-    // stays zero-alloc on the per-dispatch hot path, which `&str` + `to_owned`
-    // would forfeit.
-    #[allow(clippy::ptr_arg)]
-    fn config_with_observers(
-        base: &Arc<crate::task::TaskConfig>,
-        observers: &Option<ObserverSlice>,
-        task_name: &Cow<'static, str>,
-    ) -> Arc<crate::task::TaskConfig> {
-        match observers {
-            None => Arc::clone(base),
-            Some(slice) => {
-                let mut cfg = (**base).clone();
-                cfg.observers = Some(Arc::clone(slice));
-                // Reuse the caller's `Cow` directly: borrowed type-names clone
-                // without allocating, and owned overrides are already owned.
-                cfg.task_name = Some(task_name.clone());
-                Arc::new(cfg)
-            }
-        }
-    }
-
     fn validate_join_config(
         join_config: &JoinConfig<TState>,
         _total_tasks: usize,
@@ -895,9 +728,9 @@ where
         // Each join_state in a Split entry must either be registered or an exit state;
         // otherwise orchestration will always error at runtime after the split completes.
         for entry in self.states.values() {
-            if let StateEntry::Split {
+            if let Entry::Split {
                 tasks, join_config, ..
-            } = entry.as_ref()
+            } = &**entry
             {
                 Self::validate_join_config(join_config, tasks.len())?;
                 let js = &join_config.join_state;
@@ -1133,9 +966,6 @@ where
             // Fresh OnceLock: cloned workflows re-validate on first orchestrate.
             validated: OnceLock::new(),
             observers: self.observers.clone(),
-            // Fresh OnceLock: the observer slice is rebuilt on first use (the
-            // observers Vec is copied above, so the cache can't be shared).
-            observer_slice_cache: OnceLock::new(),
             compensators: self.compensators.clone(),
             checkpoint_store: self.checkpoint_store.clone(),
             workflow_id: self.workflow_id.clone(),
@@ -1646,7 +1476,7 @@ mod tests {
         }
 
         let result = Workflow::bare()
-            .register_router(TestState::Start, RouteToProcess)
+            .register(TestState::Start, RouteToProcess)
             .register(TestState::Process, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
             .orchestrate(TestState::Start)
@@ -1670,7 +1500,7 @@ mod tests {
 
         let wf = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Process))
-            .register_router(TestState::Process, GoRoute)
+            .register(TestState::Process, GoRoute)
             .register_split(
                 TestState::Split,
                 vec![SimpleTask::new(TestState::Join)],
@@ -1700,7 +1530,7 @@ mod tests {
         }
 
         let workflow = Workflow::bare()
-            .register_router(TestState::Start, RouteToComplete)
+            .register(TestState::Start, RouteToComplete)
             .add_exit_state(TestState::Complete);
 
         assert!(workflow.validate().is_ok());

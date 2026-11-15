@@ -176,8 +176,8 @@ async fn assert_compensation_ran_matches_reverse_order() {
     let handle = log.clone();
     let resources = Resources::new().insert(log);
     let saga = Workflow::new(resources)
-        .register_with_compensation(S::Start, Step1)
-        .register_with_compensation(S::Work, Step2)
+        .register(S::Start, Step1)
+        .register(S::Work, Step2)
         .register(S::Finish, Fail)
         .add_exit_state(S::Done);
     let _ = saga.orchestrate(S::Start).await; // fails, rolls back

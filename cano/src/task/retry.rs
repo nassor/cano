@@ -6,7 +6,6 @@
 //! scheduler dispatchers call [`run_with_retries`] with a closure that runs one
 //! task attempt.
 
-use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -218,16 +217,6 @@ pub struct TaskConfig {
     /// retry slot. Share one breaker across multiple tasks to make a trip from
     /// any caller protect every caller.
     pub circuit_breaker: Option<Arc<CircuitBreaker>>,
-    /// Observers notified of retry and circuit-open events from inside
-    /// [`run_with_retries`]. The workflow engine stamps its registered observer
-    /// list (and [`task_name`](Self::task_name)) onto a per-dispatch copy of the
-    /// config when any observer is attached; left `None` there is zero overhead
-    /// on the hot path. See [`WorkflowObserver`].
-    pub observers: Option<Arc<[Arc<dyn WorkflowObserver>]>>,
-    /// Human-readable task identifier reported to [`observers`](Self::observers).
-    /// Populated by the workflow engine from [`Task::name`]; `None` when
-    /// [`run_with_retries`] is invoked directly without observers wired.
-    pub task_name: Option<Cow<'static, str>>,
 }
 
 impl TaskConfig {
@@ -304,16 +293,34 @@ impl TaskConfig {
     }
 }
 
-/// Invoke `f` for every observer attached to `config`, passing the resolved task name.
-///
-/// No-op (and no allocation) when `config.observers` is `None` — the common case
-/// on the hot path when no observer is wired into the workflow.
+/// The workflow's observers plus the name of the task being retried, notified of
+/// `on_retry` / `on_circuit_open` from inside [`run_with_retries_observed`].
+#[derive(Clone, Copy)]
+pub(crate) struct ObserverCtx<'a> {
+    pub(crate) observers: &'a [Arc<dyn WorkflowObserver>],
+    pub(crate) task_name: &'a str,
+}
+
+impl<'a> ObserverCtx<'a> {
+    /// `None` when there is nobody to notify, so the retry loop skips the fan-out.
+    #[inline]
+    pub(crate) fn new(
+        observers: &'a [Arc<dyn WorkflowObserver>],
+        task_name: &'a str,
+    ) -> Option<Self> {
+        (!observers.is_empty()).then_some(Self {
+            observers,
+            task_name,
+        })
+    }
+}
+
+/// Invoke `f` for every observer in `obs`, passing the task name.
 #[inline]
-fn notify_observers(config: &TaskConfig, f: impl Fn(&dyn WorkflowObserver, &str)) {
-    if let Some(observers) = config.observers.as_deref() {
-        let name = config.task_name.as_deref().unwrap_or("<task>");
-        for observer in observers {
-            f(observer.as_ref(), name);
+fn notify_observers(obs: Option<ObserverCtx<'_>>, f: impl Fn(&dyn WorkflowObserver, &str)) {
+    if let Some(ctx) = obs {
+        for observer in ctx.observers {
+            f(observer.as_ref(), ctx.task_name);
         }
     }
 }
@@ -372,16 +379,31 @@ where
     }
 }
 
-/// Default implementation for retry logic that can be used by any task
+/// Run `run_fn` under `config`'s retry mode, attempt timeout and circuit breaker.
 ///
-/// This function provides a standard retry mechanism that can be used by any task
-/// that implements a simple run function.
-#[cfg_attr(feature = "tracing", instrument(
-    skip(config, run_fn),
-    fields(max_attempts = config.retry_mode.max_attempts())
-))]
+/// Use this inside custom task bodies; the workflow engine applies it to every
+/// registered task already.
 pub async fn run_with_retries<TState, F, Fut>(
     config: &TaskConfig,
+    run_fn: F,
+) -> Result<TState, CanoError>
+where
+    TState: Send + Sync,
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = Result<TState, CanoError>>,
+{
+    run_with_retries_observed(config, None, run_fn).await
+}
+
+/// [`run_with_retries`] that also reports `on_retry` / `on_circuit_open` to `obs`.
+#[cfg_attr(feature = "tracing", instrument(
+    name = "run_with_retries",
+    skip(config, obs, run_fn),
+    fields(max_attempts = config.retry_mode.max_attempts())
+))]
+pub(crate) async fn run_with_retries_observed<TState, F, Fut>(
+    config: &TaskConfig,
+    obs: Option<ObserverCtx<'_>>,
     run_fn: F,
 ) -> Result<TState, CanoError>
 where
@@ -419,7 +441,7 @@ where
                     Err(e) => {
                         #[cfg(feature = "tracing")]
                         warn!(error = %e, "Circuit breaker open; short-circuiting task");
-                        notify_observers(config, |o, name| o.on_circuit_open(name));
+                        notify_observers(obs, |o, name| o.on_circuit_open(name));
                         #[cfg(feature = "metrics")]
                         crate::metrics::circuit_rejection();
                         return RetryStep::Done(Err(e));
@@ -482,7 +504,7 @@ where
                             CanoError::retry_exhausted(attempts_made as u32, e)
                         }));
                     }
-                    notify_observers(config, |o, name| o.on_retry(name, attempts_made as u32));
+                    notify_observers(obs, |o, name| o.on_retry(name, attempts_made as u32));
                     #[cfg(feature = "tracing")]
                     if let Some(delay) = config.retry_mode.delay_for_attempt(attempt) {
                         debug!(delay_ms = delay.as_millis(), "Waiting before retry");

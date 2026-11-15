@@ -15,7 +15,7 @@ use futures_util::FutureExt;
 use crate::error::CanoError;
 use crate::recovery::RowKind;
 use crate::saga::{CompensationEntry, ErasedCompensatable};
-use crate::task::run_with_retries;
+use crate::task::{ObserverCtx, TaskConfig, run_with_retries_observed};
 use tokio_util::sync::CancellationToken;
 
 use super::{Workflow, notify_observers, panic_payload_message};
@@ -402,35 +402,18 @@ where
         let _ = clear_result;
     }
 
+    /// Run a compensatable task under `config`. The entry's config has
+    /// `attempt_timeout` stripped at registration (see `StateEntry::compensatable`):
+    /// the adapter bounds only the forward call, so a timeout never drops the inline
+    /// compensate path with the typed output lost.
     pub(super) async fn execute_compensatable_task(
         &self,
-        task: Arc<dyn ErasedCompensatable<TState>>,
-        config: Arc<crate::task::TaskConfig>,
+        task: &dyn ErasedCompensatable<TState>,
+        config: &TaskConfig,
+        task_name: &str,
     ) -> Result<(TState, Vec<u8>), CanoError> {
-        let observers = self.observer_slice();
-        let task_name = task.name();
-        if let Some(ref slice) = observers {
-            notify_observers(slice, |o| o.on_task_start(task_name.as_ref()));
-        }
-        let config = Self::config_with_observers(&config, &observers, &task_name);
-        // Strip `attempt_timeout` before handing the config to
-        // `run_with_retries`. The compensatable adapter applies the original
-        // attempt_timeout *only* to the forward call (see
-        // `CompensatableAdapter::run`); leaving it on the retry-loop config
-        // would also wrap the inline-compensate path in `tokio::time::timeout`
-        // — dropping that future mid-await destroys the typed `output` value
-        // with no recovery path (the compensation entry was never persisted),
-        // leaving partial side effects with no automated rollback. Stripping
-        // here keeps the per-attempt bound on the forward call while letting
-        // inline compensate run to completion.
-        let config = if config.attempt_timeout.is_some() {
-            Arc::new(crate::task::TaskConfig {
-                attempt_timeout: None,
-                ..(*config).clone()
-            })
-        } else {
-            config
-        };
+        let obs = ObserverCtx::new(&self.observers, task_name);
+        notify_observers(&self.observers, |o| o.on_task_start(task_name));
 
         #[cfg(feature = "tracing")]
         let task_span = if tracing::enabled!(tracing::Level::INFO) {
@@ -439,14 +422,8 @@ where
             tracing::Span::none()
         };
 
-        let run_future = async {
-            run_with_retries(&config, || {
-                let task_clone = task.clone();
-                let resources_clone = Arc::clone(&self.resources);
-                async move { task_clone.run(&resources_clone).await }
-            })
-            .await
-        };
+        let resources = &*self.resources;
+        let run_future = run_with_retries_observed(config, obs, || task.run(resources));
 
         let run = super::catch_panic_to_error(run_future, "Compensatable task");
         // Attach with `Instrument`, never `Span::enter()`: a guard held across `.await` stays
@@ -456,11 +433,9 @@ where
         let run = run.instrument(task_span);
         let outcome: Result<(TState, Vec<u8>), CanoError> = run.await;
 
-        if let Some(ref slice) = observers {
-            match &outcome {
-                Ok(_) => notify_observers(slice, |o| o.on_task_success(task_name.as_ref())),
-                Err(e) => notify_observers(slice, |o| o.on_task_failure(task_name.as_ref(), e)),
-            }
+        match &outcome {
+            Ok(_) => notify_observers(&self.observers, |o| o.on_task_success(task_name)),
+            Err(e) => notify_observers(&self.observers, |o| o.on_task_failure(task_name, e)),
         }
         outcome
     }
@@ -996,7 +971,7 @@ mod tests {
 
         // Route (router) → Process (single) → Complete (exit)
         let workflow = Workflow::bare()
-            .register_router(TestState::Start, RouteToWork)
+            .register(TestState::Start, RouteToWork)
             .register(TestState::Process, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone())
@@ -1056,7 +1031,7 @@ mod tests {
 
         let process_task = SimpleTask::new(TestState::Complete);
         let workflow = Workflow::bare()
-            .register_router(TestState::Start, RouteToWork)
+            .register(TestState::Start, RouteToWork)
             .register(TestState::Process, process_task.clone())
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
@@ -1091,19 +1066,19 @@ mod tests {
     async fn compensations_run_in_reverse_on_terminal_failure() {
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 1, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask::ok("B", 2, TestState::Split, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Split,
                 CompTask::ok("C", 3, TestState::Join, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Join,
                 CompTask {
                     name: "D",
@@ -1136,17 +1111,17 @@ mod tests {
     async fn only_compensatable_tasks_are_compensated() {
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 10, TestState::Process, &log),
             )
             // Plain task — produces no compensation-stack entry.
             .register(TestState::Process, SimpleTask::new(TestState::Split))
-            .register_with_compensation(
+            .register(
                 TestState::Split,
                 CompTask::ok("C", 30, TestState::Join, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Join,
                 CompTask {
                     name: "D",
@@ -1172,11 +1147,11 @@ mod tests {
     async fn compensation_failure_aggregates_errors_and_keeps_going() {
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 1, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask {
                     name: "B",
@@ -1187,11 +1162,11 @@ mod tests {
                     fail_compensate: true, // B's compensate errors
                 },
             )
-            .register_with_compensation(
+            .register(
                 TestState::Split,
                 CompTask::ok("C", 3, TestState::Join, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Join,
                 CompTask {
                     name: "D",
@@ -1233,7 +1208,7 @@ mod tests {
         // and errors[1] = A's compensate failure.
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask {
                     name: "A",
@@ -1244,7 +1219,7 @@ mod tests {
                     fail_compensate: true,
                 },
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask {
                     name: "B",
@@ -1327,15 +1302,15 @@ mod tests {
             .unwrap();
 
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 7, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask::ok("B", 8, TestState::Split, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Split,
                 CompTask {
                     name: "C",
@@ -1421,15 +1396,15 @@ mod tests {
         // C (Split state) is the resume point; configure it to fail forward so the compensation
         // stack drains and we can inspect which entries were rehydrated.
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 101, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask::ok("B", 202, TestState::Split, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Split,
                 CompTask {
                     name: "C",
@@ -1462,11 +1437,11 @@ mod tests {
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
         // Replacing a compensatable state with a different compensatable task.
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 1, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A2", 2, TestState::Process, &log),
             );
@@ -1478,7 +1453,7 @@ mod tests {
 
         // Replacing a compensatable state with a plain `register` also drops it.
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("B", 1, TestState::Process, &log),
             )
@@ -1622,7 +1597,7 @@ mod tests {
             ok_appends: std::sync::atomic::AtomicUsize::new(2),
         });
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 // A's compensate *also* fails → dirty rollback → log left for manual recovery.
                 CompTask {
@@ -1634,7 +1609,7 @@ mod tests {
                     fail_compensate: true,
                 },
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask::ok("B", 2, TestState::Complete, &log),
             )
@@ -1713,11 +1688,11 @@ mod tests {
     async fn panicking_compensator_is_caught_and_the_drain_continues() {
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 1, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompFault {
                     name: "B",
@@ -1727,7 +1702,7 @@ mod tests {
                     attempt_timeout: None,
                 },
             )
-            .register_with_compensation(
+            .register(
                 TestState::Split,
                 CompTask {
                     name: "C",
@@ -1759,11 +1734,11 @@ mod tests {
     async fn hanging_compensator_is_bounded_by_attempt_timeout() {
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 1, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompFault {
                     name: "H",
@@ -1773,7 +1748,7 @@ mod tests {
                     attempt_timeout: Some(Duration::from_millis(50)),
                 },
             )
-            .register_with_compensation(
+            .register(
                 TestState::Split,
                 CompTask {
                     name: "C",
@@ -1817,11 +1792,11 @@ mod tests {
         // deadline. The drain must NOT block on Slow for the full second.
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("Fast", 1, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompFault {
                     name: "Slow",
@@ -1929,7 +1904,7 @@ mod tests {
         let workflow = Workflow::bare()
             .with_total_timeout(Duration::from_secs(10))
             .with_compensation_timeout(Duration::from_millis(50))
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 SlowCompensate {
                     log: log.clone(),
@@ -1986,11 +1961,11 @@ mod tests {
         // `OrphanedCompensation` errors carrying the blob.
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 1, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask::ok("B", 2, TestState::Complete, &log),
             )
@@ -2117,15 +2092,15 @@ mod tests {
             .unwrap();
 
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 1, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask::ok("B", 2, TestState::Split, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Split,
                 CompTask {
                     name: "C",
@@ -2296,7 +2271,7 @@ mod tests {
         // Counts 0 → 3 (3 steps total: More(1), More(2), More(3), Done).
         struct TourStepper;
 
-        #[derive(Serialize, Deserialize)]
+        #[derive(Clone, Serialize, Deserialize)]
         struct GrindCursor(u32);
 
         #[task_mod::stepped]
@@ -2322,7 +2297,7 @@ mod tests {
         let poll_counter = Arc::new(AtomicU32::new(0));
 
         let workflow = Workflow::bare()
-            .register_router(TourStage::Route, TourRouter)
+            .register(TourStage::Route, TourRouter)
             .register(
                 TourStage::Wait,
                 TourPoller {
@@ -2330,7 +2305,7 @@ mod tests {
                 },
             )
             .register(TourStage::Crunch, TourBatch)
-            .register_stepped(TourStage::Grind, TourStepper)
+            .register(TourStage::Grind, TourStepper)
             .add_exit_state(TourStage::Done)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("tour-interop");
@@ -2389,15 +2364,15 @@ mod tests {
             .unwrap();
 
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 11, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask::ok("B", 22, TestState::Split, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Split,
                 CompTask {
                     name: "C",
@@ -2479,7 +2454,7 @@ mod tests {
 
         let mut workflow = Workflow::<u32>::bare().add_exit_state(N);
         for i in 0..N {
-            workflow = workflow.register_with_compensation(
+            workflow = workflow.register(
                 i,
                 NumComp {
                     idx: i,
@@ -2531,7 +2506,7 @@ mod tests {
             let log = Arc::new(Mutex::new(Vec::<u32>::new()));
             let mut workflow = Workflow::<u32>::bare().add_exit_state(N);
             for i in 0..N {
-                workflow = workflow.register_with_compensation(
+                workflow = workflow.register(
                     i,
                     Step {
                         idx: i,
@@ -2611,7 +2586,7 @@ mod tests {
         let (stepper, calls) = CountStepper::new(4); // steps: None→1, 1→2, 2→3, 3→Done
 
         let workflow = Workflow::bare()
-            .register_stepped(TestState::Start, stepper)
+            .register(TestState::Start, stepper)
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("step-fwd");
@@ -2682,7 +2657,7 @@ mod tests {
         let (stepper, calls) = CountStepper::new(4);
 
         let workflow = Workflow::bare()
-            .register_stepped(TestState::Start, stepper)
+            .register(TestState::Start, stepper)
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
@@ -2706,7 +2681,7 @@ mod tests {
         let (stepper, _) = CountStepper::new(3); // 2 cursor rows (1 and 2), then Done
 
         let workflow = Workflow::bare()
-            .register_stepped(TestState::Start, stepper)
+            .register(TestState::Start, stepper)
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("dense");
@@ -2743,7 +2718,7 @@ mod tests {
         let (stepper, calls) = CountStepper::new(3); // needs 2 successful steps
 
         let workflow = Workflow::bare()
-            .register_stepped(TestState::Start, stepper)
+            .register(TestState::Start, stepper)
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
@@ -2761,7 +2736,7 @@ mod tests {
         let (stepper, calls) = CountStepper::new(3);
 
         let result = Workflow::bare()
-            .register_stepped(TestState::Start, stepper)
+            .register(TestState::Start, stepper)
             .add_exit_state(TestState::Complete)
             .orchestrate(TestState::Start)
             .await
@@ -2825,11 +2800,11 @@ mod tests {
         }
 
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 42, TestState::Process, &log),
             )
-            .register_stepped(TestState::Process, FailingStepper)
+            .register(TestState::Process, FailingStepper)
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
@@ -3020,11 +2995,11 @@ mod tests {
             .unwrap();
 
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 1, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask::ok("B", 2, TestState::Error, &log),
             )
@@ -3080,7 +3055,7 @@ mod tests {
         let began = Arc::new(AtomicBool::new(false));
         let finished = Arc::new(AtomicBool::new(false));
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 HangingCompensator {
                     began: began.clone(),
@@ -3201,7 +3176,7 @@ mod tests {
         let committed = Arc::new(AtomicBool::new(false));
         let compensated = Arc::new(AtomicBool::new(false));
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 LeakyTask {
                     committed: committed.clone(),
@@ -3318,7 +3293,7 @@ mod tests {
 
         let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let workflow = Workflow::bare()
-            .register_with_compensation(TestState::Start, CountingCompensate { ran: ran.clone() })
+            .register(TestState::Start, CountingCompensate { ran: ran.clone() })
             .add_exit_state(TestState::Complete);
 
         let started = std::time::Instant::now();
@@ -3368,7 +3343,7 @@ mod tests {
         }
 
         let workflow = Workflow::bare()
-            .register_with_compensation(TestState::Start, PanickyCompensate)
+            .register(TestState::Start, PanickyCompensate)
             .add_exit_state(TestState::Complete);
 
         let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
@@ -3420,7 +3395,7 @@ mod tests {
         }
 
         let workflow = Workflow::bare()
-            .register_with_compensation(TestState::Start, InlineFailingCompensate)
+            .register(TestState::Start, InlineFailingCompensate)
             .add_exit_state(TestState::Complete);
         let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         let errors = match err {
@@ -3515,7 +3490,7 @@ mod tests {
 
         let log: SideEffect = Arc::new(Mutex::new(Vec::new()));
         let workflow = Workflow::bare()
-            .register_with_compensation(TestState::Start, LeakyCharge { log: log.clone() })
+            .register(TestState::Start, LeakyCharge { log: log.clone() })
             .add_exit_state(TestState::Complete);
 
         let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
@@ -3587,7 +3562,7 @@ mod tests {
         let (obs, rec) = EventLog::new();
 
         let workflow = Workflow::new(resources)
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 1, TestState::Process, &log),
             )
@@ -3726,11 +3701,11 @@ mod tests {
             .unwrap();
 
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 1, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask::ok("B", 2, TestState::Error, &log),
             )
@@ -4310,7 +4285,7 @@ mod metrics_tests {
             // CompensatableTask succeeds (Start→Process), then AlwaysFailTask fails.
             // This triggers a LIFO drain with one compensate() call which succeeds.
             let workflow = Workflow::bare()
-                .register_with_compensation(
+                .register(
                     TestState::Start,
                     CompTask::ok("comp", 42, TestState::Process, &log),
                 )

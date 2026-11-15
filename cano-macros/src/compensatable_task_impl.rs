@@ -17,6 +17,7 @@ const MODEL: Model = Model {
     res_first: &[("run", 1), ("compensate", 2)],
     infer_assoc,
     companion_run: None,
+    entry: "compensatable",
 };
 
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {

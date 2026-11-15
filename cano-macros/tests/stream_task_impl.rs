@@ -1,7 +1,7 @@
 //! Integration tests for `#[cano::task::stream]` — the inherent form (which emits
 //! `::cano::` paths, so it only resolves *outside* the `cano` crate), the `key =` form,
 //! and the explicit trait-impl form. Exercises the companion `impl Task` and the
-//! engine-driven `register_stream` path.
+//! engine-driven `register` path.
 
 use cano::prelude::*;
 use futures_util::{Stream, stream};
@@ -77,7 +77,7 @@ fn inherent_default_name_contains_type_name() {
 #[tokio::test]
 async fn inherent_runs_via_register_stream() {
     let workflow = Workflow::bare()
-        .register_stream(Step::Consume, InherentInferred)
+        .register(Step::Consume, InherentInferred)
         .add_exit_state(Step::Done);
     let result = workflow.orchestrate(Step::Consume).await.unwrap();
     assert_eq!(result, Step::Done);

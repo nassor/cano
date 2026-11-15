@@ -149,7 +149,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("-- Scenario 2: compensation runs after a downstream panic --");
     {
         let workflow = Workflow::bare()
-            .register_with_compensation(Step::Reserve, ReserveSlot)
+            .register(Step::Reserve, ReserveSlot)
             .register(Step::PanicTask, PanicAfterReserve)
             .add_exit_state(Step::Done);
 

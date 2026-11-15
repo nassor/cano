@@ -113,7 +113,7 @@
 //! [`Task`] is the single interface for processing logic — implement `run`. Several
 //! specialized task models build on it:
 //! - [`RouterTask`] trait: side-effect-free branching; reads resources, returns the next
-//!   state without writing anything. Registered with [`Workflow::register_router`] — the
+//!   state without writing anything. Registered with [`Workflow::register`] — the
 //!   engine dispatches it like a normal state but writes **no** `CheckpointRow`.
 //! - [`PollTask`] trait: "wait-until" loop; `poll()` returns [`PollOutcome::Ready`] or
 //!   [`PollOutcome::Pending { delay_ms }`](PollOutcome::Pending) on each call. Defaults to
@@ -128,14 +128,16 @@
 //! - [`StreamTask`] trait: a genuine stream-processing model — consume an `impl Stream`
 //!   continuously via `open`/`process_item`/`flush_window`/`on_close`, flush per
 //!   [`StreamWindow`] window, run until the [`CancellationToken`] fires, and resume from a
-//!   persisted cursor. Registered with [`Workflow::register_stream`]; per-item errors are
-//!   governed by [`StreamErrorPolicy`]. (Plain [`Workflow::register`] runs an in-memory,
-//!   non-durable, non-cancellable companion loop.)
+//!   persisted cursor. Registered with [`Workflow::register`]; per-item errors are
+//!   governed by [`StreamErrorPolicy`].
 //!
-//! Every [`RouterTask`], [`PollTask`], [`TimerTask`], [`BatchTask`], [`SteppedTask`], and
-//! [`StreamTask`] automatically implements [`Task`] via companion impls emitted by the
-//! `#[task::router]`, `#[task::poll]`, `#[task::timer]`, `#[task::batch]`, `#[task::stepped]`,
-//! and `#[task::stream]` macros respectively.
+//! Every model registers with the same [`Workflow::register`] call: the model macros
+//! (`#[task::router]`, `#[task::poll]`, `#[task::timer]`, `#[task::batch]`,
+//! `#[task::stepped]`, `#[task::stream]`, `#[saga::task]`) implement
+//! [`Registrable`](workflow::Registrable), which picks the engine path for the model.
+//! They also emit a companion [`Task`] impl, so any model can be a
+//! [`Workflow::register_split`] branch (stepped and stream tasks then run in-memory loops
+//! without cursor persistence).
 //!
 //! ### Parallel Execution (Split/Join)
 //!
@@ -179,7 +181,7 @@
 //!
 //! For steps that mutate external systems, implement [`CompensatableTask`] (its `run`
 //! returns the next state *and* an `Output`; its `compensate` undoes the step given that
-//! `Output`) and register it with [`Workflow::register_with_compensation`]. The engine
+//! `Output`) and register it with [`Workflow::register`]. The engine
 //! keeps a per-run compensation stack; if a later state fails, it drains the stack in
 //! reverse and runs each `compensate`. A clean rollback returns the original error (and
 //! clears the checkpoint log if one is attached); a failed `compensate` produces
@@ -229,12 +231,12 @@
 //! ## Module Overview
 //!
 //! - [`mod@task`]: The [`Task`] trait — single `run()` method
-//! - [`task::router`]: The [`RouterTask`] trait — side-effect-free branching via `route()`; registered with [`Workflow::register_router`]
+//! - [`task::router`]: The [`RouterTask`] trait — side-effect-free branching via `route()`; registered with [`Workflow::register`]
 //! - [`task::poll`]: The [`PollTask`] trait — wait-until loop via `poll()`; registered with [`Workflow::register`]
 //! - [`task::timer`]: The [`TimerTask`] trait — wait-then-transition via `wait()`/`after_wait()`; registered with [`Workflow::register`]
 //! - [`task::batch`]: The [`BatchTask`] trait — fan-out over data items via `load`/`process_item`/`finish`; registered with [`Workflow::register`]
-//! - [`task::stepped`]: The [`SteppedTask`] trait — resumable iterative work via `step()` with a serializable cursor; registered with [`Workflow::register_stepped`] (persists the cursor when a checkpoint store is attached)
-//! - [`task::stream`]: The [`StreamTask`] trait — a genuine stream-processing model: consume an `impl Stream` continuously, flush per [`StreamWindow`] window, run until the [`CancellationToken`] fires, and resume from a persisted cursor; registered with [`Workflow::register_stream`]
+//! - [`task::stepped`]: The [`SteppedTask`] trait — resumable iterative work via `step()` with a serializable cursor; registered with [`Workflow::register`] (persists the cursor when a checkpoint store is attached)
+//! - [`task::stream`]: The [`StreamTask`] trait — a genuine stream-processing model: consume an `impl Stream` continuously, flush per [`StreamWindow`] window, run until the [`CancellationToken`] fires, and resume from a persisted cursor; registered with [`Workflow::register`]
 //! - [`CancellationToken`] — cooperative cancellation for [`orchestrate_with_token`](Workflow::orchestrate_with_token)
 //! - [`workflow`]: [`Workflow`] — FSM orchestration with Split/Join support
 //! - `scheduler` (requires `scheduler` feature): `Scheduler` (builder) and `RunningScheduler` (live handle) — cron and interval scheduling
@@ -245,7 +247,7 @@
 //!   scheduler, processing-loop, recovery and saga internals — call `cano::metrics::describe()`
 //!   for the full list with help text and units
 //! - [`recovery`]: [`CheckpointStore`] / [`CheckpointRow`] — append-only checkpoint log for crash recovery (and `RedbCheckpointStore`, behind the `recovery` feature)
-//! - [`saga`]: [`CompensatableTask`] — pair a forward step with a compensating action; failures roll back via [`Workflow::register_with_compensation`]
+//! - [`saga`]: [`CompensatableTask`] — pair a forward step with a compensating action; failures roll back via [`Workflow::register`]
 //! - [`rate_limit`]: [`RateLimiter`] (token bucket) and [`WindowedRateLimiter`] (fixed window) throttles, both implementing [`Meter`] so they compose into a [`MultiRateLimiter`] that enforces several weighted tiers (e.g. a 5h + 7d + per-model limit) at once
 //! - [`store`]: [`MemoryStore`] — a typed in-memory store that implements [`Resource`]
 //! - `testing` (requires `testing` feature): batteries-included test fixtures —
@@ -293,7 +295,7 @@ pub use rate_limit::{
 };
 pub use recovery::{CheckpointRow, CheckpointStore, RowKind};
 pub use resource::{HealthStatus, Resource, Resources};
-pub use saga::{CompensatableTask, ErasedCompensatable};
+pub use saga::CompensatableTask;
 pub use task::batch::BatchTask;
 pub use task::poll::{PollErrorPolicy, PollOutcome, PollTask};
 pub use task::router::RouterTask;
@@ -306,7 +308,7 @@ pub use tokio_util::sync::CancellationToken;
 pub use recovery::RedbCheckpointStore;
 pub use store::MemoryStore;
 pub use task::{RetryMode, Task, TaskConfig};
-pub use workflow::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult, StateEntry, Workflow};
+pub use workflow::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult, Workflow};
 
 #[cfg(feature = "tracing")]
 pub use observer::TracingObserver;
@@ -380,9 +382,9 @@ pub mod prelude {
         HealthStatus, JoinConfig, JoinStrategy, MemoryStore, Meter, MeterStatus, MultiPermit,
         MultiRateLimiter, PollErrorPolicy, PollOutcome, PollTask, RateLimiter, RateLimiterPermit,
         RateLimiterPolicy, Reservation, Resource, Resources, RetryMode, RouterTask, RowKind,
-        SplitResult, SplitTaskResult, StateEntry, StepOutcome, SteppedTask, StreamErrorPolicy,
-        StreamTask, StreamWindow, Task, TaskConfig, Tier, TimerOutcome, TimerTask, WindowPermit,
-        WindowPolicy, WindowSignal, WindowedRateLimiter, Workflow, WorkflowObserver,
+        SplitResult, SplitTaskResult, StepOutcome, SteppedTask, StreamErrorPolicy, StreamTask,
+        StreamWindow, Task, TaskConfig, Tier, TimerOutcome, TimerTask, WindowPermit, WindowPolicy,
+        WindowSignal, WindowedRateLimiter, Workflow, WorkflowObserver,
     };
 
     #[cfg(feature = "scheduler")]

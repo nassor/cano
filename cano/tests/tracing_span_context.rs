@@ -401,11 +401,11 @@ fn split(id: String) -> Run {
 fn compensatable(id: String) -> Run {
     Box::pin(async move {
         Workflow::bare()
-            .register_with_compensation(
+            .register(
                 S::Start,
                 CompProbe(Probe::new(&id, "compensatable", -1, S::Mid)),
             )
-            .register_with_compensation(
+            .register(
                 S::Mid,
                 CompProbe(Probe::new(&id, "compensatable", -1, S::Done)),
             )
@@ -512,7 +512,7 @@ fn cancelled(id: String) -> Run {
         let token = CancellationToken::new();
         let handle = token.clone();
         Workflow::bare()
-            .register_with_compensation(
+            .register(
                 S::Start,
                 CompProbe(Probe::new(&id, "compensatable", -1, S::Mid)),
             )

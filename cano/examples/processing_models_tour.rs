@@ -234,10 +234,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== processing models tour ===\n");
 
     let workflow = Workflow::new(resources)
-        .register_router(Stage::Route, Router)
+        .register(Stage::Route, Router)
         .register(Stage::Wait, Waiter)
         .register(Stage::Crunch, Cruncher)
-        .register_stepped(Stage::Grind, Grinder)
+        .register(Stage::Grind, Grinder)
         .add_exit_state(Stage::Done)
         .with_checkpoint_store(checkpoint_store.clone())
         .with_workflow_id(run_id);

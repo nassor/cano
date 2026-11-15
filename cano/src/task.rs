@@ -90,6 +90,7 @@ pub mod timer;
 
 pub use batch::{BatchTask, run_batch};
 pub use poll::{PollErrorPolicy, PollOutcome, PollTask, run_poll_loop};
+pub(crate) use retry::{ObserverCtx, run_with_retries_observed};
 pub use retry::{RetryMode, TaskConfig, run_with_retries};
 pub use router::RouterTask;
 pub use stepped::{StepOutcome, SteppedTask, run_stepped};
@@ -107,43 +108,6 @@ pub use cano_macros::router_task as router;
 pub use cano_macros::stepped_task as stepped;
 pub use cano_macros::stream_task as stream;
 pub use cano_macros::timer_task as timer;
-
-/// One iteration of a step-style task loop ([`run_task_loop`]).
-///
-/// The loop skeleton is deliberately dumb — it only re-invokes the step closure
-/// until the closure says it is done. All model-specific bookkeeping (delays,
-/// error policies, cursors) lives in the closure, so `run_poll_loop` and
-/// `run_stepped` share the same driver instead of each re-spelling the loop.
-pub(crate) enum TaskLoopStep<T> {
-    /// Stop the loop and return this outcome.
-    Done(Result<T, CanoError>),
-    /// Run the step closure again.
-    Continue,
-}
-
-/// Drive a step-style task loop: call `step` until it returns [`TaskLoopStep::Done`].
-///
-/// `state` is threaded between iterations **by value**: the step closure takes
-/// the current state, returns `(new_state, outcome)` after its future resolves,
-/// and the driver feeds `new_state` back in. The step future owns its state, so
-/// it needs no borrows of the closure's captures (which would fight the borrow
-/// checker) and no boxing. All model-specific bookkeeping (delays, error
-/// policies, cursors) lives in `state` and the closure body, so `run_poll_loop`
-/// and `run_stepped` share the same driver instead of each re-spelling the loop.
-pub(crate) async fn run_task_loop<T, S, F, Fut>(mut state: S, mut step: F) -> Result<T, CanoError>
-where
-    F: FnMut(S) -> Fut,
-    Fut: std::future::Future<Output = (S, TaskLoopStep<T>)>,
-{
-    loop {
-        let (new_state, outcome) = step(state).await;
-        state = new_state;
-        match outcome {
-            TaskLoopStep::Done(outcome) => return outcome,
-            TaskLoopStep::Continue => {}
-        }
-    }
-}
 
 /// Task trait for workflow processing
 ///

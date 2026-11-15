@@ -1,6 +1,6 @@
 //! Reliability contracts of [`SteppedTask`] under critical scenarios.
 //!
-//! Black-box integration tests (public API only, engine-driven `register_stepped`
+//! Black-box integration tests (public API only, engine-driven `register`
 //! path) documenting how the stepped processing model behaves when a step fails:
 //!
 //! | Critical scenario | Contract |
@@ -66,7 +66,7 @@ impl SteppedTask<Flow> for PagedMigration {
 async fn stepped_transient_error_retries_same_cursor_without_restarting() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let workflow = Workflow::bare()
-        .register_stepped(
+        .register(
             Flow::Work,
             PagedMigration {
                 flaky_cursor: 3,
@@ -142,7 +142,7 @@ async fn stepped_hard_failure_resumes_from_last_persisted_cursor() {
     let store = Arc::new(MemStore::default());
 
     let workflow = Workflow::bare()
-        .register_stepped(
+        .register(
             Flow::Work,
             BlockingMigration {
                 blocked_at: 4,

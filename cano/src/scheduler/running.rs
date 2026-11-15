@@ -1633,7 +1633,7 @@ mod tests {
 
     fn stubborn() -> Workflow<TestState> {
         Workflow::bare()
-            .register_with_compensation(TestState::Start, Stubborn)
+            .register(TestState::Start, Stubborn)
             .add_exit_state(TestState::Complete)
     }
 

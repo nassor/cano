@@ -16,6 +16,7 @@ const MODEL: Model = Model {
     res_first: &[("run", 1)],
     infer_assoc: no_assoc,
     companion_run: None,
+    entry: "single",
 };
 
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream> {

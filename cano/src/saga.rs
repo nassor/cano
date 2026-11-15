@@ -11,7 +11,7 @@
 //! - Implement [`CompensatableTask`] for a state's task. Its [`run`](CompensatableTask::run)
 //!   returns the next state **and** an `Output` value describing what it did;
 //!   [`compensate`](CompensatableTask::compensate) takes that `Output` back and undoes it.
-//! - Register it with [`Workflow::register_with_compensation`](crate::workflow::Workflow::register_with_compensation).
+//! - Register it with [`Workflow::register`](crate::workflow::Workflow::register).
 //! - The engine keeps a per-run **compensation stack**: each successful compensatable
 //!   task pushes `(task name, serialized output)`. If a later state's task fails, the
 //!   stack is drained LIFO and every `compensate` runs (errors are collected, the drain
@@ -52,7 +52,7 @@ use crate::task::TaskConfig;
 /// A workflow task that records an `Output` when it succeeds and can later be
 /// undone via [`compensate`](Self::compensate).
 ///
-/// Register it with [`Workflow::register_with_compensation`](crate::workflow::Workflow::register_with_compensation).
+/// Register it with [`Workflow::register`](crate::workflow::Workflow::register).
 /// Use `#[saga::task(state = S)]` on an inherent `impl` block — the macro builds
 /// the `impl CompensatableTask<S> for T` header, requiring only `type Output`, `run`, and
 /// `compensate` (plus optional `config` / `name` overrides). A bare
@@ -165,17 +165,15 @@ pub(crate) struct CompensationEntry {
 
 /// Object-safe, type-erased view of a [`CompensatableTask`].
 ///
-/// [`Workflow::register_with_compensation`](crate::workflow::Workflow::register_with_compensation)
+/// [`Workflow::register`](crate::workflow::Workflow::register)
 /// builds one of these so the engine can dispatch the forward run and replay
 /// compensations without naming the task's concrete `Output` type. **You should not need
 /// to implement or name this directly** — it's the saga analogue of
 /// `dyn Task`.
-pub trait ErasedCompensatable<TState>: Send + Sync
+pub(crate) trait ErasedCompensatable<TState>: Send + Sync
 where
     TState: Clone + Send + Sync + 'static,
 {
-    /// The underlying task's [`name`](CompensatableTask::name).
-    fn name(&self) -> Cow<'static, str>;
     /// The forward task's retry / timeout configuration.
     fn config(&self) -> TaskConfig;
     /// Run the forward action; on success return the next state and the
@@ -187,11 +185,12 @@ where
 
 /// Future returned by [`ErasedCompensatable::run`] — yields the next state and the
 /// serialized [`Output`](CompensatableTask::Output).
-pub type ForwardRunFuture<'a, TState> =
+pub(crate) type ForwardRunFuture<'a, TState> =
     Pin<Box<dyn Future<Output = Result<(TState, Vec<u8>), CanoError>> + Send + 'a>>;
 
 /// Future returned by [`ErasedCompensatable::compensate`].
-pub type CompensateFuture<'a> = Pin<Box<dyn Future<Output = Result<(), CanoError>> + Send + 'a>>;
+pub(crate) type CompensateFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<(), CanoError>> + Send + 'a>>;
 
 /// Run `task.compensate(output)` inline as the rollback for an irrecoverable
 /// failure detected by the adapter itself (the output failed to serialize).
@@ -278,10 +277,6 @@ where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
     T: CompensatableTask<TState> + 'static,
 {
-    fn name(&self) -> Cow<'static, str> {
-        self.0.name()
-    }
-
     fn config(&self) -> TaskConfig {
         self.0.config()
     }
@@ -290,7 +285,7 @@ where
         let attempt_timeout = self.0.config().attempt_timeout;
         Box::pin(async move {
             // Apply the user's `attempt_timeout` *only* to the forward call.
-            // `execute_compensatable_task` strips it from the config passed to
+            // `StateEntry::compensatable` strips it from the config passed to
             // `run_with_retries` so the outer retry loop doesn't blanket-cancel
             // the inline-compensate path along with the forward call — a mid-
             // await drop there would destroy the typed `output` value with no
@@ -466,10 +461,9 @@ mod tests {
     // ----- adapter delegation -----
 
     #[test]
-    fn name_and_config_delegate_to_the_inner_task() {
+    fn config_delegates_to_the_inner_task() {
         let l = log();
         let adapter = CompensatableAdapter(Arc::new(Comp::ok(1, &l)));
-        assert!(adapter.name().contains("Comp"));
         assert!(adapter.config().attempt_timeout.is_none());
 
         let slow = CompensatableAdapter(Arc::new(SlowTask));

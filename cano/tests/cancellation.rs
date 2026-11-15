@@ -200,7 +200,7 @@ async fn cancel_with_compensation_drains_stack_then_returns_cancelled() {
     let ship_started = flag();
     let ignore = flag();
     let wf = Workflow::bare()
-        .register_with_compensation(
+        .register(
             Step::Reserve,
             CompStep {
                 name: "reserve",
@@ -213,7 +213,7 @@ async fn cancel_with_compensation_drains_stack_then_returns_cancelled() {
                 fail_comp: false,
             },
         )
-        .register_with_compensation(
+        .register(
             Step::Charge,
             CompStep {
                 name: "charge",
@@ -264,7 +264,7 @@ async fn cancel_with_failing_compensator_surfaces_compensation_failed() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let ship_started = flag();
     let wf = Workflow::bare()
-        .register_with_compensation(
+        .register(
             Step::Reserve,
             CompStep {
                 name: "reserve",
@@ -314,7 +314,7 @@ async fn compensatable_task_not_interrupted_midflight() {
     let hold_completed = flag();
     let park_started = flag();
     let wf = Workflow::bare()
-        .register_with_compensation(
+        .register(
             Step::Reserve,
             CompStep {
                 name: "hold",
@@ -474,7 +474,7 @@ async fn on_cancelled_does_not_fire_on_successful_run() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let wf = Workflow::bare()
         .with_observer(rec.clone())
-        .register_with_compensation(
+        .register(
             Step::Reserve,
             CompStep {
                 name: "reserve",
@@ -504,7 +504,7 @@ async fn on_cancelled_does_not_fire_on_successful_run() {
 async fn uncancelled_token_behaves_like_orchestrate() {
     let build = || {
         Workflow::bare()
-            .register_with_compensation(
+            .register(
                 Step::Reserve,
                 // A quick compensatable task (no sleep) that transitions straight to Done;
                 // a successful run never triggers its compensator.
@@ -604,7 +604,7 @@ async fn compensation_drain_completes_fully_under_cancellation() {
     let log = Arc::new(Mutex::new(Vec::new()));
     let ship_started = flag();
     let wf = Workflow::bare()
-        .register_with_compensation(
+        .register(
             Step::Reserve,
             CompStep {
                 name: "reserve",
@@ -617,7 +617,7 @@ async fn compensation_drain_completes_fully_under_cancellation() {
                 fail_comp: false,
             },
         )
-        .register_with_compensation(
+        .register(
             Step::Charge,
             CompStep {
                 name: "charge",
@@ -719,7 +719,7 @@ impl SlowRouter {
 async fn cancel_during_router_task_returns_cancelled() {
     let started = flag();
     let wf = Workflow::bare()
-        .register_router(
+        .register(
             Step::Reserve,
             SlowRouter {
                 started: started.clone(),
@@ -913,7 +913,7 @@ impl SlowStepper {
 async fn cancel_during_stepped_task_returns_cancelled() {
     let started = flag();
     let wf = Workflow::bare()
-        .register_stepped(
+        .register(
             Step::Ship,
             SlowStepper {
                 started: started.clone(),
