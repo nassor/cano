@@ -9,7 +9,7 @@
 //! | crash mid-window → `resume_from` | loss is bounded to the uncommitted window; replay is at-least-once |
 //! | cancel mid-window → drain → resume | in-flight window is flushed + committed ⇒ resume produces **no duplicates** |
 //! | flaky source items under `RetryOnError` | error *budget*: failed items are dropped (never re-pulled), counter resets on success |
-//! | `process_item` hangs | `attempt_timeout` is the liveness ceiling; surfaces as `timeout` |
+//! | `process_item` hangs | `attempt_timeout` is the latency ceiling; surfaces as `timeout` |
 
 mod support;
 
@@ -457,7 +457,7 @@ async fn stream_hung_item_is_bounded_by_attempt_timeout() {
     assert_eq!(err.category(), "timeout", "got: {err}");
     assert!(
         elapsed < Duration::from_secs(30),
-        "liveness: the run must fail near the 50ms budget, took {elapsed:?}"
+        "bounded latency: the run must fail near the 50ms budget, took {elapsed:?}"
     );
     assert_eq!(
         *flushed.lock(),

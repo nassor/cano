@@ -66,11 +66,11 @@ async fn main() {
     }
 
     // Run the same workflow under the scheduler for ~1.2s, firing every 1s.
-    let mut scheduler = Scheduler::new();
-    scheduler
-        .every_seconds("demo_flow", workflow(), Step::Fetch, 1)
-        .expect("register flow");
-    let running = scheduler.start().await.expect("start scheduler");
+    let running = Scheduler::new()
+        .every("demo_flow", workflow(), Step::Fetch, Duration::from_secs(1))
+        .start()
+        .await
+        .expect("start scheduler");
     tokio::time::sleep(Duration::from_millis(1200)).await;
     running.stop().await.expect("stop scheduler");
 

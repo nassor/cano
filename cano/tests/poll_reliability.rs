@@ -137,6 +137,6 @@ async fn poll_eternal_pending_is_bounded_by_attempt_timeout() {
     );
     assert!(
         elapsed < Duration::from_secs(30),
-        "liveness: took {elapsed:?}"
+        "bounded latency: took {elapsed:?}"
     );
 }

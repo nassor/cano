@@ -73,7 +73,7 @@ async fn main() -> CanoResult<()> {
     println!("Duration-Based Scheduling Example");
     println!("====================================");
 
-    let mut scheduler = Scheduler::new();
+    let scheduler = Scheduler::new();
     let store = MemoryStore::new();
 
     // Create workflows with different durations
@@ -90,24 +90,24 @@ async fn main() -> CanoResult<()> {
         .add_exit_state(TaskState::Complete);
 
     // Schedule workflows with different durations
-    scheduler.every(
+    let scheduler = scheduler.every(
         "daily_task",
         daily_flow,
         TaskState::Start,
         Duration::from_secs(4),
-    )?; // Simulated daily (every 4s)
-    scheduler.every(
+    ); // Simulated daily (every 4s)
+    let scheduler = scheduler.every(
         "hourly_task",
         hourly_flow,
         TaskState::Start,
         Duration::from_secs(2),
-    )?; // Simulated hourly (every 2s)
-    scheduler.every(
+    ); // Simulated hourly (every 2s)
+    let scheduler = scheduler.every(
         "frequent_task",
         frequent_flow,
         TaskState::Start,
         Duration::from_secs(1),
-    )?; // Frequent (every 1s)
+    ); // Frequent (every 1s)
 
     println!("Scheduled workflows:");
     println!("  Daily task: Every 4 seconds (simulated)");

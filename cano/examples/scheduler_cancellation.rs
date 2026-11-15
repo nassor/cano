@@ -19,7 +19,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use cano::prelude::*;
-use cano::scheduler::Status;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step {
@@ -92,26 +91,25 @@ async fn main() -> CanoResult<()> {
         )
         .add_exit_state(Step::Done);
 
-    let mut scheduler = Scheduler::new();
-    scheduler.manual("order", workflow, Step::Reserve)?;
-    let running = scheduler.start().await?;
+    let running = Scheduler::new()
+        .manual("order", workflow, Step::Reserve)
+        .start()
+        .await?;
 
     // Kick off the saga, then cancel it once Ship is in flight.
-    running.trigger("order").await?;
+    running.trigger("order")?;
     while !ship_started.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     println!("\n>>> cancelling the in-flight flow…\n");
-    running.cancel_flow("order").await?;
+    running.cancel_flow("order")?;
 
     // Wait for the cancelled run to settle (saga drained, status back to Idle).
-    loop {
-        let status = running.status("order").await.map(|i| i.status);
-        if status != Some(Status::Running) {
-            println!("\norder flow status after cancel: {status:?}  (Idle — not a failure)");
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
+    if let Some(info) = running.wait_idle("order").await {
+        println!(
+            "\norder flow status after cancel: {:?}  (Idle — not a failure)",
+            info.status
+        );
     }
 
     running.stop().await?;

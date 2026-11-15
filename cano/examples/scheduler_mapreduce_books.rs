@@ -532,7 +532,7 @@ async fn main() -> Result<(), CanoError> {
             books.len()
         );
 
-        scheduler.manual(&batch_name, workflow, BookAnalysisState::Start)?;
+        scheduler = scheduler.manual(&batch_name, workflow, BookAnalysisState::Start);
     }
 
     println!("\n🎬 Starting scheduler...\n");
@@ -544,7 +544,7 @@ async fn main() -> Result<(), CanoError> {
     println!("🗺️  MAP PHASE: Triggering all batch workflows...\n");
     for (batch_name, _) in get_book_batches() {
         println!("  ⚡ Triggering: {}", batch_name);
-        running.trigger(&batch_name).await?;
+        running.trigger(&batch_name)?;
     }
 
     // Wait for all workflows to complete
@@ -556,7 +556,7 @@ async fn main() -> Result<(), CanoError> {
         // Wait up to 10 minutes total
         tokio::time::sleep(Duration::from_secs(5)).await;
 
-        let workflows = running.list().await;
+        let workflows = running.list();
         let completed_count = workflows
             .iter()
             .filter(|w| w.status == Status::Completed)

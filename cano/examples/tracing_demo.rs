@@ -271,7 +271,7 @@ async fn main() -> CanoResult<()> {
     {
         info!("Example 3: Scheduler with Workflow Tracing");
 
-        let mut scheduler = Scheduler::new();
+        let scheduler = Scheduler::new();
         let store = MemoryStore::new();
         let resources = Resources::new().insert("store", store.clone());
 
@@ -284,12 +284,12 @@ async fn main() -> CanoResult<()> {
             )
             .add_exit_state(WorkflowState::Complete);
 
-        scheduler.every_seconds(
+        let scheduler = scheduler.every(
             "traced_workflow",
             scheduled_workflow,
             WorkflowState::Start,
-            2,
-        )?;
+            Duration::from_secs(2),
+        );
 
         info!("Starting scheduler...");
         let running = scheduler.start().await?;
@@ -299,7 +299,7 @@ async fn main() -> CanoResult<()> {
         tokio::time::sleep(Duration::from_secs(6)).await;
 
         // Check status
-        if let Some(flow_info) = running.status("traced_workflow").await {
+        if let Some(flow_info) = running.status("traced_workflow") {
             info!(
                 workflow_id = %flow_info.id,
                 run_count = flow_info.run_count,

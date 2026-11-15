@@ -208,29 +208,9 @@ where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
     TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
-    #[cfg(feature = "scheduler")]
-    pub(crate) async fn execute_workflow(
-        &self,
-        initial_state: TState,
-        total_budget: Option<(std::time::Instant, std::time::Duration)>,
-        token: Option<&CancellationToken>,
-    ) -> Result<TState, CanoError> {
-        self.execute_workflow_from(
-            initial_state,
-            0,
-            self.workflow_id.clone(),
-            Vec::new(),
-            HashMap::new(),
-            Vec::new(),
-            total_budget,
-            token,
-        )
-        .await
-    }
-
     /// The FSM loop, parameterized by the starting checkpoint sequence, the workflow id
     /// to record under, and the (possibly pre-populated, on resume) compensation stack.
-    /// `execute_workflow` enters with `(state, 0, self.workflow_id, [])`;
+    /// `run_workflow` enters with `(state, 0, self.workflow_id, [])`;
     /// [`resume_from`](Self::resume_from) enters with `(resumed_state, last_sequence + 1,
     /// Some(id), rehydrated_stack)`.
     ///

@@ -44,20 +44,15 @@ async fn await_flag(flag: &Arc<AtomicBool>) {
     }
 }
 
-/// Spin until the flow leaves `Status::Running` (its cancelled run settled).
+/// Wait until the flow leaves `Status::Running` (its cancelled run settled).
 /// Panics after 15s so a cancellation regression fails fast instead of hanging.
-async fn await_not_running(running: &RunningScheduler<Step>, id: &str) {
-    let t_start = Instant::now();
-    loop {
-        if running.status(id).await.map(|i| i.status) != Some(Status::Running) {
-            return;
-        }
-        assert!(
-            t_start.elapsed() < Duration::from_secs(15),
-            "flow '{id}' never left Running after cancel — cancellation regression"
-        );
-        tokio::time::sleep(Duration::from_millis(2)).await;
-    }
+async fn await_not_running(running: &RunningScheduler, id: &str) {
+    tokio::time::timeout(Duration::from_secs(15), running.wait_idle(id))
+        .await
+        .unwrap_or_else(|_| {
+            panic!("flow '{id}' never left Running after cancel — cancellation regression")
+        })
+        .expect("flow is registered");
 }
 
 // ---- base long-running task (the cancellable building block) ----
@@ -142,16 +137,16 @@ async fn cancel_flow_drains_scheduled_saga_and_returns_to_idle() {
         )
         .add_exit_state(Step::Done);
 
-    let mut scheduler = Scheduler::new();
-    scheduler.manual("order", wf, Step::Reserve).unwrap();
+    let scheduler = Scheduler::new();
+    let scheduler = scheduler.manual("order", wf, Step::Reserve);
     let running = scheduler.start().await.unwrap();
 
-    running.trigger("order").await.unwrap();
+    running.trigger("order").unwrap();
     await_flag(&ship_started).await;
-    running.cancel_flow("order").await.unwrap();
+    running.cancel_flow("order").unwrap();
     await_not_running(&running, "order").await;
 
-    let info = running.status("order").await.unwrap();
+    let info = running.status("order").unwrap();
     assert_eq!(info.status, Status::Idle, "clean cancel → Idle");
     assert_eq!(info.failure_streak, 0, "cancel is not a backoff failure");
     assert_eq!(
@@ -194,16 +189,16 @@ async fn cancel_flow_dirty_rollback_saga_parks_in_backoff() {
         )
         .add_exit_state(Step::Done);
 
-    let mut scheduler = Scheduler::new();
-    scheduler.manual("order", wf, Step::Reserve).unwrap();
+    let scheduler = Scheduler::new();
+    let scheduler = scheduler.manual("order", wf, Step::Reserve);
     let running = scheduler.start().await.unwrap();
 
-    running.trigger("order").await.unwrap();
+    running.trigger("order").unwrap();
     await_flag(&ship_started).await;
-    running.cancel_flow("order").await.unwrap();
+    running.cancel_flow("order").unwrap();
     await_not_running(&running, "order").await;
 
-    let info = running.status("order").await.unwrap();
+    let info = running.status("order").unwrap();
     assert!(
         matches!(info.status, Status::Backoff { .. }),
         "a dirty rollback is a failure → Backoff, got {:?}",
@@ -236,18 +231,23 @@ async fn graceful_stop_rolls_back_in_flight_saga() {
         )
         .add_exit_state(Step::Done);
 
-    let mut scheduler = Scheduler::new();
-    scheduler.manual("order", wf, Step::Reserve).unwrap();
-    let running = scheduler.start().await.unwrap();
+    // A short drain: the 30s task outlives it, so the cancel phase must fire and
+    // roll the saga back.
+    let running = Scheduler::new()
+        .manual("order", wf, Step::Reserve)
+        .with_drain_timeout(Duration::from_millis(100))
+        .start()
+        .await
+        .unwrap();
 
-    running.trigger("order").await.unwrap();
+    running.trigger("order").unwrap();
     await_flag(&ship_started).await;
 
     let t_start = Instant::now();
     running.stop().await.expect("graceful stop succeeds");
     assert!(
         t_start.elapsed() < Duration::from_secs(5),
-        "shutdown must cancel + drain, not wait 30s"
+        "shutdown must cancel + drain after the drain timeout, not wait 30s"
     );
     let events = log.lock().unwrap().clone();
     assert!(events.contains(&"rollback:charge".to_string()));
@@ -291,11 +291,11 @@ async fn cancel_flow_cancels_in_flight_split_flow() {
         )
         .add_exit_state(Step::Done);
 
-    let mut scheduler = Scheduler::new();
-    scheduler.manual("split", wf, Step::Work).unwrap();
+    let scheduler = Scheduler::new();
+    let scheduler = scheduler.manual("split", wf, Step::Work);
     let running = scheduler.start().await.unwrap();
 
-    running.trigger("split").await.unwrap();
+    running.trigger("split").unwrap();
     let t_start = Instant::now();
     while started.load(SeqCst) < 3 {
         assert!(
@@ -304,7 +304,7 @@ async fn cancel_flow_cancels_in_flight_split_flow() {
         );
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
-    running.cancel_flow("split").await.unwrap();
+    running.cancel_flow("split").unwrap();
     await_not_running(&running, "split").await;
 
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -313,7 +313,7 @@ async fn cancel_flow_cancels_in_flight_split_flow() {
         0,
         "split children must be aborted, not completed"
     );
-    assert_eq!(running.status("split").await.unwrap().status, Status::Idle);
+    assert_eq!(running.status("split").unwrap().status, Status::Idle);
     running.stop().await.unwrap();
 }
 
@@ -352,24 +352,21 @@ async fn cancel_flow_cancels_in_flight_stepped_flow() {
         )
         .add_exit_state(Step::Done);
 
-    let mut scheduler = Scheduler::new();
-    scheduler.manual("stepped", wf, Step::Work).unwrap();
+    let scheduler = Scheduler::new();
+    let scheduler = scheduler.manual("stepped", wf, Step::Work);
     let running = scheduler.start().await.unwrap();
 
-    running.trigger("stepped").await.unwrap();
+    running.trigger("stepped").unwrap();
     await_flag(&started).await;
     let t_start = Instant::now();
-    running.cancel_flow("stepped").await.unwrap();
+    running.cancel_flow("stepped").unwrap();
     await_not_running(&running, "stepped").await;
 
     assert!(
         t_start.elapsed() < Duration::from_secs(5),
         "stepped loop aborts promptly"
     );
-    assert_eq!(
-        running.status("stepped").await.unwrap().status,
-        Status::Idle
-    );
+    assert_eq!(running.status("stepped").unwrap().status, Status::Idle);
     running.stop().await.unwrap();
 }
 
@@ -405,20 +402,20 @@ async fn cancel_flow_cancels_in_flight_timer_flow() {
         )
         .add_exit_state(Step::Done);
 
-    let mut scheduler = Scheduler::new();
-    scheduler.manual("timer", wf, Step::Work).unwrap();
+    let scheduler = Scheduler::new();
+    let scheduler = scheduler.manual("timer", wf, Step::Work);
     let running = scheduler.start().await.unwrap();
 
-    running.trigger("timer").await.unwrap();
+    running.trigger("timer").unwrap();
     await_flag(&started).await;
-    running.cancel_flow("timer").await.unwrap();
+    running.cancel_flow("timer").unwrap();
     await_not_running(&running, "timer").await;
 
     assert!(
         !fired.load(SeqCst),
         "after_wait must not run when the timer is cancelled"
     );
-    assert_eq!(running.status("timer").await.unwrap().status, Status::Idle);
+    assert_eq!(running.status("timer").unwrap().status, Status::Idle);
     running.stop().await.unwrap();
 }
 
@@ -447,21 +444,21 @@ async fn cancel_flow_cancels_in_flight_poll_flow() {
         )
         .add_exit_state(Step::Done);
 
-    let mut scheduler = Scheduler::new();
-    scheduler.manual("poll", wf, Step::Work).unwrap();
+    let scheduler = Scheduler::new();
+    let scheduler = scheduler.manual("poll", wf, Step::Work);
     let running = scheduler.start().await.unwrap();
 
-    running.trigger("poll").await.unwrap();
+    running.trigger("poll").unwrap();
     await_flag(&started).await;
     let t_start = Instant::now();
-    running.cancel_flow("poll").await.unwrap();
+    running.cancel_flow("poll").unwrap();
     await_not_running(&running, "poll").await;
 
     assert!(
         t_start.elapsed() < Duration::from_secs(5),
         "poll loop aborts promptly"
     );
-    assert_eq!(running.status("poll").await.unwrap().status, Status::Idle);
+    assert_eq!(running.status("poll").unwrap().status, Status::Idle);
     running.stop().await.unwrap();
 }
 
@@ -507,14 +504,14 @@ async fn cancel_flow_cancels_in_flight_batch_flow() {
         )
         .add_exit_state(Step::Done);
 
-    let mut scheduler = Scheduler::new();
-    scheduler.manual("batch", wf, Step::Work).unwrap();
+    let scheduler = Scheduler::new();
+    let scheduler = scheduler.manual("batch", wf, Step::Work);
     let running = scheduler.start().await.unwrap();
 
-    running.trigger("batch").await.unwrap();
+    running.trigger("batch").unwrap();
     await_flag(&started).await;
     let t_start = Instant::now();
-    running.cancel_flow("batch").await.unwrap();
+    running.cancel_flow("batch").unwrap();
     await_not_running(&running, "batch").await;
 
     assert!(
@@ -525,7 +522,7 @@ async fn cancel_flow_cancels_in_flight_batch_flow() {
         !finished.load(SeqCst),
         "finish must not run when the batch is cancelled"
     );
-    assert_eq!(running.status("batch").await.unwrap().status, Status::Idle);
+    assert_eq!(running.status("batch").unwrap().status, Status::Idle);
     running.stop().await.unwrap();
 }
 
@@ -545,17 +542,15 @@ async fn cancel_flow_on_every_flow_cancels_current_run_and_keeps_scheduling() {
         )
         .add_exit_state(Step::Done);
 
-    let mut scheduler = Scheduler::new();
-    scheduler
-        .every("ticker", wf, Step::Work, Duration::from_millis(80))
-        .unwrap();
+    let scheduler = Scheduler::new();
+    let scheduler = scheduler.every("ticker", wf, Step::Work, Duration::from_millis(80));
     let running = scheduler.start().await.unwrap();
 
     // First run is in flight.
     while started.load(SeqCst) < 1 {
         tokio::time::sleep(Duration::from_millis(2)).await;
     }
-    running.cancel_flow("ticker").await.unwrap();
+    running.cancel_flow("ticker").unwrap();
 
     // The loop must dispatch a *second* run after the cancel returns it to Idle.
     let t_start = Instant::now();
@@ -568,7 +563,7 @@ async fn cancel_flow_on_every_flow_cancels_current_run_and_keeps_scheduling() {
     }
     assert!(
         !matches!(
-            running.status("ticker").await.unwrap().status,
+            running.status("ticker").unwrap().status,
             Status::Tripped { .. }
         ),
         "cancel must not trip an interval flow"
@@ -590,10 +585,8 @@ async fn cancel_flow_cancels_in_flight_cron_flow() {
         )
         .add_exit_state(Step::Done);
 
-    let mut scheduler = Scheduler::new();
-    scheduler
-        .cron("cronflow", wf, Step::Work, "* * * * * *")
-        .unwrap();
+    let scheduler = Scheduler::new();
+    let scheduler = scheduler.cron("cronflow", wf, Step::Work, "* * * * * *");
     let running = scheduler.start().await.unwrap();
 
     // First per-second tick starts a run within ~1s.
@@ -605,12 +598,9 @@ async fn cancel_flow_cancels_in_flight_cron_flow() {
         );
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    running.cancel_flow("cronflow").await.unwrap();
+    running.cancel_flow("cronflow").unwrap();
     await_not_running(&running, "cronflow").await;
-    assert_eq!(
-        running.status("cronflow").await.unwrap().status,
-        Status::Idle
-    );
+    assert_eq!(running.status("cronflow").unwrap().status, Status::Idle);
     running.stop().await.unwrap();
 }
 
@@ -650,18 +640,15 @@ async fn cancel_flow_cancels_checkpointed_stepped_flow() {
         )
         .add_exit_state(Step::Done);
 
-    let mut scheduler = Scheduler::new();
-    scheduler.manual("stepped", wf, Step::Work).unwrap();
+    let scheduler = Scheduler::new();
+    let scheduler = scheduler.manual("stepped", wf, Step::Work);
     let running = scheduler.start().await.unwrap();
 
-    running.trigger("stepped").await.unwrap();
+    running.trigger("stepped").unwrap();
     await_flag(&started).await;
-    running.cancel_flow("stepped").await.unwrap();
+    running.cancel_flow("stepped").unwrap();
     await_not_running(&running, "stepped").await;
 
-    assert_eq!(
-        running.status("stepped").await.unwrap().status,
-        Status::Idle
-    );
+    assert_eq!(running.status("stepped").unwrap().status, Status::Idle);
     running.stop().await.unwrap();
 }

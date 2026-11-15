@@ -89,16 +89,14 @@ async fn test_scheduler_with_tracing() {
             .register(TestState::Processing, TestTask::new("processing"))
             .add_exit_state(TestState::Complete);
 
-        let mut scheduler = Scheduler::new();
-        scheduler
-            .manual("test_workflow", workflow, TestState::Start)
-            .unwrap();
+        let scheduler = Scheduler::new();
+        let scheduler = scheduler.manual("test_workflow", workflow, TestState::Start);
 
         // Start consumes the builder and returns a clone-able handle.
         let running = scheduler.start().await.unwrap();
 
         // Inspect status before stopping.
-        let status = running.status("test_workflow").await;
+        let status = running.status("test_workflow");
         assert!(status.is_some());
         assert_eq!(status.unwrap().status, cano::scheduler::Status::Idle);
 

@@ -209,21 +209,26 @@ async fn main() -> CanoResult<()> {
         .add_exit_states(vec![WorkflowAction::Complete, WorkflowAction::Error]);
 
     // Create scheduler with multiple flows
-    let mut scheduler = Scheduler::new();
+    let scheduler = Scheduler::new();
 
     // Run hourly report every 5 seconds for demo to see concurrent executions
-    scheduler.every_seconds(
+    let scheduler = scheduler.every(
         "hourly_report",
         hourly_report_flow,
         WorkflowAction::Start,
-        5,
-    )?;
+        Duration::from_secs(5),
+    );
     // Run cleanup every 3 seconds for concurrent demo
-    scheduler.every_seconds("data_cleanup", cleanup_flow, WorkflowAction::Start, 3)?;
+    let scheduler = scheduler.every(
+        "data_cleanup",
+        cleanup_flow,
+        WorkflowAction::Start,
+        Duration::from_secs(3),
+    );
     // Manual trigger only
-    scheduler.manual("manual_migration", manual_flow, WorkflowAction::Start)?;
+    let scheduler = scheduler.manual("manual_migration", manual_flow, WorkflowAction::Start);
     // System setup
-    scheduler.manual("system_setup", setup_flow, WorkflowAction::Start)?;
+    let scheduler = scheduler.manual("system_setup", setup_flow, WorkflowAction::Start);
 
     println!("Configured flows:");
     println!("  Hourly Report: Every 5 seconds");
@@ -240,7 +245,7 @@ async fn main() -> CanoResult<()> {
     sleep(Duration::from_secs(2)).await;
 
     println!("Current workflow status:");
-    let flows_info = running.list().await;
+    let flows_info = running.list();
     for info in &flows_info {
         println!(
             "  {}: {:?} (runs: {})",
@@ -255,11 +260,11 @@ async fn main() -> CanoResult<()> {
 
     // Manually trigger the setup task
     println!("Manually triggering system setup...");
-    running.trigger("system_setup").await?;
+    running.trigger("system_setup")?;
 
     // Manually trigger the migration task
     println!("Manually triggering data migration...");
-    running.trigger("manual_migration").await?;
+    running.trigger("manual_migration")?;
 
     // Let the scheduler run for a while to see scheduled executions
     println!("Running scheduler for 20 seconds to see concurrent executions...");
@@ -267,7 +272,7 @@ async fn main() -> CanoResult<()> {
 
     // Show final status
     println!("\nFinal workflow status:");
-    let final_flows_info = running.list().await;
+    let final_flows_info = running.list();
     for info in &final_flows_info {
         println!(
             "  {}: {:?} (runs: {})",

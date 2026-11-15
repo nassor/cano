@@ -324,7 +324,9 @@ pub use observer::TracingObserver;
 pub use observer::MetricsObserver;
 
 #[cfg(feature = "scheduler")]
-pub use scheduler::{BackoffPolicy, FlowInfo, RunningScheduler, Schedule, Scheduler, Status};
+pub use scheduler::{
+    BackoffPolicy, FlowInfo, RunningScheduler, Scheduler, Status, shutdown_signal,
+};
 
 /// Attribute macro applied to `Task` trait definitions and `impl Task` blocks
 /// to rewrite `async fn` methods into ones returning
@@ -394,7 +396,9 @@ pub mod prelude {
     };
 
     #[cfg(feature = "scheduler")]
-    pub use crate::{BackoffPolicy, FlowInfo, RunningScheduler, Schedule, Scheduler, Status};
+    pub use crate::{
+        BackoffPolicy, FlowInfo, RunningScheduler, Scheduler, Status, shutdown_signal,
+    };
 
     #[cfg(feature = "tracing")]
     pub use crate::TracingObserver;

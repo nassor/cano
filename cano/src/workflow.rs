@@ -1026,6 +1026,19 @@ where
         result
     }
 
+    /// Validate (cached) + validate the initial state + run the FSM. No resource
+    /// setup/teardown: the scheduler owns its flows' resource lifecycle.
+    #[cfg(feature = "scheduler")]
+    pub(crate) async fn run_once(
+        &self,
+        initial_state: TState,
+        token: Option<&CancellationToken>,
+    ) -> Result<TState, CanoError> {
+        self.validate_cached()?;
+        self.validate_initial_state(&initial_state)?;
+        self.run_workflow(initial_state, token).await
+    }
+
     /// `validate()`, computed once and cached: the workflow shape is immutable post-build.
     pub(crate) fn validate_cached(&self) -> Result<(), CanoError> {
         self.validated.get_or_init(|| self.validate()).clone()

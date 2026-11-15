@@ -541,12 +541,12 @@ fn scheduled(id: String) -> Run {
             .register(S::Start, Probe::new(&id, "single", -1, S::Mid))
             .register(S::Mid, Probe::new(&id, "single", -1, S::Done))
             .add_exit_state(S::Done);
-        let mut scheduler = Scheduler::new();
-        scheduler.manual(&id, workflow, S::Start)?;
+        let scheduler = Scheduler::new();
+        let scheduler = scheduler.manual(&id, workflow, S::Start);
         let running = scheduler.start().await?;
-        running.trigger(&id).await?;
+        running.trigger(&id)?;
         let deadline = Instant::now() + Duration::from_secs(30);
-        while running.status(&id).await.map(|info| info.status) != Some(Status::Completed) {
+        while running.status(&id).map(|info| info.status) != Some(Status::Completed) {
             assert!(
                 Instant::now() < deadline,
                 "{id}: scheduled run never completed"
