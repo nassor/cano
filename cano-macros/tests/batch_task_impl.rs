@@ -105,10 +105,7 @@ async fn inherent_inferred_integrates_with_workflow() {
         .register(Step::Process, InherentInferred)
         .add_exit_state(Step::Done);
 
-    let result = workflow
-        .orchestrate(Step::Process, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Step::Process).await.unwrap();
     assert_eq!(result, Step::Done);
 }
 
@@ -200,10 +197,7 @@ async fn inherent_with_key_integrates_with_workflow() {
         .register(Step::Process, InherentWithKey)
         .add_exit_state(Step::Done);
 
-    let result = workflow
-        .orchestrate(Step::Process, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Step::Process).await.unwrap();
     assert_eq!(result, Step::Done);
 }
 
@@ -400,10 +394,7 @@ async fn trait_form_integrates_with_workflow() {
         .register(Step::Process, TraitBatch)
         .add_exit_state(Step::Done);
 
-    let result = workflow
-        .orchestrate(Step::Process, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Step::Process).await.unwrap();
     assert_eq!(result, Step::Done);
 }
 
@@ -543,10 +534,7 @@ async fn end_to_end_workflow_load_process_finish() {
         .register(Step::Process, LoadStep)
         .add_exit_state(Step::Done);
 
-    let result = workflow
-        .orchestrate(Step::Process, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Step::Process).await.unwrap();
     assert_eq!(result, Step::Done);
 
     let output: Vec<u32> = store.get("output").unwrap();

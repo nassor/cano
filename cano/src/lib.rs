@@ -57,7 +57,7 @@
 //!     .register(Step::Process, ProcessTask)
 //!     .add_exit_state(Step::Done);
 //!
-//! let final_state = workflow.orchestrate(Step::Fetch, CancellationToken::disabled()).await?;
+//! let final_state = workflow.orchestrate(Step::Fetch).await?;
 //! assert_eq!(final_state, Step::Done);
 //!
 //! // The sum of 1..=3 is 6.
@@ -95,7 +95,7 @@
 //!     .register(Step::Compute, ComputeTask)
 //!     .add_exit_state(Step::Done);
 //!
-//! let final_state = workflow.orchestrate(Step::Compute, CancellationToken::disabled()).await?;
+//! let final_state = workflow.orchestrate(Step::Compute).await?;
 //! assert_eq!(final_state, Step::Done);
 //! # Ok(())
 //! # }
@@ -216,15 +216,15 @@
 //!
 //! ### Cooperative cancellation
 //!
-//! [`Workflow::orchestrate`] (and [`resume_from`](Workflow::resume_from))
-//! take a [`CancellationToken`] obtained from [`CancellationToken::new`]; firing the paired
-//! [`CancellationHandle`] aborts the in-flight cancellable task at its next `.await`, drains the
-//! saga compensation stack, and returns [`CanoError::Cancelled`]. Cancellation is *cooperative*
-//! (a task in tight synchronous work isn't interrupted until it yields) and *saga-safe* (a
-//! [`CompensatableTask`] always runs to completion so its rollback entry is recorded; the cancel
-//! is honoured at the next state boundary). The compensation drain itself is uncancellable.
-//! To opt a run out of cancellation, pass [`CancellationToken::disabled`] — it never fires and is
-//! zero-cost (the FSM skips the cancellation `select!`). See the [`cancel`] module.
+//! [`Workflow::orchestrate_with_token`] (and [`resume_from_with_token`](Workflow::resume_from_with_token))
+//! take a [`CancellationToken`] (re-exported from `tokio_util`); calling
+//! [`cancel`](CancellationToken::cancel) on it (or on any clone) aborts the in-flight cancellable
+//! task at its next `.await`, drains the saga compensation stack, and returns
+//! [`CanoError::Cancelled`]. Cancellation is *cooperative* (a task in tight synchronous work isn't
+//! interrupted until it yields) and *saga-safe* (a [`CompensatableTask`] always runs to completion
+//! so its rollback entry is recorded; the cancel is honoured at the next state boundary). The
+//! compensation drain itself is uncancellable. [`Workflow::orchestrate`] runs without a token and
+//! skips the cancellation `select!` entirely.
 //!
 //! ## Module Overview
 //!
@@ -235,7 +235,7 @@
 //! - [`task::batch`]: The [`BatchTask`] trait — fan-out over data items via `load`/`process_item`/`finish`; registered with [`Workflow::register`]
 //! - [`task::stepped`]: The [`SteppedTask`] trait — resumable iterative work via `step()` with a serializable cursor; registered with [`Workflow::register_stepped`] (persists the cursor when a checkpoint store is attached)
 //! - [`task::stream`]: The [`StreamTask`] trait — a genuine stream-processing model: consume an `impl Stream` continuously, flush per [`StreamWindow`] window, run until the [`CancellationToken`] fires, and resume from a persisted cursor; registered with [`Workflow::register_stream`]
-//! - [`cancel`]: [`CancellationToken`] / [`CancellationHandle`] — cooperative cancellation for [`orchestrate`](Workflow::orchestrate)
+//! - [`CancellationToken`] — cooperative cancellation for [`orchestrate_with_token`](Workflow::orchestrate_with_token)
 //! - [`workflow`]: [`Workflow`] — FSM orchestration with Split/Join support
 //! - `scheduler` (requires `scheduler` feature): `Scheduler` (builder) and `RunningScheduler` (live handle) — cron and interval scheduling
 //! - [`mod@resource`]: [`Resource`] trait, [`Resources`] dictionary, and [`HealthStatus`] — lifecycle-aware resource management and health probes
@@ -264,7 +264,6 @@
 // Lets macro output use `::cano::…` paths inside this crate too.
 extern crate self as cano;
 
-pub mod cancel;
 pub mod circuit;
 pub mod error;
 pub mod observer;
@@ -286,7 +285,6 @@ pub mod scheduler;
 pub mod testing;
 
 // Core public API - simplified imports
-pub use cancel::{CancellationHandle, CancellationToken};
 pub use circuit::{CircuitBreaker, CircuitPolicy, CircuitState, Permit as CircuitPermit};
 pub use error::{CanoError, CanoResult};
 pub use observer::WorkflowObserver;
@@ -311,6 +309,7 @@ pub use task::stream::{
     CloseReason, StreamBatch, StreamErrorPolicy, StreamTask, StreamWindow, WindowSignal,
 };
 pub use task::timer::{DynTimerTask, TimerOutcome, TimerTask, TimerTaskObject, run_timer};
+pub use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "recovery")]
 pub use recovery::RedbCheckpointStore;
@@ -383,14 +382,14 @@ pub mod prelude {
     //! Use `use cano::prelude::*;` to import the most commonly used types and traits.
 
     pub use crate::{
-        BatchTask, CancellationHandle, CancellationToken, CanoError, CanoResult, CheckpointRow,
-        CheckpointStore, CircuitBreaker, CircuitPermit, CircuitPolicy, CircuitState, CloseReason,
-        CompensatableTask, HealthStatus, JoinConfig, JoinStrategy, MemoryStore, Meter, MeterStatus,
-        MultiPermit, MultiRateLimiter, PollErrorPolicy, PollOutcome, PollTask, RateLimiter,
-        RateLimiterPermit, RateLimiterPolicy, Reservation, Resource, Resources, RetryMode,
-        RouterTask, RowKind, SplitResult, SplitTaskResult, StateEntry, StepOutcome, SteppedTask,
-        StreamBatch, StreamErrorPolicy, StreamTask, StreamWindow, Task, TaskConfig, TaskObject,
-        TaskResult, Tier, TimerOutcome, TimerTask, WindowPermit, WindowPolicy, WindowSignal,
+        BatchTask, CancellationToken, CanoError, CanoResult, CheckpointRow, CheckpointStore,
+        CircuitBreaker, CircuitPermit, CircuitPolicy, CircuitState, CloseReason, CompensatableTask,
+        HealthStatus, JoinConfig, JoinStrategy, MemoryStore, Meter, MeterStatus, MultiPermit,
+        MultiRateLimiter, PollErrorPolicy, PollOutcome, PollTask, RateLimiter, RateLimiterPermit,
+        RateLimiterPolicy, Reservation, Resource, Resources, RetryMode, RouterTask, RowKind,
+        SplitResult, SplitTaskResult, StateEntry, StepOutcome, SteppedTask, StreamBatch,
+        StreamErrorPolicy, StreamTask, StreamWindow, Task, TaskConfig, TaskObject, TaskResult,
+        Tier, TimerOutcome, TimerTask, WindowPermit, WindowPolicy, WindowSignal,
         WindowedRateLimiter, Workflow, WorkflowObserver, run_stepped,
     };
 

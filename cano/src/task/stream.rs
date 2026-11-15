@@ -11,7 +11,7 @@
 //!   [`on_close`](StreamTask::on_close)`(Exhausted)` chooses the next state.
 //! - **Stop** — [`flush_window`](StreamTask::flush_window) returns [`WindowSignal::Stop`]:
 //!   transition to that result.
-//! - **Cancelled** — the workflow's [`CancellationToken`](crate::cancel::CancellationToken)
+//! - **Cancelled** — the workflow's [`CancellationToken`](crate::CancellationToken)
 //!   fires: cooperative drain — the in-flight window is flushed, its cursor is committed,
 //!   `on_close(Cancelled)` runs for cleanup (its returned state is *ignored*), and the run
 //!   ends as [`CanoError::Cancelled`](crate::error::CanoError::Cancelled) so a later
@@ -66,7 +66,6 @@
 //! `open()` and re-consume the stream; only [`attempt_timeout`](crate::task::TaskConfig)
 //! is honored — as a per-[`process_item`](StreamTask::process_item) bound.
 
-use crate::cancel::CancellationToken;
 use crate::error::CanoError;
 use crate::resource::Resources;
 use crate::task::{TaskConfig, TaskResult};
@@ -79,6 +78,7 @@ use std::future::Future;
 use std::hash::Hash;
 use std::pin::Pin;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 // ---------------------------------------------------------------------------
 // Value types
@@ -150,7 +150,7 @@ pub enum WindowSignal<TState> {
 pub enum CloseReason {
     /// The source stream returned `None`.
     Exhausted,
-    /// The workflow's [`CancellationToken`](crate::cancel::CancellationToken) fired
+    /// The workflow's [`CancellationToken`](crate::CancellationToken) fired
     /// (cooperative shutdown). The in-flight partial window was flushed first.
     Cancelled,
 }
@@ -344,7 +344,7 @@ async fn drive_window<T, S, K>(
     window: &StreamWindow,
     policy: &StreamErrorPolicy,
     attempt_timeout: Option<std::time::Duration>,
-    token: &CancellationToken,
+    token: Option<&CancellationToken>,
 ) -> Result<WindowStep<T::Cursor, S>, CanoError>
 where
     T: StreamTask<S, K> + ?Sized,
@@ -373,6 +373,16 @@ where
     let mut tick: Option<Pin<Box<tokio::time::Sleep>>> = duration_len
         .map(|len| Box::pin(tokio::time::sleep_until(tokio::time::Instant::now() + len)));
 
+    // Resolves when the token fires, or never (no token). Built once and polled by
+    // reference so the `select!` below does not re-register a waiter per item.
+    let cancelled = async {
+        match token {
+            Some(t) => t.cancelled().await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::pin!(cancelled);
+
     loop {
         // Count-window flush.
         if let Some(limit) = count_limit
@@ -383,7 +393,7 @@ where
 
         tokio::select! {
             biased;
-            _ = token.cancelled() => {
+            _ = &mut cancelled => {
                 // On cancel, flush the partial window (if any) and run `on_close` for
                 // cleanup; the run ends as `Cancelled` (resumable). `WindowSignal` from the
                 // cancel-drain flush is ignored — honouring `Stop` here would contradict
@@ -543,7 +553,7 @@ where
     })
 }
 
-/// In-memory companion loop: drive windows with a disabled token (no cancellation), no
+/// In-memory companion loop: drive windows with no token (no cancellation), no
 /// cursor persistence. Backs [`StreamTask::run_in_memory`].
 async fn run_stream_in_memory<T, S, K>(
     task: &T,
@@ -554,7 +564,6 @@ where
     S: Clone + fmt::Debug + Send + Sync + 'static,
     K: Hash + Eq + Send + Sync + 'static,
 {
-    let token = CancellationToken::disabled();
     let window = task.window();
     let policy = task.on_item_error();
     let attempt_timeout = task.config().attempt_timeout;
@@ -571,20 +580,20 @@ where
                 &window,
                 &policy,
                 attempt_timeout,
-                &token,
+                None,
             )
             .await?
             {
                 WindowStep::Window { .. } => continue,
                 WindowStep::Done { result, .. } => return Ok(result),
-                // Unreachable: the in-memory companion drives with a disabled token.
+                // Unreachable: the in-memory companion drives without a token.
                 WindowStep::Cancelled { .. } => return Err(CanoError::cancelled()),
             }
         }
     }
     .await;
 
-    // The in-memory companion uses a disabled token, so it never cancels.
+    // The in-memory companion has no token, so it never cancels.
     #[cfg(feature = "metrics")]
     crate::metrics::stream_run(if result.is_ok() {
         "completed"
@@ -626,7 +635,7 @@ where
     fn next_window<'a>(
         &'a mut self,
         res: &'a Resources<TResourceKey>,
-        token: &'a CancellationToken,
+        token: Option<&'a CancellationToken>,
     ) -> WindowFuture<'a, TState>;
 }
 
@@ -682,7 +691,7 @@ where
     fn next_window<'a>(
         &'a mut self,
         res: &'a Resources<K>,
-        token: &'a CancellationToken,
+        token: Option<&'a CancellationToken>,
     ) -> WindowFuture<'a, S> {
         Box::pin(async move {
             let step = drive_window(
@@ -981,16 +990,12 @@ mod tests {
 
     #[tokio::test]
     async fn integrates_with_workflow_via_register() {
-        use crate::cancel::CancellationToken;
         use crate::workflow::Workflow;
 
         let workflow = Workflow::bare()
             .register(Step::Consume, Collector::default())
             .add_exit_state(Step::Done);
-        let result = workflow
-            .orchestrate(Step::Consume, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(Step::Consume).await.unwrap();
         assert_eq!(result, Step::Done);
     }
 
@@ -1097,7 +1102,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_drains_and_surfaces_cancelled() {
-        use crate::cancel::CancellationToken;
+        use crate::CancellationToken;
         use crate::workflow::Workflow;
 
         let closed = Arc::new(AtomicBool::new(false));
@@ -1105,7 +1110,8 @@ mod tests {
             closed_cancelled: Arc::clone(&closed),
             flushed_windows: Arc::new(AtomicU32::new(0)),
         };
-        let (handle, token) = CancellationToken::new();
+        let token = CancellationToken::new();
+        let handle = token.clone();
         let workflow = Workflow::bare()
             .register_stream(Step::Consume, task)
             .add_exit_state(Step::Done);
@@ -1115,9 +1121,9 @@ mod tests {
             handle.cancel();
         });
 
-        let result = workflow.orchestrate(Step::Consume, token).await;
+        let result = workflow.orchestrate_with_token(Step::Consume, &token).await;
         assert!(
-            matches!(&result, Err(e) if e.category() == "cancelled"),
+            matches!(&result, Err(e) if e.is_cancelled()),
             "a cancelled stream must surface as cancelled, got {result:?}"
         );
         assert!(
@@ -1181,7 +1187,6 @@ mod tests {
 
     #[tokio::test]
     async fn persists_cursor_and_resumes() {
-        use crate::cancel::CancellationToken;
         use crate::recovery::{CheckpointStore, RowKind};
         use crate::workflow::Workflow;
 
@@ -1200,9 +1205,7 @@ mod tests {
             .with_workflow_id("resume-test");
 
         // Run 1: fails flushing window [5,6].
-        let r1 = workflow
-            .orchestrate(Step::Consume, CancellationToken::disabled())
-            .await;
+        let r1 = workflow.orchestrate(Step::Consume).await;
         assert!(r1.is_err(), "run 1 should fail mid-stream: {r1:?}");
 
         // Windows [1,2] (cursor 2) and [3,4] (cursor 4) committed; [5,6] failed.
@@ -1219,10 +1222,7 @@ mod tests {
         );
 
         // Resume: re-open at cursor 4 and finish [5,6].
-        let r2 = workflow
-            .resume_from("resume-test", CancellationToken::disabled())
-            .await
-            .unwrap();
+        let r2 = workflow.resume_from("resume-test").await.unwrap();
         assert_eq!(r2, Step::Done);
 
         assert_eq!(*opened.lock().unwrap(), vec![None, Some(4)]);
@@ -1288,16 +1288,12 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_flush_stop_is_honored() {
-        use crate::cancel::CancellationToken;
         use crate::workflow::Workflow;
 
         let workflow = Workflow::bare()
             .register_stream(S3::Consume, StopOnFinalWindow)
             .add_exit_states([S3::ViaStop, S3::ViaClose]);
-        let result = workflow
-            .orchestrate(S3::Consume, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(S3::Consume).await.unwrap();
         assert_eq!(
             result,
             S3::ViaStop,
@@ -1322,7 +1318,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_fires_on_cancelled_once() {
-        use crate::cancel::CancellationToken;
+        use crate::CancellationToken;
         use crate::workflow::Workflow;
 
         let task = Forever {
@@ -1330,7 +1326,8 @@ mod tests {
             flushed_windows: Arc::new(AtomicU32::new(0)),
         };
         let counter = Arc::new(CancelCounter::default());
-        let (handle, token) = CancellationToken::new();
+        let token = CancellationToken::new();
+        let handle = token.clone();
         let workflow = Workflow::bare()
             .register_stream(Step::Consume, task)
             .add_exit_state(Step::Done)
@@ -1341,8 +1338,8 @@ mod tests {
             handle.cancel();
         });
 
-        let result = workflow.orchestrate(Step::Consume, token).await;
-        assert!(matches!(&result, Err(e) if e.category() == "cancelled"));
+        let result = workflow.orchestrate_with_token(Step::Consume, &token).await;
+        assert!(matches!(&result, Err(e) if e.is_cancelled()));
         assert_eq!(
             counter.cancels.load(Ordering::SeqCst),
             1,
@@ -1400,7 +1397,6 @@ mod tests {
 
     #[tokio::test]
     async fn duration_window_zero_is_clamped_not_livelocked() {
-        use crate::cancel::CancellationToken;
         use crate::workflow::Workflow;
 
         let seen = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -1414,7 +1410,7 @@ mod tests {
         // regression fails the test instead of hanging the suite.
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            workflow.orchestrate(Step::Consume, CancellationToken::disabled()),
+            workflow.orchestrate(Step::Consume),
         )
         .await
         .expect("must not livelock on a zero-duration window");
@@ -1479,14 +1475,15 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_drain_flush_error_still_runs_on_close() {
-        use crate::cancel::CancellationToken;
+        use crate::CancellationToken;
         use crate::workflow::Workflow;
 
         let on_close_reason = Arc::new(parking_lot::Mutex::new(None));
         let task = FlushFailsOnDrain {
             on_close_reason: on_close_reason.clone(),
         };
-        let (handle, token) = CancellationToken::new();
+        let token = CancellationToken::new();
+        let handle = token.clone();
         let workflow = Workflow::bare()
             .register_stream(Step::Consume, task)
             .add_exit_state(Step::Done);
@@ -1496,7 +1493,7 @@ mod tests {
             handle.cancel();
         });
 
-        let result = workflow.orchestrate(Step::Consume, token).await;
+        let result = workflow.orchestrate_with_token(Step::Consume, &token).await;
         assert!(
             matches!(&result, Err(e) if e.category() == "task_execution"),
             "the drain flush error must be surfaced, not swallowed into `Cancelled`; got \
@@ -1518,7 +1515,6 @@ mod tests {
 
     #[tokio::test]
     async fn total_timeout_flushes_commits_and_reclassifies() {
-        use crate::cancel::CancellationToken;
         use crate::workflow::Workflow;
 
         let task = Forever {
@@ -1536,7 +1532,7 @@ mod tests {
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            workflow.orchestrate(Step::Consume, CancellationToken::disabled()),
+            workflow.orchestrate(Step::Consume),
         )
         .await
         .expect("a Stream state must not silently defeat with_total_timeout");
@@ -1606,11 +1602,12 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_during_open_session_is_cancellable_without_on_close() {
-        use crate::cancel::CancellationToken;
+        use crate::CancellationToken;
         use crate::workflow::Workflow;
 
         let on_close_called = Arc::new(AtomicBool::new(false));
-        let (handle, token) = CancellationToken::new();
+        let token = CancellationToken::new();
+        let handle = token.clone();
         let workflow = Workflow::bare()
             .register_stream(
                 Step::Consume,
@@ -1627,13 +1624,13 @@ mod tests {
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            workflow.orchestrate(Step::Consume, token),
+            workflow.orchestrate_with_token(Step::Consume, &token),
         )
         .await
         .expect("a hung open() must still be cancellable");
 
         assert!(
-            matches!(&result, Err(e) if e.category() == "cancelled"),
+            matches!(&result, Err(e) if e.is_cancelled()),
             "got {result:?}"
         );
         assert!(
@@ -1691,7 +1688,6 @@ mod tests {
 
     #[tokio::test]
     async fn attempt_timeout_bounds_process_item() {
-        use crate::cancel::CancellationToken;
         use crate::workflow::Workflow;
 
         let workflow = Workflow::bare()
@@ -1700,7 +1696,7 @@ mod tests {
         // FailFast (default) → the timed-out item fails the run promptly.
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            workflow.orchestrate(Step::Consume, CancellationToken::disabled()),
+            workflow.orchestrate(Step::Consume),
         )
         .await
         .expect("attempt_timeout must bound the hung process_item well under 5s");
@@ -1797,7 +1793,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn duration_window_flushes_on_deadline_and_rearms() {
-        use crate::cancel::CancellationToken;
         use crate::workflow::Workflow;
 
         // 50ms windows; items arrive at +30ms each (1@30, 2@60, 3@90, 4@120) under paused
@@ -1823,10 +1818,7 @@ mod tests {
             }
         });
 
-        let result = workflow
-            .orchestrate(Step::Consume, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(Step::Consume).await.unwrap();
         assert_eq!(result, Step::Done);
         assert_eq!(
             *windows.lock().unwrap(),
@@ -1842,7 +1834,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn duration_window_skips_empty_intervals() {
-        use crate::cancel::CancellationToken;
         use crate::workflow::Workflow;
 
         // 50ms windows but the source is idle until +120ms. The deadlines at 50/100ms fire
@@ -1863,10 +1854,7 @@ mod tests {
             // tx dropped here → channel closes, run exhausts.
         });
 
-        let result = workflow
-            .orchestrate(Step::Consume, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(Step::Consume).await.unwrap();
         assert_eq!(result, Step::Done);
         let w = windows.lock().unwrap();
         assert!(
@@ -1928,7 +1916,6 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn duration_window_stop_transitions_without_close() {
-        use crate::cancel::CancellationToken;
         use crate::workflow::Workflow;
 
         // One item buffered, then the 50ms deadline fires and flush_window returns Stop:
@@ -1952,10 +1939,7 @@ mod tests {
             drop(tx);
         });
 
-        let result = workflow
-            .orchestrate(S3::Consume, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(S3::Consume).await.unwrap();
         assert_eq!(
             result,
             S3::ViaStop,
@@ -2181,7 +2165,6 @@ mod tests {
 
     #[tokio::test]
     async fn skip_does_not_commit_bad_item_cursor() {
-        use crate::cancel::CancellationToken;
         use crate::workflow::Workflow;
 
         // Count(1) over [1,2,3] with item 2 failing under SkipAndContinue: cursors 1 and 3
@@ -2198,10 +2181,7 @@ mod tests {
             .add_exit_state(Step::Done)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("skip-cursor");
-        let result = workflow
-            .orchestrate(Step::Consume, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(Step::Consume).await.unwrap();
         assert_eq!(result, Step::Done);
         assert_eq!(
             step_cursors(&store),
@@ -2327,7 +2307,6 @@ mod tests {
 
     #[tokio::test]
     async fn empty_stream_closes_without_flush_or_cursor() {
-        use crate::cancel::CancellationToken;
         use crate::workflow::Workflow;
 
         // open() yields nothing → on_close(Exhausted) runs, but no window flushes and no
@@ -2344,10 +2323,7 @@ mod tests {
             .add_exit_state(Step::Done)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("empty");
-        let result = workflow
-            .orchestrate(Step::Consume, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(Step::Consume).await.unwrap();
         assert_eq!(result, Step::Done);
         assert!(
             flushes.lock().unwrap().is_empty(),
@@ -2361,7 +2337,6 @@ mod tests {
 
     #[tokio::test]
     async fn exhaust_exact_divide_commits_only_full_window_cursors() {
-        use crate::cancel::CancellationToken;
         use crate::workflow::Workflow;
 
         // Count(2) over exactly 4 items: windows [1,2] and [3,4] flush; exhaustion finds an
@@ -2378,10 +2353,7 @@ mod tests {
             .add_exit_state(Step::Done)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("exact");
-        let result = workflow
-            .orchestrate(Step::Consume, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(Step::Consume).await.unwrap();
         assert_eq!(result, Step::Done);
         assert_eq!(*flushes.lock().unwrap(), vec![vec![1u64, 2], vec![3, 4]]);
         assert_eq!(step_cursors(&store), vec![2u64, 4]);
@@ -2389,7 +2361,6 @@ mod tests {
 
     #[tokio::test]
     async fn exhaust_partial_window_commits_its_cursor() {
-        use crate::cancel::CancellationToken;
         use crate::workflow::Workflow;
 
         // Count(2) over 5 items: [1,2], [3,4], then the terminal partial [5] flushes on
@@ -2406,10 +2377,7 @@ mod tests {
             .add_exit_state(Step::Done)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("partial");
-        let result = workflow
-            .orchestrate(Step::Consume, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(Step::Consume).await.unwrap();
         assert_eq!(result, Step::Done);
         assert_eq!(
             *flushes.lock().unwrap(),
@@ -2425,7 +2393,7 @@ mod tests {
     /// Self-cancels from `process_item` once `cancel_after` items have been seen, so a
     /// partial (sub-window) buffer is in flight when the token fires. Records flushes/close.
     struct CancelMidWindow {
-        handle: crate::cancel::CancellationHandle,
+        handle: CancellationToken,
         cancel_after: u32,
         seen: AtomicU32,
         window: StreamWindow,
@@ -2485,7 +2453,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_flushes_partial_in_flight_window() {
-        use crate::cancel::CancellationToken;
+        use crate::CancellationToken;
         use crate::workflow::Workflow;
 
         // Count(3) but cancel fires after the 2nd item: the in-flight partial [0,1] is
@@ -2493,7 +2461,8 @@ mod tests {
         // select also proves cancel wins over the ready 3rd stream item.
         let flushed = Arc::new(Mutex::new(Vec::new()));
         let close_reason = Arc::new(Mutex::new(None));
-        let (handle, token) = CancellationToken::new();
+        let token = CancellationToken::new();
+        let handle = token.clone();
         let task = CancelMidWindow {
             handle,
             cancel_after: 2,
@@ -2506,9 +2475,9 @@ mod tests {
         let workflow = Workflow::bare()
             .register_stream(S3::Consume, task)
             .add_exit_states([S3::ViaStop, S3::ViaClose]);
-        let result = workflow.orchestrate(S3::Consume, token).await;
+        let result = workflow.orchestrate_with_token(S3::Consume, &token).await;
         assert!(
-            matches!(&result, Err(e) if e.category() == "cancelled"),
+            matches!(&result, Err(e) if e.is_cancelled()),
             "got {result:?}"
         );
         assert_eq!(
@@ -2521,12 +2490,13 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_ignores_stop_from_partial_flush() {
-        use crate::cancel::CancellationToken;
+        use crate::CancellationToken;
         use crate::workflow::Workflow;
 
         // The cancel-drain flush returns Stop(ViaStop); it must be ignored — the run still
         // ends cancelled rather than transitioning to ViaStop.
-        let (handle, token) = CancellationToken::new();
+        let token = CancellationToken::new();
+        let handle = token.clone();
         let task = CancelMidWindow {
             handle,
             cancel_after: 2,
@@ -2539,9 +2509,9 @@ mod tests {
         let workflow = Workflow::bare()
             .register_stream(S3::Consume, task)
             .add_exit_states([S3::ViaStop, S3::ViaClose]);
-        let result = workflow.orchestrate(S3::Consume, token).await;
+        let result = workflow.orchestrate_with_token(S3::Consume, &token).await;
         assert!(
-            matches!(&result, Err(e) if e.category() == "cancelled"),
+            matches!(&result, Err(e) if e.is_cancelled()),
             "Stop from the cancel-drain flush must not transition, got {result:?}"
         );
     }
@@ -2549,7 +2519,7 @@ mod tests {
     /// Self-cancels from `flush_window` (after a full window), so the next loop observes the
     /// cancel with an *empty* buffer. `on_close` may return an error to test propagation.
     struct CancelAfterWindow {
-        handle: crate::cancel::CancellationHandle,
+        handle: CancellationToken,
         flushes: AtomicU32,
         close_errors: bool,
         closed_cancelled: Arc<AtomicBool>,
@@ -2602,10 +2572,11 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_with_empty_buffer_skips_flush_but_runs_close() {
-        use crate::cancel::CancellationToken;
+        use crate::CancellationToken;
         use crate::workflow::Workflow;
 
-        let (handle, token) = CancellationToken::new();
+        let token = CancellationToken::new();
+        let handle = token.clone();
         let closed = Arc::new(AtomicBool::new(false));
         let task = CancelAfterWindow {
             handle,
@@ -2616,9 +2587,9 @@ mod tests {
         let workflow = Workflow::bare()
             .register_stream(Step::Consume, task)
             .add_exit_state(Step::Done);
-        let result = workflow.orchestrate(Step::Consume, token).await;
+        let result = workflow.orchestrate_with_token(Step::Consume, &token).await;
         assert!(
-            matches!(&result, Err(e) if e.category() == "cancelled"),
+            matches!(&result, Err(e) if e.is_cancelled()),
             "got {result:?}"
         );
         assert!(
@@ -2629,11 +2600,12 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_propagates_on_close_error() {
-        use crate::cancel::CancellationToken;
+        use crate::CancellationToken;
         use crate::workflow::Workflow;
 
         // An Err from on_close(Cancelled) surfaces as that error, not as a generic cancel.
-        let (handle, token) = CancellationToken::new();
+        let token = CancellationToken::new();
+        let handle = token.clone();
         let task = CancelAfterWindow {
             handle,
             flushes: AtomicU32::new(0),
@@ -2644,7 +2616,7 @@ mod tests {
             .register_stream(Step::Consume, task)
             .add_exit_state(Step::Done);
         let err = workflow
-            .orchestrate(Step::Consume, token)
+            .orchestrate_with_token(Step::Consume, &token)
             .await
             .unwrap_err();
         assert_eq!(err.category(), "task_execution");
@@ -2654,7 +2626,7 @@ mod tests {
     /// Cancels mid-window with a committed-cursor source so the cancel commits a final
     /// cursor; a fresh-cursor `open` lets resume continue from it.
     struct CancelThenResume {
-        handle: crate::cancel::CancellationHandle,
+        handle: CancellationToken,
         seen: AtomicU32,
         opened_cursors: Arc<Mutex<Vec<Option<u64>>>>,
     }
@@ -2711,10 +2683,11 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_commits_partial_cursor_and_resumes() {
-        use crate::cancel::CancellationToken;
+        use crate::CancellationToken;
         use crate::workflow::Workflow;
 
-        let (handle, token) = CancellationToken::new();
+        let token = CancellationToken::new();
+        let handle = token.clone();
         let opened = Arc::new(Mutex::new(Vec::new()));
         let task = CancelThenResume {
             handle,
@@ -2730,11 +2703,8 @@ mod tests {
 
         // Run 1: cancel after the 2nd item; the partial window [0,1] flushes and commits
         // cursor 1.
-        let r1 = workflow.orchestrate(Step::Consume, token).await;
-        assert!(
-            matches!(&r1, Err(e) if e.category() == "cancelled"),
-            "got {r1:?}"
-        );
+        let r1 = workflow.orchestrate_with_token(Step::Consume, &token).await;
+        assert!(matches!(&r1, Err(e) if e.is_cancelled()), "got {r1:?}");
         assert_eq!(
             step_cursors(&store),
             vec![1u64],
@@ -2742,10 +2712,7 @@ mod tests {
         );
 
         // Resume: re-open at cursor 1, exhaust the empty tail, finish.
-        let r2 = workflow
-            .resume_from("cancel-resume", CancellationToken::disabled())
-            .await
-            .unwrap();
+        let r2 = workflow.resume_from("cancel-resume").await.unwrap();
         assert_eq!(r2, Step::Done);
         assert_eq!(*opened.lock().unwrap(), vec![None, Some(1)]);
     }
@@ -2793,16 +2760,12 @@ mod tests {
 
     #[tokio::test]
     async fn stream_split_result_is_rejected() {
-        use crate::cancel::CancellationToken;
         use crate::workflow::Workflow;
 
         let workflow = Workflow::bare()
             .register_stream(Step::Consume, SplitOnClose)
             .add_exit_state(Step::Done);
-        let err = workflow
-            .orchestrate(Step::Consume, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(Step::Consume).await.unwrap_err();
         assert_eq!(err.category(), "workflow");
         assert!(err.to_string().contains("split"), "got {err}");
     }
@@ -2851,7 +2814,6 @@ mod tests {
 
     #[tokio::test]
     async fn corrupt_cursor_fails_to_deserialize_on_resume() {
-        use crate::cancel::CancellationToken;
         use crate::workflow::Workflow;
 
         let store = Arc::new(InMemoryStore::default());
@@ -2862,9 +2824,7 @@ mod tests {
             .with_workflow_id("corrupt");
 
         // Run 1 commits cursor 1 then crashes flushing [2]; the log is kept for resume.
-        let r1 = workflow
-            .orchestrate(Step::Consume, CancellationToken::disabled())
-            .await;
+        let r1 = workflow.orchestrate(Step::Consume).await;
         assert!(r1.is_err(), "run 1 should crash: {r1:?}");
 
         // Corrupt the committed cursor blob to invalid JSON.
@@ -2877,10 +2837,7 @@ mod tests {
             }
         }
 
-        let err = workflow
-            .resume_from("corrupt", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("corrupt").await.unwrap_err();
         assert_eq!(err.category(), "task_execution");
         assert!(
             err.to_string().contains("deserialize stream cursor"),
@@ -2918,7 +2875,6 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_append_failure_surfaces() {
-        use crate::cancel::CancellationToken;
         use crate::workflow::Workflow;
 
         let task = CountingFlush {
@@ -2931,10 +2887,7 @@ mod tests {
             .add_exit_state(Step::Done)
             .with_checkpoint_store(Arc::new(CursorAppendFails))
             .with_workflow_id("append-fail");
-        let err = workflow
-            .orchestrate(Step::Consume, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(Step::Consume).await.unwrap_err();
         assert_eq!(err.category(), "checkpoint_store");
         assert!(
             err.to_string().contains("append stream cursor checkpoint"),
@@ -2981,7 +2934,6 @@ mod tests {
 
     #[tokio::test]
     async fn panic_in_callback_becomes_error() {
-        use crate::cancel::CancellationToken;
         use crate::workflow::Workflow;
 
         // The engine wraps the session in catch_panic_to_error: a panic becomes a CanoError
@@ -2989,10 +2941,7 @@ mod tests {
         let workflow = Workflow::bare()
             .register_stream(Step::Consume, PanicInFlush)
             .add_exit_state(Step::Done);
-        let err = workflow
-            .orchestrate(Step::Consume, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(Step::Consume).await.unwrap_err();
         assert_eq!(err.category(), "task_execution");
         assert!(err.to_string().contains("panic"), "got {err}");
     }
@@ -3053,7 +3002,6 @@ mod tests {
 
     #[tokio::test]
     async fn outer_retry_not_applied_open_called_once() {
-        use crate::cancel::CancellationToken;
         use crate::workflow::Workflow;
 
         let opened = Arc::new(AtomicU32::new(0));
@@ -3063,9 +3011,7 @@ mod tests {
         let workflow = Workflow::bare()
             .register_stream(Step::Consume, task)
             .add_exit_state(Step::Done);
-        let result = workflow
-            .orchestrate(Step::Consume, CancellationToken::disabled())
-            .await;
+        let result = workflow.orchestrate(Step::Consume).await;
         assert!(result.is_err(), "FailFast item error fails the run");
         assert_eq!(
             opened.load(Ordering::SeqCst),
@@ -3141,7 +3087,6 @@ mod tests {
 
     #[tokio::test]
     async fn name_override_forwarded_to_observer() {
-        use crate::cancel::CancellationToken;
         use crate::workflow::Workflow;
 
         let log = Arc::new(EventLog::default());
@@ -3149,10 +3094,7 @@ mod tests {
             .register_stream(Step::Consume, NamedExhaust)
             .add_exit_state(Step::Done)
             .with_observer(log.clone());
-        workflow
-            .orchestrate(Step::Consume, CancellationToken::disabled())
-            .await
-            .unwrap();
+        workflow.orchestrate(Step::Consume).await.unwrap();
         let events = log.events.lock().unwrap();
         assert_eq!(
             *events,
@@ -3166,12 +3108,13 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_fires_full_observer_sequence() {
-        use crate::cancel::CancellationToken;
+        use crate::CancellationToken;
         use crate::workflow::Workflow;
 
         // A cancelled stream fires on_task_start, then (since cancel surfaces as Err)
         // on_task_failure, then on_cancelled — in that order, exactly once each.
-        let (handle, token) = CancellationToken::new();
+        let token = CancellationToken::new();
+        let handle = token.clone();
         let task = CancelAfterWindow {
             handle,
             flushes: AtomicU32::new(0),
@@ -3183,8 +3126,8 @@ mod tests {
             .register_stream(Step::Consume, task)
             .add_exit_state(Step::Done)
             .with_observer(log.clone());
-        let result = workflow.orchestrate(Step::Consume, token).await;
-        assert!(matches!(&result, Err(e) if e.category() == "cancelled"));
+        let result = workflow.orchestrate_with_token(Step::Consume, &token).await;
+        assert!(matches!(&result, Err(e) if e.is_cancelled()));
         let events = log.events.lock().unwrap();
         assert_eq!(events.len(), 3, "exactly three hooks fire, got {events:?}");
         assert!(
@@ -3200,7 +3143,6 @@ mod tests {
 
     #[tokio::test]
     async fn register_stream_without_store_completes() {
-        use crate::cancel::CancellationToken;
         use crate::workflow::Workflow;
 
         // register_stream with neither a checkpoint store nor a workflow id: cursor
@@ -3213,10 +3155,7 @@ mod tests {
         let workflow = Workflow::bare()
             .register_stream(Step::Consume, task)
             .add_exit_state(Step::Done);
-        let result = workflow
-            .orchestrate(Step::Consume, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(Step::Consume).await.unwrap();
         assert_eq!(result, Step::Done);
     }
 
@@ -3280,7 +3219,6 @@ mod tests {
 
     #[tokio::test]
     async fn duration_window_flushes_on_elapsed_time() {
-        use crate::cancel::CancellationToken;
         use crate::workflow::Workflow;
 
         // Three items emitted 10ms apart with a 50ms duration window: all three should
@@ -3293,10 +3231,7 @@ mod tests {
         let workflow = Workflow::bare()
             .register_stream(Step::Consume, task)
             .add_exit_state(Step::Done);
-        let result = workflow
-            .orchestrate(Step::Consume, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(Step::Consume).await.unwrap();
         assert_eq!(result, Step::Done);
     }
 
@@ -3306,7 +3241,6 @@ mod tests {
 
     #[tokio::test]
     async fn crash_resume_commits_cursor_between_windows() {
-        use crate::cancel::CancellationToken;
         use crate::recovery::{CheckpointRow, CheckpointStore};
         use crate::workflow::Workflow;
 
@@ -3399,10 +3333,7 @@ mod tests {
             .with_workflow_id("crash-resume");
 
         // The synthetic log has cursor 2 committed; resume should pick it up.
-        let result = workflow
-            .resume_from("crash-resume", CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.resume_from("crash-resume").await.unwrap();
         assert_eq!(result, Step::Done);
         // The resumed run opened from cursor 2 (the last committed position).
         assert_eq!(*opened_cursor.lock().unwrap(), Some(2));
@@ -3412,7 +3343,7 @@ mod tests {
 #[cfg(all(test, feature = "metrics"))]
 mod metrics_tests {
     use super::*;
-    use crate::cancel::CancellationToken;
+    use crate::CancellationToken;
     use crate::metrics::test_support::*;
     use crate::task;
     use crate::task::Task;
@@ -3473,9 +3404,7 @@ mod metrics_tests {
             let workflow = Workflow::bare()
                 .register_stream(St::Consume, FiveItems)
                 .add_exit_state(St::Done);
-            workflow
-                .orchestrate(St::Consume, CancellationToken::disabled())
-                .await
+            workflow.orchestrate(St::Consume).await
         });
         assert!(result.is_ok(), "workflow should succeed: {result:?}");
         assert_eq!(
@@ -3498,7 +3427,7 @@ mod metrics_tests {
 
     /// Cancels itself after the first window (deterministic — no spawn/sleep).
     struct SelfCancel {
-        handle: crate::cancel::CancellationHandle,
+        handle: CancellationToken,
     }
 
     #[task::stream]
@@ -3541,12 +3470,13 @@ mod metrics_tests {
 
     #[test]
     fn cancelled_stream_records_cancelled_outcome() {
-        let (handle, token) = CancellationToken::new();
+        let token = CancellationToken::new();
+        let handle = token.clone();
         let (result, rows) = run_with_recorder(|| async move {
             let workflow = Workflow::bare()
                 .register_stream(St::Consume, SelfCancel { handle })
                 .add_exit_state(St::Done);
-            workflow.orchestrate(St::Consume, token).await
+            workflow.orchestrate_with_token(St::Consume, &token).await
         });
         assert!(result.is_err(), "a cancelled run is Err: {result:?}");
         assert_eq!(
@@ -3611,9 +3541,7 @@ mod metrics_tests {
                 .register_stream(St::Consume, NeverStops)
                 .add_exit_state(St::Done)
                 .with_total_timeout(std::time::Duration::from_nanos(1));
-            workflow
-                .orchestrate(St::Consume, CancellationToken::disabled())
-                .await
+            workflow.orchestrate(St::Consume).await
         });
         assert!(
             matches!(&result, Err(e) if e.category() == "workflow_timeout"),
@@ -3680,9 +3608,7 @@ mod metrics_tests {
             let workflow = Workflow::bare()
                 .register_stream(St::Consume, FailSecond)
                 .add_exit_state(St::Done);
-            workflow
-                .orchestrate(St::Consume, CancellationToken::disabled())
-                .await
+            workflow.orchestrate(St::Consume).await
         });
         assert!(
             result.is_err(),

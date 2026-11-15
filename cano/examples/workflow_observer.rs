@@ -158,9 +158,7 @@ async fn main() -> Result<(), CanoError> {
         )
         .add_exit_state(Step::Done)
         .with_observer(observer.clone());
-    let final_state = workflow
-        .orchestrate(Step::Load, CancellationToken::disabled())
-        .await?;
+    let final_state = workflow.orchestrate(Step::Load).await?;
     println!("  → workflow finished in state {final_state:?}\n");
 
     // -- Scenario B -------------------------------------------------------
@@ -183,10 +181,7 @@ async fn main() -> Result<(), CanoError> {
         )
         .add_exit_state(Step::Done)
         .with_observer(observer.clone());
-    match guarded
-        .orchestrate(Step::Probe, CancellationToken::disabled())
-        .await
-    {
+    match guarded.orchestrate(Step::Probe).await {
         Ok(s) => println!("  → unexpectedly finished in {s:?}\n"),
         Err(e) => println!("  → workflow errored as expected: {e}\n"),
     }

@@ -5,8 +5,8 @@
 //! `on_cancelled`, idempotency, precedence over `with_total_timeout`, an uncancellable drain,
 //! pass-through equivalence with `orchestrate`, and resume cancellation.
 
+use cano::CancellationToken;
 use cano::prelude::*;
-use cano::{CancellationHandle, CancellationToken};
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -125,7 +125,7 @@ fn flag() -> Arc<AtomicBool> {
 
 /// Cancel via `handle` as soon as `flag` flips true (deterministic: fire while the
 /// target task is parked in its sleep).
-fn cancel_when(flag: Arc<AtomicBool>, handle: CancellationHandle) -> tokio::task::JoinHandle<()> {
+fn cancel_when(flag: Arc<AtomicBool>, handle: CancellationToken) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         while !flag.load(Ordering::SeqCst) {
             tokio::time::sleep(Duration::from_millis(2)).await;
@@ -149,11 +149,12 @@ async fn cancel_mid_long_running_task_returns_cancelled() {
         )
         .add_exit_state(Step::Done);
 
-    let (handle, token) = CancellationToken::new();
+    let token = CancellationToken::new();
+    let handle = token.clone();
     let canceller = cancel_when(started.clone(), handle);
 
     let t0 = Instant::now();
-    let result = wf.orchestrate(Step::Ship, token).await;
+    let result = wf.orchestrate_with_token(Step::Ship, &token).await;
     canceller.await.unwrap();
 
     assert_eq!(result.unwrap_err().category(), "cancelled");
@@ -184,10 +185,11 @@ async fn cancel_before_orchestrate_returns_immediately_without_running_any_task(
         )
         .add_exit_state(Step::Done);
 
-    let (handle, token) = CancellationToken::new();
+    let token = CancellationToken::new();
+    let handle = token.clone();
     handle.cancel(); // pre-cancel before running
 
-    let result = wf.orchestrate(Step::Ship, token).await;
+    let result = wf.orchestrate_with_token(Step::Ship, &token).await;
 
     assert_eq!(result.unwrap_err().category(), "cancelled");
     assert!(!started.load(Ordering::SeqCst), "task must not start");
@@ -237,10 +239,11 @@ async fn cancel_with_compensation_drains_stack_then_returns_cancelled() {
         )
         .add_exit_state(Step::Done);
 
-    let (handle, token) = CancellationToken::new();
+    let token = CancellationToken::new();
+    let handle = token.clone();
     let canceller = cancel_when(ship_started.clone(), handle);
 
-    let result = wf.orchestrate(Step::Reserve, token).await;
+    let result = wf.orchestrate_with_token(Step::Reserve, &token).await;
     canceller.await.unwrap();
 
     let err = result.unwrap_err();
@@ -287,10 +290,11 @@ async fn cancel_with_failing_compensator_surfaces_compensation_failed() {
         )
         .add_exit_state(Step::Done);
 
-    let (handle, token) = CancellationToken::new();
+    let token = CancellationToken::new();
+    let handle = token.clone();
     let canceller = cancel_when(ship_started.clone(), handle);
 
-    let result = wf.orchestrate(Step::Reserve, token).await;
+    let result = wf.orchestrate_with_token(Step::Reserve, &token).await;
     canceller.await.unwrap();
 
     match result.unwrap_err() {
@@ -336,10 +340,11 @@ async fn compensatable_task_not_interrupted_midflight() {
         )
         .add_exit_state(Step::Done);
 
-    let (handle, token) = CancellationToken::new();
+    let token = CancellationToken::new();
+    let handle = token.clone();
     let canceller = cancel_when(hold_started.clone(), handle); // cancel during Hold's run
 
-    let result = wf.orchestrate(Step::Reserve, token).await;
+    let result = wf.orchestrate_with_token(Step::Reserve, &token).await;
     canceller.await.unwrap();
 
     assert_eq!(result.unwrap_err().category(), "cancelled");
@@ -398,7 +403,8 @@ async fn cancel_mid_split_aborts_children_and_returns_cancelled() {
         )
         .add_exit_state(Step::Done);
 
-    let (handle, token) = CancellationToken::new();
+    let token = CancellationToken::new();
+    let handle = token.clone();
     // Cancel only once all three children have started (so all three fired on_task_start).
     let started_probe = started.clone();
     let canceller = tokio::spawn(async move {
@@ -409,7 +415,7 @@ async fn cancel_mid_split_aborts_children_and_returns_cancelled() {
     });
 
     let t0 = Instant::now();
-    let result = wf.orchestrate(Step::Ship, token).await;
+    let result = wf.orchestrate_with_token(Step::Ship, &token).await;
     canceller.await.unwrap();
 
     assert_eq!(result.unwrap_err().category(), "cancelled");
@@ -450,9 +456,10 @@ async fn on_cancelled_fires_exactly_once() {
         )
         .add_exit_state(Step::Done);
 
-    let (handle, token) = CancellationToken::new();
+    let token = CancellationToken::new();
+    let handle = token.clone();
     let canceller = cancel_when(started.clone(), handle);
-    let result = wf.orchestrate(Step::Ship, token).await;
+    let result = wf.orchestrate_with_token(Step::Ship, &token).await;
     canceller.await.unwrap();
 
     assert_eq!(result.unwrap_err().category(), "cancelled");
@@ -488,8 +495,8 @@ async fn on_cancelled_does_not_fire_on_successful_run() {
         )
         .add_exit_state(Step::Done);
 
-    let (_handle, token) = CancellationToken::new(); // armed but never fired
-    let result = wf.orchestrate(Step::Reserve, token).await;
+    let token = CancellationToken::new(); // armed but never fired
+    let result = wf.orchestrate_with_token(Step::Reserve, &token).await;
 
     assert_eq!(result.unwrap(), Step::Done);
     assert_eq!(
@@ -521,11 +528,9 @@ async fn uncancelled_token_behaves_like_orchestrate() {
             .add_exit_state(Step::Done)
     };
 
-    let plain = build()
-        .orchestrate(Step::Reserve, CancellationToken::disabled())
-        .await;
-    let (_handle, token) = CancellationToken::new(); // never cancelled
-    let with_cancel = build().orchestrate(Step::Reserve, token).await;
+    let plain = build().orchestrate(Step::Reserve).await;
+    let token = CancellationToken::new(); // never cancelled
+    let with_cancel = build().orchestrate_with_token(Step::Reserve, &token).await;
 
     assert_eq!(plain.unwrap(), Step::Done);
     assert_eq!(with_cancel.unwrap(), Step::Done);
@@ -547,7 +552,8 @@ async fn double_cancel_is_idempotent() {
         )
         .add_exit_state(Step::Done);
 
-    let (handle, token) = CancellationToken::new();
+    let token = CancellationToken::new();
+    let handle = token.clone();
     let probe = started.clone();
     let canceller = tokio::spawn(async move {
         while !probe.load(Ordering::SeqCst) {
@@ -557,7 +563,7 @@ async fn double_cancel_is_idempotent() {
         handle.cancel(); // second cancel is a no-op
     });
 
-    let result = wf.orchestrate(Step::Ship, token).await;
+    let result = wf.orchestrate_with_token(Step::Ship, &token).await;
     canceller.await.unwrap();
 
     assert_eq!(result.unwrap_err().category(), "cancelled");
@@ -583,9 +589,10 @@ async fn cancellation_precedence_over_total_timeout() {
         )
         .add_exit_state(Step::Done);
 
-    let (handle, token) = CancellationToken::new();
+    let token = CancellationToken::new();
+    let handle = token.clone();
     let canceller = cancel_when(started.clone(), handle);
-    let result = wf.orchestrate(Step::Ship, token).await;
+    let result = wf.orchestrate_with_token(Step::Ship, &token).await;
     canceller.await.unwrap();
 
     let err = result.unwrap_err();
@@ -639,9 +646,10 @@ async fn compensation_drain_completes_fully_under_cancellation() {
         )
         .add_exit_state(Step::Done);
 
-    let (handle, token) = CancellationToken::new();
+    let token = CancellationToken::new();
+    let handle = token.clone();
     let canceller = cancel_when(ship_started.clone(), handle);
-    let result = wf.orchestrate(Step::Reserve, token).await;
+    let result = wf.orchestrate_with_token(Step::Reserve, &token).await;
     canceller.await.unwrap();
 
     assert_eq!(result.unwrap_err().category(), "cancelled");
@@ -683,9 +691,10 @@ async fn resources_are_torn_down_on_cancel() {
         )
         .add_exit_state(Step::Done);
 
-    let (handle, token) = CancellationToken::new();
+    let token = CancellationToken::new();
+    let handle = token.clone();
     let canceller = cancel_when(started.clone(), handle);
-    let result = wf.orchestrate(Step::Ship, token).await;
+    let result = wf.orchestrate_with_token(Step::Ship, &token).await;
     canceller.await.unwrap();
 
     assert_eq!(result.unwrap_err().category(), "cancelled");
@@ -727,10 +736,11 @@ async fn cancel_during_router_task_returns_cancelled() {
         )
         .add_exit_state(Step::Done);
 
-    let (handle, token) = CancellationToken::new();
+    let token = CancellationToken::new();
+    let handle = token.clone();
     let canceller = cancel_when(started.clone(), handle);
     let t0 = Instant::now();
-    let result = wf.orchestrate(Step::Reserve, token).await;
+    let result = wf.orchestrate_with_token(Step::Reserve, &token).await;
     canceller.await.unwrap();
 
     assert_eq!(result.unwrap_err().category(), "cancelled");
@@ -764,10 +774,11 @@ async fn cancel_during_poll_task_returns_cancelled() {
         )
         .add_exit_state(Step::Done);
 
-    let (handle, token) = CancellationToken::new();
+    let token = CancellationToken::new();
+    let handle = token.clone();
     let canceller = cancel_when(started.clone(), handle);
     let t0 = Instant::now();
-    let result = wf.orchestrate(Step::Ship, token).await;
+    let result = wf.orchestrate_with_token(Step::Ship, &token).await;
     canceller.await.unwrap();
 
     assert_eq!(result.unwrap_err().category(), "cancelled");
@@ -808,10 +819,11 @@ async fn cancel_during_timer_task_returns_cancelled() {
         )
         .add_exit_state(Step::Done);
 
-    let (handle, token) = CancellationToken::new();
+    let token = CancellationToken::new();
+    let handle = token.clone();
     let canceller = cancel_when(started.clone(), handle);
     let t0 = Instant::now();
-    let result = wf.orchestrate(Step::Ship, token).await;
+    let result = wf.orchestrate_with_token(Step::Ship, &token).await;
     canceller.await.unwrap();
 
     assert_eq!(result.unwrap_err().category(), "cancelled");
@@ -866,10 +878,11 @@ async fn cancel_during_batch_task_returns_cancelled() {
         )
         .add_exit_state(Step::Done);
 
-    let (handle, token) = CancellationToken::new();
+    let token = CancellationToken::new();
+    let handle = token.clone();
     let canceller = cancel_when(started.clone(), handle);
     let t0 = Instant::now();
-    let result = wf.orchestrate(Step::Ship, token).await;
+    let result = wf.orchestrate_with_token(Step::Ship, &token).await;
     canceller.await.unwrap();
 
     assert_eq!(result.unwrap_err().category(), "cancelled");
@@ -917,10 +930,11 @@ async fn cancel_during_stepped_task_returns_cancelled() {
         )
         .add_exit_state(Step::Done);
 
-    let (handle, token) = CancellationToken::new();
+    let token = CancellationToken::new();
+    let handle = token.clone();
     let canceller = cancel_when(started.clone(), handle);
     let t0 = Instant::now();
-    let result = wf.orchestrate(Step::Ship, token).await;
+    let result = wf.orchestrate_with_token(Step::Ship, &token).await;
     canceller.await.unwrap();
 
     assert_eq!(result.unwrap_err().category(), "cancelled");
@@ -970,18 +984,20 @@ async fn resume_from_honors_precancelled_token() {
         )
         .add_exit_state(Step::Done);
 
-    let (handle, token) = CancellationToken::new();
+    let token = CancellationToken::new();
+    let handle = token.clone();
     let canceller = cancel_when(started.clone(), handle);
-    let r1 = wf.orchestrate(Step::Ship, token).await;
+    let r1 = wf.orchestrate_with_token(Step::Ship, &token).await;
     canceller.await.unwrap();
     assert_eq!(r1.unwrap_err().category(), "cancelled");
     assert_eq!(run_count.load(Ordering::SeqCst), 1);
 
     // Run 2: resume with a pre-cancelled token — the resumed run must cancel at the Ship
     // boundary WITHOUT re-running the task.
-    let (handle2, token2) = CancellationToken::new();
+    let token2 = CancellationToken::new();
+    let handle2 = token2.clone();
     handle2.cancel();
-    let r2 = wf.resume_from("run-1", token2).await;
+    let r2 = wf.resume_from_with_token("run-1", &token2).await;
     assert_eq!(r2.unwrap_err().category(), "cancelled");
     assert_eq!(
         run_count.load(Ordering::SeqCst),

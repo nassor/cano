@@ -98,9 +98,7 @@ async fn main() -> Result<(), CanoError> {
 
     println!("Phase 1 — dependency unhealthy, threshold = 3.");
     for attempt in 1..=5 {
-        let outcome = workflow
-            .orchestrate(Step::Call, CancellationToken::disabled())
-            .await;
+        let outcome = workflow.orchestrate(Step::Call).await;
         // `orchestrate` wraps task failures in `WithStateContext`; unwrap one layer
         // before pattern-matching on the underlying variant.
         let label = match outcome {
@@ -127,10 +125,7 @@ async fn main() -> Result<(), CanoError> {
 
     println!("Phase 3 — half-open trial probes the dependency, then closes the breaker.");
     for attempt in 1..=3 {
-        match workflow
-            .orchestrate(Step::Call, CancellationToken::disabled())
-            .await
-        {
+        match workflow.orchestrate(Step::Call).await {
             Ok(_) => println!(
                 "  recovery call {attempt}: ok | state={:?}",
                 breaker.state()

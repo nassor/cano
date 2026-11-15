@@ -577,9 +577,7 @@ fn bench_orchestrate_overhead(c: &mut Criterion) {
         b.to_async(&runtime).iter(|| {
             let workflow = Arc::clone(&workflow);
             async move {
-                let _ = workflow
-                    .orchestrate(S::Done, CancellationToken::disabled())
-                    .await;
+                let _ = workflow.orchestrate(S::Done).await;
             }
         });
     });
@@ -619,9 +617,7 @@ fn bench_large_split_collect(c: &mut Criterion) {
                 .add_exit_state(S::Done);
 
             b.to_async(&runtime).iter(|| async {
-                let _ = workflow
-                    .orchestrate(S::Start, CancellationToken::disabled())
-                    .await;
+                let _ = workflow.orchestrate(S::Start).await;
             });
         });
     }
@@ -714,11 +710,8 @@ fn bench_fsm_transitions(c: &mut Criterion) {
         ("observed_3_states", &observed),
     ] {
         group.bench_function(id, |b| {
-            b.to_async(&rt).iter(|| async {
-                wf.orchestrate(S::A, CancellationToken::disabled())
-                    .await
-                    .unwrap()
-            });
+            b.to_async(&rt)
+                .iter(|| async { wf.orchestrate(S::A).await.unwrap() });
         });
     }
     group.finish();
@@ -759,9 +752,7 @@ fn bench_tracing_overhead(c: &mut Criterion) {
         b.to_async(&runtime).iter(|| {
             let workflow = Arc::clone(&workflow);
             async move {
-                let _ = workflow
-                    .orchestrate(S::Done, CancellationToken::disabled())
-                    .await;
+                let _ = workflow.orchestrate(S::Done).await;
             }
         });
     });

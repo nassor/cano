@@ -212,7 +212,7 @@ where
 
     /// Request cooperative cancellation of a flow's in-flight run.
     ///
-    /// Fires the run's [`CancellationToken`](crate::cancel::CancellationToken):
+    /// Fires the run's [`CancellationToken`](crate::CancellationToken):
     /// the in-flight workflow aborts at its next await point, drains its saga
     /// compensation stack, and returns [`CanoError::Cancelled`]. The flow then
     /// returns to [`Status::Idle`](crate::scheduler::Status::Idle) — a deliberate

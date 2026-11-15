@@ -74,10 +74,7 @@ async fn poll_error_budget_resets_on_pending_and_kills_on_burst() {
             },
         )
         .add_exit_state(Flow::Done);
-    let result = workflow
-        .orchestrate(Flow::Work, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Flow::Work).await.unwrap();
     assert_eq!(result, Flow::Done);
     assert_eq!(calls.load(Ordering::SeqCst), 6);
 
@@ -92,10 +89,7 @@ async fn poll_error_budget_resets_on_pending_and_kills_on_burst() {
             },
         )
         .add_exit_state(Flow::Done);
-    let err = workflow
-        .orchestrate(Flow::Work, CancellationToken::disabled())
-        .await
-        .unwrap_err();
+    let err = workflow.orchestrate(Flow::Work).await.unwrap_err();
     assert_eq!(err.category(), "task_execution", "got: {err}");
     assert!(err.to_string().contains("probe 2 refused"), "got: {err}");
     assert_eq!(
@@ -133,10 +127,7 @@ async fn poll_eternal_pending_is_bounded_by_attempt_timeout() {
         .add_exit_state(Flow::Done);
 
     let started = Instant::now();
-    let err = workflow
-        .orchestrate(Flow::Work, CancellationToken::disabled())
-        .await
-        .unwrap_err();
+    let err = workflow.orchestrate(Flow::Work).await.unwrap_err();
     let elapsed = started.elapsed();
 
     assert_eq!(err.category(), "timeout", "got: {err}");

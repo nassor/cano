@@ -141,10 +141,7 @@ async fn main() -> Result<(), CanoError> {
     println!("Executing workflow...");
     println!();
 
-    match workflow
-        .orchestrate(TaskState::Start, CancellationToken::disabled())
-        .await
-    {
+    match workflow.orchestrate(TaskState::Start).await {
         Ok(final_state) => {
             println!();
             println!("Workflow completed successfully!");

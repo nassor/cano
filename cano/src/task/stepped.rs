@@ -56,7 +56,7 @@
 //!     .register(MyState::Process, scanner)
 //!     .add_exit_state(MyState::Done);
 //!
-//! let result = workflow.orchestrate(MyState::Process, CancellationToken::disabled()).await?;
+//! let result = workflow.orchestrate(MyState::Process).await?;
 //! assert_eq!(result, MyState::Done);
 //! # Ok(())
 //! # }
@@ -98,7 +98,7 @@
 //!     .register(MyState::Process, TraitStepper)
 //!     .add_exit_state(MyState::Done);
 //!
-//! let result = workflow.orchestrate(MyState::Process, CancellationToken::disabled()).await?;
+//! let result = workflow.orchestrate(MyState::Process).await?;
 //! assert_eq!(result, MyState::Done);
 //! # Ok(())
 //! # }
@@ -400,7 +400,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cancel::CancellationToken;
+
     use crate::resource::Resources;
     use crate::task;
     use crate::task::Task;
@@ -733,10 +733,7 @@ mod tests {
             .register(MyState::Next, NextTask)
             .add_exit_state(MyState::Done);
 
-        let result = workflow
-            .orchestrate(MyState::Work, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(MyState::Work).await.unwrap();
         assert_eq!(result, MyState::Done);
     }
 
@@ -794,7 +791,7 @@ mod tests {
 #[cfg(all(test, feature = "metrics"))]
 mod metrics_tests {
     use super::*;
-    use crate::cancel::CancellationToken;
+
     use crate::metrics::test_support::*;
     use crate::workflow::Workflow;
 
@@ -856,9 +853,7 @@ mod metrics_tests {
             let workflow = Workflow::bare()
                 .register_stepped(St::Work, TwoMoreOneDone)
                 .add_exit_state(St::Done);
-            workflow
-                .orchestrate(St::Work, CancellationToken::disabled())
-                .await
+            workflow.orchestrate(St::Work).await
         });
         assert!(result.is_ok(), "workflow should succeed: {result:?}");
         assert_eq!(

@@ -192,10 +192,7 @@ async fn inherent_router_integrates_with_workflow() {
         .register(Step::PathA, PathATask)
         .add_exit_state(Step::Done);
 
-    let result = workflow
-        .orchestrate(Step::Route, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Step::Route).await.unwrap();
     assert_eq!(result, Step::Done);
 }
 
@@ -206,9 +203,6 @@ async fn trait_router_integrates_with_workflow() {
         .register(Step::PathA, PathATask)
         .add_exit_state(Step::Done);
 
-    let result = workflow
-        .orchestrate(Step::Route, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Step::Route).await.unwrap();
     assert_eq!(result, Step::Done);
 }

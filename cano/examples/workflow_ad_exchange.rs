@@ -596,10 +596,7 @@ async fn main() -> Result<(), CanoError> {
     let start = tokio::time::Instant::now();
 
     // Execute workflow - if splits timeout or fail, transition to NoFill
-    let result = match workflow
-        .orchestrate(AdExchangeState::Start, CancellationToken::disabled())
-        .await
-    {
+    let result = match workflow.orchestrate(AdExchangeState::Start).await {
         Ok(state) => state,
         Err(e) => {
             // If workflow fails due to split timeout/error, handle as NoFill.
@@ -609,12 +606,7 @@ async fn main() -> Result<(), CanoError> {
             store.put("error_reason", e.to_string())?;
             println!("\n⚠️  Handling as No Fill due to error\n");
 
-            workflow
-                .orchestrate(
-                    AdExchangeState::ErrorTracking,
-                    CancellationToken::disabled(),
-                )
-                .await?
+            workflow.orchestrate(AdExchangeState::ErrorTracking).await?
         }
     };
 

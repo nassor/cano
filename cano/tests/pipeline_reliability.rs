@@ -174,10 +174,7 @@ async fn pipeline_resume_reenters_only_the_crashed_state() {
 
     // Run 1: Wait and Crunch complete; Pump flushes [1,2] and [3,4], then crashes
     // on the corrupt item 5.
-    let err = workflow
-        .orchestrate(Pipe::Wait, CancellationToken::disabled())
-        .await
-        .unwrap_err();
+    let err = workflow.orchestrate(Pipe::Wait).await.unwrap_err();
     assert_eq!(err.category(), "task_execution", "got: {err}");
     assert_eq!(poll_calls.load(Ordering::SeqCst), 3);
     assert_eq!(load_calls.load(Ordering::SeqCst), 1);
@@ -186,10 +183,7 @@ async fn pipeline_resume_reenters_only_the_crashed_state() {
     assert_eq!(store.last_cursor("pipeline", "Pump"), Some(4));
 
     // Run 2: resume enters at Pump directly.
-    let result = workflow
-        .resume_from("pipeline", CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.resume_from("pipeline").await.unwrap();
     assert_eq!(result, Pipe::Done);
 
     // Completed stages did not re-execute…

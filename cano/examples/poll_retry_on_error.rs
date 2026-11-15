@@ -115,10 +115,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .register(Step::Poll, poller)
             .add_exit_state(Step::Done);
 
-        match workflow
-            .orchestrate(Step::Poll, CancellationToken::disabled())
-            .await
-        {
+        match workflow.orchestrate(Step::Poll).await {
             Ok(state) => println!("  result: Ok({state:?})  -- loop tolerated the streak\n"),
             Err(e) => println!("  result: Err({e})  -- unexpected failure\n"),
         }
@@ -138,10 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .register(Step::Poll, poller)
             .add_exit_state(Step::Done);
 
-        match workflow
-            .orchestrate(Step::Poll, CancellationToken::disabled())
-            .await
-        {
+        match workflow.orchestrate(Step::Poll).await {
             Ok(state) => println!("  result: Ok({state:?})  -- unexpected success\n"),
             Err(e) => println!("  result: Err(\"{e}\")  -- loop aborted after streak > cap\n"),
         }
@@ -201,10 +195,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .add_exit_state(Step::Done);
 
-        match workflow
-            .orchestrate(Step::Poll, CancellationToken::disabled())
-            .await
-        {
+        match workflow.orchestrate(Step::Poll).await {
             Ok(state) => println!("  result: Ok({state:?})  -- Pending reset the counter\n"),
             Err(e) => println!("  result: Err({e})  -- unexpected failure\n"),
         }

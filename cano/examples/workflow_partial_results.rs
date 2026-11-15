@@ -103,9 +103,7 @@ async fn main() -> Result<(), CanoError> {
     println!("Starting workflow...");
     let start = std::time::Instant::now();
 
-    let result = workflow
-        .orchestrate(ApiState::Start, CancellationToken::disabled())
-        .await?;
+    let result = workflow.orchestrate(ApiState::Start).await?;
 
     let duration = start.elapsed();
     println!(

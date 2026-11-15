@@ -47,9 +47,7 @@ async fn router_hop_is_counted() {
         .register(S::Worker, Go(S::Done))
         .add_exit_state(S::Done)
         .with_observer(observer.clone());
-    wf.orchestrate(S::Start, CancellationToken::disabled())
-        .await
-        .unwrap();
+    wf.orchestrate(S::Start).await.unwrap();
     observer
         .assert_registered_states_entered(&wf)
         .expect("router hops counted");
@@ -63,9 +61,7 @@ async fn unregistered_routed_state_returns_err_does_not_panic() {
         .register(S::Orphan, Go(S::Done))
         .add_exit_state(S::Done)
         .with_observer(observer.clone());
-    wf.orchestrate(S::Start, CancellationToken::disabled())
-        .await
-        .unwrap();
+    wf.orchestrate(S::Start).await.unwrap();
     let missing = observer.assert_registered_states_entered(&wf).unwrap_err();
     assert!(missing.contains(&"Orphan".to_string()), "got: {missing:?}");
 }
@@ -77,9 +73,7 @@ async fn multi_state_with_explicit_list() {
         .register(S::Start, Go(S::Done))
         .add_exit_state(S::Done)
         .with_observer(observer.clone());
-    wf.orchestrate(S::Start, CancellationToken::disabled())
-        .await
-        .unwrap();
+    wf.orchestrate(S::Start).await.unwrap();
     let missing = observer
         .assert_all_states_entered(&[S::Start, S::Route, S::Worker])
         .unwrap_err();

@@ -349,6 +349,7 @@ dependencies = [
  "smallvec",
  "tempfile",
  "tokio",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "wide",

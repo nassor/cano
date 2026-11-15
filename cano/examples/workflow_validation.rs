@@ -102,9 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => println!("  validate_initial_state(Prepare) -> Err: {e}"),
         }
 
-        let result = workflow
-            .orchestrate(Step::Prepare, CancellationToken::disabled())
-            .await?;
+        let result = workflow.orchestrate(Step::Prepare).await?;
         println!("  orchestrate -> {result:?}\n");
     }
 

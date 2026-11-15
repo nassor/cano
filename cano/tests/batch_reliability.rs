@@ -108,10 +108,7 @@ async fn batch_isolates_poison_items_retries_per_item_and_bounds_concurrency() {
         )
         .add_exit_state(Flow::Done);
 
-    let result = workflow
-        .orchestrate(Flow::Work, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Flow::Work).await.unwrap();
     assert_eq!(
         result,
         Flow::Done,
@@ -232,10 +229,7 @@ async fn batch_outer_retry_replays_the_entire_cycle() {
     let workflow = Workflow::bare()
         .register(Flow::Work, probe.task)
         .add_exit_state(Flow::Done);
-    let result = workflow
-        .orchestrate(Flow::Work, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Flow::Work).await.unwrap();
     assert_eq!(result, Flow::Done);
     assert_eq!(probe.load_calls.load(Ordering::SeqCst), 2, "load re-ran");
     assert_eq!(probe.finish_calls.load(Ordering::SeqCst), 2);
@@ -251,10 +245,7 @@ async fn batch_outer_retry_replays_the_entire_cycle() {
     let workflow = Workflow::bare()
         .register(Flow::Work, probe.task)
         .add_exit_state(Flow::Done);
-    let err = workflow
-        .orchestrate(Flow::Work, CancellationToken::disabled())
-        .await
-        .unwrap_err();
+    let err = workflow.orchestrate(Flow::Work).await.unwrap_err();
     // The engine adds state/path context around the failure; `category()` sees
     // through that wrapper to the RetryExhausted underneath.
     assert_eq!(err.category(), "retry_exhausted", "got: {err}");

@@ -49,7 +49,7 @@
 //!     .register(S::Start, OkTask)
 //!     .add_exit_state(S::Done)
 //!     .with_observer(observer.clone());
-//! assert_eq!(wf.orchestrate(S::Start, CancellationToken::disabled()).await.unwrap(), S::Done);
+//! assert_eq!(wf.orchestrate(S::Start).await.unwrap(), S::Done);
 //! observer.assert_path(&["Start", "Done"]);
 //! # }
 //! ```
@@ -120,7 +120,7 @@ pub enum RecordedEvent {
         /// The sequence of the last persisted row.
         sequence: u64,
     },
-    /// A run was cancelled via a [`CancellationToken`](crate::cancel::CancellationToken).
+    /// A run was cancelled via a [`CancellationToken`](crate::CancellationToken).
     Cancelled {
         /// The `Debug` rendering of the state cancellation was observed at.
         state: String,
@@ -568,12 +568,7 @@ mod tests {
             .register(S::Start, OkTask)
             .add_exit_state(S::Done)
             .with_observer(observer.clone());
-        assert_eq!(
-            wf.orchestrate(S::Start, CancellationToken::disabled())
-                .await
-                .unwrap(),
-            S::Done
-        );
+        assert_eq!(wf.orchestrate(S::Start).await.unwrap(), S::Done);
         observer.assert_path(&["Start", "Done"]);
         observer.assert_completed_with("Done");
         assert!(observer.events().contains(&RecordedEvent::TaskSucceeded {
@@ -588,9 +583,7 @@ mod tests {
             .register(S::Start, OkTask)
             .add_exit_state(S::Done)
             .with_observer(observer.clone());
-        wf.orchestrate(S::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        wf.orchestrate(S::Start).await.unwrap();
         assert!(!observer.events().is_empty());
         observer.clear();
         assert!(observer.events().is_empty());
@@ -713,10 +706,7 @@ mod tests {
             .register(S::Start, task)
             .add_exit_state(S::Done)
             .with_observer(observer.clone());
-        let err = wf
-            .orchestrate(S::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = wf.orchestrate(S::Start).await.unwrap_err();
         assert!(err.to_string().contains("panic"), "{err}");
         let retries = observer
             .events()
@@ -739,12 +729,7 @@ mod tests {
         let wf = Workflow::bare()
             .register(S::Start, panic_on_attempt(0, S::Done))
             .add_exit_state(S::Done);
-        assert_eq!(
-            wf.orchestrate(S::Start, CancellationToken::disabled())
-                .await
-                .unwrap(),
-            S::Done
-        );
+        assert_eq!(wf.orchestrate(S::Start).await.unwrap(), S::Done);
     }
 
     #[test]
@@ -768,9 +753,7 @@ mod tests {
             .register(S::B, Go(S::Done))
             .add_exit_state(S::Done)
             .with_observer(observer.clone());
-        wf.orchestrate(S::A, CancellationToken::disabled())
-            .await
-            .unwrap();
+        wf.orchestrate(S::A).await.unwrap();
         observer
             .assert_all_states_entered(&[S::A, S::B, S::Done])
             .expect("all states visited");
@@ -783,9 +766,7 @@ mod tests {
             .register(S::A, Go(S::Done))
             .add_exit_state(S::Done)
             .with_observer(observer.clone());
-        wf.orchestrate(S::A, CancellationToken::disabled())
-            .await
-            .unwrap();
+        wf.orchestrate(S::A).await.unwrap();
         let missing = observer
             .assert_all_states_entered(&[S::A, S::B, S::C, S::Done])
             .unwrap_err();
@@ -799,9 +780,7 @@ mod tests {
             .register(S::A, Go(S::Done))
             .add_exit_state(S::Done)
             .with_observer(observer.clone());
-        wf.orchestrate(S::A, CancellationToken::disabled())
-            .await
-            .unwrap();
+        wf.orchestrate(S::A).await.unwrap();
         let missing = observer
             .assert_all_states_entered(&[S::A, S::A, S::B])
             .unwrap_err();
@@ -816,9 +795,7 @@ mod tests {
             .register(S::B, Go(S::Done))
             .add_exit_state(S::Done)
             .with_observer(observer.clone());
-        wf.orchestrate(S::A, CancellationToken::disabled())
-            .await
-            .unwrap();
+        wf.orchestrate(S::A).await.unwrap();
         observer
             .assert_registered_states_entered(&wf)
             .expect("all registered states visited");
@@ -832,9 +809,7 @@ mod tests {
             .register(S::C, Go(S::Done)) // never routed to
             .add_exit_state(S::Done)
             .with_observer(observer.clone());
-        wf.orchestrate(S::A, CancellationToken::disabled())
-            .await
-            .unwrap();
+        wf.orchestrate(S::A).await.unwrap();
         let missing = observer.assert_registered_states_entered(&wf).unwrap_err();
         assert!(missing.contains(&"C".to_string()), "missing={missing:?}");
     }

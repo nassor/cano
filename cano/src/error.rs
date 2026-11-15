@@ -206,11 +206,11 @@ pub enum CanoError {
         limit: std::time::Duration,
     },
 
-    /// A run was cancelled via a [`CancellationToken`](crate::cancel::CancellationToken).
+    /// A run was cancelled via a [`CancellationToken`](crate::CancellationToken).
     ///
-    /// Emitted by [`orchestrate`](crate::workflow::Workflow::orchestrate)
-    /// and [`resume_from`](crate::workflow::Workflow::resume_from) when the paired
-    /// [`CancellationHandle`](crate::cancel::CancellationHandle) fires. The in-flight
+    /// Emitted by [`orchestrate_with_token`](crate::workflow::Workflow::orchestrate_with_token)
+    /// and [`resume_from_with_token`](crate::workflow::Workflow::resume_from_with_token) when
+    /// the token is cancelled. The in-flight
     /// cancellable task is dropped at its next await point and the compensation stack is drained
     /// before this error surfaces. Like every task error from the FSM it is wrapped in
     /// [`CanoError::WithStateContext`] (clean rollback); a dirty rollback yields
@@ -611,6 +611,15 @@ impl CanoError {
             CanoError::WithStateContext { source, .. } => source.as_ref(),
             other => other,
         }
+    }
+
+    /// Whether this error is a cooperative cancellation ([`CanoError::Cancelled`],
+    /// possibly wrapped in [`CanoError::WithStateContext`]).
+    ///
+    /// A cancelled run whose rollback failed is a
+    /// [`CompensationFailed`](CanoError::CompensationFailed), not a cancellation.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self.inner(), CanoError::Cancelled)
     }
 
     /// Get the *outer* error category — the variant of `self` without

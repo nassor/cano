@@ -88,10 +88,7 @@ async fn inherent_runs_via_register_stream() {
     let workflow = Workflow::bare()
         .register_stream(Step::Consume, InherentInferred)
         .add_exit_state(Step::Done);
-    let result = workflow
-        .orchestrate(Step::Consume, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Step::Consume).await.unwrap();
     assert_eq!(result, Step::Done);
 }
 

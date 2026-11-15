@@ -219,10 +219,7 @@ async fn inherent_poller_integrates_with_workflow() {
         .register(Step::Poll, InherentPoller)
         .add_exit_state(Step::Done);
 
-    let result = workflow
-        .orchestrate(Step::Poll, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Step::Poll).await.unwrap();
     assert_eq!(result, Step::Done);
 }
 
@@ -232,10 +229,7 @@ async fn trait_poller_integrates_with_workflow() {
         .register(Step::Poll, TraitPoller)
         .add_exit_state(Step::Done);
 
-    let result = workflow
-        .orchestrate(Step::Poll, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Step::Poll).await.unwrap();
     assert_eq!(result, Step::Done);
 }
 

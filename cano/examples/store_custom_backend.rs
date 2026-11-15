@@ -221,9 +221,7 @@ async fn main() -> Result<(), CanoError> {
         .add_exit_state(Step::Done);
 
     println!("\n-- Part 2: MemoryStore::get_shared (Arc zero-copy sharing) --");
-    let result = workflow
-        .orchestrate(Step::WriteA, CancellationToken::disabled())
-        .await?;
+    let result = workflow.orchestrate(Step::WriteA).await?;
     println!("\ncompleted at {result:?}");
 
     println!("\n=== Done ===");

@@ -76,10 +76,7 @@ async fn stepped_transient_error_retries_same_cursor_without_restarting() {
         )
         .add_exit_state(Flow::Done);
 
-    let result = workflow
-        .orchestrate(Flow::Work, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Flow::Work).await.unwrap();
     assert_eq!(result, Flow::Done);
     assert_eq!(
         *calls.lock(),
@@ -158,10 +155,7 @@ async fn stepped_hard_failure_resumes_from_last_persisted_cursor() {
         .with_workflow_id("stepped-outage");
 
     // Run 1: advances through cursors 1..=4, then the step at 4 hits the outage.
-    let err = workflow
-        .orchestrate(Flow::Work, CancellationToken::disabled())
-        .await
-        .unwrap_err();
+    let err = workflow.orchestrate(Flow::Work).await.unwrap_err();
     assert_eq!(err.category(), "task_execution", "got: {err}");
     assert_eq!(
         *calls.lock(),
@@ -175,10 +169,7 @@ async fn stepped_hard_failure_resumes_from_last_persisted_cursor() {
 
     // Outage repaired; resume continues AT cursor 4 — not from None.
     unblocked.store(true, Ordering::SeqCst);
-    let result = workflow
-        .resume_from("stepped-outage", CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.resume_from("stepped-outage").await.unwrap();
     assert_eq!(result, Flow::Done);
 
     let all = calls.lock().clone();

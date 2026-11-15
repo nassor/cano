@@ -1,8 +1,8 @@
 //! # Cooperative cancellation — saga rollback on cancel
 //!
-//! Demonstrates [`Workflow::orchestrate`](cano::Workflow::orchestrate) with a live token:
+//! Demonstrates [`Workflow::orchestrate_with_token`](cano::Workflow::orchestrate_with_token):
 //! a 3-step saga `Reserve → Charge → Ship → Done` where a sibling task fires a
-//! [`CancellationHandle`](cano::CancellationHandle) once `Ship` is in flight. The in-flight
+//! [`CancellationToken`](CancellationToken) once `Ship` is in flight. The in-flight
 //! task is aborted at its next await point, the saga compensation stack drains in reverse
 //! (`Charge` then `Reserve`), and the call returns
 //! [`CanoError::Cancelled`](cano::CanoError::Cancelled).
@@ -101,7 +101,8 @@ async fn main() {
         )
         .add_exit_state(Step::Done);
 
-    let (handle, token) = CancellationToken::new();
+    let token = CancellationToken::new();
+    let handle = token.clone();
 
     // Sibling task: cancel as soon as `Ship` is in flight.
     let canceller = tokio::spawn(async move {
@@ -111,7 +112,7 @@ async fn main() {
         handle.cancel();
     });
 
-    match workflow.orchestrate(Step::Reserve, token).await {
+    match workflow.orchestrate_with_token(Step::Reserve, &token).await {
         Ok(state) => println!("\nworkflow completed at {state:?}"),
         Err(error) => println!("\nworkflow cancelled, rolled back: {error}"),
     }

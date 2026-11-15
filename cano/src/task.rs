@@ -69,7 +69,7 @@
 //! let result = Workflow::new(resources)
 //!     .register(Step::Fetch, FetchTask)
 //!     .add_exit_state(Step::Done)
-//!     .orchestrate(Step::Fetch, CancellationToken::disabled())
+//!     .orchestrate(Step::Fetch)
 //!     .await?;
 //! assert_eq!(result, Step::Done);
 //! # Ok(())

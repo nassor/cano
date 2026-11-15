@@ -320,9 +320,7 @@ async fn main() -> Result<(), CanoError> {
         .add_exit_state(Step::Done);
 
     println!("Running workflow...");
-    let final_state = workflow
-        .orchestrate(Step::Init, CancellationToken::disabled())
-        .await?;
+    let final_state = workflow.orchestrate(Step::Init).await?;
     assert_eq!(final_state, Step::Done);
 
     let result: u32 = store.get("result")?;

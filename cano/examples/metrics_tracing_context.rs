@@ -94,14 +94,14 @@ async fn main() {
     // Path 1: Cano's own `workflow_orchestrate` span carries `workflow_id`.
     workflow()
         .with_workflow_id("demo-run-1")
-        .orchestrate(Step::Fetch, CancellationToken::disabled())
+        .orchestrate(Step::Fetch)
         .await
         .expect("workflow run");
 
     // Path 2: a user span around orchestrate() — `request_id` flows onto the metrics too.
     // Attach it with `.instrument(..)`; holding `span.enter()` across `.await` would leak it.
     workflow()
-        .orchestrate(Step::Fetch, CancellationToken::disabled())
+        .orchestrate(Step::Fetch)
         .instrument(info_span!("api_request", request_id = "abc"))
         .await
         .expect("workflow run");

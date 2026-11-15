@@ -77,7 +77,7 @@ use std::hash::Hash;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use crate::cancel::CancellationToken;
+use crate::CancellationToken;
 use crate::error::CanoError;
 use crate::observer::WorkflowObserver;
 use crate::recovery::CheckpointStore;
@@ -336,7 +336,7 @@ where
     ///     .add_exit_state(Step::Done);
     ///
     /// let err = workflow
-    ///     .orchestrate(Step::Start, CancellationToken::disabled())
+    ///     .orchestrate(Step::Start)
     ///     .await
     ///     .expect_err("budget elapses before Done");
     /// // The engine wraps task errors with state context; `.inner()` peels one layer.
@@ -563,7 +563,7 @@ where
     ///
     /// Unlike `register` (which runs a `StreamTask`'s in-memory companion loop with no
     /// persistence and no cancellation), this drives the stream through the FSM engine: it
-    /// observes the run's [`CancellationToken`](crate::cancel::CancellationToken), and —
+    /// observes the run's [`CancellationToken`](crate::CancellationToken), and —
     /// when a [`checkpoint store`](Self::with_checkpoint_store) + a
     /// [`workflow id`](Self::with_workflow_id) are attached — persists the cursor of each
     /// flushed window so a crashed or cancelled run resumes from the last committed
@@ -661,7 +661,7 @@ where
     ///     .register(Step::Start, NoopTask)
     ///     .add_exit_state(Step::Done)
     ///     .with_observer(counter.clone());
-    /// workflow.orchestrate(Step::Start, CancellationToken::disabled()).await?;
+    /// workflow.orchestrate(Step::Start).await?;
     /// assert_eq!(counter.0.load(Ordering::Relaxed), 1);
     /// # Ok(())
     /// # }
@@ -934,35 +934,54 @@ where
     /// Drive the workflow FSM from `initial_state` until an exit state is reached.
     ///
     /// Runs lifecycle setup before execution and teardown after, regardless of outcome.
-    ///
-    /// `token` controls cooperative cancellation. Drive the run with a [`CancellationToken`]
-    /// obtained from [`CancellationToken::new`](crate::cancel::CancellationToken::new) and keep the
-    /// paired [`CancellationHandle`](crate::cancel::CancellationHandle); when the handle's
-    /// [`cancel`](crate::cancel::CancellationHandle::cancel) fires, the in-flight cancellable task
-    /// is dropped at its next await point, the saga compensation stack is drained, and the call
-    /// returns [`CanoError::Cancelled`] (wrapped in [`CanoError::WithStateContext`]; a dirty
-    /// rollback yields [`CanoError::CompensationFailed`] whose `errors[0]` is the wrapped cancel).
-    /// To opt a run out of cancellation, pass [`CancellationToken::disabled`] — it never fires and
-    /// is zero-cost (the FSM skips the cancellation `select!` entirely).
-    ///
-    /// Cancellation is cooperative and saga-safe: a task is only interrupted at an `.await`, and a
-    /// [`CompensatableTask`](crate::saga::CompensatableTask) is never interrupted mid-run (it
-    /// completes so its rollback entry is recorded, and the cancel is honoured at the next state
-    /// boundary). The compensation drain itself is uncancellable. See the
-    /// [`cancel`](crate::cancel) module for the full semantics and precedence rules against
-    /// [`with_total_timeout`](Self::with_total_timeout).
+    /// The run cannot be cancelled from outside (it still honours
+    /// [`with_total_timeout`](Self::with_total_timeout)); use
+    /// [`orchestrate_with_token`](Self::orchestrate_with_token) to stop it on a signal.
     ///
     /// # Errors
     ///
     /// - [`CanoError::Workflow`] -- no handler is registered for the current state, a single
     ///   task returned a `TaskResult::Split` (use [`Workflow::register_split`] instead), the
     ///   global workflow timeout was exceeded, or a split strategy was misconfigured
-    /// - [`CanoError::Cancelled`] -- the run was cancelled via `token` (see above)
     /// - Any [`CanoError`] variant propagated from a task during execution
-    pub async fn orchestrate(
+    pub async fn orchestrate(&self, initial_state: TState) -> Result<TState, CanoError> {
+        self.orchestrate_inner(initial_state, None).await
+    }
+
+    /// [`orchestrate`](Self::orchestrate), cancellable through `token`.
+    ///
+    /// When `token` (or any clone of it) is cancelled, the in-flight cancellable task is
+    /// dropped, the saga compensation stack is drained, and the call returns
+    /// [`CanoError::Cancelled`] wrapped in [`CanoError::WithStateContext`] (check with
+    /// [`CanoError::is_cancelled`]); a dirty rollback yields [`CanoError::CompensationFailed`]
+    /// whose `errors[0]` is the wrapped cancel. Three rules govern it:
+    ///
+    /// - **Cooperative**: the running task is dropped at its next `.await`, so a task doing
+    ///   uninterrupted synchronous work is not interrupted until it next yields.
+    /// - **Saga-safe**: a [`CompensatableTask`](crate::saga::CompensatableTask) is never
+    ///   interrupted mid-run (that would orphan a committed side effect with no entry to roll
+    ///   back); it completes and the cancel is honoured at the next state boundary.
+    /// - **Uncancellable drain**: the compensation drain itself always runs to completion.
+    ///
+    /// If the [`with_total_timeout`](Self::with_total_timeout) budget and the token fire
+    /// together, the cancellation wins.
+    ///
+    /// # Errors
+    ///
+    /// As [`orchestrate`](Self::orchestrate), plus [`CanoError::Cancelled`] when the run was
+    /// cancelled via `token`.
+    pub async fn orchestrate_with_token(
         &self,
         initial_state: TState,
-        token: CancellationToken,
+        token: &CancellationToken,
+    ) -> Result<TState, CanoError> {
+        self.orchestrate_inner(initial_state, Some(token)).await
+    }
+
+    async fn orchestrate_inner(
+        &self,
+        initial_state: TState,
+        token: Option<&CancellationToken>,
     ) -> Result<TState, CanoError> {
         #[cfg(feature = "tracing")]
         let workflow_span = self.tracing_span.clone().unwrap_or_else(|| {
@@ -993,15 +1012,9 @@ where
     async fn orchestrate_body(
         &self,
         initial_state: TState,
-        token: CancellationToken,
+        token: Option<&CancellationToken>,
     ) -> Result<TState, CanoError> {
-        // Validate once and cache. Subsequent calls return the cached result without
-        // re-walking the states + splits tree — workflow shape is immutable post-build.
-        let cached_validation = self.validated.get_or_init(|| self.validate());
-        if let Err(e) = cached_validation {
-            return Err(e.clone());
-        }
-
+        self.validate_cached()?;
         // initial_state varies per call; this still runs every time, but it's O(1).
         self.validate_initial_state(&initial_state)?;
 
@@ -1013,17 +1026,31 @@ where
         result
     }
 
+    /// `validate()`, computed once and cached: the workflow shape is immutable post-build.
+    pub(crate) fn validate_cached(&self) -> Result<(), CanoError> {
+        self.validated.get_or_init(|| self.validate()).clone()
+    }
+
     async fn run_workflow(
         &self,
         initial_state: TState,
-        token: CancellationToken,
+        token: Option<&CancellationToken>,
     ) -> Result<TState, CanoError> {
         #[cfg(feature = "metrics")]
         let _active = crate::metrics::WorkflowActiveGuard::new();
         let started = std::time::Instant::now();
         let total_budget = self.resolve_total_budget(started);
         let result = self
-            .execute_workflow(initial_state, total_budget, token)
+            .execute_workflow_from(
+                initial_state,
+                0,
+                self.workflow_id.clone(),
+                Vec::new(),
+                HashMap::new(),
+                Vec::new(),
+                total_budget,
+                token,
+            )
             .await;
         Self::record_run_outcome(&result, started);
         result
@@ -1119,7 +1146,7 @@ where
     /// let result = Workflow::bare()
     ///     .register(Step::Start, NoopTask)
     ///     .add_exit_state(Step::Done)
-    ///     .orchestrate(Step::Start, CancellationToken::disabled())
+    ///     .orchestrate(Step::Start)
     ///     .await?;
     /// assert_eq!(result, Step::Done);
     /// # Ok(())
@@ -1189,11 +1216,7 @@ mod metrics_tests {
 
     #[test]
     fn successful_run_records_outcome_duration_and_clears_active_gauge() {
-        let (res, rows) = run_with_recorder(|| async {
-            ok_workflow()
-                .orchestrate(S::Start, CancellationToken::disabled())
-                .await
-        });
+        let (res, rows) = run_with_recorder(|| async { ok_workflow().orchestrate(S::Start).await });
         assert_eq!(res.unwrap(), S::Done);
         assert_eq!(
             counter(
@@ -1220,7 +1243,7 @@ mod metrics_tests {
             Workflow::bare()
                 .register(S::Start, Boom)
                 .add_exit_state(S::Done)
-                .orchestrate(S::Start, CancellationToken::disabled())
+                .orchestrate(S::Start)
                 .await
         });
         assert!(res.is_err());
@@ -1233,11 +1256,7 @@ mod metrics_tests {
 
     #[test]
     fn per_state_task_durations_are_recorded_single_and_split() {
-        let (res, rows) = run_with_recorder(|| async {
-            ok_workflow()
-                .orchestrate(S::Start, CancellationToken::disabled())
-                .await
-        });
+        let (res, rows) = run_with_recorder(|| async { ok_workflow().orchestrate(S::Start).await });
         assert_eq!(res.unwrap(), S::Done);
         assert_eq!(
             histogram_count(
@@ -1289,7 +1308,7 @@ mod metrics_tests {
                     JoinConfig::new(JoinStrategy::PartialResults(2), S::Done),
                 )
                 .add_exit_state(S::Done)
-                .orchestrate(S::Start, CancellationToken::disabled())
+                .orchestrate(S::Start)
                 .await
         });
         assert_eq!(res.unwrap(), S::Done);
@@ -1352,10 +1371,7 @@ mod tests {
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete);
 
-        let result = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1366,10 +1382,7 @@ mod tests {
             .register(TestState::Process, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete);
 
-        let result = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1384,10 +1397,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let result = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
 
         let data: String = store.get("test_key").unwrap();
@@ -1400,9 +1410,7 @@ mod tests {
         // upfront rather than reaching the FSM loop.
         let workflow = Workflow::<TestState>::bare().add_exit_state(TestState::Complete);
 
-        let result = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await;
+        let result = workflow.orchestrate(TestState::Start).await;
         let err = result.unwrap_err();
         assert_eq!(err.category(), "configuration");
         assert!(err.to_string().contains("no registered state handlers"));
@@ -1488,10 +1496,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let result = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1507,10 +1512,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let result = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1520,10 +1522,7 @@ mod tests {
         let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_states([TestState::Complete, TestState::Error]);
-        let result = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1533,10 +1532,7 @@ mod tests {
         let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_states([TestState::Complete, TestState::Complete].into_iter());
-        let result = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1640,7 +1636,7 @@ mod tests {
         let result = Workflow::bare()
             .register(TestState::Start, BareWorkflowTask)
             .add_exit_state(TestState::Complete)
-            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .orchestrate(TestState::Start)
             .await
             .unwrap();
         assert_eq!(result, TestState::Complete);
@@ -1674,7 +1670,7 @@ mod tests {
             .register_router(TestState::Start, RouteToProcess)
             .register(TestState::Process, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
-            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .orchestrate(TestState::Start)
             .await
             .unwrap();
 
@@ -1800,7 +1796,7 @@ mod tests {
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
             .with_observer(Arc::new(PanickyObserver))
-            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .orchestrate(TestState::Start)
             .await
             .expect("orchestrate must complete despite observer panic");
         assert_eq!(result, TestState::Complete);
@@ -1830,7 +1826,7 @@ mod tests {
             .register(TestState::Process, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
             .with_observer(Arc::new(CountThenPanic(Arc::clone(&count))))
-            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .orchestrate(TestState::Start)
             .await
             .expect("orchestrate must complete despite repeated observer panics");
         assert_eq!(result, TestState::Complete);
@@ -1851,10 +1847,7 @@ mod tests {
         let wf = Workflow::bare()
             .register(TestState::Start, start.clone())
             .add_exit_state(TestState::Complete);
-        let result = wf
-            .orchestrate(TestState::Complete, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = wf.orchestrate(TestState::Complete).await.unwrap();
         assert_eq!(result, TestState::Complete);
         assert_eq!(
             start.count(),
@@ -1872,10 +1865,7 @@ mod tests {
             .register(TestState::Start, SimpleTask::new(TestState::Process))
             .register(TestState::Process, process.clone())
             .add_exit_state(TestState::Process);
-        let result = wf
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = wf.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Process);
         assert_eq!(
             process.count(),
@@ -1891,10 +1881,7 @@ mod tests {
         let wf = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Process))
             .add_exit_state(TestState::Complete);
-        let err = wf
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = wf.orchestrate(TestState::Start).await.unwrap_err();
         assert!(err.to_string().contains("No task registered"), "got: {err}");
     }
 
@@ -1905,10 +1892,7 @@ mod tests {
         let wf = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete);
-        let err = wf
-            .orchestrate(TestState::Process, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = wf.orchestrate(TestState::Process).await.unwrap_err();
         assert_eq!(err.category(), "configuration");
         assert!(
             err.to_string()
@@ -1931,10 +1915,7 @@ mod tests {
         let wf = Workflow::bare()
             .register(TestState::Start, ReturnsSplit)
             .add_exit_state(TestState::Complete);
-        let err = wf
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = wf.orchestrate(TestState::Start).await.unwrap_err();
         assert!(err.to_string().contains("use register_split"), "got: {err}");
     }
 
@@ -1945,10 +1926,7 @@ mod tests {
             .register(TestState::Start, first.clone())
             .register(TestState::Start, SimpleTask::new(TestState::Complete)) // replaces `first`
             .add_exit_state(TestState::Complete);
-        let result = wf
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = wf.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete); // the second handler ran
         assert_eq!(first.count(), 0, "the replaced handler must not run");
     }
@@ -1984,10 +1962,7 @@ mod tests {
                 },
             )
             .add_exit_state(TestState::Complete);
-        let result = wf
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = wf.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 5);
     }
@@ -2006,7 +1981,7 @@ mod tests {
             .add_exit_state(TestState::Complete);
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            wf.orchestrate(TestState::Start, CancellationToken::disabled()),
+            wf.orchestrate(TestState::Start),
         )
         .await
         .expect("orchestrate of an empty split must not hang");

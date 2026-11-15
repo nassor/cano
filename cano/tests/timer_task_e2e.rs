@@ -51,10 +51,7 @@ async fn duration_timer_fires_after_expected_delay() {
         .register(Step::Process, Process)
         .add_exit_state(Step::Done);
 
-    let result = workflow
-        .orchestrate(Step::Wait, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Step::Wait).await.unwrap();
     let elapsed = start.elapsed();
 
     assert_eq!(result, Step::Done);
@@ -95,7 +92,7 @@ async fn instant_timer_fires_at_correct_instant() {
         .register(Step::Wait, NearFutureInstantTimer)
         .register(Step::Process, Process)
         .add_exit_state(Step::Done)
-        .orchestrate(Step::Wait, CancellationToken::disabled())
+        .orchestrate(Step::Wait)
         .await
         .unwrap();
 
@@ -135,7 +132,7 @@ async fn attempt_timeout_cancels_long_timer() {
         .register(Step::Wait, OneHourTimer)
         .register(Step::Process, Process)
         .add_exit_state(Step::Done)
-        .orchestrate(Step::Wait, CancellationToken::disabled())
+        .orchestrate(Step::Wait)
         .await
         .unwrap_err();
 

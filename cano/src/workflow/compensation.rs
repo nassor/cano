@@ -13,11 +13,11 @@ use std::sync::Arc;
 
 use futures_util::FutureExt;
 
-use crate::cancel::CancellationToken;
 use crate::error::CanoError;
 use crate::recovery::RowKind;
 use crate::saga::{CompensationEntry, ErasedCompensatable};
 use crate::task::{TaskResult, run_with_retries};
+use tokio_util::sync::CancellationToken;
 
 use super::{Workflow, notify_observers, panic_payload_message};
 
@@ -516,12 +516,8 @@ where
     /// Rows with other kinds — ordinary [`RowKind::StateEntry`] rows and
     /// [`RowKind::StepCursor`] rows — are ignored by the rehydration.
     ///
-    /// `token` controls cooperative cancellation exactly as in
-    /// [`orchestrate`](Self::orchestrate): firing the paired
-    /// [`CancellationHandle`](crate::cancel::CancellationHandle) aborts the resumed run at the next
-    /// await point and drains the rehydrated compensation stack, returning
-    /// [`CanoError::Cancelled`]. Pass [`CancellationToken::disabled`] to opt out. See the
-    /// [`cancel`](crate::cancel) module for the full cancellation semantics.
+    /// The resumed run cannot be cancelled from outside; use
+    /// [`resume_from_with_token`](Self::resume_from_with_token) for that.
     ///
     /// # Errors
     ///
@@ -531,18 +527,36 @@ where
     ///   rows for `workflow_id`.
     /// - [`CanoError::Workflow`] — the recorded state label doesn't match any state of
     ///   this workflow (e.g. resuming against a different workflow definition).
-    /// - [`CanoError::Cancelled`] — the resumed run was cancelled via `token`.
     /// - Any [`CanoError`] propagated from a task during the resumed execution.
     /// - The error from a failed resource `teardown` after a *successful* run —
     ///   the run's own error (if any) always takes precedence, and teardown
     ///   errors on a failed run are logged but not surfaced.
-    pub async fn resume_from(
+    pub async fn resume_from(&self, workflow_id: impl Into<Arc<str>>) -> Result<TState, CanoError> {
+        self.resume_from_inner(workflow_id.into(), None).await
+    }
+
+    /// [`resume_from`](Self::resume_from), cancellable through `token` with the same
+    /// semantics as [`orchestrate_with_token`](Self::orchestrate_with_token): the resumed run
+    /// stops at the next await point and drains the rehydrated compensation stack.
+    ///
+    /// # Errors
+    ///
+    /// As [`resume_from`](Self::resume_from), plus [`CanoError::Cancelled`] when the resumed
+    /// run was cancelled via `token`.
+    pub async fn resume_from_with_token(
         &self,
         workflow_id: impl Into<Arc<str>>,
-        token: CancellationToken,
+        token: &CancellationToken,
     ) -> Result<TState, CanoError> {
-        let workflow_id: Arc<str> = workflow_id.into();
+        self.resume_from_inner(workflow_id.into(), Some(token))
+            .await
+    }
 
+    async fn resume_from_inner(
+        &self,
+        workflow_id: Arc<str>,
+        token: Option<&CancellationToken>,
+    ) -> Result<TState, CanoError> {
         #[cfg(feature = "tracing")]
         let workflow_span = self.tracing_span.clone().unwrap_or_else(|| {
             if tracing::enabled!(tracing::Level::INFO) {
@@ -568,7 +582,7 @@ where
     async fn resume_from_body(
         &self,
         workflow_id: Arc<str>,
-        token: CancellationToken,
+        token: Option<&CancellationToken>,
     ) -> Result<TState, CanoError> {
         let store = self.checkpoint_store.clone().ok_or_else(|| {
             CanoError::configuration(
@@ -576,10 +590,7 @@ where
             )
         })?;
 
-        let cached_validation = self.validated.get_or_init(|| self.validate());
-        if let Err(e) = cached_validation {
-            return Err(e.clone());
-        }
+        self.validate_cached()?;
 
         // Set up resources before any rehydration work. If `setup_all` fails
         // we'd otherwise have a fully-rebuilt compensation stack and a fired
@@ -622,7 +633,7 @@ where
         &self,
         workflow_id: Arc<str>,
         store: Arc<dyn crate::recovery::CheckpointStore>,
-        token: CancellationToken,
+        token: Option<&CancellationToken>,
     ) -> Result<TState, CanoError> {
         let mut rows = store.load_run(&workflow_id).await.map_err(|e| {
             CanoError::checkpoint_store(format!("load checkpoint run {workflow_id:?}: {e}"))
@@ -768,10 +779,7 @@ mod tests {
             .with_workflow_id("run-1");
 
         assert_eq!(
-            workflow
-                .orchestrate(TestState::Start, CancellationToken::disabled())
-                .await
-                .unwrap(),
+            workflow.orchestrate(TestState::Start).await.unwrap(),
             TestState::Complete
         );
 
@@ -805,16 +813,10 @@ mod tests {
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete);
         assert_eq!(
-            workflow
-                .orchestrate(TestState::Start, CancellationToken::disabled())
-                .await
-                .unwrap(),
+            workflow.orchestrate(TestState::Start).await.unwrap(),
             TestState::Complete
         );
-        let err = workflow
-            .resume_from("whatever", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("whatever").await.unwrap_err();
         assert_eq!(err.category(), "configuration");
         assert!(err.message().contains("checkpoint store"));
     }
@@ -843,10 +845,7 @@ mod tests {
             .with_observer(Arc::new(observer));
 
         assert_eq!(
-            workflow
-                .resume_from("run-2", CancellationToken::disabled())
-                .await
-                .unwrap(),
+            workflow.resume_from("run-2").await.unwrap(),
             TestState::Complete
         );
         assert_eq!(
@@ -895,10 +894,7 @@ mod tests {
             .with_checkpoint_store(store.clone());
 
         assert_eq!(
-            workflow
-                .resume_from("done-run", CancellationToken::disabled())
-                .await
-                .unwrap(),
+            workflow.resume_from("done-run").await.unwrap(),
             TestState::Complete
         );
         assert_eq!(
@@ -922,10 +918,7 @@ mod tests {
             .with_workflow_id("split-run");
 
         assert_eq!(
-            workflow
-                .orchestrate(TestState::Start, CancellationToken::disabled())
-                .await
-                .unwrap(),
+            workflow.orchestrate(TestState::Start).await.unwrap(),
             TestState::Complete
         );
 
@@ -954,10 +947,7 @@ mod tests {
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         // Errors raised inside `execute_workflow_from` are wrapped with state context;
         // `.inner()` peels one layer back to the underlying checkpoint_store error.
         assert_eq!(err.inner().category(), "checkpoint_store");
@@ -971,10 +961,7 @@ mod tests {
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
-        let err = workflow
-            .resume_from("never-ran", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("never-ran").await.unwrap_err();
         assert_eq!(err.category(), "checkpoint_store");
         assert!(err.message().contains("no checkpoint rows"));
     }
@@ -993,10 +980,7 @@ mod tests {
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
-        let err = workflow
-            .resume_from("wrong-defn", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("wrong-defn").await.unwrap_err();
         assert_eq!(err.category(), "workflow");
         assert!(err.message().contains("is not a registered or exit state"));
     }
@@ -1036,10 +1020,7 @@ mod tests {
             .with_observer(Arc::new(obs));
 
         assert_eq!(
-            workflow
-                .orchestrate(TestState::Start, CancellationToken::disabled())
-                .await
-                .unwrap(),
+            workflow.orchestrate(TestState::Start).await.unwrap(),
             TestState::Complete
         );
 
@@ -1100,10 +1081,7 @@ mod tests {
             .with_checkpoint_store(store.clone());
 
         assert_eq!(
-            workflow
-                .resume_from("router-resume", CancellationToken::disabled())
-                .await
-                .unwrap(),
+            workflow.resume_from("router-resume").await.unwrap(),
             TestState::Complete
         );
         assert_eq!(
@@ -1157,10 +1135,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         // Clean rollback → the original failure is surfaced, wrapped with state context.
         assert_eq!(err.inner().category(), "task_execution");
         assert_eq!(err.message(), "D forward failed");
@@ -1203,10 +1178,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         assert_eq!(err.message(), "D forward failed");
         // Only the two compensatable tasks rolled back — the plain `Process` task didn't.
         assert_eq!(
@@ -1251,10 +1223,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         match err {
             CanoError::CompensationFailed { errors } => {
                 // [original (D forward failed, wrapped with state context), B's compensate failure].
@@ -1307,10 +1276,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         match err {
             CanoError::CompensationFailed { errors } => {
                 assert!(
@@ -1402,10 +1368,7 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
-        let err = workflow
-            .resume_from("saga-run", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("saga-run").await.unwrap_err();
         assert_eq!(err.message(), "C forward failed");
         // The rehydrated stack [A=7, B=8] drains in reverse, using the outputs persisted
         // before the crash. C never produced an output (it failed forward).
@@ -1499,10 +1462,7 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
-        let err = workflow
-            .resume_from("mixed-run", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("mixed-run").await.unwrap_err();
         // C failed forward (original error is "C forward failed").
         assert_eq!(err.message(), "C forward failed");
 
@@ -1569,7 +1529,7 @@ mod tests {
             let s = Arc::clone(&store);
             handles.push(tokio::spawn(async move {
                 three_state_checkpointed(s, format!("run-{i}"))
-                    .orchestrate(TestState::Start, CancellationToken::disabled())
+                    .orchestrate(TestState::Start)
                     .await
             }));
         }
@@ -1603,7 +1563,7 @@ mod tests {
             let s = Arc::clone(&store);
             handles.push(tokio::spawn(async move {
                 three_state_checkpointed(s, "dup")
-                    .orchestrate(TestState::Start, CancellationToken::disabled())
+                    .orchestrate(TestState::Start)
                     .await
             }));
         }
@@ -1642,7 +1602,7 @@ mod tests {
             .unwrap();
 
         let err = three_state_checkpointed(store.clone(), "run")
-            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .orchestrate(TestState::Start)
             .await
             .unwrap_err();
         assert_eq!(err.inner().category(), "checkpoint_store");
@@ -1701,10 +1661,7 @@ mod tests {
             .with_checkpoint_store(store.clone())
             .with_workflow_id("disk");
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         match err {
             CanoError::CompensationFailed { errors } => {
                 // [the append failure that ended the run (now wrapped with state context),
@@ -1802,10 +1759,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         match err {
             CanoError::CompensationFailed { errors } => {
                 assert_eq!(errors[0].message(), "C forward failed");
@@ -1852,10 +1806,7 @@ mod tests {
             .add_exit_state(TestState::Complete);
 
         let started = std::time::Instant::now();
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "a hanging compensator must be bounded, not block the drain forever"
@@ -2016,10 +1967,7 @@ mod tests {
             .add_exit_state(TestState::Complete);
 
         let started = std::time::Instant::now();
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         let elapsed = started.elapsed();
 
         // With the bounded drain (50ms cap) the test finishes well under
@@ -2215,10 +2163,7 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
-        let err = workflow
-            .resume_from("crash-after-b", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("crash-after-b").await.unwrap_err();
         assert_eq!(err.message(), "C forward failed");
         // B re-ran on resume and re-pushed its entry; the persisted B-completion row at the
         // resume point must NOT be replayed too, or B would compensate twice. Expect exactly
@@ -2265,10 +2210,7 @@ mod tests {
             .with_checkpoint_store(store.clone());
 
         let started = std::time::Instant::now();
-        let err = workflow
-            .resume_from("resume-budget", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("resume-budget").await.unwrap_err();
         let elapsed = started.elapsed();
 
         assert!(
@@ -2429,10 +2371,7 @@ mod tests {
             .with_checkpoint_store(store.clone())
             .with_workflow_id("tour-interop");
 
-        let result = workflow
-            .orchestrate(TourStage::Route, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(TourStage::Route).await.unwrap();
         assert_eq!(result, TourStage::Done);
 
         // --- assertions on the audit log ---
@@ -2508,10 +2447,7 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
-        let err = workflow
-            .resume_from("mid-a", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("mid-a").await.unwrap_err();
         assert_eq!(err.message(), "C forward failed");
         // A re-ran (fresh output 11), B ran (22), C failed → drain B then A.
         assert_eq!(
@@ -2543,10 +2479,7 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("nope");
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         assert_eq!(err.inner().category(), "task_execution");
         // The Start checkpoint row is kept (empty stack ⇒ original error, no `clear`) —
         // so the run can still be resumed.
@@ -2597,10 +2530,7 @@ mod tests {
             );
         }
 
-        let err = workflow
-            .orchestrate(0, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(0).await.unwrap_err();
         assert_eq!(err.message(), format!("n{} failed", N - 1));
         // States 0..N-1 succeeded forward (the last one failed), so 0..N-1 compensate in reverse.
         let expected: Vec<u32> = (0..N - 1).rev().collect();
@@ -2653,7 +2583,7 @@ mod tests {
                     },
                 );
             }
-            let result = workflow.orchestrate(0, CancellationToken::disabled()).await;
+            let result = workflow.orchestrate(0).await;
             if fail_at == N {
                 assert_eq!(result.unwrap(), N, "no failure ⇒ run completes");
                 assert!(
@@ -2732,10 +2662,7 @@ mod tests {
             .with_workflow_id("step-fwd");
 
         assert_eq!(
-            workflow
-                .orchestrate(TestState::Start, CancellationToken::disabled())
-                .await
-                .unwrap(),
+            workflow.orchestrate(TestState::Start).await.unwrap(),
             TestState::Complete
         );
         assert_eq!(calls.load(AtomicOrdering::Relaxed), 4);
@@ -2805,10 +2732,7 @@ mod tests {
             .with_checkpoint_store(store.clone());
 
         assert_eq!(
-            workflow
-                .resume_from("step-resume", CancellationToken::disabled())
-                .await
-                .unwrap(),
+            workflow.resume_from("step-resume").await.unwrap(),
             TestState::Complete
         );
         // Only 2 step calls: cursor=2→More(3), cursor=3→Done.
@@ -2832,10 +2756,7 @@ mod tests {
             .with_checkpoint_store(store.clone())
             .with_workflow_id("dense");
 
-        workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        workflow.orchestrate(TestState::Start).await.unwrap();
 
         let audit = store.audit_rows("dense");
         // seq 0: Start (StateEntry), seq 1: cursor=1, seq 2: cursor=2, seq 3: Complete (exit)
@@ -2872,10 +2793,7 @@ mod tests {
             .with_checkpoint_store(store.clone());
 
         assert_eq!(
-            workflow
-                .resume_from("step-fresh-resume", CancellationToken::disabled())
-                .await
-                .unwrap(),
+            workflow.resume_from("step-fresh-resume").await.unwrap(),
             TestState::Complete
         );
         // Full 2 steps: None→1, 1→2, 2→Done = 3 calls
@@ -2890,7 +2808,7 @@ mod tests {
         let result = Workflow::bare()
             .register_stepped(TestState::Start, stepper)
             .add_exit_state(TestState::Complete)
-            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .orchestrate(TestState::Start)
             .await
             .unwrap();
         assert_eq!(result, TestState::Complete);
@@ -2962,10 +2880,7 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
-        let err = workflow
-            .resume_from("mixed-stepped", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("mixed-stepped").await.unwrap_err();
         assert_eq!(err.message(), "stepper failed");
         // A must have been compensated with value 42 from the rehydrated stack.
         assert_eq!(
@@ -2985,10 +2900,7 @@ mod tests {
             .with_checkpoint_store(store.clone())
             .with_workflow_id("ver-run")
             .with_workflow_version(7);
-        workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        workflow.orchestrate(TestState::Start).await.unwrap();
         let rows = store.audit_rows("ver-run");
         assert!(rows.iter().all(|r| r.workflow_version == 7));
         assert!(!rows.is_empty(), "expected at least one appended row");
@@ -3009,10 +2921,7 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone())
             .with_workflow_version(2);
-        let err = workflow
-            .resume_from("ver-mismatch", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("ver-mismatch").await.unwrap_err();
         assert_eq!(err, CanoError::workflow_version_mismatch(1, 2));
     }
 
@@ -3041,7 +2950,7 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
         let out = workflow
-            .resume_from("wf-no-se", CancellationToken::disabled())
+            .resume_from("wf-no-se")
             .await
             .expect("resume should fall back instead of refusing on missing StateEntry");
         assert_eq!(out, TestState::Complete);
@@ -3080,7 +2989,7 @@ mod tests {
             .with_checkpoint_store(store.clone())
             .with_workflow_version(1);
         let out = workflow
-            .resume_from("mixed-ver", CancellationToken::disabled())
+            .resume_from("mixed-ver")
             .await
             .expect("mixed-version log with matching tail must resume cleanly");
         assert_eq!(out, TestState::Complete);
@@ -3170,10 +3079,7 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
-        let _ = workflow
-            .resume_from("unsorted", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let _ = workflow.resume_from("unsorted").await.unwrap_err();
         // LIFO drain: B compensates first (output 2), then A (output 1).
         // Without the engine-side sort, the rehydrated stack would have been
         // built in reverse and `A` would have compensated before `B`.
@@ -3235,10 +3141,7 @@ mod tests {
             .register(TestState::Process, FailTask::new(true))
             .add_exit_state(TestState::Complete);
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         // The drain ran compensate (it started) but timed out before finishing.
         assert!(began.load(Ordering::SeqCst), "compensate must have started");
         assert!(
@@ -3300,10 +3203,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         assert!(
             started.load(Ordering::SeqCst),
             "task body must have started"
@@ -3365,10 +3265,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         assert!(
             committed.load(Ordering::SeqCst),
             "commit must have happened"
@@ -3419,10 +3316,7 @@ mod tests {
             .with_observer(Arc::new(obs));
 
         // Successful run that triggers the clear-on-success path.
-        workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        workflow.orchestrate(TestState::Start).await.unwrap();
 
         let calls = rec.clear_failures();
         assert_eq!(calls.len(), 1, "expected one clear-failure event");
@@ -3483,10 +3377,7 @@ mod tests {
             .add_exit_state(TestState::Complete);
 
         let started = std::time::Instant::now();
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         let elapsed = started.elapsed();
         assert!(
             ran.load(std::sync::atomic::Ordering::SeqCst),
@@ -3537,10 +3428,7 @@ mod tests {
             .register_with_compensation(TestState::Start, PanickyCompensate)
             .add_exit_state(TestState::Complete);
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         match err.inner() {
             CanoError::CompensationFailed { errors } => {
                 assert!(
@@ -3593,10 +3481,7 @@ mod tests {
         let workflow = Workflow::bare()
             .register_with_compensation(TestState::Start, InlineFailingCompensate)
             .add_exit_state(TestState::Complete);
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         let errors = match err {
             CanoError::CompensationFailed { errors } => errors,
             other => panic!("expected CompensationFailed, got: {other:?}"),
@@ -3699,10 +3584,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         assert!(charged.load(Ordering::SeqCst));
         // The error mentions the split rejection.
         assert!(err.message().contains("split"), "got: {err}");
@@ -3759,10 +3641,7 @@ mod tests {
             .register_with_compensation(TestState::Start, LeakyCharge { log: log.clone() })
             .add_exit_state(TestState::Complete);
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         // The serialize error is what surfaces (wrapped with state context).
         assert!(err.message().contains("serialize"), "got: {err}");
 
@@ -3843,10 +3722,7 @@ mod tests {
             .with_checkpoint_store(store.clone())
             .with_observer(Arc::new(obs));
 
-        let err = workflow
-            .resume_from("f3", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("f3").await.unwrap_err();
         // Setup ran and failed.
         assert!(triggered.load(Ordering::SeqCst));
         // The resource error surfaces (not wrapped in WithStateContext, not
@@ -3907,10 +3783,7 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
-        let err = workflow
-            .resume_from("orphan", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("orphan").await.unwrap_err();
         // The drain produced two errors (original + orphan) → CompensationFailed.
         let inner = match &err {
             CanoError::CompensationFailed { errors } => errors.clone(),
@@ -3991,10 +3864,7 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
-        let err = workflow
-            .resume_from("f9", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("f9").await.unwrap_err();
         // The drain ran two compensators (clean rollback) so the surfaced
         // error is just the original wrapped failure.
         let ctx = match &err {
@@ -4066,9 +3936,7 @@ mod tests {
             .with_observer(Arc::new(obs));
 
         // Resume succeeds (label dropped from path; gap surfaced via observer).
-        let _ = workflow
-            .resume_from("f-rename", CancellationToken::disabled())
-            .await;
+        let _ = workflow.resume_from("f-rename").await;
         let recorded = rec.unknown_states();
         assert_eq!(
             recorded.len(),
@@ -4125,10 +3993,7 @@ mod tests {
             .with_checkpoint_store(store.clone());
 
         // Case 1: no rows for the id — `load_run` returns empty.
-        let err = workflow
-            .resume_from("never-existed", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("never-existed").await.unwrap_err();
         assert!(err.message().contains("no checkpoint rows"), "got: {err}");
         assert_eq!(setups.load(Ordering::SeqCst), 1, "setup must have run");
         assert_eq!(
@@ -4145,10 +4010,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let err = workflow
-            .resume_from("ver-mismatch", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("ver-mismatch").await.unwrap_err();
         assert!(matches!(err, CanoError::WorkflowVersionMismatch { .. }));
         assert_eq!(setups.load(Ordering::SeqCst), 2);
         assert_eq!(
@@ -4165,10 +4027,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let err = workflow
-            .resume_from("bad-label", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("bad-label").await.unwrap_err();
         assert!(err.message().contains("is not a registered or exit state"));
         assert_eq!(setups.load(Ordering::SeqCst), 3);
         assert_eq!(
@@ -4217,7 +4076,7 @@ mod tests {
             .with_checkpoint_store(store.clone());
 
         let out = workflow
-            .resume_from("missing-entry", CancellationToken::disabled())
+            .resume_from("missing-entry")
             .await
             .expect("resume should fall back rather than refuse on missing StateEntry");
         assert_eq!(out, TestState::Complete);
@@ -4255,7 +4114,7 @@ mod tests {
             .with_workflow_version(2);
 
         let out = workflow
-            .resume_from("mixed-ver", CancellationToken::disabled())
+            .resume_from("mixed-ver")
             .await
             .expect("post-F3, mixed-version log with matching tail must resume");
         assert_eq!(out, TestState::Complete);
@@ -4539,9 +4398,7 @@ mod metrics_tests {
                 .register(TestState::Start, SimpleTask::new(TestState::Process))
                 .register(TestState::Process, SimpleTask::new(TestState::Complete))
                 .add_exit_state(TestState::Complete);
-            workflow
-                .orchestrate(TestState::Start, CancellationToken::disabled())
-                .await
+            workflow.orchestrate(TestState::Start).await
         });
         assert_eq!(res.unwrap(), TestState::Complete);
         // At minimum one append per state entered (Start, Process, Complete = 3 rows)
@@ -4591,9 +4448,7 @@ mod metrics_tests {
                 )
                 .register(TestState::Process, AlwaysFailTask)
                 .add_exit_state(TestState::Complete);
-            workflow
-                .orchestrate(TestState::Start, CancellationToken::disabled())
-                .await
+            workflow.orchestrate(TestState::Start).await
         });
         // Clean rollback: the original error is returned (not CompensationFailed)
         assert!(res.is_err(), "expected workflow to fail");

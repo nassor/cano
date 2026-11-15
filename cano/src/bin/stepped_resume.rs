@@ -107,17 +107,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let final_state = match mode {
         "resume" => {
-            let result = workflow
-                .resume_from(WORKFLOW_ID, CancellationToken::disabled())
-                .await?;
+            let result = workflow.resume_from(WORKFLOW_ID).await?;
             println!("RESUME COMPLETE final={result:?}");
             let _ = std::io::stdout().flush();
             result
         }
         _ => {
-            let result = workflow
-                .orchestrate(State::Crunch, CancellationToken::disabled())
-                .await?;
+            let result = workflow.orchestrate(State::Crunch).await?;
             println!("RUN COMPLETE final={result:?}");
             let _ = std::io::stdout().flush();
             result

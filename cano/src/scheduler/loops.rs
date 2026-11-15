@@ -13,9 +13,9 @@ use tokio::sync::{RwLock, mpsc, watch};
 use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Duration, sleep};
 
-use crate::cancel::{CancellationHandle, CancellationToken};
 use crate::error::{CanoError, CanoResult};
 use crate::workflow::Workflow;
+use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "tracing")]
 use tracing::Instrument;
@@ -64,7 +64,7 @@ pub(super) async fn spawn_every_loop<TState, TResourceKey>(
     initial_state: TState,
     info: Arc<RwLock<FlowInfo>>,
     policy: Arc<BackoffPolicy>,
-    cancel: Arc<RwLock<Option<CancellationHandle>>>,
+    cancel: Arc<RwLock<Option<CancellationToken>>>,
     mut running: watch::Receiver<bool>,
     interval: Duration,
 ) where
@@ -116,7 +116,7 @@ pub(super) async fn spawn_cron_loop<TState, TResourceKey>(
     initial_state: TState,
     info: Arc<RwLock<FlowInfo>>,
     policy: Arc<BackoffPolicy>,
-    cancel: Arc<RwLock<Option<CancellationHandle>>>,
+    cancel: Arc<RwLock<Option<CancellationToken>>>,
     mut running: watch::Receiver<bool>,
     schedule: Box<CronSchedule>,
 ) where
@@ -399,7 +399,7 @@ async fn execute_flow<TState, TResourceKey>(
     initial_state: TState,
     info: Arc<RwLock<FlowInfo>>,
     policy: &BackoffPolicy,
-    cancel: Arc<RwLock<Option<CancellationHandle>>>,
+    cancel: Arc<RwLock<Option<CancellationToken>>>,
 ) where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
     TResourceKey: Hash + Eq + Send + Sync + 'static,
@@ -447,7 +447,7 @@ async fn execute_reserved_flow<TState, TResourceKey>(
     initial_state: TState,
     info: Arc<RwLock<FlowInfo>>,
     policy: &BackoffPolicy,
-    cancel: Arc<RwLock<Option<CancellationHandle>>>,
+    cancel: Arc<RwLock<Option<CancellationToken>>>,
 ) where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
     TResourceKey: Hash + Eq + Send + Sync + 'static,
@@ -469,12 +469,12 @@ async fn execute_reserved_flow<TState, TResourceKey>(
         .total_timeout
         .map(|d| (std::time::Instant::now(), d));
 
-    // Publish a fresh cancellation handle for this run so `cancel_flow` and
+    // Publish a fresh cancellation token for this run so `cancel_flow` and
     // graceful shutdown can cooperatively stop it (and drain its saga). A fresh
     // token per run means cancelling one run never poisons a later one. Cleared
     // below once the run finishes, so a `cancel_flow` on an idle flow is a no-op.
-    let (handle, token) = CancellationToken::new();
-    *cancel.write().await = Some(handle);
+    let token = CancellationToken::new();
+    *cancel.write().await = Some(token.clone());
 
     // Wrap the workflow future in `catch_unwind`. A panic inside any path
     // that bypasses the FSM's own `catch_unwind` (e.g. an observer that
@@ -486,10 +486,10 @@ async fn execute_reserved_flow<TState, TResourceKey>(
     // `BackoffPolicy`.
     #[cfg(feature = "tracing")]
     let workflow_fut = workflow
-        .execute_workflow(initial_state, total_budget, token)
+        .execute_workflow(initial_state, total_budget, Some(&token))
         .instrument(tracing::info_span!("execute_flow"));
     #[cfg(not(feature = "tracing"))]
-    let workflow_fut = workflow.execute_workflow(initial_state, total_budget, token);
+    let workflow_fut = workflow.execute_workflow(initial_state, total_budget, Some(&token));
 
     let result = match AssertUnwindSafe(workflow_fut).catch_unwind().await {
         Ok(inner) => inner,
@@ -534,7 +534,7 @@ async fn apply_outcome(
         // streak or backoff window, so its next scheduled run fires normally. A
         // *dirty* cancel whose rollback itself failed surfaces as
         // `compensation_failed`, which falls through to the backoff arm below.
-        Err(ref e) if e.category() == "cancelled" => {
+        Err(ref e) if e.is_cancelled() => {
             info_guard.status = Status::Idle;
         }
         Err(e) => {
@@ -585,7 +585,7 @@ async fn dispatch_flow_if_eligible<TState, TResourceKey>(
     initial_state: &TState,
     info: &Arc<RwLock<FlowInfo>>,
     policy: &Arc<BackoffPolicy>,
-    cancel: &Arc<RwLock<Option<CancellationHandle>>>,
+    cancel: &Arc<RwLock<Option<CancellationToken>>>,
 ) -> bool
 where
     TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,

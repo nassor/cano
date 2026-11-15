@@ -250,13 +250,7 @@ async fn run_negotiation_workflow() -> Result<(), CanoError> {
         ]);
 
     // Execute the negotiation workflow
-    match workflow
-        .orchestrate(
-            NegotiationAction::StartSelling,
-            CancellationToken::disabled(),
-        )
-        .await
-    {
+    match workflow.orchestrate(NegotiationAction::StartSelling).await {
         Ok(final_state) => {
             println!("{}", "=".repeat(50));
 

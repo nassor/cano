@@ -109,10 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_observer(Arc::new(Watcher));
 
     println!("── run 1: orchestrate (Process will crash) ──");
-    if let Err(e) = workflow
-        .orchestrate(Step::Start, CancellationToken::disabled())
-        .await
-    {
+    if let Err(e) = workflow.orchestrate(Step::Start).await {
         println!("  stopped: {e}");
     }
     println!("checkpoint log after run 1 (the crash left it intact):");
@@ -121,9 +118,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("\n── run 2: resume_from ──");
-    let final_state = workflow
-        .resume_from(run_id, CancellationToken::disabled())
-        .await?;
+    let final_state = workflow.resume_from(run_id).await?;
     println!("  reached {final_state:?} — checkpoint log cleared on success");
     assert_eq!(final_state, Step::Done);
     assert!(checkpoint_store.load_run(run_id).await?.is_empty());

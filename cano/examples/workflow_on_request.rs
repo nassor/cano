@@ -165,7 +165,7 @@ async fn process_handler(
 
     // Run the FSM to completion.
     workflow
-        .orchestrate(TextPipelineState::Parse, CancellationToken::disabled())
+        .orchestrate(TextPipelineState::Parse)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

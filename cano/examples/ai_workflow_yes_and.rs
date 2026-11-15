@@ -389,9 +389,7 @@ async fn main() -> Result<(), CanoError> {
 
     println!("Starting improvised story...\n");
 
-    let final_state = workflow
-        .orchestrate(ConversationState::Start, CancellationToken::disabled())
-        .await?;
+    let final_state = workflow.orchestrate(ConversationState::Start).await?;
 
     println!("\nStory completed with state: {final_state:?}");
 

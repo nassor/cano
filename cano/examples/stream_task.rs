@@ -195,9 +195,7 @@ async fn main() -> CanoResult<()> {
         .register_stream(Mode::Alert, AlertMode)
         .add_exit_state(Mode::Done);
 
-    let result = workflow
-        .orchestrate(Mode::Calm, CancellationToken::disabled())
-        .await?;
+    let result = workflow.orchestrate(Mode::Calm).await?;
     assert_eq!(result, Mode::Done);
     println!("\ncompleted at {result:?}");
     Ok(())

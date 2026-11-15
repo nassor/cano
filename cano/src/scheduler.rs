@@ -30,7 +30,6 @@ mod backoff;
 
 pub use backoff::BackoffPolicy;
 
-use crate::cancel::CancellationHandle;
 use crate::error::CanoResult;
 use crate::workflow::Workflow;
 use chrono::{DateTime, Utc};
@@ -39,6 +38,7 @@ use std::hash::Hash;
 use std::sync::Arc;
 use tokio::sync::{RwLock, oneshot};
 use tokio::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 /// Commands sent over the internal scheduler control channel.
 ///
@@ -145,7 +145,7 @@ where
     /// by `execute_reserved_flow` while a run is in flight and cleared when it
     /// finishes. `None` when the flow is idle. Lets `cancel_flow` and graceful
     /// shutdown cooperatively cancel an in-flight run.
-    cancel: Arc<RwLock<Option<CancellationHandle>>>,
+    cancel: Arc<RwLock<Option<CancellationToken>>>,
 }
 
 impl<TState, TResourceKey> Clone for FlowData<TState, TResourceKey>
