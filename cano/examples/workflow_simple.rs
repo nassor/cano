@@ -6,7 +6,7 @@
 //!    with no-op lifecycle, ready to insert into a `Resources` map.
 //! 2. [`#[derive(FromResources)]`](cano::FromResources) — generates a
 //!    `from_resources(&Resources)` constructor that pulls each declared
-//!    field out of the map. Field-level `#[res("key")]` declares the lookup key.
+//!    field out of the map by type (`#[res("name")]` looks up a named entry).
 //! 3. [`#[task(state = ...)]`](cano::task) on an inherent `impl` block — the
 //!    macro builds the `impl Task<State> for X` header from the attribute,
 //!    and infers the return type from the `run` method signature.
@@ -52,14 +52,12 @@ struct GeneratorConfig {
 /// Dependencies the generator task needs.
 #[derive(FromResources)]
 struct GeneratorDeps {
-    #[res("config")]
     config: Arc<GeneratorConfig>,
 }
 
 /// Dependencies the store step needs to write the filtered vector.
 #[derive(FromResources)]
 struct StoreDeps {
-    #[res("store")]
     store: Arc<MemoryStore>,
 }
 

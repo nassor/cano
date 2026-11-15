@@ -282,7 +282,7 @@ pub mod metrics;
 #[cfg(feature = "scheduler")]
 pub mod scheduler;
 
-#[cfg(feature = "testing")]
+#[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
 // Core public API - simplified imports

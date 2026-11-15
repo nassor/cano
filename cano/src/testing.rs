@@ -55,6 +55,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 
@@ -119,6 +120,30 @@ pub enum RecordedEvent {
     /// A run was cancelled via a [`CancellationToken`](crate::CancellationToken).
     Cancelled {
         /// The `Debug` rendering of the state cancellation was observed at.
+        state: String,
+    },
+    /// The [`with_total_timeout`](crate::workflow::Workflow::with_total_timeout) budget
+    /// was exceeded.
+    WorkflowTimeout {
+        /// Wall-clock time elapsed when the budget tripped.
+        elapsed: Duration,
+        /// The configured budget.
+        limit: Duration,
+    },
+    /// Clearing the checkpoint log after a successful run failed.
+    CheckpointClearFailed {
+        /// The workflow id whose log could not be cleared.
+        workflow_id: String,
+        /// The store error's `Display` rendering.
+        error: String,
+    },
+    /// A resumed run met a checkpoint row whose state label it does not know.
+    UnknownResumeState {
+        /// The resumed workflow id.
+        workflow_id: String,
+        /// The row's sequence.
+        sequence: u64,
+        /// The unrecognised state label.
         state: String,
     },
 }
@@ -305,6 +330,24 @@ impl WorkflowObserver for RecordingObserver {
             state: state.into(),
         });
     }
+    fn on_workflow_timeout(&self, elapsed: Duration, limit: Duration) {
+        self.events
+            .lock()
+            .push(RecordedEvent::WorkflowTimeout { elapsed, limit });
+    }
+    fn on_checkpoint_clear_failed(&self, workflow_id: &str, error: &CanoError) {
+        self.events.lock().push(RecordedEvent::CheckpointClearFailed {
+            workflow_id: workflow_id.into(),
+            error: error.to_string(),
+        });
+    }
+    fn on_unknown_resume_state(&self, workflow_id: &str, sequence: u64, state: &str) {
+        self.events.lock().push(RecordedEvent::UnknownResumeState {
+            workflow_id: workflow_id.into(),
+            sequence,
+            state: state.into(),
+        });
+    }
 }
 
 /// A process-local [`CheckpointStore`] for resume /
@@ -316,10 +359,13 @@ impl WorkflowObserver for RecordingObserver {
 /// [`resume_from`](crate::workflow::Workflow::resume_from) to exercise the crash-recovery
 /// path entirely in memory. It honors the full trait contract: duplicate
 /// `(workflow_id, sequence)` is rejected, [`load_run`](Self::load_run) returns rows sorted by
-/// sequence, and [`clear`](Self::clear) is per-id.
+/// sequence, and [`clear`](Self::clear) is per-id. Every appended row is also kept in
+/// an append-order [`history`](Self::history) that `clear` never touches, so a test can
+/// inspect what a successful (log-clearing) run wrote.
 #[derive(Default, Debug)]
 pub struct InMemoryCheckpointStore {
     inner: Mutex<HashMap<String, Vec<CheckpointRow>>>,
+    history: Mutex<Vec<(String, CheckpointRow)>>,
 }
 
 impl InMemoryCheckpointStore {
@@ -327,6 +373,23 @@ impl InMemoryCheckpointStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The live rows for `workflow_id`, sorted by sequence (empty after a `clear`).
+    pub fn rows(&self, workflow_id: &str) -> Vec<CheckpointRow> {
+        let mut rows = self
+            .inner
+            .lock()
+            .get(workflow_id)
+            .cloned()
+            .unwrap_or_default();
+        rows.sort_by_key(|r| r.sequence);
+        rows
+    }
+
+    /// Every row ever appended, with its workflow id, in append order. Survives `clear`.
+    pub fn history(&self) -> Vec<(String, CheckpointRow)> {
+        self.history.lock().clone()
     }
 }
 
@@ -341,19 +404,15 @@ impl CheckpointStore for InMemoryCheckpointStore {
                 row.sequence
             )));
         }
+        self.history
+            .lock()
+            .push((workflow_id.to_string(), row.clone()));
         rows.push(row);
         Ok(())
     }
 
     async fn load_run(&self, workflow_id: &str) -> Result<Vec<CheckpointRow>, CanoError> {
-        let mut rows = self
-            .inner
-            .lock()
-            .get(workflow_id)
-            .cloned()
-            .unwrap_or_default();
-        rows.sort_by_key(|r| r.sequence);
-        Ok(rows)
+        Ok(self.rows(workflow_id))
     }
 
     async fn clear(&self, workflow_id: &str) -> Result<(), CanoError> {

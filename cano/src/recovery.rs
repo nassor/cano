@@ -37,13 +37,13 @@
 //!
 //! /// A trivial in-memory store, useful for tests.
 //! #[derive(Default)]
-//! struct InMemoryStore(Mutex<HashMap<String, Vec<CheckpointRow>>>);
+//! struct MapStore(Mutex<HashMap<String, Vec<CheckpointRow>>>);
 //!
 //! // `#[cano::checkpoint_store]` on an inherent `impl` builds the
-//! // `impl CheckpointStore for InMemoryStore` header for you. (Or write that header
-//! // yourself: `#[cano::checkpoint_store] impl CheckpointStore for InMemoryStore { … }`.)
+//! // `impl CheckpointStore for MapStore` header for you. (Or write that header
+//! // yourself: `#[cano::checkpoint_store] impl CheckpointStore for MapStore { … }`.)
 //! #[cano::checkpoint_store]
-//! impl InMemoryStore {
+//! impl MapStore {
 //!     async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
 //!         let mut runs = self.0.lock().unwrap();
 //!         let rows = runs.entry(workflow_id.to_string()).or_default();
@@ -68,7 +68,7 @@
 //!
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), CanoError> {
-//! let checkpoint_store = InMemoryStore::default();
+//! let checkpoint_store = MapStore::default();
 //! checkpoint_store.append("run-1", CheckpointRow::new(0, "Start", "fetch")).await?;
 //! checkpoint_store.append("run-1", CheckpointRow::new(1, "Done", "process")).await?;
 //! assert_eq!(checkpoint_store.load_run("run-1").await?.len(), 2);
@@ -206,47 +206,14 @@ pub trait CheckpointStore: Send + Sync + 'static {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-
-    use parking_lot::Mutex;
-
-    /// Minimal in-memory `CheckpointStore` for exercising the trait contract.
-    #[derive(Default)]
-    struct InMemoryStore(Mutex<HashMap<String, Vec<CheckpointRow>>>);
-
-    #[checkpoint_store]
-    impl CheckpointStore for InMemoryStore {
-        async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
-            let mut runs = self.0.lock();
-            let rows = runs.entry(workflow_id.to_string()).or_default();
-            if rows.iter().any(|r| r.sequence == row.sequence) {
-                return Err(CanoError::checkpoint_store(format!(
-                    "checkpoint conflict: {workflow_id:?} already has sequence {}",
-                    row.sequence
-                )));
-            }
-            rows.push(row);
-            Ok(())
-        }
-
-        async fn load_run(&self, workflow_id: &str) -> Result<Vec<CheckpointRow>, CanoError> {
-            let mut rows = self.0.lock().get(workflow_id).cloned().unwrap_or_default();
-            rows.sort_by_key(|r| r.sequence);
-            Ok(rows)
-        }
-
-        async fn clear(&self, workflow_id: &str) -> Result<(), CanoError> {
-            self.0.lock().remove(workflow_id);
-            Ok(())
-        }
-    }
+    use crate::testing::InMemoryCheckpointStore;
 
     #[test]
     fn checkpoint_store_is_dyn_compatible() {
         // `CheckpointStore` must stay object-safe so a single store can be shared
         // as `Arc<dyn CheckpointStore>` across concurrent workflows.
         let _erased: std::sync::Arc<dyn CheckpointStore> =
-            std::sync::Arc::new(InMemoryStore::default());
+            std::sync::Arc::new(InMemoryCheckpointStore::new());
     }
 
     #[test]
@@ -271,7 +238,7 @@ mod tests {
 
     #[tokio::test]
     async fn trait_roundtrip_append_load_clear() {
-        let store = InMemoryStore::default();
+        let store = InMemoryCheckpointStore::new();
 
         store
             .append("run", CheckpointRow::new(0, "A", "t0"))
@@ -303,7 +270,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_run_unknown_id_is_empty() {
-        let store = InMemoryStore::default();
+        let store = InMemoryCheckpointStore::new();
         assert!(store.load_run("nope").await.unwrap().is_empty());
     }
 
@@ -321,7 +288,7 @@ mod tests {
 
     #[tokio::test]
     async fn append_rejects_duplicate_sequence() {
-        let store = InMemoryStore::default();
+        let store = InMemoryCheckpointStore::new();
         store
             .append("run", CheckpointRow::new(0, "A", "t0"))
             .await
@@ -439,7 +406,7 @@ mod tests {
 
     #[tokio::test]
     async fn load_run_returns_rows_sorted_even_when_appended_out_of_order() {
-        let store = InMemoryStore::default();
+        let store = InMemoryCheckpointStore::new();
         for seq in [2u64, 0, 1] {
             store
                 .append("run", CheckpointRow::new(seq, "S", "t"))
@@ -456,7 +423,7 @@ mod tests {
 
     #[tokio::test]
     async fn clear_isolates_by_workflow_id() {
-        let store = InMemoryStore::default();
+        let store = InMemoryCheckpointStore::new();
         store
             .append("a", CheckpointRow::new(0, "S", "t"))
             .await
@@ -479,7 +446,7 @@ mod tests {
         // A single store shared as `Arc<dyn CheckpointStore>` across tasks: every distinct sequence
         // lands, and load_run returns them sorted (the contract concurrent callers rely on).
         let store: std::sync::Arc<dyn CheckpointStore> =
-            std::sync::Arc::new(InMemoryStore::default());
+            std::sync::Arc::new(InMemoryCheckpointStore::new());
         let mut handles = Vec::new();
         for seq in 0..20u64 {
             let s = std::sync::Arc::clone(&store);

@@ -974,52 +974,10 @@ mod tests {
     // Engine-path tests: register_stream + cancellation + cursor persistence
     // -----------------------------------------------------------------------
 
-    use std::collections::HashMap;
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-    /// Minimal in-memory `CheckpointStore` for the resume test. `committed` records every
-    /// appended `StepCursor` blob at append time, so cursor assertions survive the log
-    /// `clear` that a *successfully completed* run performs.
-    #[derive(Default)]
-    struct InMemoryStore {
-        rows: Mutex<HashMap<String, Vec<crate::recovery::CheckpointRow>>>,
-        committed: Mutex<Vec<Vec<u8>>>,
-    }
-
-    #[crate::checkpoint_store]
-    impl crate::recovery::CheckpointStore for InMemoryStore {
-        async fn append(
-            &self,
-            workflow_id: &str,
-            row: crate::recovery::CheckpointRow,
-        ) -> Result<(), CanoError> {
-            if row.kind == crate::recovery::RowKind::StepCursor
-                && let Some(blob) = &row.output_blob
-            {
-                self.committed.lock().unwrap().push(blob.clone());
-            }
-            let mut g = self.rows.lock().unwrap();
-            let v = g.entry(workflow_id.to_string()).or_default();
-            if v.iter().any(|r| r.sequence == row.sequence) {
-                return Err(CanoError::checkpoint_store("duplicate sequence"));
-            }
-            v.push(row);
-            Ok(())
-        }
-        async fn load_run(
-            &self,
-            workflow_id: &str,
-        ) -> Result<Vec<crate::recovery::CheckpointRow>, CanoError> {
-            let g = self.rows.lock().unwrap();
-            let mut v = g.get(workflow_id).cloned().unwrap_or_default();
-            v.sort_by_key(|r| r.sequence);
-            Ok(v)
-        }
-        async fn clear(&self, workflow_id: &str) -> Result<(), CanoError> {
-            self.rows.lock().unwrap().remove(workflow_id);
-            Ok(())
-        }
-    }
+    use crate::recovery::CheckpointStore;
+    use crate::testing::InMemoryCheckpointStore;
 
     struct Forever {
         closed_cancelled: Arc<AtomicBool>,
@@ -1164,7 +1122,7 @@ mod tests {
             processed: Arc::clone(&processed),
             fail_third: Arc::new(AtomicBool::new(true)),
         };
-        let store = Arc::new(InMemoryStore::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let workflow = Workflow::bare()
             .register(Step::Consume, task)
             .add_exit_state(Step::Done)
@@ -1481,7 +1439,7 @@ mod tests {
             flushed_windows: Arc::new(AtomicU32::new(0)),
         };
         let closed = Arc::clone(&task.closed_cancelled);
-        let store = Arc::new(InMemoryStore::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let workflow = Workflow::bare()
             .register(Step::Consume, task)
             .add_exit_state(Step::Done)
@@ -1507,7 +1465,7 @@ mod tests {
              same cooperative drain as a real cancel"
         );
         assert!(
-            !store.committed.lock().unwrap().is_empty(),
+            !step_cursors(&store).is_empty(),
             "the in-flight window's cursor must be committed before the timeout surfaces"
         );
     }
@@ -1689,13 +1647,13 @@ mod tests {
 
     /// The cursors (decoded as `u64`) committed during a run, in append order — captured at
     /// append time so they survive the log `clear` a completed run performs.
-    fn step_cursors(store: &InMemoryStore) -> Vec<u64> {
+    fn step_cursors(store: &InMemoryCheckpointStore) -> Vec<u64> {
         store
-            .committed
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|blob| serde_json::from_slice::<u64>(blob).unwrap())
+            .history()
+            .into_iter()
+            .filter(|(_, row)| row.kind == crate::recovery::RowKind::StepCursor)
+            .filter_map(|(_, row)| row.output_blob)
+            .map(|blob| serde_json::from_slice::<u64>(&blob).unwrap())
             .collect()
     }
 
@@ -1759,7 +1717,7 @@ mod tests {
         // the channel closes at t=120 so [4] flushes as the terminal partial on exhaustion.
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
         let windows = Arc::new(Mutex::new(Vec::new()));
-        let store = Arc::new(InMemoryStore::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let task = DurationSource {
             rx: Mutex::new(Some(rx)),
             windows: Arc::clone(&windows),
@@ -2130,7 +2088,7 @@ mod tests {
             policy: StreamErrorPolicy::SkipAndContinue,
             flushed: Arc::new(Mutex::new(Vec::new())),
         };
-        let store = Arc::new(InMemoryStore::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let workflow = Workflow::bare()
             .register(Step::Consume, task)
             .add_exit_state(Step::Done)
@@ -2272,7 +2230,7 @@ mod tests {
             window: StreamWindow::Count(2),
             flushes: Arc::clone(&flushes),
         };
-        let store = Arc::new(InMemoryStore::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let workflow = Workflow::bare()
             .register(Step::Consume, task)
             .add_exit_state(Step::Done)
@@ -2302,7 +2260,7 @@ mod tests {
             window: StreamWindow::Count(2),
             flushes: Arc::clone(&flushes),
         };
-        let store = Arc::new(InMemoryStore::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let workflow = Workflow::bare()
             .register(Step::Consume, task)
             .add_exit_state(Step::Done)
@@ -2326,7 +2284,7 @@ mod tests {
             window: StreamWindow::Count(2),
             flushes: Arc::clone(&flushes),
         };
-        let store = Arc::new(InMemoryStore::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let workflow = Workflow::bare()
             .register(Step::Consume, task)
             .add_exit_state(Step::Done)
@@ -2641,7 +2599,7 @@ mod tests {
             seen: AtomicU32::new(0),
             opened_cursors: Arc::clone(&opened),
         };
-        let store = Arc::new(InMemoryStore::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let workflow = Workflow::bare()
             .register(Step::Consume, task)
             .add_exit_state(Step::Done)
@@ -2714,7 +2672,7 @@ mod tests {
     async fn corrupt_cursor_fails_to_deserialize_on_resume() {
         use crate::workflow::Workflow;
 
-        let store = Arc::new(InMemoryStore::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let workflow = Workflow::bare()
             .register(Step::Consume, CrashAfterFirstWindow)
             .add_exit_state(Step::Done)
@@ -2726,13 +2684,13 @@ mod tests {
         assert!(r1.is_err(), "run 1 should crash: {r1:?}");
 
         // Corrupt the committed cursor blob to invalid JSON.
-        {
-            let mut g = store.rows.lock().unwrap();
-            for row in g.get_mut("corrupt").unwrap().iter_mut() {
-                if row.kind == crate::recovery::RowKind::StepCursor {
-                    row.output_blob = Some(b"not-json".to_vec());
-                }
+        let rows = store.rows("corrupt");
+        store.clear("corrupt").await.unwrap();
+        for mut row in rows {
+            if row.kind == crate::recovery::RowKind::StepCursor {
+                row.output_blob = Some(b"not-json".to_vec());
             }
+            store.append("corrupt", row).await.unwrap();
         }
 
         let err = workflow.resume_from("corrupt").await.unwrap_err();

@@ -703,7 +703,7 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_row_written_for_each_state_entered() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Process))
             .register(TestState::Process, SimpleTask::new(TestState::Complete))
@@ -718,14 +718,14 @@ mod tests {
 
         // One row per state entered, in order — including the terminal exit state.
         assert_eq!(
-            store.audit_states("run-1"),
+            audit_states(&store, "run-1"),
             vec![
                 (0, "Start".to_string()),
                 (1, "Process".to_string()),
                 (2, "Complete".to_string()),
             ]
         );
-        let rows = store.audit_rows("run-1");
+        let rows = audit_rows(&store, "run-1");
         assert!(
             !rows[0].task_id.is_empty() && !rows[1].task_id.is_empty(),
             "rows for registered states carry the task name"
@@ -756,7 +756,7 @@ mod tests {
 
     #[tokio::test]
     async fn resume_continues_from_last_checkpointed_state() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // Seed: the run got as far as entering `Process` before "crashing".
         store
             .append("run-2", CheckpointRow::new(0, "Start", ""))
@@ -794,7 +794,7 @@ mod tests {
 
         // Continuation appended rows from sequence 2 onward (re-entering `Process`, then `Complete`).
         assert_eq!(
-            store.audit_states("run-2"),
+            audit_states(&store, "run-2"),
             vec![
                 (0, "Start".to_string()),
                 (1, "Process".to_string()),
@@ -811,7 +811,7 @@ mod tests {
 
     #[tokio::test]
     async fn resume_from_exit_state_returns_immediately() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         store
             .append("done-run", CheckpointRow::new(0, "Start", ""))
             .await
@@ -839,7 +839,7 @@ mod tests {
 
     #[tokio::test]
     async fn split_state_writes_a_single_checkpoint_row() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let tasks: Vec<SimpleTask> = (0..5)
             .map(|_| SimpleTask::new(TestState::Complete))
             .collect();
@@ -856,14 +856,14 @@ mod tests {
         );
 
         // The 5-way split is one state ⇒ one entry row, not five.
-        let rows = store.audit_rows("split-run");
+        let rows = audit_rows(&store, "split-run");
         assert_eq!(
             rows.iter().filter(|r| r.state == "Start").count(),
             1,
             "the split state is checkpointed exactly once"
         );
         assert_eq!(
-            store.audit_states("split-run"),
+            audit_states(&store, "split-run"),
             vec![(0, "Start".to_string()), (1, "Complete".to_string())]
         );
         assert!(
@@ -874,7 +874,7 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_requires_workflow_id_on_orchestrate() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // Store attached but no workflow id — orchestrate must error at the first checkpoint write.
         let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
@@ -889,7 +889,7 @@ mod tests {
 
     #[tokio::test]
     async fn resume_unknown_workflow_id_errors() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
@@ -901,7 +901,7 @@ mod tests {
 
     #[tokio::test]
     async fn resume_with_unrecognized_state_label_errors() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         store
             .append(
                 "wrong-defn",
@@ -935,7 +935,7 @@ mod tests {
             }
         }
 
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // One `EventLog` observes both on_state_enter and on_checkpoint, to verify the
         // router fires the former but NOT the latter.
         let (obs, rec) = EventLog::new();
@@ -963,7 +963,7 @@ mod tests {
 
         // No router row: only Process (seq 0) and Complete (seq 1).
         assert_eq!(
-            store.audit_states("router-run"),
+            audit_states(&store, "router-run"),
             vec![(0, "Process".to_string()), (1, "Complete".to_string())],
             "router state leaves no checkpoint row; sequences are dense from 0"
         );
@@ -992,7 +992,7 @@ mod tests {
             }
         }
 
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // Only the Process row exists — as if the run crashed right after entering Process
         // (the Start router left no row).
         store
@@ -1018,7 +1018,7 @@ mod tests {
         );
         // Continuation wrote Process (seq 1) and Complete (seq 2).
         assert_eq!(
-            store.audit_states("router-resume"),
+            audit_states(&store, "router-resume"),
             vec![
                 (0, "Process".to_string()),
                 (1, "Process".to_string()),
@@ -1238,7 +1238,7 @@ mod tests {
 
     #[tokio::test]
     async fn resume_rehydrates_compensation_stack_and_rolls_back() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
 
         // Seed a log as if a previous process: entered Start, ran compensatable A (output 7),
@@ -1313,7 +1313,7 @@ mod tests {
     async fn resume_step_cursor_row_is_not_added_to_compensation_stack() {
         use crate::recovery::RowKind;
 
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
 
         // Seed a mixed log:
@@ -1435,7 +1435,7 @@ mod tests {
     // ---- hardening: concurrency & high-error scenarios ----
 
     fn three_state_checkpointed(
-        store: Arc<MemCheckpoints>,
+        store: Arc<InMemoryCheckpointStore>,
         id: impl Into<Arc<str>>,
     ) -> Workflow<TestState> {
         Workflow::bare()
@@ -1448,7 +1448,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn many_workflows_share_one_store_without_cross_talk() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         const RUNS: usize = 16;
 
         let mut handles = Vec::new();
@@ -1467,7 +1467,7 @@ mod tests {
         for i in 0..RUNS {
             let id = format!("run-{i}");
             assert_eq!(
-                store.audit_states(&id),
+                audit_states(&store, &id),
                 vec![
                     (0, "Start".to_string()),
                     (1, "Process".to_string()),
@@ -1484,7 +1484,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn racing_runs_of_one_id_never_corrupt_and_at_least_one_completes() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let mut handles = Vec::new();
         for _ in 0..2 {
             let s = Arc::clone(&store);
@@ -1517,7 +1517,7 @@ mod tests {
 
     #[tokio::test]
     async fn fresh_run_over_an_uncleared_log_is_rejected() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // A previous run that failed left rows behind (no `clear`).
         store
             .append("run", CheckpointRow::new(0, "Start", "SimpleTask"))
@@ -1542,7 +1542,7 @@ mod tests {
     async fn append_failure_mid_run_rolls_back_and_keeps_the_log() {
         // A store that errors on the n-th `append` — a stand-in for a disk-full crash.
         struct FailAfter {
-            inner: MemCheckpoints,
+            inner: InMemoryCheckpointStore,
             ok_appends: std::sync::atomic::AtomicUsize,
         }
         #[cano_macros::checkpoint_store]
@@ -1563,7 +1563,7 @@ mod tests {
 
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
         let store = Arc::new(FailAfter {
-            inner: MemCheckpoints::default(),
+            inner: InMemoryCheckpointStore::new(),
             // Allow: Start entry (1), Start completion (2). Fail on the 3rd append (Process entry).
             ok_appends: std::sync::atomic::AtomicUsize::new(2),
         });
@@ -2033,7 +2033,7 @@ mod tests {
 
     #[tokio::test]
     async fn double_compensate_on_resume_is_avoided() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
 
         // Seed a log that crashed *after* B's completion row but *before* the next state's
@@ -2102,7 +2102,7 @@ mod tests {
         // `resume_from` must thread `total_timeout` into the FSM loop the same way the
         // forward `run`/`orchestrate` path does. Without it, a slow resumed task would
         // run to completion regardless of the configured budget.
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // Seed: run got as far as entering `Process` before crashing — resume re-runs Process.
         store
             .append("resume-budget", CheckpointRow::new(0, "Process", ""))
@@ -2264,7 +2264,7 @@ mod tests {
         }
 
         // --- build workflow ---
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let poll_counter = Arc::new(AtomicU32::new(0));
 
         let workflow = Workflow::bare()
@@ -2285,7 +2285,7 @@ mod tests {
         assert_eq!(result, TourStage::Done);
 
         // --- assertions on the audit log ---
-        let audit = store.audit_rows("tour-interop");
+        let audit = audit_rows(&store, "tour-interop");
 
         // (1) No row whose state label is "Route" (the router skips the checkpoint).
         assert!(
@@ -2325,7 +2325,7 @@ mod tests {
 
     #[tokio::test]
     async fn resume_then_advance_then_fail_rolls_back_mixed_outputs_and_clears() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
 
         // Crash mid-A (entry written, no completion) — A is the resume point and re-runs.
@@ -2380,7 +2380,7 @@ mod tests {
             }
         }
 
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let workflow = Workflow::bare()
             .register(TestState::Start, FailFast)
             .add_exit_state(TestState::Complete)
@@ -2553,7 +2553,7 @@ mod tests {
 
     #[tokio::test]
     async fn stepped_forward_run_writes_cursor_rows_and_clears_on_success() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let (stepper, calls) = CountStepper::new(4); // steps: None→1, 1→2, 2→3, 3→Done
 
         let workflow = Workflow::bare()
@@ -2570,7 +2570,7 @@ mod tests {
 
         // Audit: Start (seq 0), cursor 1 (seq 1), cursor 2 (seq 2), cursor 3 (seq 3),
         // Complete (seq 4). Live rows must be empty on success.
-        let audit = store.audit_rows("step-fwd");
+        let audit = audit_rows(&store, "step-fwd");
         assert_eq!(audit.len(), 5, "start + 3 cursors + exit = 5 rows");
         assert_eq!(audit[0].kind, RowKind::StateEntry);
         assert_eq!(audit[0].state, "Start");
@@ -2596,7 +2596,7 @@ mod tests {
 
     #[tokio::test]
     async fn stepped_resume_continues_from_last_cursor() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
 
         // Seed: the run had entered Start (seq 0), written cursor=1 (seq 1), cursor=2 (seq 2),
         // then crashed. Resume should start from cursor=2, not from None.
@@ -2648,7 +2648,7 @@ mod tests {
     async fn stepped_sequences_are_dense_after_cursors() {
         // Verify that cursor rows consume sequence numbers and subsequent state rows
         // (e.g. the exit state) continue at the right sequence.
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let (stepper, _) = CountStepper::new(3); // 2 cursor rows (1 and 2), then Done
 
         let workflow = Workflow::bare()
@@ -2659,7 +2659,7 @@ mod tests {
 
         workflow.orchestrate(TestState::Start).await.unwrap();
 
-        let audit = store.audit_rows("dense");
+        let audit = audit_rows(&store, "dense");
         // seq 0: Start (StateEntry), seq 1: cursor=1, seq 2: cursor=2, seq 3: Complete (exit)
         assert_eq!(audit[0].sequence, 0);
         assert_eq!(audit[1].sequence, 1);
@@ -2677,7 +2677,7 @@ mod tests {
     async fn stepped_resume_without_cursor_rows_restarts_from_none() {
         // If the run crashed before any cursor was persisted (only the StateEntry row exists),
         // resume should start from None (same as a fresh run).
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         store
             .append(
                 "step-fresh-resume",
@@ -2720,7 +2720,7 @@ mod tests {
     async fn stepped_cursor_rows_do_not_become_compensation_entries() {
         // Verifies the existing regression test still passes with the full engine path
         // (StepCursor rows from register_stepped must not pollute the compensation stack).
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
 
         // Seed: A (compensatable, seq 0+1), Process StateEntry (seq 2 — the engine
@@ -2791,7 +2791,7 @@ mod tests {
 
     #[tokio::test]
     async fn workflow_version_is_stamped_on_every_appended_row() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Process))
             .register(TestState::Process, SimpleTask::new(TestState::Complete))
@@ -2800,14 +2800,14 @@ mod tests {
             .with_workflow_id("ver-run")
             .with_workflow_version(7);
         workflow.orchestrate(TestState::Start).await.unwrap();
-        let rows = store.audit_rows("ver-run");
+        let rows = audit_rows(&store, "ver-run");
         assert!(rows.iter().all(|r| r.workflow_version == 7));
         assert!(!rows.is_empty(), "expected at least one appended row");
     }
 
     #[tokio::test]
     async fn resume_from_rejects_workflow_version_mismatch() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         store
             .append(
                 "ver-mismatch",
@@ -2832,7 +2832,7 @@ mod tests {
         // writes, older schema). The resume should still succeed when there
         // are still rehydrate-able earlier rows; the rehydrated path is
         // best-effort, so missing it is not a fatal corruption.
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // Only a single `StepCursor` row exists for the resume state — no
         // leading `StateEntry`. Previously this configuration was rejected.
         store
@@ -2863,7 +2863,7 @@ mod tests {
         // at the tail must now resume cleanly; the only authoritative version
         // is the latest one, since that determines which workflow definition
         // continues. Older rows just inform the rehydrated path.
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // Older rows under workflow_version=0.
         store
             .append(
@@ -2897,7 +2897,7 @@ mod tests {
     // A backend that violates the `load_run` ascending-by-sequence contract.
     // Used only to verify the engine's defensive sort.
     #[derive(Default)]
-    struct UnsortedStore(MemCheckpoints);
+    struct UnsortedStore(InMemoryCheckpointStore);
 
     #[cano_macros::checkpoint_store]
     impl CheckpointStore for UnsortedStore {
@@ -3182,7 +3182,7 @@ mod tests {
         // observer pipeline.
 
         // A store that succeeds on append but always errors on clear.
-        struct ClearFailsStore(MemCheckpoints);
+        struct ClearFailsStore(InMemoryCheckpointStore);
         #[cano_macros::checkpoint_store]
         impl CheckpointStore for ClearFailsStore {
             async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
@@ -3196,7 +3196,7 @@ mod tests {
             }
         }
 
-        let store = Arc::new(ClearFailsStore(MemCheckpoints::default()));
+        let store = Arc::new(ClearFailsStore(InMemoryCheckpointStore::new()));
         let (obs, rec) = EventLog::new();
 
         let workflow = Workflow::bare()
@@ -3497,7 +3497,7 @@ mod tests {
         }
 
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // Pre-existing CompCompletion row so there's something to rehydrate.
         store
             .append(
@@ -3522,7 +3522,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let rows_before = store.audit_rows("f3").len();
+        let rows_before = audit_rows(&store, "f3").len();
 
         let triggered = Arc::new(AtomicBool::new(false));
         let resources = Resources::new().insert(FailingResource {
@@ -3550,7 +3550,7 @@ mod tests {
         assert!(err.message().contains("db unavailable"), "got: {err}");
         // The checkpoint log is unchanged — no new rows appended.
         assert_eq!(
-            store.audit_rows("f3").len(),
+            audit_rows(&store, "f3").len(),
             rows_before,
             "checkpoint log must be untouched on setup failure"
         );
@@ -3567,7 +3567,7 @@ mod tests {
         // `OrphanedCompensation { task_id, output_blob }` variant so operators
         // can match on it and decode the blob for manual recovery — a bare
         // string error would lose the data needed to undo the side effect.
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // Build a log: CompCompletion for a renamed task `ghost_v1`, then a
         // StateEntry for the resume point whose task fails forward.
         let blob = serde_json::to_vec(&99u32).unwrap();
@@ -3635,7 +3635,7 @@ mod tests {
         // than the crash row, so a naive `sequence != resume_sequence` filter
         // would keep it AND the FSM would re-push it when the state re-runs.
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         store
             .append(
                 "f9",
@@ -3718,7 +3718,7 @@ mod tests {
         // rename without a `with_workflow_version` bump). Operators couldn't
         // see the gap. Now the engine fires `on_unknown_resume_state` per
         // unrecognized row so observers/metrics can surface the drift.
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // Pre-populate the log with a StateEntry referencing a state ("Charge")
         // the current workflow no longer registers, plus a registered state
         // ("Start") whose label IS valid. The resume must drop the Charge row
@@ -3803,7 +3803,7 @@ mod tests {
             setups: setups.clone(),
             teardowns: teardowns.clone(),
         });
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let workflow = Workflow::new(resources)
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
@@ -3864,7 +3864,7 @@ mod tests {
         // back to `last.sequence + 1` as cutoff and lets the resume succeed
         // — losing the prior_transitions row is acceptable; refusing to
         // resume recoverable work is not.
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         store
             .append(
                 "missing-entry",
@@ -3907,7 +3907,7 @@ mod tests {
         // kept (with a tracing warning) so a mid-run version bump can resume
         // cleanly. Rejecting on a per-row scan refused exactly the migration
         // path `workflow_version` was meant to support.
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         store
             .append(
                 "mixed-ver",
@@ -4192,7 +4192,7 @@ mod metrics_tests {
     use crate::metrics::test_support::*;
     use crate::prelude::*;
 
-    use crate::workflow::test_support::{CompLog, CompTask, MemCheckpoints, SimpleTask, TestState};
+    use crate::workflow::test_support::{CompLog, CompTask, InMemoryCheckpointStore, SimpleTask, TestState};
     use std::sync::{Arc, Mutex};
 
     // ---- Recovery: checkpoint append + clear counters ----
@@ -4200,7 +4200,7 @@ mod metrics_tests {
     #[test]
     fn checkpoint_append_and_clear_counters_on_successful_run() {
         let (res, rows) = run_with_recorder(|| async {
-            let store = Arc::new(MemCheckpoints::default());
+            let store = Arc::new(InMemoryCheckpointStore::new());
             let workflow = Workflow::bare()
                 .with_checkpoint_store(store.clone())
                 .with_workflow_id("metrics-wf")

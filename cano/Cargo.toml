@@ -44,7 +44,6 @@ cuca = { version = "0.3", features = ["provider-lmstudio"] }
 futures-util = "0.3"
 parking_lot = "0.12"
 redb = "4.2"
-reqwest = { version = "0.13", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tempfile = "3"
@@ -69,26 +68,6 @@ required-features = ["recovery"]
 name = "stepped_resume"
 path = "src/bin/stepped_resume.rs"
 required-features = ["recovery"]
-
-[[example]]
-name = "ai_workflow_yes_and"
-path = "examples/ai_workflow_yes_and.rs"
-
-[[example]]
-name = "workflow_simple"
-path = "examples/workflow_simple.rs"
-
-[[example]]
-name = "workflow_book_prepositions"
-path = "examples/workflow_book_prepositions.rs"
-
-[[example]]
-name = "workflow_negotiation"
-path = "examples/workflow_negotiation.rs"
-
-[[example]]
-name = "workflow_simd_matrix_pipeline"
-path = "examples/workflow_simd_matrix_pipeline.rs"
 
 [[example]]
 name = "scheduler_scheduling"
@@ -146,89 +125,9 @@ path = "examples/metrics_tracing_context.rs"
 required-features = ["metrics", "tracing"]
 
 [[example]]
-name = "workflow_stack_store"
-path = "examples/workflow_stack_store.rs"
-
-[[example]]
-name = "mixed_workflow"
-path = "examples/mixed_workflow.rs"
-
-[[example]]
-name = "task_interface_demo"
-path = "examples/task_interface_demo.rs"
-
-[[example]]
-name = "task_simple"
-path = "examples/task_simple.rs"
-
-[[example]]
-name = "workflow_ad_exchange"
-path = "examples/workflow_ad_exchange.rs"
-
-[[example]]
-name = "workflow_partial_results"
-path = "examples/workflow_partial_results.rs"
-
-[[example]]
-name = "workflow_split_join"
-path = "examples/workflow_split_join.rs"
-
-[[example]]
-name = "workflow_on_request"
-path = "examples/workflow_on_request.rs"
-
-[[example]]
-name = "circuit_breaker"
-path = "examples/circuit_breaker.rs"
-
-[[example]]
-name = "rate_limiter"
-path = "examples/rate_limiter.rs"
-
-[[example]]
-name = "rate_limiter_multi"
-path = "examples/rate_limiter_multi.rs"
-
-[[example]]
-name = "workflow_observer"
-path = "examples/workflow_observer.rs"
-
-[[example]]
-name = "observer_metrics"
-path = "examples/observer_metrics.rs"
-
-[[example]]
 name = "workflow_recovery"
 path = "examples/workflow_recovery.rs"
 required-features = ["recovery"]
-
-[[example]]
-name = "saga_payment"
-path = "examples/saga_payment.rs"
-
-[[example]]
-name = "workflow_total_timeout"
-path = "examples/workflow_total_timeout.rs"
-
-[[example]]
-name = "workflow_cancellation"
-path = "examples/workflow_cancellation.rs"
-
-[[example]]
-name = "router_task"
-path = "examples/router_task.rs"
-
-[[example]]
-name = "poll_task"
-path = "examples/poll_task.rs"
-
-[[example]]
-name = "timer_task"
-path = "examples/timer_task.rs"
-
-[[example]]
-name = "batch_task"
-path = "examples/batch_task.rs"
 
 [[example]]
 name = "stepped_task"
@@ -241,45 +140,9 @@ path = "examples/processing_models_tour.rs"
 required-features = ["recovery"]
 
 [[example]]
-name = "join_strategies"
-path = "examples/join_strategies.rs"
-
-[[example]]
-name = "custom_checkpoint_store"
-path = "examples/custom_checkpoint_store.rs"
-
-[[example]]
 name = "saga_recovery"
 path = "examples/saga_recovery.rs"
 required-features = ["recovery"]
-
-[[example]]
-name = "circuit_breaker_manual"
-path = "examples/circuit_breaker_manual.rs"
-
-[[example]]
-name = "workflow_validation"
-path = "examples/workflow_validation.rs"
-
-[[example]]
-name = "split_bulkhead"
-path = "examples/split_bulkhead.rs"
-
-[[example]]
-name = "poll_retry_on_error"
-path = "examples/poll_retry_on_error.rs"
-
-[[example]]
-name = "panic_safety"
-path = "examples/panic_safety.rs"
-
-[[example]]
-name = "store_custom_backend"
-path = "examples/store_custom_backend.rs"
-
-[[example]]
-name = "resources_advanced"
-path = "examples/resources_advanced.rs"
 
 [[example]]
 name = "testing_helpers"

@@ -3347,7 +3347,7 @@ mod register_paths_tests {
     use crate::task::stream::{CloseReason, WindowSignal};
     use crate::task::{self, TaskConfig};
     use crate::workflow::Workflow;
-    use crate::workflow::test_support::MemCheckpoints;
+    use crate::workflow::test_support::{InMemoryCheckpointStore, audit_rows};
     use futures_util::stream::{self, Stream};
     use std::pin::Pin;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -3439,7 +3439,7 @@ mod register_paths_tests {
     /// compensatable task's output is rolled back when a later state fails.
     #[tokio::test]
     async fn register_selects_the_engine_path_per_model() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let compensated = Arc::new(Mutex::new(Vec::new()));
         let workflow = Workflow::bare()
             .with_checkpoint_store(store.clone())
@@ -3456,7 +3456,7 @@ mod register_paths_tests {
         assert!(err.to_string().contains("boom"), "{err}");
         assert_eq!(*compensated.lock().unwrap(), vec![7]);
 
-        let rows = store.audit_rows("models");
+        let rows = audit_rows(&store, "models");
         let cursor_rows = |state: &str| {
             rows.iter()
                 .filter(|r| r.state == state && r.kind == RowKind::StepCursor)
