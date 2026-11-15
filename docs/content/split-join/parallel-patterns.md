@@ -42,50 +42,48 @@ mental model, better resource control, and type-safe state management.
 <h3 id="pattern-queue"><a href="#pattern-queue" class="anchor-link" aria-hidden="true">#</a>Pattern 1: Queue Consumer with Batch Processing</h3>
 <p>
 Process items from a queue in parallel batches. Instead of running multiple workflow instances concurrently,
-use a single workflow that pulls a batch, splits it into per-item processors via a task that returns
-<code>TaskResult::Split</code>, and loops until the queue drains.
+use a single workflow whose state is a <a href="../../batch-task/">batch task</a>: <code>load</code> pops up to
+<code>batch_size</code> items off the queue, <code>process_item</code> runs once per item with bounded
+concurrency, and <code>finish</code> loops back to the same state until the queue drains.
 </p>
 
 <div class="diagram-frame">
 <p class="diagram-label">Queue consumer: pull, split, drain</p>
 <div class="cd-wrap">
 <svg class="cd" viewBox="0 0 720 416" role="img">
-<title>Queue consumer pattern: PullBatch pops a batch off the external queue, ProcessBatch returns TaskResult::Split with one Complete branch per item, and the outer loop calls orchestrate again until the queue drains.</title>
+<title>Queue consumer pattern: the Consume state's load pops a batch off the external queue, process_item runs once per item concurrently, and finish loops back to Consume until the queue drains.</title>
 <defs><marker id="queue-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
 <path class="e e-dim" d="M360,342 V372 Q360,380 352,380 H40 Q32,380 32,372 V160 Q32,152 40,152 H302 Q310,152 310,144" marker-end="url(#queue-ah)"/>
-<text class="t-mut" x="376" y="400">outer loop — orchestrate(PullBatch) again until the queue drains</text>
+<text class="t-mut" x="376" y="400">finish: back to Consume until the queue drains</text>
 <rect class="n-cop" x="280" y="16" width="160" height="46" rx="10"/>
 <text class="t-strong" x="360" y="40">Queue</text>
 <text class="t-mut ta-s" x="452" y="44">SQS · Redis · Kafka</text>
 <path class="e" d="M360,62 V90" marker-end="url(#queue-ah)"/>
 <text class="t-mut ta-s" x="372" y="82">pop up to batch_size items</text>
-<path class="e e-dim" d="M280,102 H232 Q224,102 224,110 V122 Q224,130 232,130 H276" marker-end="url(#queue-ah)"/>
-<text class="t-mut ta-e" x="212" y="110">empty batch</text>
-<text class="t-mut ta-e" x="212" y="126">sleep 1s, retry</text>
 <rect class="n" x="280" y="94" width="160" height="46" rx="10"/>
-<text class="t-strong" x="360" y="118">PullBatch</text>
-<text class="t-code t-mut ta-s" x="452" y="122">QueuePuller</text>
+<text class="t-strong" x="360" y="118">load</text>
+<text class="t-code t-mut ta-s" x="452" y="122">QueueConsumer</text>
 <path class="e" d="M360,140 V168" marker-end="url(#queue-ah)"/>
-<text class="t-code t-mut ta-s" x="372" y="160">store.put("current_batch")</text>
+<text class="t-code t-mut ta-s" x="372" y="160">Vec&lt;String&gt; of items</text>
 <rect class="n-hot" x="260" y="172" width="200" height="56" rx="10"/>
-<text class="t-strong" x="360" y="194">ProcessBatch</text>
-<text class="t-code t-mut" x="360" y="214">TaskResult::Split</text>
-<text class="t-code t-mut ta-s" x="472" y="204">BatchSplitter</text>
+<text class="t-strong" x="360" y="194">process_item</text>
+<text class="t-code t-mut" x="360" y="214">concurrency() = 5</text>
+<text class="t-code t-mut ta-s" x="472" y="204">BatchTask</text>
 <path class="e" d="M360,228 V248"/>
 <path class="e" d="M130,248 H590"/>
 <path class="e" d="M130,248 V286" marker-end="url(#queue-ah)"/>
 <path class="e" d="M360,248 V286" marker-end="url(#queue-ah)"/>
 <path class="e" d="M590,248 V286" marker-end="url(#queue-ah)"/>
-<text class="t-mut" x="245" y="266">one Complete branch per item</text>
+<text class="t-mut" x="245" y="266">one call per item, run concurrently</text>
 <rect class="n-ok" x="60" y="290" width="140" height="52" rx="10"/>
 <text class="t-strong" x="130" y="311">item 1</text>
-<text class="t-code t-mut" x="130" y="331">Complete</text>
+<text class="t-code t-mut" x="130" y="331">Ok</text>
 <rect class="n-ok" x="290" y="290" width="140" height="52" rx="10"/>
 <text class="t-strong" x="360" y="311">item 2</text>
-<text class="t-code t-mut" x="360" y="331">Complete</text>
+<text class="t-code t-mut" x="360" y="331">Ok</text>
 <rect class="n-ok" x="520" y="290" width="140" height="52" rx="10"/>
 <text class="t-strong" x="590" y="311">item n</text>
-<text class="t-code t-mut" x="590" y="331">Complete</text>
+<text class="t-code t-mut" x="590" y="331">Ok</text>
 </svg>
 </div>
 </div>
@@ -98,90 +96,74 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum QueueState { PullBatch, ProcessBatch, Complete }
+enum QueueState { Consume, Done }
 
 // Simulated queue (in production, use Redis, SQS, etc.)
 type SharedQueue = Arc<Mutex<VecDeque<String>>>;
 
-#[derive(Clone)]
-struct QueuePuller { queue: SharedQueue, batch_size: usize }
+struct QueueConsumer { queue: SharedQueue, batch_size: usize }
 
-#[task(state = QueueState)]
-impl QueuePuller {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<QueueState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+#[task::batch(state = QueueState)]
+impl QueueConsumer {
+    // At most 5 process_item calls run at once.
+    fn concurrency(&self) -> usize { 5 }
+
+    // Pop up to batch_size items off the queue.
+    async fn load(&self) -> Result<Vec<String>, CanoError> {
         let mut queue = self.queue.lock().await;
-
-        let mut batch = Vec::new();
-        for _ in 0..self.batch_size {
-            match queue.pop_front() {
-                Some(item) => batch.push(item),
-                None => break,
-            }
-        }
-
-        if batch.is_empty() {
-            tokio::time::sleep(Duration::from_secs(1)).await;
-            return Ok(TaskResult::Single(QueueState::PullBatch));
-        }
-
-        store.put("current_batch", batch)?;
-        Ok(TaskResult::Single(QueueState::ProcessBatch))
+        let n = self.batch_size.min(queue.len());
+        Ok(queue.drain(..n).collect())
     }
-}
 
-#[derive(Clone)]
-struct ItemProcessor { item_id: String }
-
-#[task(state = QueueState)]
-impl ItemProcessor {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<QueueState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    // Runs once per item, in parallel.
+    async fn process_item(&self, item: &String) -> Result<String, CanoError> {
         tokio::time::sleep(Duration::from_millis(500)).await;
-        store.put(&format!("result_{}", self.item_id), "completed")?;
-        Ok(TaskResult::Single(QueueState::Complete))
+        Ok(item.clone())
     }
-}
 
-#[derive(Clone)]
-struct BatchSplitter;
-
-#[task(state = QueueState)]
-impl BatchSplitter {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<QueueState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
-        let batch: Vec<String> = store.get("current_batch")?;
-        if batch.is_empty() {
-            return Ok(TaskResult::Single(QueueState::PullBatch));
+    async fn finish(
+        &self,
+        res: &Resources,
+        outputs: Vec<Result<String, CanoError>>,
+    ) -> Result<QueueState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
+        // Failed items are skipped here; return Err to fail the whole batch instead.
+        for item in outputs.into_iter().flatten() {
+            store.put(&format!("result_{item}"), "completed");
         }
-        // One follow-on Complete state per item — processed in parallel.
-        Ok(TaskResult::Split(batch.iter().map(|_| QueueState::Complete).collect()))
+        if self.queue.lock().await.is_empty() {
+            Ok(QueueState::Done)
+        } else {
+            Ok(QueueState::Consume)
+        }
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     let store = MemoryStore::new();
-    let queue = Arc::new(Mutex::new(VecDeque::from(vec![
-        "order1".into(), "order2".into(), "order3".into(), "order4".into(), "order5".into(),
+    let queue: SharedQueue = Arc::new(Mutex::new(VecDeque::from(vec![
+        "order1".to_string(), "order2".to_string(), "order3".to_string(),
+        "order4".to_string(), "order5".to_string(),
     ])));
 
-    let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
-        .register(QueueState::PullBatch, QueuePuller { queue: queue.clone(), batch_size: 10 })
-        .register(QueueState::ProcessBatch, BatchSplitter)
-        .add_exit_state(QueueState::Complete);
+    let workflow = Workflow::new(Resources::new().insert(store.clone()))
+        .register(QueueState::Consume, QueueConsumer { queue: queue.clone(), batch_size: 10 })
+        .add_exit_state(QueueState::Done);
 
-    loop {
-        let result = workflow.orchestrate(QueueState::PullBatch, CancellationToken::disabled()).await?;
-        if result == QueueState::Complete && queue.lock().await.is_empty() {
-            break;
-        }
-    }
+    workflow.orchestrate(QueueState::Consume).await?;
 
     println!("All items processed");
     Ok(())
 }
 ```
+
+<p>
+Item failures are returned to <code>finish</code> as <code>Err</code> entries; a batch task makes no
+retries unless you opt in with <code>item_retry()</code> or <code>config()</code>. For a queue that never
+drains, run the same workflow under the <a href="../../scheduler/">scheduler</a> (see Pattern 4) instead of
+looping on the <code>Done</code> exit.
+</p>
 
 <h3 id="pattern-dynamic"><a href="#pattern-dynamic" class="anchor-link" aria-hidden="true">#</a>Pattern 2: Dynamic Task Generation</h3>
 <p>
@@ -202,10 +184,10 @@ struct RecordLoader;
 
 #[task(state = DataState)]
 impl RecordLoader {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<DataState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
-        store.put("records", (1..=100).collect::<Vec<i32>>())?;
-        Ok(TaskResult::Single(DataState::ProcessBatch))
+    async fn run(&self, res: &Resources) -> Result<DataState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
+        store.put("records", (1..=100).collect::<Vec<i32>>());
+        Ok(DataState::ProcessBatch)
     }
 }
 
@@ -214,12 +196,12 @@ struct RecordProcessor { index: usize }
 
 #[task(state = DataState)]
 impl RecordProcessor {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<DataState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<DataState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let records: Vec<i32> = store.get("records")?;
         tokio::time::sleep(Duration::from_millis(10)).await;
-        store.put(&format!("result_{}", self.index), records[self.index] * 2)?;
-        Ok(TaskResult::Single(DataState::Aggregate))
+        store.put(&format!("result_{}", self.index), records[self.index] * 2);
+        Ok(DataState::Aggregate)
     }
 }
 
@@ -228,13 +210,13 @@ struct FinishAggregate;
 
 #[task(state = DataState)]
 impl FinishAggregate {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<DataState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<DataState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let total: i32 = (0..100)
             .filter_map(|i| store.get::<i32>(&format!("result_{}", i)).ok())
             .sum();
         println!("Aggregated total: {}", total);
-        Ok(TaskResult::Single(DataState::Complete))
+        Ok(DataState::Complete)
     }
 }
 
@@ -246,13 +228,13 @@ async fn main() -> Result<(), CanoError> {
     let processors: Vec<RecordProcessor> = (0..100).map(|i| RecordProcessor { index: i }).collect();
     let join_config = JoinConfig::new(JoinStrategy::All, DataState::Aggregate);
 
-    let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let workflow = Workflow::new(Resources::new().insert(store.clone()))
         .register(DataState::LoadRecords, RecordLoader)
         .register_split(DataState::ProcessBatch, processors, join_config)
         .register(DataState::Aggregate, FinishAggregate)
         .add_exit_state(DataState::Complete);
 
-    workflow.orchestrate(DataState::LoadRecords, CancellationToken::disabled()).await?;
+    workflow.orchestrate(DataState::LoadRecords).await?;
     Ok(())
 }
 ```
@@ -340,13 +322,13 @@ struct RateLimitedApiTask { api_id: usize, semaphore: Arc<Semaphore> }
 
 #[task(state = ApiState)]
 impl RateLimitedApiTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<ApiState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<ApiState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let _permit = self.semaphore.acquire().await
             .map_err(|e| CanoError::task_execution(e.to_string()))?;
         let result = make_api_call(self.api_id).await?;
-        store.put(&format!("api_result_{}", self.api_id), result)?;
-        Ok(TaskResult::Single(ApiState::Complete))
+        store.put(&format!("api_result_{}", self.api_id), result);
+        Ok(ApiState::Complete)
     }
 }
 
@@ -358,7 +340,7 @@ fn build_workflow(store: MemoryStore) -> Workflow<ApiState> {
         .collect();
     let join_config = JoinConfig::new(JoinStrategy::All, ApiState::Complete);
 
-    Workflow::new(Resources::new().insert("store", store))
+    Workflow::new(Resources::new().insert(store))
         .register_split(ApiState::Start, tasks, join_config)
         .add_exit_state(ApiState::Complete)
 }
@@ -382,6 +364,7 @@ size it for your throughput and let the scheduler re-run it on an interval.
 
 ```rust
 use cano::prelude::*;
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ProcessState { Start, ProcessBatch, Complete }
@@ -395,13 +378,13 @@ struct WorkProcessor { item_index: usize }
 
 #[task(state = ProcessState)]
 impl WorkProcessor {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<ProcessState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<ProcessState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let items: Vec<String> = store.get("work_items")?;
         if let Some(item) = items.get(self.item_index) {
             println!("Processing item: {}", item);
         }
-        Ok(TaskResult::Single(ProcessState::Complete))
+        Ok(ProcessState::Complete)
     }
 }
 
@@ -410,37 +393,39 @@ struct BatchLoaderTask;
 
 #[task(state = ProcessState)]
 impl BatchLoaderTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<ProcessState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<ProcessState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let items = fetch_pending_work().await?;
         if items.is_empty() {
-            return Ok(TaskResult::Single(ProcessState::Complete));
+            return Ok(ProcessState::Complete);
         }
-        store.put("work_items", items)?;
-        Ok(TaskResult::Single(ProcessState::ProcessBatch))
+        store.put("work_items", items);
+        Ok(ProcessState::ProcessBatch)
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let mut scheduler = Scheduler::new();
     let store = MemoryStore::new();
 
     let batch_size = 10usize;
     let processors: Vec<WorkProcessor> = (0..batch_size).map(|i| WorkProcessor { item_index: i }).collect();
     let join_config = JoinConfig::new(JoinStrategy::All, ProcessState::Complete);
 
-    let batch_workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let batch_workflow = Workflow::new(Resources::new().insert(store.clone()))
         .register(ProcessState::Start, BatchLoaderTask)
         .register_split(ProcessState::ProcessBatch, processors, join_config)
         .add_exit_state(ProcessState::Complete);
 
-    scheduler.every_seconds("batch_processor", batch_workflow, ProcessState::Start, 10)?;
-    // Keep the handle alive — dropping the `RunningScheduler` aborts the spawned loops.
-    let running = scheduler.start().await?;
+    // Keep the handle alive: dropping every `RunningScheduler` handle aborts the runs.
+    let running = Scheduler::new()
+        .every("batch_processor", batch_workflow, ProcessState::Start, Duration::from_secs(10))
+        .start()
+        .await?;
 
-    // ...run until shut down (e.g. a Ctrl-C handler), then stop gracefully.
-    running.wait().await?;
+    // Run until Ctrl-C or SIGTERM, then drain in-flight runs, cancel stragglers and tear down.
+    shutdown_signal().await?;
+    running.stop().await?;
     Ok(())
 }
 ```

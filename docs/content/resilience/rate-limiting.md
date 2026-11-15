@@ -88,9 +88,9 @@ builds a limiter pays nothing. The bucket starts <strong>full</strong>, so a bur
 </div>
 </div>
 <p>
-Like a breaker, a limiter is cheap to clone (it's an <code>Arc</code> inside) — <strong>share one
-<code>Arc&lt;RateLimiter&gt;</code> across every task that draws on the same quota</strong> so the budget
-is enforced globally, including across tasks running in parallel inside a
+Like a breaker, a limiter is cheap to clone (it's an <code>Arc</code> inside, and clones share the
+bucket) — <strong>share one limiter, by cloning it, across every task that draws on the same quota</strong>
+so the budget is enforced globally, including across tasks running in parallel inside a
 <a href="../../split-join/">split/join</a> state. Internally it's a synchronous
 <code>parking_lot::Mutex</code> with no awaits held across the critical section.
 </p>
@@ -168,35 +168,35 @@ token was already spent at acquisition and the bucket refills on the clock, not 
 
 ```rust
 use cano::prelude::*;
-use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step { Call, Done }
 
 #[derive(Clone)]
-struct CallUpstream { limiter: Arc<RateLimiter> }
+struct CallUpstream { limiter: RateLimiter }
 
 #[task(state = Step)]
 impl CallUpstream {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         // Park until the shared budget admits this call, then proceed.
         let _permit = self.limiter.acquire().await;
         // ... call the rate-sensitive dependency ...
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
-// 20 req/s, shared across every task that constructs from this Arc.
-let limiter = Arc::new(RateLimiter::new(RateLimiterPolicy::per_second(20)));
+// 20 req/s, shared across every task that holds a clone of this limiter.
+let limiter = RateLimiter::new(RateLimiterPolicy::per_second(20));
 let workflow = Workflow::bare()
-    .register(Step::Call, CallUpstream { limiter: Arc::clone(&limiter) })
+    .register(Step::Call, CallUpstream { limiter: limiter.clone() })
     .add_exit_state(Step::Done);
 ```
 
 <p>
-<code>RateLimiter</code> also implements <code>Resource</code> (no-op lifecycle), so instead of threading
-the <code>Arc</code> into each task you can register it once in <a href="../../resources/">Resources</a> and
-look it up by key inside the task body — handy when several tasks share one quota.
+<code>RateLimiter</code> also implements <code>Resource</code> (no-op lifecycle), so instead of cloning
+it into each task you can register it once in <a href="../../resources/">Resources</a> and
+look it up by type (<code>res.get::&lt;RateLimiter&gt;()?</code>) inside the task body — handy when several
+tasks share one quota.
 </p>
 
 <h3 id="rl-windowed"><a href="#rl-windowed" class="anchor-link" aria-hidden="true">#</a>Token bucket vs fixed window</h3>
@@ -224,7 +224,8 @@ lazily (no background task) and, like the bucket, is cheap to clone and implemen
 <p>
 Both limiters meter <strong>weighted units</strong>: <code>try_acquire_n(cost)</code> /
 <code>acquire_n(cost)</code> consume <code>cost</code> units instead of one (the no-argument
-<code>try_acquire</code> / <code>acquire</code> are <code>_n(1)</code>). A request-count limit uses
+<code>try_acquire</code> / <code>acquire</code> are <code>_n(1)</code>). All four take <code>&amp;self</code>.
+A request-count limit uses
 <code>cost = 1</code>; a usage/token budget uses the call's cost (e.g. <code>1500</code> tokens).
 <code>tokens_available()</code> / <code>time_until(cost)</code> expose the live state for
 observability and retry-after.
@@ -234,15 +235,17 @@ observability and retry-after.
 <p>
 Real-world API limits often stack: a 5-hour cap <em>and</em> a weekly cap <em>and</em> a separate
 weekly cap for a single endpoint. <code>MultiRateLimiter</code> enforces them together — a request is admitted
-only if <strong>every</strong> applicable tier has room. Each tier is any <code>Meter</code> (a
-<code>RateLimiter</code> or a <code>WindowedRateLimiter</code>, mixed freely) with its own
+only if <strong>every</strong> applicable tier has room. Each tier is an <code>Arc&lt;dyn Meter&gt;</code>
+(a <code>RateLimiter</code> or a <code>WindowedRateLimiter</code>, mixed freely) with its own
 <code>cost</code>, so a request-count tier and a token-budget tier can share one gate.
 </p>
 <p>
 The acquisition is <strong>atomic with no leak</strong>: it reserves each tier in turn, and if any
 tier rejects it drops the reservations gathered so far — <em>refunding</em> their units — so a
 partially-passing attempt never burns budget on the tiers that admitted it. (This is why a
-<code>Reservation</code>'s drop refunds, unlike a committed <code>Permit</code>.) At most one tier's
+<code>Reservation</code>'s drop refunds, unlike a committed <code>Permit</code>.
+A <code>Reservation</code> holds an <code>Arc&lt;dyn Meter&gt;</code>, so <code>try_reserve_n</code> is
+the one acquire method that takes <code>self: &amp;Arc&lt;Self&gt;</code>.) At most one tier's
 lock is held at a time, so there is no deadlock. On rejection it reports <strong>which</strong> tier
 blocked and the retry-after, as <code>CanoError::RateLimited { tier, retry_after }</code>.
 </p>

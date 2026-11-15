@@ -97,22 +97,22 @@ struct Aggregator;
 
 #[task(state = DataState)]
 impl DataLoader {
-    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
-        Ok(TaskResult::Single(DataState::ParallelProcessing))
+    async fn run(&self) -> Result<DataState, CanoError> {
+        Ok(DataState::ParallelProcessing)
     }
 }
 
 #[task(state = DataState)]
 impl ProcessorTask {
-    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
-        Ok(TaskResult::Single(DataState::Aggregate))
+    async fn run(&self) -> Result<DataState, CanoError> {
+        Ok(DataState::Aggregate)
     }
 }
 
 #[task(state = DataState)]
 impl Aggregator {
-    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
-        Ok(TaskResult::Single(DataState::Complete))
+    async fn run(&self) -> Result<DataState, CanoError> {
+        Ok(DataState::Complete)
     }
 }
 
@@ -121,7 +121,7 @@ fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
     let join_config = JoinConfig::new(JoinStrategy::All, DataState::Aggregate)
         .with_timeout(Duration::from_secs(10));
 
-    Workflow::new(Resources::new().insert("store", store))
+    Workflow::new(Resources::new().insert(store))
         .register(DataState::Start, DataLoader)
         .register_split(
             DataState::ParallelProcessing,
@@ -184,8 +184,8 @@ struct DataLoader;
 
 #[task(state = DataState)]
 impl DataLoader {
-    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
-        Ok(TaskResult::Single(DataState::ParallelProcessing))
+    async fn run(&self) -> Result<DataState, CanoError> {
+        Ok(DataState::ParallelProcessing)
     }
 }
 
@@ -195,8 +195,8 @@ impl ApiCallTask { fn new(provider: &str) -> Self { Self { provider: provider.in
 
 #[task(state = DataState)]
 impl ApiCallTask {
-    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
-        Ok(TaskResult::Single(DataState::Complete))
+    async fn run(&self) -> Result<DataState, CanoError> {
+        Ok(DataState::Complete)
     }
 }
 
@@ -205,7 +205,7 @@ fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
     let join_config = JoinConfig::new(JoinStrategy::Any, DataState::Complete);
 
     // Call 3 different data sources, use whoever responds first
-    Workflow::new(Resources::new().insert("store", store))
+    Workflow::new(Resources::new().insert(store))
         .register(DataState::Start, DataLoader)
         .register_split(
             DataState::ParallelProcessing,
@@ -221,14 +221,14 @@ fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
 ```
 
 <h3 id="strategy-quorum"><a href="#strategy-quorum" class="anchor-link" aria-hidden="true">#</a>Quorum(n) — Wait for N Tasks</h3>
-<p>Proceeds once a specific number of tasks complete successfully; the rest are cancelled. Useful for
-distributed consensus and majority-vote writes.</p>
+<p>Waits for every task to finish, then proceeds if at least a specific number of them succeeded. Useful for
+distributed consensus and majority-vote writes where the stragglers are still worth waiting for.</p>
 
 <div class="diagram-frame">
 <p class="diagram-label">Quorum Strategy</p>
 <div class="cd-wrap">
 <svg class="cd" viewBox="0 0 840 462" role="img" style="max-width: 860px">
-<title>Quorum strategy: four tasks start, the join waits for the third success to land in whatever order they arrive, fires as soon as the quorum of 3 of 4 is met, and cancels the task still running.</title>
+<title>Quorum strategy: four tasks start and the join waits for all of them to finish, whatever order they arrive in; three succeed and one fails, which still meets the quorum of 3 of 4.</title>
 <defs><marker id="quorum-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
 <rect class="n" x="10" y="8" width="140" height="38" rx="8"/>
 <text class="t-strong" x="80" y="28">Workflow</text>
@@ -238,13 +238,13 @@ distributed consensus and majority-vote writes.</p>
 <text class="t-strong" x="420" y="28">Task 2</text>
 <rect class="n" x="520" y="8" width="140" height="38" rx="8"/>
 <text class="t-strong" x="590" y="28">Task 3</text>
-<rect class="n-ghost" x="690" y="8" width="140" height="38" rx="8"/>
+<rect class="n" x="690" y="8" width="140" height="38" rx="8"/>
 <text class="t-strong" x="760" y="28">Task 4</text>
 <line class="lifeline" x1="80" y1="46" x2="80" y2="440"/>
 <line class="lifeline" x1="250" y1="46" x2="250" y2="440"/>
 <line class="lifeline" x1="420" y1="46" x2="420" y2="440"/>
 <line class="lifeline" x1="590" y1="46" x2="590" y2="440"/>
-<line class="n-ghost" x1="760" y1="46" x2="760" y2="440"/>
+<line class="lifeline" x1="760" y1="46" x2="760" y2="440"/>
 <text class="t-mut" x="165" y="66">Start</text>
 <path class="e" d="M80,78 H247" marker-end="url(#quorum-ah)"/>
 <text class="t-mut" x="250" y="110">Start</text>
@@ -259,10 +259,10 @@ distributed consensus and majority-vote writes.</p>
 <path class="e e-dash" d="M590,298 H83" marker-end="url(#quorum-ah)"/>
 <text class="t-mut t-ok" x="250" y="330">Complete ✓</text>
 <path class="e e-dash" d="M420,342 H83" marker-end="url(#quorum-ah)"/>
-<rect class="n-hot" x="16" y="362" width="808" height="34" rx="10"/>
-<text class="t-strong" x="420" y="380">Quorum (3/4) Met → Proceed</text>
-<text class="t-mut t-warn" x="420" y="416">Cancel ⏱</text>
-<path class="e e-dim" d="M80,428 H757" marker-end="url(#quorum-ah)"/>
+<text class="t-mut t-err" x="420" y="374">Failed ✗</text>
+<path class="e e-dash" d="M760,386 H83" marker-end="url(#quorum-ah)"/>
+<rect class="n-hot" x="16" y="398" width="808" height="34" rx="10"/>
+<text class="t-strong" x="420" y="416">All finished, Quorum (3/4) Met → Proceed</text>
 </svg>
 </div>
 </div>
@@ -284,22 +284,22 @@ struct ConfirmWrite;
 
 #[task(state = DataState)]
 impl PrepareData {
-    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
-        Ok(TaskResult::Single(DataState::ParallelProcessing))
+    async fn run(&self) -> Result<DataState, CanoError> {
+        Ok(DataState::ParallelProcessing)
     }
 }
 
 #[task(state = DataState)]
 impl WriteReplica {
-    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
-        Ok(TaskResult::Single(DataState::Aggregate))
+    async fn run(&self) -> Result<DataState, CanoError> {
+        Ok(DataState::Aggregate)
     }
 }
 
 #[task(state = DataState)]
 impl ConfirmWrite {
-    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
-        Ok(TaskResult::Single(DataState::Complete))
+    async fn run(&self) -> Result<DataState, CanoError> {
+        Ok(DataState::Complete)
     }
 }
 
@@ -308,7 +308,7 @@ fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
     let join_config = JoinConfig::new(JoinStrategy::Quorum(3), DataState::Aggregate)
         .with_timeout(Duration::from_secs(5));
 
-    Workflow::new(Resources::new().insert("store", store))
+    Workflow::new(Resources::new().insert(store))
         .register(DataState::Start, PrepareData)
         .register_split(
             DataState::ParallelProcessing,
@@ -327,14 +327,14 @@ fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
 ```
 
 <h3 id="strategy-percentage"><a href="#strategy-percentage" class="anchor-link" aria-hidden="true">#</a>Percentage(p) — Wait for a Fraction of Tasks</h3>
-<p>Proceeds once a percentage of tasks complete successfully. Scales with the batch size, so it works
-well when the number of split tasks varies.</p>
+<p>Waits for every task to finish, then proceeds if at least a fraction of them succeeded. Scales with the
+batch size, so it works well when the number of split tasks varies.</p>
 
 <div class="diagram-frame">
 <p class="diagram-label">Percentage Strategy</p>
 <div class="cd-wrap">
 <svg class="cd" viewBox="0 0 840 462" role="img" style="max-width: 860px">
-<title>Percentage strategy: four tasks start and the join fires the moment the configured fraction of them has succeeded — here 75%, three of four — cancelling the one still in flight.</title>
+<title>Percentage strategy: four tasks start and the join waits for all of them to finish; three succeed and one fails, which still meets the configured fraction of 75%.</title>
 <defs><marker id="pct-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
 <rect class="n" x="10" y="8" width="140" height="38" rx="8"/>
 <text class="t-strong" x="80" y="28">Workflow</text>
@@ -342,14 +342,14 @@ well when the number of split tasks varies.</p>
 <text class="t-strong" x="250" y="28">Task 1</text>
 <rect class="n" x="350" y="8" width="140" height="38" rx="8"/>
 <text class="t-strong" x="420" y="28">Task 2</text>
-<rect class="n-ghost" x="520" y="8" width="140" height="38" rx="8"/>
+<rect class="n" x="520" y="8" width="140" height="38" rx="8"/>
 <text class="t-strong" x="590" y="28">Task 3</text>
 <rect class="n" x="690" y="8" width="140" height="38" rx="8"/>
 <text class="t-strong" x="760" y="28">Task 4</text>
 <line class="lifeline" x1="80" y1="46" x2="80" y2="440"/>
 <line class="lifeline" x1="250" y1="46" x2="250" y2="440"/>
 <line class="lifeline" x1="420" y1="46" x2="420" y2="440"/>
-<line class="n-ghost" x1="590" y1="46" x2="590" y2="440"/>
+<line class="lifeline" x1="590" y1="46" x2="590" y2="440"/>
 <line class="lifeline" x1="760" y1="46" x2="760" y2="440"/>
 <text class="t-mut" x="165" y="66">Start</text>
 <path class="e" d="M80,78 H247" marker-end="url(#pct-ah)"/>
@@ -365,10 +365,10 @@ well when the number of split tasks varies.</p>
 <path class="e e-dash" d="M420,298 H83" marker-end="url(#pct-ah)"/>
 <text class="t-mut t-ok" x="420" y="330">Complete ✓</text>
 <path class="e e-dash" d="M760,342 H83" marker-end="url(#pct-ah)"/>
-<rect class="n-hot" x="16" y="362" width="808" height="34" rx="10"/>
-<text class="t-strong" x="420" y="380">75% (3/4) Met → Proceed</text>
-<text class="t-mut t-warn" x="335" y="416">Cancel ⏱</text>
-<path class="e e-dim" d="M80,428 H587" marker-end="url(#pct-ah)"/>
+<text class="t-mut t-err" x="335" y="374">Failed ✗</text>
+<path class="e e-dash" d="M590,386 H83" marker-end="url(#pct-ah)"/>
+<rect class="n-hot" x="16" y="398" width="808" height="34" rx="10"/>
+<text class="t-strong" x="420" y="416">All finished, 75% (3/4) Met → Proceed</text>
 </svg>
 </div>
 </div>
@@ -390,22 +390,22 @@ struct SummarizeResults;
 
 #[task(state = DataState)]
 impl LoadRecords {
-    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
-        Ok(TaskResult::Single(DataState::ParallelProcessing))
+    async fn run(&self) -> Result<DataState, CanoError> {
+        Ok(DataState::ParallelProcessing)
     }
 }
 
 #[task(state = DataState)]
 impl RecordProcessor {
-    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
-        Ok(TaskResult::Single(DataState::Aggregate))
+    async fn run(&self) -> Result<DataState, CanoError> {
+        Ok(DataState::Aggregate)
     }
 }
 
 #[task(state = DataState)]
 impl SummarizeResults {
-    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
-        Ok(TaskResult::Single(DataState::Complete))
+    async fn run(&self) -> Result<DataState, CanoError> {
+        Ok(DataState::Complete)
     }
 }
 
@@ -416,7 +416,7 @@ fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
 
     let tasks: Vec<RecordProcessor> = (0..100).map(RecordProcessor::new).collect();
 
-    Workflow::new(Resources::new().insert("store", store))
+    Workflow::new(Resources::new().insert(store))
         .register(DataState::Start, LoadRecords)
         .register_split(DataState::ParallelProcessing, tasks, join_config)
         .register(DataState::Aggregate, SummarizeResults)
@@ -426,17 +426,18 @@ fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
 
 <h3 id="strategy-partial-results"><a href="#strategy-partial-results" class="anchor-link" aria-hidden="true">#</a>PartialResults(n) — Accept Partial Completion</h3>
 <p>
-Proceeds once <code>n</code> tasks have <em>completed</em> — successes or failures both count — and
-cancels the rest. All outcomes are tracked, so a downstream task can inspect how many succeeded versus
-failed. Good for latency-bounded fan-out where some failures are tolerable. A fuller, runnable
-walk-through lives in <code>cargo run --example workflow_partial_results</code>.
+Proceeds once <code>n</code> tasks have <em>succeeded</em> and cancels the rest; failures along the way
+are tolerated. If the split finishes (or times out) with fewer than <code>n</code> successes, the join
+fails with a <code>CanoError::Workflow</code> that lists the task errors. Good for latency-bounded fan-out where
+some failures are tolerable. A fuller, runnable walk-through lives in
+<code>cargo run --example workflow_partial_results</code>.
 </p>
 
 <div class="diagram-frame">
 <p class="diagram-label">PartialResults Strategy</p>
 <div class="cd-wrap">
 <svg class="cd" viewBox="0 0 840 504" role="img" style="max-width: 860px">
-<title>PartialResults strategy: four tasks start and the join counts completions rather than successes, so a failure still counts — three outcomes arrive, the join fires, the last task is cancelled and every outcome is tracked for the downstream task.</title>
+<title>PartialResults strategy: four tasks start and the join counts successes, so a failure does not advance it — two successes arrive, the join fires, the last task is cancelled, and the failure is reported to observers.</title>
 <defs><marker id="partial-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
 <rect class="n" x="10" y="8" width="140" height="38" rx="8"/>
 <text class="t-strong" x="80" y="28">Workflow</text>
@@ -468,11 +469,11 @@ walk-through lives in <code>cargo run --example workflow_partial_results</code>.
 <text class="t-mut t-ok" x="335" y="330">Complete ✓</text>
 <path class="e e-dash" d="M590,342 H83" marker-end="url(#partial-ah)"/>
 <rect class="n-hot" x="16" y="362" width="808" height="34" rx="10"/>
-<text class="t-strong" x="420" y="380">3 completions → Proceed</text>
+<text class="t-strong" x="420" y="380">2 successes → Proceed</text>
 <text class="t-mut t-warn" x="420" y="416">Cancel ⏱</text>
 <path class="e e-dim" d="M80,428 H757" marker-end="url(#partial-ah)"/>
 <rect class="n-hot" x="16" y="448" width="808" height="34" rx="10"/>
-<text class="t-strong" x="420" y="466">Track: <tspan class="t-ok">2 success</tspan>, <tspan class="t-err">1 error</tspan>, <tspan class="t-warn">1 cancelled</tspan></text>
+<text class="t-strong" x="420" y="466">Outcome: <tspan class="t-ok">2 success</tspan>, <tspan class="t-err">1 error (observers)</tspan>, <tspan class="t-warn">1 cancelled</tspan></text>
 </svg>
 </div>
 </div>
@@ -494,31 +495,31 @@ struct MergePartialResults;
 
 #[task(state = DataState)]
 impl PrepareRequest {
-    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
-        Ok(TaskResult::Single(DataState::ParallelProcessing))
+    async fn run(&self) -> Result<DataState, CanoError> {
+        Ok(DataState::ParallelProcessing)
     }
 }
 
 #[task(state = DataState)]
 impl ServiceCall {
-    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
-        Ok(TaskResult::Single(DataState::Aggregate))
+    async fn run(&self) -> Result<DataState, CanoError> {
+        Ok(DataState::Aggregate)
     }
 }
 
 #[task(state = DataState)]
 impl MergePartialResults {
-    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
-        Ok(TaskResult::Single(DataState::Complete))
+    async fn run(&self) -> Result<DataState, CanoError> {
+        Ok(DataState::Complete)
     }
 }
 
 fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
-    // PartialResults Strategy: proceed after any 3 of 4 service calls finish
-    let join_config = JoinConfig::new(JoinStrategy::PartialResults(3), DataState::Aggregate)
+    // PartialResults Strategy: proceed after any 2 of 4 service calls succeed
+    let join_config = JoinConfig::new(JoinStrategy::PartialResults(2), DataState::Aggregate)
         .with_timeout(Duration::from_secs(5));
 
-    Workflow::new(Resources::new().insert("store", store))
+    Workflow::new(Resources::new().insert(store))
         .register(DataState::Start, PrepareRequest)
         .register_split(
             DataState::ParallelProcessing,
@@ -536,8 +537,10 @@ fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
 ```
 
 <h3 id="strategy-partial-timeout"><a href="#strategy-partial-timeout" class="anchor-link" aria-hidden="true">#</a>PartialTimeout — Deadline-Based Completion</h3>
-<p>Accepts whatever has completed when the timeout expires and proceeds with those results — the
-remaining tasks are cancelled. The go-to strategy for hard SLAs. Requires <code>.with_timeout()</code>.</p>
+<p>Accepts whatever has finished (successes or failures) when the timeout expires and proceeds with those
+results; the remaining tasks are cancelled. If no task finished before the deadline, the join fails with a
+<code>CanoError::Workflow</code>. The go-to strategy for hard SLAs. Requires <code>.with_timeout()</code>;
+<code>validate()</code> rejects a <code>PartialTimeout</code> split without one before the workflow runs.</p>
 
 <div class="diagram-frame">
 <p class="diagram-label">PartialTimeout Strategy</p>
@@ -601,22 +604,22 @@ struct AggregateWithinSla;
 
 #[task(state = DataState)]
 impl LoadUserContext {
-    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
-        Ok(TaskResult::Single(DataState::ParallelProcessing))
+    async fn run(&self) -> Result<DataState, CanoError> {
+        Ok(DataState::ParallelProcessing)
     }
 }
 
 #[task(state = DataState)]
 impl RecommendationEngine {
-    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
-        Ok(TaskResult::Single(DataState::Aggregate))
+    async fn run(&self) -> Result<DataState, CanoError> {
+        Ok(DataState::Aggregate)
     }
 }
 
 #[task(state = DataState)]
 impl AggregateWithinSla {
-    async fn run_bare(&self) -> Result<TaskResult<DataState>, CanoError> {
-        Ok(TaskResult::Single(DataState::Complete))
+    async fn run(&self) -> Result<DataState, CanoError> {
+        Ok(DataState::Complete)
     }
 }
 
@@ -625,7 +628,7 @@ fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
     let join_config = JoinConfig::new(JoinStrategy::PartialTimeout, DataState::Aggregate)
         .with_timeout(Duration::from_millis(500));
 
-    Workflow::new(Resources::new().insert("store", store))
+    Workflow::new(Resources::new().insert(store))
         .register(DataState::Start, LoadUserContext)
         .register_split(
             DataState::ParallelProcessing,
@@ -668,19 +671,19 @@ fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
 </tr>
 <tr>
 <td><code>Quorum(n)</code></td>
-<td>N tasks succeed</td>
-<td>Yes</td>
+<td>All tasks finished, at least N succeeded</td>
+<td>No</td>
 <td>Distributed consensus</td>
 </tr>
 <tr>
 <td><code>Percentage(p)</code></td>
-<td>P% succeed</td>
-<td>Yes</td>
+<td>All tasks finished, at least P% succeeded</td>
+<td>No</td>
 <td>Batch processing</td>
 </tr>
 <tr>
 <td><code>PartialResults(n)</code></td>
-<td>N tasks complete (success or failure)</td>
+<td>N tasks succeed (failures tolerated)</td>
 <td>Yes</td>
 <td>Latency optimization</td>
 </tr>

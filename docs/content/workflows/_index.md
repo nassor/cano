@@ -49,11 +49,12 @@ enum OrderState {
 <h2 id="building-a-workflow"><a href="#building-a-workflow" class="anchor-link" aria-hidden="true">#</a>Building a Workflow</h2>
 <p>
 A workflow is constructed with a <a href="../resources/"><code>Resources</code></a> dictionary
-that its tasks can look up during execution.
+that its tasks can look up during execution, keyed by type.
 Use <code>Workflow::new(resources)</code> when tasks need shared state (such as a <code>MemoryStore</code>,
-configuration, or clients), or <code>Workflow::bare()</code> when every task is self-contained and uses
-<code>run_bare()</code>. <code>Workflow::bare()</code> is equivalent to
-<code>Workflow::new(Resources::empty())</code>.
+configuration, or clients), or <code>Workflow::bare()</code> when no task needs a resource.
+<code>Workflow::bare()</code> is equivalent to <code>Workflow::new(Resources::new())</code>. A task that
+needs no resources can leave the <code>res</code> parameter out of its method signature
+(<code>async fn run(&amp;self)</code>); the task macros add it.
 </p>
 <div class="diagram-frame">
 <p class="diagram-label">Workflow State Transitions</p>
@@ -108,22 +109,22 @@ struct ProcessTask;
 
 #[task(state = OrderState)]
 impl StartTask {
-    async fn run_bare(&self) -> Result<TaskResult<OrderState>, CanoError> {
-        Ok(TaskResult::Single(OrderState::Validate))
+    async fn run(&self) -> Result<OrderState, CanoError> {
+        Ok(OrderState::Validate)
     }
 }
 
 #[task(state = OrderState)]
 impl ValidateTask {
-    async fn run_bare(&self) -> Result<TaskResult<OrderState>, CanoError> {
-        Ok(TaskResult::Single(OrderState::Process))
+    async fn run(&self) -> Result<OrderState, CanoError> {
+        Ok(OrderState::Process)
     }
 }
 
 #[task(state = OrderState)]
 impl ProcessTask {
-    async fn run_bare(&self) -> Result<TaskResult<OrderState>, CanoError> {
-        Ok(TaskResult::Single(OrderState::Complete))
+    async fn run(&self) -> Result<OrderState, CanoError> {
+        Ok(OrderState::Complete)
     }
 }
 
@@ -134,7 +135,7 @@ async fn main() -> Result<(), CanoError> {
     // Build workflow using the builder pattern — each method consumes self
     // and returns a new Workflow, so you must capture the return value.
     // For workflows that need no shared resources at all, use `Workflow::bare()`.
-    let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let workflow = Workflow::new(Resources::new().insert(store.clone()))
         // 1. Register Tasks for each state
         .register(OrderState::Start, StartTask)
         .register(OrderState::Validate, ValidateTask)
@@ -143,7 +144,7 @@ async fn main() -> Result<(), CanoError> {
         .add_exit_states(vec![OrderState::Complete, OrderState::Failed]);
 
     // 3. Execute
-    let result = workflow.orchestrate(OrderState::Start, CancellationToken::disabled()).await?;
+    let result = workflow.orchestrate(OrderState::Start).await?;
 
     println!("Final State: {:?}", result);
     Ok(())
@@ -159,33 +160,36 @@ like the one above.</p>
 
 <h2 id="cancellation"><a href="#cancellation" class="anchor-link" aria-hidden="true">#</a>Cancelling a Run</h2>
 <p>
-<code>orchestrate</code> always takes a <code>CancellationToken</code> as its second argument. The
-example above passes <code>CancellationToken::disabled()</code> — a token that never fires, opting
-the run out of cancellation at zero cost. To stop a run <em>early</em> on a signal you control — a
-shutdown handler, a user "stop" button, a parent task giving up — pass a live token from
-<code>CancellationToken::new()</code> instead and keep its paired <code>CancellationHandle</code>.
-Firing the handle aborts the in-flight task at its next <code>.await</code>, drains the
+<code>orchestrate</code> runs the workflow to an exit state and offers no way to stop it from outside
+(it still honours <code>with_total_timeout</code>). To stop a run <em>early</em> on a signal you
+control — a shutdown handler, a user "stop" button, a parent task giving up — create a
+<code>CancellationToken</code> (a re-export of <code>tokio_util::sync::CancellationToken</code>) and pass
+a reference to <code>orchestrate_with_token</code>. Calling <code>cancel()</code> on the token, or on any
+clone of it, aborts the in-flight task at its next <code>.await</code>, drains the
 <a href="../saga/">saga compensation stack</a>, and returns <code>CanoError::Cancelled</code>.
+<code>resume_from_with_token</code> does the same for a resumed run.
 </p>
 
 ```rust
 use cano::prelude::*;
 
-let (handle, token) = CancellationToken::new();
+let token = CancellationToken::new();
 
-// Cancel from anywhere — the handle is Clone and cancel() is idempotent:
+// Cancel from anywhere: clones share the token and cancel() is idempotent.
+let canceller = token.clone();
 tokio::spawn(async move {
-    shutdown_signal().await;
-    handle.cancel();
+    tokio::signal::ctrl_c().await.ok();
+    canceller.cancel();
 });
 
-let result = workflow.orchestrate(OrderState::Start, token).await;
-assert!(matches!(result, Err(e) if e.category() == "cancelled"));
+let result = workflow.orchestrate_with_token(OrderState::Start, &token).await;
+assert!(matches!(result, Err(e) if e.is_cancelled()));
 ```
 
 <p>
 Cancellation is <em>cooperative</em> (a task is interrupted only at an <code>.await</code>) and
-<em>saga-safe</em> (a <a href="../saga/">compensatable task</a> is never interrupted mid-run). The
+<em>saga-safe</em> (a <a href="../saga/">compensatable task</a> is never interrupted mid-run, and the
+compensation drain itself always runs to completion). The
 <a href="../resilience/#cancellation">Resilience → Cooperative Cancellation</a> page covers the full
 semantics, the <code>on_cancelled</code> observer hook, and precedence against
 <code>with_total_timeout</code>.
@@ -194,46 +198,60 @@ semantics, the <code>on_cancelled</code> observer hook, and precedence against
 
 <h2 id="builder-pattern"><a href="#builder-pattern" class="anchor-link" aria-hidden="true">#</a>Builder Pattern and #[must_use]</h2>
 <p>
-Workflow uses a builder pattern where the <code>register*</code> methods and
+Workflow uses a builder pattern where <code>register</code>, <code>register_split</code> and
 <code>add_exit_state()</code> all consume <code>self</code> and return a new <code>Workflow</code>.
 The <code>#[must_use]</code> attribute on <code>Workflow</code> and <code>JoinConfig</code> means the compiler
 will warn you if you discard the return value. If you forget to capture it, the registration is silently lost.
 </p>
 
-<p>Each <code>register*</code> method maps a state to a kind of <code>StateEntry</code>:</p>
+<p>There are two ways to put work on a state:</p>
 <table class="styled-table">
 <thead>
 <tr>
 <th>Builder method</th>
-<th><code>StateEntry</code> kind</th>
 <th>What runs at that state</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td><code>register(state, task)</code></td>
-<td><code>Single</code></td>
-<td>One <a href="../task/">Task</a> (or <a href="../poll-task/">PollTask</a>, <a href="../timer-task/">TimerTask</a>, <a href="../batch-task/">BatchTask</a> — all dispatch as <code>Task</code>).</td>
+<td>One task of any model: <a href="../task/">Task</a>, <a href="../router-task/">RouterTask</a>, <a href="../poll-task/">PollTask</a>, <a href="../timer-task/">TimerTask</a>, <a href="../batch-task/">BatchTask</a>, <a href="../stepped-task/">SteppedTask</a>, <a href="../stream-task/">StreamTask</a>, or a <a href="../saga/">CompensatableTask</a>. The model's macro tells the engine how to run it.</td>
 </tr>
 <tr>
 <td><code>register_split(state, tasks, join_config)</code></td>
-<td><code>Split</code></td>
-<td>Many tasks in parallel; a <code>JoinConfig</code> picks the <a href="../split-join/">join strategy</a> and the next state.</td>
+<td>Many tasks in parallel; a <code>JoinConfig</code> picks the <a href="../split-join/">join strategy</a> and the next state. Any task model can be a branch; stepped and stream branches run their loops in memory, without cursor persistence.</td>
+</tr>
+</tbody>
+</table>
+
+<p>What <code>register</code> does for each task model:</p>
+<table class="styled-table">
+<thead>
+<tr>
+<th>Task model</th>
+<th>Engine behaviour</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>Task</code>, <code>PollTask</code>, <code>TimerTask</code>, <code>BatchTask</code></td>
+<td>Dispatched as a single task and checkpointed like any state.</td>
 </tr>
 <tr>
-<td><code>register_router(state, task)</code></td>
-<td><code>Router</code></td>
-<td>A <a href="../router-task/">RouterTask</a> — dispatched like <code>Single</code>, but writes <strong>no checkpoint row</strong> (pure routing, nothing to recover).</td>
+<td><code>RouterTask</code></td>
+<td>Dispatched the same way, but writes <strong>no checkpoint row</strong> (pure routing, nothing to recover).</td>
 </tr>
 <tr>
-<td><code>register_stepped(state, task)</code></td>
-<td><code>Stepped</code></td>
-<td>A <a href="../stepped-task/">SteppedTask</a> — the engine owns the step loop and, with a checkpoint store attached, persists the cursor after each step.</td>
+<td><code>SteppedTask</code></td>
+<td>The engine owns the step loop: each step is retried per the task's config and, with a checkpoint store and a workflow id attached, the cursor is persisted after every step.</td>
 </tr>
 <tr>
-<td><code>register_with_compensation(state, task)</code></td>
-<td><code>CompensatableSingle</code></td>
-<td>A <a href="../saga/">CompensatableTask</a> — single-task states only; pushes onto the compensation stack on success.</td>
+<td><code>StreamTask</code></td>
+<td>The engine drives the windows, stops when the run's token is cancelled, and persists a cursor row per flushed window when a store and workflow id are attached.</td>
+</tr>
+<tr>
+<td><code>CompensatableTask</code> (<code>#[saga::task]</code>)</td>
+<td>Pushes onto the compensation stack on success; single-task states only. Two compensatable states that share a task <code>name()</code> make <code>validate()</code> fail with a configuration error.</td>
 </tr>
 </tbody>
 </table>
@@ -241,9 +259,9 @@ will warn you if you discard the return value. If you forget to capture it, the 
 <p>
 The same builder also carries the cross-cutting concerns: <code>with_checkpoint_store</code> /
 <code>with_workflow_id</code> / <code>with_workflow_version</code> / <code>resume_from</code> for <a href="../recovery/">crash recovery</a>,
-<code>register_with_compensation</code> for <a href="../saga/">sagas</a>, <code>with_observer</code> for
-<a href="../observers/">observers</a>, and per-task <code>TaskConfig</code> for retries, timeouts, and
-<a href="../resilience/">circuit breakers</a>.
+<code>with_observer</code> for <a href="../observers/">observers</a>, and per-task <code>TaskConfig</code> for
+opt-in retries, timeouts, and <a href="../resilience/">circuit breakers</a>. Tasks run once unless their
+config asks for retries.
 </p>
 
 <div class="callout callout-warning">
@@ -260,8 +278,8 @@ struct MyTask;
 
 #[task(state = State)]
 impl MyTask {
-    async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> {
-        Ok(TaskResult::Single(State::Complete))
+    async fn run(&self) -> Result<State, CanoError> {
+        Ok(State::Complete)
     }
 }
 
@@ -269,15 +287,15 @@ fn examples(store: MemoryStore) {
     let my_task = MyTask;
 
     // WRONG — registration is lost!
-    let workflow = Workflow::new(Resources::new().insert("store", store.clone()));
+    let workflow = Workflow::new(Resources::new().insert(store.clone()));
     workflow.register(State::Start, my_task.clone());  // returns a new Workflow, but it is discarded
 
     // CORRECT — capture the returned workflow
-    let workflow = Workflow::new(Resources::new().insert("store", store.clone()));
+    let workflow = Workflow::new(Resources::new().insert(store.clone()));
     let _workflow = workflow.register(State::Start, my_task.clone());
 
     // BEST — chain calls in a single expression
-    let _workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let _workflow = Workflow::new(Resources::new().insert(store.clone()))
         .register(State::Start, my_task)
         .add_exit_state(State::Complete);
 }
@@ -310,7 +328,7 @@ how many of those tasks run at once.
 let join_config = JoinConfig::new(JoinStrategy::All, State::Aggregate)
     .with_timeout(Duration::from_secs(5));
 
-Workflow::new(Resources::new().insert("store", store))
+Workflow::new(Resources::new().insert(store))
     .register_split(State::Fanout, vec![Worker { id: 1 }, Worker { id: 2 }], join_config)
     .register(State::Aggregate, Aggregator)
     .add_exit_state(State::Complete)
@@ -328,7 +346,7 @@ covered in the <a href="../split-join/">Split &amp; Join</a> guide.
 <p>
 A very common pattern is triggering a workflow for every incoming HTTP request, running the FSM to
 completion, and returning the results in the response. Cano workflows are cheap to construct — tasks are
-small <code>Clone</code> structs wrapped in <code>Arc</code> internally — so building one per request is
+small structs wrapped in <code>Arc</code> internally — so building one per request is
 fast, and <a href="../split-join/">split/join</a> inside the workflow gives you per-request parallelism for free.
 </p>
 
@@ -389,7 +407,7 @@ concurrent requests.
 ```rust
 // One factory, called per request with a fresh store.
 fn build_workflow(store: MemoryStore) -> Workflow<TextPipelineState> {
-    Workflow::new(Resources::new().insert("store", store))
+    Workflow::new(Resources::new().insert(store))
         .register(TextPipelineState::Parse, ParseTask)
         .register(TextPipelineState::Transform, TransformTask)
         .add_exit_state(TextPipelineState::Done)
@@ -398,9 +416,9 @@ fn build_workflow(store: MemoryStore) -> Workflow<TextPipelineState> {
 
 // Inside an HTTP handler:
 let store = MemoryStore::new();              // fresh store — full isolation
-store.put("input_text", text)?;
+store.put("input_text", text);
 let workflow = build_workflow(store.clone());
-let final_state = workflow.orchestrate(TextPipelineState::Parse, CancellationToken::disabled()).await?; // which terminal branch ran
+let final_state = workflow.orchestrate(TextPipelineState::Parse).await?; // which terminal branch ran
 let word_count: usize = store.get("word_count")?;
 ```
 

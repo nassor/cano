@@ -66,15 +66,15 @@ impl ConsumeEvents {
     }
 
     async fn on_close(&self, _res: &Resources, reason: CloseReason)
-        -> Result<TaskResult<Step>, CanoError>
+        -> Result<Step, CanoError>
     {
         println!("stream ended ({reason:?})");
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
 let workflow = Workflow::bare()
-    .register_stream(Step::Consume, ConsumeEvents)
+    .register(Step::Consume, ConsumeEvents)
     .add_exit_state(Step::Done);
 ```
 </div>
@@ -102,7 +102,7 @@ over and aggregate once, reach for a <a href="../batch-task/">BatchTask</a> inst
 <li><a href="#cursor">Cursor Persistence &amp; Resume</a></li>
 <li><a href="#cancellation">The Cancellation Contract</a></li>
 <li><a href="#idempotency">The Idempotency Contract</a></li>
-<li><a href="#register">register vs register_stream</a></li>
+<li><a href="#register">Registering a Stream Task</a></li>
 <li><a href="#explicit">Explicit Trait-Impl Form</a></li>
 <li><a href="#when-to-use">When to Use StreamTask</a></li>
 </ol>
@@ -182,7 +182,7 @@ cancelled/exhausted, and resumes from a cursor.
 <path class="e" d="M292,110 V272" marker-end="url(#stream-ah)"/>
 <text class="t-mut ta-e" x="282" y="160">source exhausted</text>
 <path class="e" d="M372,299 H526" marker-end="url(#stream-ah)"/>
-<text class="t-code t-mut" x="449" y="282">TaskResult::Single</text>
+<text class="t-code t-mut" x="449" y="282">Ok(state)</text>
 <rect class="n" x="16" y="64" width="142" height="46" rx="10"/>
 <text class="t-code" x="87" y="88">open(cursor)</text>
 <rect class="n" x="252" y="64" width="158" height="46" rx="10"/>
@@ -238,7 +238,8 @@ the source), <code>type Output</code> (the per-item result accumulated into a wi
 Optional methods carry defaults: <code>window()</code> (defaults to
 <code>StreamWindow::Count(1)</code> — flush per item), <code>on_item_error()</code> (defaults to
 <code>StreamErrorPolicy::FailFast</code>), <code>config()</code> (defaults to
-<code>TaskConfig::minimal()</code> — <strong>no outer retry</strong>, because an outer retry would
+<code>TaskConfig::new()</code>; only its <code>attempt_timeout</code> is applied, as a bound on each
+<code>process_item</code> call — there is <strong>no outer retry</strong>, because an outer retry would
 re-invoke <code>open()</code> and re-consume the stream), and <code>name()</code> (defaults to the
 type name).
 </p>
@@ -249,12 +250,13 @@ type name).
 <p>
 Attach <code>#[task::stream(state = MyState)]</code> to an inherent <code>impl</code> block. The macro
 infers <code>Item</code> from <code>process_item</code>'s owned <code>item</code> parameter and
-<code>Output</code> / <code>Cursor</code> from the <code>Ok</code> tuple of its return type, injects
-default <code>window</code> / <code>on_item_error</code> / <code>config</code> / <code>name</code> if
-absent, synthesises the <code>impl StreamTask&lt;MyState&gt; for ConsumeEvents</code> header, and emits
-a companion <code>impl Task&lt;MyState&gt; for ConsumeEvents</code> whose <code>run</code> drives the
-in-memory loop — useful if you register it with plain <code>register</code> and don't want
-persistence.
+<code>Output</code> / <code>Cursor</code> from the <code>Ok</code> tuple of its return type,
+synthesises the <code>impl StreamTask&lt;MyState&gt; for ConsumeEvents</code> header (<code>window</code> /
+<code>on_item_error</code> / <code>config</code> / <code>name</code> fall back to the trait defaults),
+and emits a companion <code>impl Task&lt;MyState&gt; for ConsumeEvents</code> whose <code>run</code>
+drives an in-memory loop — useful as a <code>register_split</code> branch, where there is no
+persistence. <code>open</code>, <code>process_item</code>, <code>flush_window</code> and
+<code>on_close</code> may omit the <code>res</code> parameter when they don't read resources.
 </p>
 
 <div class="code-block">
@@ -310,10 +312,10 @@ impl ConsumeEvents {
     }
 
     async fn on_close(&self, _res: &Resources, reason: CloseReason)
-        -> Result<TaskResult<Step>, CanoError>
+        -> Result<Step, CanoError>
     {
         println!("stream ended ({reason:?})");
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 ```
@@ -342,11 +344,6 @@ flush + checkpoint cost.
  the deadline simply advances.</p>
  </div>
  </div>
-
- <p>
- <code>StreamBatch</code> is an alias for <code>StreamWindow</code> — it is semantically identical
- but emphasises the batching semantics of <code>Count(n)</code> windows.
- </p>
 
  <!-- Section: Error policy -->
 <hr class="section-divider">
@@ -383,13 +380,13 @@ does when <code>process_item</code> returns an <code>Err</code>:
 <hr class="section-divider">
 <h2 id="cursor"><a href="#cursor" class="anchor-link" aria-hidden="true">#</a>Cursor Persistence &amp; Resume</h2>
 <p>
-Register a stream with <code>Workflow::register_stream(state, task)</code> — the durable, cancellable
+Register a stream with <code>Workflow::register(state, task)</code> — the durable, cancellable
 engine path. When a <a href="../recovery/"><code>CheckpointStore</code></a> plus a workflow id are
 attached (<code>with_checkpoint_store</code> + <code>with_workflow_id</code>), the engine persists the
 cursor returned by the <strong>last item of each flushed window</strong> as a
 <code>CheckpointRow</code> whose <code>kind</code> is <code>RowKind::StepCursor</code> (the cursor is
 <a href="https://docs.rs/serde_json"><code>serde_json</code></a>-encoded). On
-<code>Workflow::resume_from(workflow_id, token)</code>, the latest persisted cursor is rehydrated and
+<code>Workflow::resume_from(workflow_id)</code>, the latest persisted cursor is rehydrated and
 passed to <code>open(Some(cursor))</code> — so a crashed or cancelled run re-opens the source from the
 last committed position instead of starting over. Only <strong>fully flushed</strong> windows commit
 a cursor; a window that errors mid-flush commits nothing.
@@ -407,11 +404,11 @@ let checkpoint_store = RedbCheckpointStore::new("/var/lib/myapp/checkpoints.redb
 let workflow = Workflow::new(resources)
     .with_checkpoint_store(Arc::new(checkpoint_store))
     .with_workflow_id("event-consumer")
-    .register_stream(Step::Consume, ConsumeEvents)   // cursor persisted per flushed window
+    .register(Step::Consume, ConsumeEvents)          // cursor persisted per flushed window
     .add_exit_state(Step::Done);
 
 // A crashed or cancelled run resumes from the last committed window:
-// let result = workflow.resume_from("event-consumer", token).await?;
+// let result = workflow.resume_from_with_token("event-consumer", &token).await?;
 // open() is called with Some(cursor) — the position of the last fully-flushed window.
 ```
 </div>
@@ -429,8 +426,15 @@ drain</strong>:
 <li>it commits that window's cursor;</li>
 <li>it calls <code>on_close(CloseReason::Cancelled)</code> for cleanup — its returned state is
 <strong>ignored</strong>;</li>
-<li>the run ends as <code>CanoError::Cancelled</code> (category <code>"cancelled"</code>).</li>
+<li>the run ends as <code>CanoError::Cancelled</code> (<code>is_cancelled()</code> is true).</li>
 </ol>
+
+<p>
+Cancel a run by passing a token: <code>workflow.orchestrate_with_token(state, &amp;token)</code> or
+<code>resume_from_with_token(id, &amp;token)</code>, then call <code>token.cancel()</code> from anywhere.
+<code>orchestrate</code> takes no token, so such a run ends only by exhaustion, a
+<code>WindowSignal::Stop</code>, an error, or a total timeout.
+</p>
 
 <p>
 The window boundary is not the only cancellable point: <code>open()</code> races the <em>same</em>
@@ -460,7 +464,7 @@ commits its cursor, exactly like a real cancel. Only the error at the end differ
 <tr>
 <td>the run's <code>CancellationToken</code> fires</td>
 <td>flushed, cursor committed, <code>on_close(Cancelled)</code> runs</td>
-<td><code>CanoError::Cancelled</code> (category <code>"cancelled"</code>)</td>
+<td><code>CanoError::Cancelled</code> (<code>is_cancelled()</code> is true)</td>
 </tr>
 <tr>
 <td>the <code>with_total_timeout</code> deadline trips</td>
@@ -478,6 +482,17 @@ A cancelled stream does <strong>not</strong> gracefully transition to another st
 <code>resume_from</code> continues from the last committed window. So cancellation is a clean,
 resumable stop, not a hand-off. (An <code>Err</code> returned by <code>on_close</code> during the
 drain <em>is</em> propagated.)
+</p>
+</div>
+
+<div class="callout callout-info">
+<div class="callout-label">Under a Scheduler</div>
+<p>
+<code>RunningScheduler::stop()</code> fires the run token only after the drain timeout (20 s by
+default) elapses. A <code>StreamTask</code> ends on its own only by exhaustion or
+<code>WindowSignal::Stop</code>, so a scheduled stream holds the drain open for the whole timeout.
+A scheduler that hosts streams sets <code>with_drain_timeout(Duration::ZERO)</code> to cancel them
+as soon as <code>stop()</code> is called.
 </p>
 </div>
 
@@ -518,8 +533,8 @@ the state-entry checkpoint <em>before</em> running the task, so a resumed run re
 calls <code>open(Some(cursor))</code> from the last committed cursor. The window <em>after</em> that
 cursor may have been partially processed and then replayed — make <code>process_item</code> safe to
 re-apply (upserts, dedupe keys, "if not already processed" guards, conditional writes). This is also
-why <code>config()</code> defaults to <code>TaskConfig::minimal()</code> (no outer retry): an outer
-retry would re-invoke <code>open()</code> and re-consume the stream.</p>
+why the engine never applies an outer retry to a stream: it would re-invoke <code>open()</code> and
+re-consume the stream.</p>
 </div>
 
 <div class="callout callout-info">
@@ -533,47 +548,25 @@ plus periodic restarts (which clear the log on the clean exit) until a log-compa
 </p>
 </div>
 
-<!-- Section: register vs register_stream -->
+<!-- Section: registering -->
 <hr class="section-divider">
-<h2 id="register"><a href="#register" class="anchor-link" aria-hidden="true">#</a><code>register</code> vs <code>register_stream</code></h2>
+<h2 id="register"><a href="#register" class="anchor-link" aria-hidden="true">#</a>Registering a Stream Task</h2>
 <p>
-A <code>StreamTask</code> can be registered two ways, and the difference is durability:
+Register a stream with <code>Workflow::register(state, task)</code>, the same call every task model
+uses. The macro marks the task as a stream, so the engine drives the windowed loop itself:
 </p>
-
-<table class="styled-table">
-<thead>
-<tr>
-<th>Registration</th>
-<th>Cursor persistence</th>
-<th>Cancellation</th>
-<th>Use for</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>register_stream</code></td>
-<td>yes (with a checkpoint store + id)</td>
-<td>yes — cooperative drain</td>
-<td>real, durable stream consumption</td>
-</tr>
-<tr>
-<td><code>register</code></td>
-<td>no</td>
-<td>no</td>
-<td>convenience / tests only</td>
-</tr>
-</tbody>
-</table>
-
+<ul>
+<li>with a checkpoint store and a workflow id, each flushed window's cursor is persisted;</li>
+<li>the run's <code>CancellationToken</code> is observed, with the cooperative drain described
+above;</li>
+<li><code>process_item</code>, <code>flush_window</code> and <code>on_close</code> run under panic
+safety, so a panic becomes a <code>CanoError</code> instead of unwinding past the FSM.</li>
+</ul>
 <p>
-Plain <code>register</code> runs the macro-generated companion <code>Task</code>, which drives an
-<strong>in-memory</strong> windowed loop with <strong>no</strong> cursor persistence and
-<strong>no</strong> cancellation — it cannot be cancelled once running, and ends only via source
-exhaustion, a <code>WindowSignal::Stop</code>, or an error. Reach for <code>register_stream</code>
-for anything real; it is the path that observes the <code>CancellationToken</code> and persists
-cursors. <code>register_stream</code> also wraps <code>on_close</code> in panic safety, so a panic
-in cleanup becomes a <code>CanoError</code> instead of unwinding past the FSM — <code>register</code>
-does <strong>not</strong> do this.
+The macro-generated companion <code>Task</code> impl, used when a stream is a
+<code>register_split</code> branch, drives an <strong>in-memory</strong> windowed loop with
+<strong>no</strong> cursor persistence and <strong>no</strong> cancellation: it cannot be cancelled
+once running, and ends only via source exhaustion, a <code>WindowSignal::Stop</code>, or an error.
 </p>
 
 <!-- Section: explicit -->
@@ -629,9 +622,9 @@ impl StreamTask<Step> for Collector {
     }
 
     async fn on_close(&self, _res: &Resources, _reason: CloseReason)
-        -> Result<TaskResult<Step>, CanoError>
+        -> Result<Step, CanoError>
     {
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 ```

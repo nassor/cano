@@ -28,8 +28,10 @@ validation and runtime error handling.
 
 <h2 id="validation"><a href="#validation" class="anchor-link" aria-hidden="true">#</a>Workflow Validation</h2>
 <p>
-Before orchestrating a workflow, you can validate its configuration to catch common mistakes early.
+You can validate a workflow's configuration right after building it to catch common mistakes early.
 Cano provides two validation methods that check for different categories of problems.
+<code>orchestrate</code>, <code>resume_from</code>, and their <code>_with_token</code> variants run both
+checks for you before any resource is set up, so a mistake never reaches a task.
 </p>
 
 <div class="diagram-frame">
@@ -70,12 +72,18 @@ Cano provides two validation methods that check for different categories of prob
 <h3 id="validate-method"><a href="#validate-method" class="anchor-link" aria-hidden="true">#</a>validate()</h3>
 <p>
 Checks the overall workflow structure. Returns <code>CanoError::Configuration</code> if problems are found.
+The engine calls it before every run and caches the result, so a workflow is checked once however many
+times it runs. Calling it yourself runs the checks immediately.
 </p>
 <div class="card-stack">
 <div class="card">
 <h3>Checks performed</h3>
 <p>No handlers registered — the workflow has no states mapped to tasks.</p>
 <p>No exit states defined — the workflow has no way to terminate.</p>
+<p>A split's join state is neither registered nor an exit state.</p>
+<p>A split's <code>JoinConfig</code> is invalid: <code>PartialTimeout</code> without a timeout, a
+<code>Percentage</code> outside <code>(0.0, 1.0]</code>, or a bulkhead of 0.</p>
+<p>Two compensatable states share a task <code>name()</code> — override <code>name()</code> on one of them.</p>
 </div>
 </div>
 
@@ -98,22 +106,22 @@ struct ProcessTask;
 
 #[task(state = State)]
 impl MyTask {
-    async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> {
-        Ok(TaskResult::Single(State::Process))
+    async fn run(&self) -> Result<State, CanoError> {
+        Ok(State::Process)
     }
 }
 
 #[task(state = State)]
 impl ProcessTask {
-    async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> {
-        Ok(TaskResult::Single(State::Complete))
+    async fn run(&self) -> Result<State, CanoError> {
+        Ok(State::Complete)
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     let store = MemoryStore::new();
-    let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let workflow = Workflow::new(Resources::new().insert(store.clone()))
         .register(State::Start, MyTask)
         .register(State::Process, ProcessTask)
         .add_exit_state(State::Complete);
@@ -125,7 +133,7 @@ async fn main() -> Result<(), CanoError> {
     workflow.validate_initial_state(&State::Start)?;
 
     // Safe to orchestrate
-    let _result = workflow.orchestrate(State::Start, CancellationToken::disabled()).await?;
+    let _result = workflow.orchestrate(State::Start).await?;
     Ok(())
 }
 ```
@@ -141,6 +149,11 @@ exact errors <code>validate()</code> / <code>validate_initial_state()</code> ret
 <p>
 The <code>orchestrate()</code> method can return several error variants depending on what goes wrong
 during execution. Understanding these errors helps you build robust error recovery logic.
+</p>
+<p>
+A run sets up the workflow's resources, drives the state machine, then tears the resources down on every
+exit path. A failing <code>setup</code> returns its error before any task runs. If the run fails, its error
+is the one returned; a <code>teardown</code> error is returned only when the run itself succeeded.
 </p>
 
 <div class="diagram-frame">
@@ -172,7 +185,7 @@ during execution. Understanding these errors helps you build robust error recove
 <rect class="n-err" x="25" y="190" width="200" height="78" rx="10"/>
 <text class="t-code t-err" x="125" y="213">CanoError::Workflow</text>
 <text class="t-mut" x="125" y="233">no handler for state</text>
-<text class="t-mut" x="125" y="251">single task → Split</text>
+<text class="t-mut" x="125" y="251">join condition not met</text>
 <rect class="n-err" x="290" y="190" width="200" height="78" rx="10"/>
 <text class="t-code t-err" x="390" y="213">CircuitOpen · Timeout</text>
 <text class="t-code t-err" x="390" y="233">RetryExhausted</text>
@@ -203,8 +216,8 @@ during execution. Understanding these errors helps you build robust error recove
 </tr>
 <tr>
 <td><code>CanoError::Workflow</code></td>
-<td>Single task returned <code>TaskResult::Split</code></td>
-<td>Use <code>register_split()</code> instead of <code>register()</code> for parallel tasks</td>
+<td>A split's join condition was not met (for example fewer branches succeeded than <code>JoinStrategy::Quorum</code> requires); the message lists the branch errors</td>
+<td>Fix the failing branches, or loosen the <code>JoinStrategy</code>; see <a href="../../split-join/">Split &amp; Join</a></td>
 </tr>
 <tr>
 <td><code>CanoError::WorkflowTimeout</code></td>
@@ -213,13 +226,13 @@ during execution. Understanding these errors helps you build robust error recove
 </tr>
 <tr>
 <td><code>CanoError::Cancelled</code></td>
-<td>Run cancelled via a live <code>CancellationToken</code> passed to <code>orchestrate</code> / <code>resume_from</code>; in-flight task aborted, compensation stack drained. Surfaced under <code>CanoError::WithStateContext</code> (or <code>CompensationFailed</code> on a dirty rollback).</td>
+<td>Run cancelled via the <code>CancellationToken</code> passed to <code>orchestrate_with_token</code> / <code>resume_from_with_token</code>; in-flight task aborted, compensation stack drained. Surfaced under <code>CanoError::WithStateContext</code> (or <code>CompensationFailed</code> on a dirty rollback). Test for it with <code>err.is_cancelled()</code>.</td>
 <td>Expected when you cancel deliberately; see <a href="../../resilience/#cancellation">Resilience → Cooperative Cancellation</a></td>
 </tr>
 <tr>
 <td><code>CanoError::Configuration</code></td>
-<td><code>PartialTimeout</code> strategy used without timeout configured</td>
-<td>Add <code>.with_timeout(duration)</code> to <code>JoinConfig</code></td>
+<td>Rejected by <code>validate()</code> before the run starts: <code>PartialTimeout</code> strategy without a timeout, a <code>Percentage</code> outside <code>(0.0, 1.0]</code>, a bulkhead of 0, a missing exit state, or two compensatable states sharing a task <code>name()</code></td>
+<td>Add <code>.with_timeout(duration)</code> to the <code>JoinConfig</code>, correct the value, or override <code>name()</code> on one compensatable task</td>
 </tr>
 <tr>
 <td><code>CanoError::Timeout</code></td>
@@ -228,8 +241,8 @@ during execution. Understanding these errors helps you build robust error recove
 </tr>
 <tr>
 <td><code>CanoError::RetryExhausted</code></td>
-<td>All retry attempts exhausted by a Task</td>
-<td>Increase retry count or fix the underlying transient failure</td>
+<td>A task configured with retries (<code>with_fixed_retry</code> / <code>with_exponential_retry</code>) failed every attempt. A task with the default config runs once and returns its own error unchanged.</td>
+<td>Increase the retry count or fix the underlying transient failure</td>
 </tr>
 <tr>
 <td><code>CanoError::CircuitOpen</code></td>
@@ -260,13 +273,15 @@ through the join strategy.
 </div>
 
 ```rust
-match workflow.orchestrate(State::Start, CancellationToken::disabled()).await {
+match workflow.orchestrate(State::Start).await {
     Ok(final_state) => println!("Completed: {:?}", final_state),
-    Err(CanoError::Workflow(msg)) => eprintln!("Workflow error: {}", msg),
-    Err(CanoError::Configuration(msg)) => eprintln!("Config error: {}", msg),
-    Err(CanoError::Timeout(msg)) => eprintln!("Attempt timed out: {}", msg),
-    Err(CanoError::RetryExhausted(msg)) => eprintln!("Retries exhausted: {}", msg),
-    Err(e) => eprintln!("Task error: {}", e),
+    Err(e) => match e.inner() {
+        CanoError::Workflow(msg) => eprintln!("Workflow error: {}", msg),
+        CanoError::Configuration(msg) => eprintln!("Config error: {}", msg),
+        CanoError::Timeout(msg) => eprintln!("Attempt timed out: {}", msg),
+        CanoError::RetryExhausted { .. } => eprintln!("Retries exhausted: {}", e),
+        _ => eprintln!("Task error: {}", e),
+    },
 }
 
 ```

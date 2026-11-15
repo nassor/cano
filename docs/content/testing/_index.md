@@ -1,6 +1,6 @@
 +++
 title = "Testing"
-description = "Batteries-included fixtures for testing Cano workflows — a recording observer, an in-memory checkpoint store, a resources builder, a panic task factory, and a saga assertion."
+description = "Batteries-included fixtures for testing Cano workflows — a recording observer, an in-memory checkpoint store, a panic task factory, and a saga assertion."
 template = "section.html"
 +++
 
@@ -13,8 +13,6 @@ template = "section.html"
 The <code>cano::testing</code> module wraps existing public surface
 (<a href="../observers/"><code>WorkflowObserver</code></a>,
 <a href="../recovery/"><code>CheckpointStore</code></a>,
-<a href="../resources/"><code>Resources</code></a>,
-<a href="../store/"><code>MemoryStore</code></a>,
 <a href="../task/"><code>Task</code></a>) into ready-made fixtures. It adds <strong>no</strong> new
 traits and changes <strong>no</strong> existing public items — it just saves you from
 re-writing the same recording observer and in-memory store in every test crate.
@@ -32,7 +30,6 @@ accident.
 <li><a href="#enabling">Enabling the feature</a></li>
 <li><a href="#recording-observer">RecordingObserver</a></li>
 <li><a href="#in-memory-store">InMemoryCheckpointStore</a></li>
-<li><a href="#test-resources">TestResources</a></li>
 <li><a href="#panic-on-attempt">panic_on_attempt</a></li>
 <li><a href="#assert-compensation">assert_compensation_ran</a></li>
 </ol>
@@ -101,8 +98,8 @@ enum S { Start, Done }
 struct OkTask;
 #[task]
 impl Task<S> for OkTask {
-    async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-        Ok(TaskResult::Single(S::Done))
+    async fn run(&self) -> Result<S, CanoError> {
+        Ok(S::Done)
     }
 }
 
@@ -114,7 +111,7 @@ async fn recording_observer_captures_the_path() {
         .add_exit_state(S::Done)
         .with_observer(observer.clone());
 
-    assert_eq!(wf.orchestrate(S::Start, CancellationToken::disabled()).await.unwrap(), S::Done);
+    assert_eq!(wf.orchestrate(S::Start).await.unwrap(), S::Done);
 
     // Assert the whole path, or inspect events directly.
     observer.assert_path(&["Start", "Done"]);
@@ -126,8 +123,9 @@ async fn recording_observer_captures_the_path() {
 <p>
 <code>RecordedEvent</code> mirrors the observer hooks (<code>StateEntered</code>,
 <code>TaskStarted</code>, <code>TaskSucceeded</code>, <code>TaskFailed</code>, <code>Retry</code>,
-<code>CircuitOpen</code>, <code>Checkpoint</code>, <code>Resume</code>). It is
-<code>#[non_exhaustive]</code> — match with a wildcard arm.
+<code>CircuitOpen</code>, <code>Checkpoint</code>, <code>Resume</code>, <code>Cancelled</code>,
+<code>WorkflowTimeout</code>, <code>CheckpointClearFailed</code>, <code>UnknownResumeState</code>).
+It is <code>#[non_exhaustive]</code> — match with a wildcard arm.
 </p>
 
 <h3 id="state-coverage">State-coverage assertions</h3>
@@ -193,8 +191,8 @@ enum S { Start, Worker, Done }
 struct Go(S);
 #[task]
 impl Task<S> for Go {
-    async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-        Ok(TaskResult::Single(self.0.clone()))
+    async fn run(&self) -> Result<S, CanoError> {
+        Ok(self.0.clone())
     }
 }
 
@@ -206,7 +204,7 @@ async fn every_registered_state_is_reached() {
         .register(S::Worker, Go(S::Done))
         .add_exit_state(S::Done)
         .with_observer(observer.clone());
-    wf.orchestrate(S::Start, CancellationToken::disabled()).await.unwrap();
+    wf.orchestrate(S::Start).await.unwrap();
 
     // Every registered handler was actually reached — no dead states.
     observer.assert_registered_states_entered(&wf).expect("no dead states");
@@ -227,6 +225,13 @@ full trait contract: duplicate <code>(workflow_id, sequence)</code> is rejected,
 <code>load_run</code> returns rows sorted by sequence, and <code>clear</code> is per-id.
 </p>
 
+<p>
+Two readers let a test inspect what a run wrote. <code>rows(workflow_id)</code> returns the live
+rows sorted by sequence (empty once a successful run has cleared its log).
+<code>history()</code> returns every row ever appended, with its workflow id, in append order;
+<code>clear</code> never touches it.
+</p>
+
 ```rust
 use cano::prelude::*;
 use cano::testing::*;
@@ -238,8 +243,8 @@ enum S { Start, Done }
 struct Go;
 #[task]
 impl Task<S> for Go {
-    async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-        Ok(TaskResult::Single(S::Done))
+    async fn run(&self) -> Result<S, CanoError> {
+        Ok(S::Done)
     }
 }
 
@@ -251,26 +256,12 @@ async fn checkpoints_run_in_memory() {
         .add_exit_state(S::Done)
         .with_checkpoint_store(store.clone())
         .with_workflow_id("run-1");
-    assert_eq!(wf.orchestrate(S::Start, CancellationToken::disabled()).await.unwrap(), S::Done);
+    assert_eq!(wf.orchestrate(S::Start).await.unwrap(), S::Done);
+
+    // A successful run clears its live log; history() keeps every appended row.
+    assert!(store.rows("run-1").is_empty());
+    assert!(!store.history().is_empty());
 }
-```
-
-<h2 id="test-resources">TestResources</h2>
-
-<p>
-A small builder for the <a href="../resources/"><code>Resources</code></a> a workflow needs.
-<code>with_store</code> drops in a fresh <a href="../store/"><code>MemoryStore</code></a> at a key;
-<code>with_resource</code> takes any <a href="../resources/"><code>Resource</code></a>.
-</p>
-
-```rust
-use cano::prelude::*;
-use cano::testing::TestResources;
-
-let resources = TestResources::new()
-    .with_store("store")
-    .build();
-assert!(resources.get::<MemoryStore, _>("store").is_ok());
 ```
 
 <h2 id="panic-on-attempt">panic_on_attempt</h2>
@@ -302,7 +293,7 @@ async fn panicking_task_fails_fast() {
         .register(S::Start, panic_on_attempt(1, S::Done))
         .add_exit_state(S::Done);
 
-    let err = wf.orchestrate(S::Start, CancellationToken::disabled()).await.unwrap_err();
+    let err = wf.orchestrate(S::Start).await.unwrap_err();
     assert!(err.to_string().contains("panic"));
 }
 ```

@@ -18,7 +18,7 @@ compensations in reverse order if a later step fails.
 In Cano you implement <strong><code>CompensatableTask</code></strong> for a state's task — its
 <code>run</code> returns the next state <em>and</em> an <code>Output</code> describing what it did;
 its <code>compensate</code> takes that <code>Output</code> back and undoes it — and register it with
-<code>Workflow::register_with_compensation</code>. The engine keeps a per-run compensation stack;
+<code>Workflow::register</code>. The engine keeps a per-run compensation stack;
 if a later state's task fails, it drains the stack <strong>LIFO</strong> and runs each
 <code>compensate</code>. With a <a href="../recovery/">checkpoint store</a> attached, the outputs are
 persisted, so a resumed run can still compensate work done in an earlier process.
@@ -67,9 +67,9 @@ struct ReserveInventory;
 impl ReserveInventory {
     type Output = Reservation;
 
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<(Step, Reservation), CanoError> {
         // ... actually reserve the stock ...
-        Ok((TaskResult::Single(Step::Ship), Reservation { sku: "WIDGET-7".into(), qty: 3 }))
+        Ok((Step::Ship, Reservation { sku: "WIDGET-7".into(), qty: 3 }))
     }
 
     async fn compensate(&self, _res: &Resources, output: Reservation) -> Result<(), CanoError> {
@@ -83,26 +83,28 @@ impl ReserveInventory {
 <p>
 Use <code>#[saga::task(state = Step)]</code> on an inherent <code>impl</code> block —
 the macro builds the <code>impl CompensatableTask&lt;Step&gt; for …</code> header. If you'd rather
-write the trait header yourself — e.g. for a non-default resource-key type, or a generic impl — a
-bare <code>#[saga::task] impl CompensatableTask&lt;Step, MyKey&gt; for ReserveInventory { … }</code>
-works too (pass <code>key = MyKey</code> to the inherent form:
-<code>#[saga::task(state = Step, key = MyKey)]</code>).
+write the trait header yourself — e.g. for a generic impl — a
+bare <code>#[saga::task] impl CompensatableTask&lt;Step&gt; for ReserveInventory { … }</code>
+works too. <code>run</code> and <code>compensate</code> may omit the <code>res</code> parameter when
+they don't read resources.
 </p>
 
 <p>
-<code>config()</code> and <code>name()</code> have the same defaults as <code>Task</code> — override
-<code>config()</code> to change the forward run's retry/timeout policy (e.g.
-<code>TaskConfig::minimal()</code> for fail-fast), and <code>name()</code> to give the task a stable
-id (it's the compensation-stack key, so a friendly name helps when reading logs). <code>Output</code>
-can be <code>()</code> for a compensatable task that needs no data to undo itself.
+<code>config()</code> and <code>name()</code> have the same defaults as <code>Task</code>:
+<code>TaskConfig::new()</code> (one attempt, no retries) and the type name. Override
+<code>config()</code> to add a retry or timeout policy for the forward run (e.g.
+<code>TaskConfig::new().with_exponential_retry(3)</code>), and <code>name()</code> to give the task a
+stable id. The name is the compensation-stack key, so two compensatable states that share a name make
+<code>validate()</code> return a configuration error; override <code>name()</code> on one of them.
+<code>Output</code> can be <code>()</code> for a compensatable task that needs no data to undo itself.
 </p>
 <hr class="section-divider">
 
 <h2 id="registering"><a href="#registering" class="anchor-link" aria-hidden="true">#</a>Registering It</h2>
 <p>
-<code>Workflow::register_with_compensation(state, task)</code> registers a compensatable task for a
-state. It's <strong>single-task states only</strong> — there is no
-<code>register_split_with_compensation</code>.
+<code>Workflow::register(state, task)</code> registers a compensatable task for a
+state, the same call every task model uses. Compensation covers
+<strong>single-task states only</strong>; a split state contributes nothing to the stack.
 </p>
 
 ```rust
@@ -110,14 +112,14 @@ use cano::prelude::*;
 
 // ReserveInventory / ChargeCard / ShipOrder each `impl CompensatableTask<Step>`.
 let workflow = Workflow::bare()
-    .register_with_compensation(Step::Reserve, ReserveInventory)
-    .register_with_compensation(Step::Charge, ChargeCard)
-    .register_with_compensation(Step::Ship, ShipOrder)
+    .register(Step::Reserve, ReserveInventory)
+    .register(Step::Charge, ChargeCard)
+    .register(Step::Ship, ShipOrder)
     .add_exit_state(Step::Done);
 ```
 
 <p>
-You can mix compensatable and plain (<code>register</code>) states freely — only the compensatable
+You can mix compensatable and plain tasks freely — both go through <code>register</code>, and only the compensatable
 ones contribute to the stack. A plain task that fails still triggers the rollback of every
 compensatable step that ran before it.
 </p>
@@ -181,6 +183,14 @@ each <code>compensate</code> is bounded by a derived deadline (<code>min(remaini
 by default, or the value set via <code>Workflow::with_compensation_timeout</code>). A
 <code>compensate</code> that exceeds the deadline becomes one recorded error and the drain continues.</li>
 </ul>
+<p>
+When a run is cancelled with <code>orchestrate_with_token</code>, a compensatable task is never
+interrupted mid-run — it completes, and the cancel is honoured at the next state boundary, so a
+committed side effect always reaches the stack. The compensation drain itself is uncancellable.
+The result is <code>CanoError::Cancelled</code> (<code>is_cancelled()</code> is true) after a clean
+rollback, or <code>CompensationFailed</code> whose <code>errors[0]</code> is the cancel when a
+<code>compensate</code> failed.
+</p>
 <hr class="section-divider">
 
 <h2 id="result"><a href="#result" class="anchor-link" aria-hidden="true">#</a>What <code>orchestrate</code> Returns</h2>
@@ -284,7 +294,7 @@ after the resume point can still roll back work the original process did before 
 discriminant keeps the two apart.)</li>
 <li>Because <code>compensate(res, output)</code> may run in a <strong>different process</strong>, it must
 work purely from <code>(res, output)</code>, and the workflow definition (state labels +
-<code>register_with_compensation</code> calls) must match across processes — the same constraint that
+compensatable <code>register</code> calls) must match across processes — the same constraint that
 already applies to resume itself.</li>
 <li>If the resuming workflow's <a href="../recovery/#versioning"><code>workflow_version</code></a>
 disagrees with the version stamped on the persisted rows, <code>resume_from</code> returns
@@ -344,10 +354,10 @@ struct ShipOrder;
 #[saga::task(state = Step)]
 impl ReserveInventory {
     type Output = Reservation;
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<(Step, Reservation), CanoError> {
         let r = Reservation { order_id: "ord-1001".into(), sku: "WIDGET-7".into(), qty: 3 };
         println!("reserve  : holding {} × {}", r.qty, r.sku);
-        Ok((TaskResult::Single(Step::Validate), r))
+        Ok((Step::Validate, r))
     }
     async fn compensate(&self, _res: &Resources, r: Reservation) -> Result<(), CanoError> {
         println!("reserve  : releasing {} × {}  (rollback)", r.qty, r.sku);
@@ -355,23 +365,22 @@ impl ReserveInventory {
     }
 }
 
-// A plain task — `register`, not `register_with_compensation`. Nothing to undo, so it never
-// appears on the compensation stack.
+// A plain task: it has nothing to undo, so it never appears on the compensation stack.
 #[task(state = Step)]
 impl ValidateOrder {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         println!("validate : order ok");
-        Ok(TaskResult::Single(Step::Charge))
+        Ok(Step::Charge)
     }
 }
 
 #[saga::task(state = Step)]
 impl ChargeCard {
     type Output = Charge;
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Charge), CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<(Step, Charge), CanoError> {
         let charge = Charge { order_id: "ord-1001".into(), txn_id: "tx-7788".into(), amount_cents: 4_200 };
         println!("charge   : $42.00 charged ({})", charge.txn_id);
-        Ok((TaskResult::Single(Step::Ship), charge))
+        Ok((Step::Ship, charge))
     }
     async fn compensate(&self, _res: &Resources, c: Charge) -> Result<(), CanoError> {
         println!("charge   : refunding {} cents (tx {})  (rollback)", c.amount_cents, c.txn_id);
@@ -383,8 +392,7 @@ impl ChargeCard {
 // that ran before it: `Charge`, then `Reserve`.
 #[task(state = Step)]
 impl ShipOrder {
-    fn config(&self) -> TaskConfig { TaskConfig::minimal() } // fail-fast — surface the original error
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         println!("ship     : dispatching → courier unavailable");
         Err(CanoError::task_execution("courier unavailable"))
     }
@@ -393,13 +401,13 @@ impl ShipOrder {
 #[tokio::main]
 async fn main() {
     let workflow = Workflow::bare()
-        .register_with_compensation(Step::Reserve, ReserveInventory)
+        .register(Step::Reserve, ReserveInventory)
         .register(Step::Validate, ValidateOrder)              // plain — no compensation
-        .register_with_compensation(Step::Charge, ChargeCard)
+        .register(Step::Charge, ChargeCard)
         .register(Step::Ship, ShipOrder)                      // plain — and it fails
         .add_exit_state(Step::Done);
 
-    match workflow.orchestrate(Step::Reserve, CancellationToken::disabled()).await {
+    match workflow.orchestrate(Step::Reserve).await {
         Ok(state) => println!("completed at {state:?}"),
         Err(error) => println!("failed, rolled back: {error}"), // "courier unavailable" — the original error
     }

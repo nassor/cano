@@ -88,7 +88,7 @@ It excels at managing complex lifecycles where state transitions matter:
 <p class="diagram-label">One trigger &rarr; one FSM run &rarr; one task per state</p>
 <div class="cd-wrap">
 <svg class="cd" viewBox="0 0 780 466" role="img">
-<title>How Cano fits together: a run starts either from a direct orchestrate() call or from the Scheduler's interval, cron and manual triggers; the Workflow FSM dispatches the Task registered for the current state and routes the returned TaskResult onward, appends every state entry to the CheckpointStore that resume_from replays after a crash, hands each task the shared Resources, and stops at an exit state &mdash; while observer hooks, tracing spans and metrics counters listen on a rail underneath.</title>
+<title>How Cano fits together: a run starts either from a direct orchestrate() call or from the Scheduler's interval, cron and manual triggers; the Workflow FSM dispatches the Task registered for the current state and routes the next state it returns onward, appends every state entry to the CheckpointStore that resume_from replays after a crash, hands each task the shared Resources, and stops at an exit state &mdash; while observer hooks, tracing spans and metrics counters listen on a rail underneath.</title>
 <defs><marker id="arch-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
 <path class="e e-dim e-dash" d="M97,320 V392" marker-end="url(#arch-ah)"/>
 <path class="e e-dim e-dash" d="M390,370 V392" marker-end="url(#arch-ah)"/>
@@ -108,7 +108,7 @@ It excels at managing complex lifecycles where state transitions matter:
 <path class="e" d="M366,202 V258" marker-end="url(#arch-ah)"/>
 <text class="t-mut ta-e" x="358" y="232">dispatch</text>
 <path class="e" d="M414,262 V206" marker-end="url(#arch-ah)"/>
-<text class="t-code ta-s" x="422" y="232">TaskResult</text>
+<text class="t-code ta-s" x="422" y="232">next state</text>
 <path class="e" d="M266,289 H182" marker-end="url(#arch-ah)"/>
 <text class="t-code" x="224" y="276">&amp;Resources</text>
 <rect class="n" x="270" y="40" width="240" height="54" rx="10"/>
@@ -193,7 +193,7 @@ on all five optional features at once:
 <li><code>tracing</code> — <a href="tracing/"><code>tracing</code>-crate spans</a> and the <code>TracingObserver</code></li>
 <li><code>recovery</code> — <a href="recovery/"><code>RedbCheckpointStore</code></a>, the embedded ACID checkpoint store (the <code>CheckpointStore</code> trait itself is always available)</li>
 <li><code>metrics</code> — <a href="metrics/"><code>metrics</code>-crate counters / histograms / gauges</a> and the <code>MetricsObserver</code></li>
-<li><code>testing</code> — <a href="testing/">batteries-included test fixtures</a> (recording observer, in-memory checkpoint store, resources builder); usually a <code>[dev-dependencies]</code> feature</li>
+<li><code>testing</code> — <a href="testing/">batteries-included test fixtures</a> (recording observer, in-memory checkpoint store, panic and saga helpers); usually a <code>[dev-dependencies]</code> feature</li>
 </ul>
 <p>
 Pick only what you need — e.g. <code>features = ["recovery"]</code>, or omit <code>features</code>
@@ -228,35 +228,36 @@ struct SimpleTask;
 
 #[task(state = WorkflowState)]
 impl SimpleTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowState>, CanoError> {
-        let config = res.get::<AppConfig, _>("config")?;
+    async fn run(&self, res: &Resources) -> Result<WorkflowState, CanoError> {
+        let config = res.get::<AppConfig>()?;
         println!("Processing task (batch_size={})...", config.batch_size);
-        Ok(TaskResult::Single(WorkflowState::Process))
+        Ok(WorkflowState::Process)
     }
 }
 
 #[derive(Clone)]
 struct DoneTask;
 
+// Tasks that need no resources omit the `res` parameter
 #[task(state = WorkflowState)]
 impl DoneTask {
-    async fn run_bare(&self) -> Result<TaskResult<WorkflowState>, CanoError> {
+    async fn run(&self) -> Result<WorkflowState, CanoError> {
         println!("Done!");
-        Ok(TaskResult::Single(WorkflowState::Complete))
+        Ok(WorkflowState::Complete)
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     let resources = Resources::new()
-        .insert("config", AppConfig { batch_size: 64 });
+        .insert(AppConfig { batch_size: 64 });
 
     let workflow = Workflow::new(resources)
         .register(WorkflowState::Start, SimpleTask)
         .register(WorkflowState::Process, DoneTask)
         .add_exit_state(WorkflowState::Complete);
 
-    workflow.orchestrate(WorkflowState::Start, CancellationToken::disabled()).await?;
+    workflow.orchestrate(WorkflowState::Start).await?;
     Ok(())
 }
 

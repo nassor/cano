@@ -64,9 +64,9 @@ and concurrency guarantees.
 <circle class="n" cx="110" cy="214" r="10"/>
 <text class="t-mut" x="110" y="215">3</text>
 <rect class="n" x="22" y="238" width="176" height="34" rx="10"/>
-<text class="t-code" x="110" y="256">execute_workflow()</text>
+<text class="t-code" x="110" y="256">run the FSM</text>
 <rect class="n-hot" x="22" y="286" width="176" height="44" rx="10"/>
-<text class="t-code" x="110" y="300">teardown_range(all)</text>
+<text class="t-code" x="110" y="300">teardown_all()</text>
 <text class="t-strong t-hot" x="110" y="317">LIFO order</text>
 <path class="e" d="M124,354 H653" marker-end="url(#life-ah)"/>
 <text class="t-code ta-s" x="142" y="341">teardown()</text>
@@ -94,7 +94,7 @@ and concurrency guarantees.
 <tr><td>Teardown order</td><td>LIFO — each teardown can rely on its dependencies still being live.</td></tr>
 <tr><td>Sequentiality</td><td>Setup and teardown calls are sequential, never concurrent.</td></tr>
 <tr><td>Partial rollback</td><td>If <code>setup</code> fails at position N, teardown runs LIFO from N&minus;1 to 0. Resources at positions &ge; N never set up, never torn down.</td></tr>
-<tr><td>Teardown errors</td><td>Logged, never aborts the sequence — every remaining resource still gets torn down.</td></tr>
+<tr><td>Teardown errors</td><td>Logged, never aborts the sequence: every remaining resource still gets torn down. <code>orchestrate</code> and <code>resume_from</code> return the first teardown error only when the run itself succeeded; a run error always wins.</td></tr>
 </tbody>
 </table>
 
@@ -124,11 +124,11 @@ impl Resource for ServiceC {
 
 #[tokio::main]
 async fn main() {
-    let resources: Resources = Resources::new()
-        .insert("a", ServiceA::new())  // position 0 — setup OK
-        .insert("b", ServiceB::new())  // position 1 — setup OK
-        .insert("c", ServiceC::new())  // position 2 — setup FAILS
-        .insert("d", ServiceD::new()); // position 3 — never reached
+    let resources = Resources::new()
+        .insert(ServiceA::new())  // position 0: setup OK
+        .insert(ServiceB::new())  // position 1: setup OK
+        .insert(ServiceC::new())  // position 2: setup FAILS
+        .insert(ServiceD::new()); // position 3: never reached
 
     // setup_all() returns Err from C; teardown runs for B then A (LIFO)
     let result = resources.setup_all().await;
@@ -142,9 +142,11 @@ async fn main() {
 <h2 id="concurrency"><a href="#concurrency" class="anchor-link" aria-hidden="true">#</a>Concurrency and Interior Mutability</h2>
 
 <p>
-<code>get()</code> returns an <code>Arc&lt;R&gt;</code>. Split tasks each get their own clone —
-a refcount bump, no data copy. Read-only resources need no synchronization. Resources with
-mutable state must use interior mutability.
+<code>get()</code> returns a <code>&amp;R</code> borrowed from the <code>Resources</code>, and
+<code>get_arc()</code> returns an <code>Arc&lt;R&gt;</code>. Split tasks share one resource
+instance through the same <code>&amp;Resources</code>; moving a handle into a spawned task is a
+refcount bump (<code>get_arc</code>), no data copy. Read-only resources need no synchronization.
+Resources with mutable state must use interior mutability.
 </p>
 
 <table class="styled-table">
@@ -173,17 +175,17 @@ partition by task index or use a concurrent structure.
 <h2 id="orchestrate-lifecycle"><a href="#orchestrate-lifecycle" class="anchor-link" aria-hidden="true">#</a>Standalone vs Scheduler Lifecycle</h2>
 
 <p>
-<strong>Standalone <code>orchestrate()</code></strong> runs the full lifecycle on every call:
-<code>setup_all()</code> before the FSM, <code>teardown_range(all)</code> after, even on
-error. Resources are scoped to one workflow run. This is the per-request model — HTTP
+<strong>Standalone <code>orchestrate()</code> and <code>resume_from()</code></strong> run the full
+lifecycle on every call: <code>setup_all()</code> before the FSM, <code>teardown_all()</code> after,
+even on error. Resources are scoped to one workflow run. This is the per-request model: HTTP
 handlers, request-bound jobs.
 </p>
 
 <p>
-<strong>Scheduler</strong> runs <code>setup_all()</code> exactly once on
-<code>scheduler.start()</code> and <code>teardown_range(all)</code> once on
-<code>scheduler.stop()</code>. Each scheduled firing calls <code>execute_workflow()</code>
-directly and reuses the same resource instances — open a DB pool once, reuse across runs.
+<strong>Scheduler</strong> runs <code>setup_all()</code> for every flow exactly once on
+<code>Scheduler::start()</code> and <code>teardown_all()</code> once on
+<code>RunningScheduler::stop()</code> (idempotent). Each scheduled firing runs the FSM directly
+and reuses the same resource instances: open a DB pool once, reuse across runs.
 </p>
 
 <div class="callout callout-warning">
@@ -191,7 +193,7 @@ directly and reuses the same resource instances — open a DB pool once, reuse a
 <p>
 Resources persist across runs. Anything accumulated in a resource (counters, cached state,
 the contents of a <code>MemoryStore</code>) carries forward. For per-run reset, clear it at
-the start of the workflow — for example, <code>store.clear()?</code> in the initial task.
+the start of the workflow, for example <code>store.clear()</code> in the initial task.
 </p>
 </div>
 

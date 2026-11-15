@@ -38,8 +38,8 @@ impl CoolDown {
     async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
         Ok(TimerOutcome::Duration(Duration::from_secs(30))) // one scheduled wake-up
     }
-    async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Stage>, CanoError> {
-        Ok(TaskResult::Single(Stage::Done))
+    async fn after_wait(&self, _res: &Resources) -> Result<Stage, CanoError> {
+        Ok(Stage::Done)
     }
 }
 ```
@@ -65,7 +65,6 @@ waiting. A timer wakes once; a poller loops.
 <li><a href="#outcomes">Duration vs Until</a></li>
 <li><a href="#caps">Bounding the Wait</a></li>
 <li><a href="#explicit">Explicit Trait-Impl Form</a></li>
-<li><a href="#object-safe">Type-Erased Aliases</a></li>
 <li><a href="#when-to-use">When to Use TimerTask</a></li>
 </ol>
 </nav>
@@ -78,7 +77,7 @@ waiting. A timer wakes once; a poller loops.
 <p class="diagram-label">wait &rarr; sleep once &rarr; after_wait</p>
 <div class="cd-wrap">
 <svg class="cd" viewBox="0 0 726 204" role="img">
-<title>A TimerTask waits exactly once: wait returns a TimerOutcome, the engine schedules a single sleep for that duration or until that instant, then after_wait runs and its TaskResult moves the workflow to the next state.</title>
+<title>A TimerTask waits exactly once: wait returns a TimerOutcome, the engine schedules a single sleep for that duration or until that instant, then after_wait runs and the state it returns moves the workflow on.</title>
 <defs><marker id="timer-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
 <path class="e" d="M130,51 H276" marker-end="url(#timer-ah)"/>
 <text class="t-code" x="205" y="34">TimerOutcome</text>
@@ -93,7 +92,7 @@ waiting. A timer wakes once; a poller loops.
 <rect class="n" x="580" y="28" width="120" height="46" rx="10"/>
 <text class="t-code" x="640" y="52">after_wait</text>
 <path class="e" d="M640,74 V129" marker-end="url(#timer-ah)"/>
-<text class="t-code t-mut ta-e" x="630" y="102">TaskResult</text>
+<text class="t-code t-mut ta-e" x="630" y="102">Ok(state)</text>
 <rect class="n-ok" x="582" y="134" width="116" height="46" rx="10"/>
 <text x="640" y="158">Next State</text>
 </svg>
@@ -103,7 +102,7 @@ waiting. A timer wakes once; a poller loops.
 <p>
 A timer implements two required methods. <code>async fn wait(&amp;self, res: &amp;Resources) -&gt; Result&lt;TimerOutcome, CanoError&gt;</code>
 runs first and decides the delay; the engine then sleeps for that <code>TimerOutcome</code>; finally
-<code>async fn after_wait(&amp;self, res: &amp;Resources) -&gt; Result&lt;TaskResult&lt;TState&gt;, CanoError&gt;</code>
+<code>async fn after_wait(&amp;self, res: &amp;Resources) -&gt; Result&lt;TState, CanoError&gt;</code>
 runs and returns the next state.
 </p>
 <table class="styled-table">
@@ -130,12 +129,14 @@ runs and returns the next state.
 <h2 id="quick-start"><a href="#quick-start" class="anchor-link" aria-hidden="true">#</a>Quick Start with <code>#[task::timer]</code></h2>
 <p>
 Attach <code>#[task::timer(state = MyState)]</code> to an inherent <code>impl</code> block. You write
-<code>wait</code> and <code>after_wait</code>; the macro injects default bodies for <code>config</code>
-and <code>name</code> if you don't, synthesises the
-<code>impl TimerTask&lt;MyState&gt; for MyTimer</code> header, and emits a companion
-<code>impl Task&lt;MyState&gt; for MyTimer</code> whose <code>run</code> schedules the sleep (via
+<code>wait</code> and <code>after_wait</code>; <code>config</code> and <code>name</code> fall back to the trait
+defaults if you don't write them. The macro synthesises the
+<code>impl TimerTask&lt;MyState&gt; for MyTimer</code> header, implements
+<code>cano::workflow::Registrable</code> so the struct can go straight into <code>register</code>, and emits a
+companion <code>impl Task&lt;MyState&gt; for MyTimer</code> whose <code>run</code> schedules the sleep (via
 <code>cano::task::timer::run_timer</code>) — so a timer is just an ordinary single-task state whose
-<code>run</code> happens to sleep first. No engine changes.
+<code>run</code> happens to sleep first. Either method may be written without the <code>res</code>
+parameter when it needs no resources.
 </p>
 
 <div class="code-block">
@@ -154,15 +155,15 @@ struct CoolDown { delay: Duration }
 impl CoolDown {
     fn config(&self) -> TaskConfig {
         // cap the whole wait at 5s
-        TaskConfig::minimal().with_attempt_timeout(Duration::from_secs(5))
+        TaskConfig::new().with_attempt_timeout(Duration::from_secs(5))
     }
 
     async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
         Ok(TimerOutcome::Duration(self.delay))
     }
 
-    async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Process))
+    async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+        Ok(Step::Process)
     }
 }
 ```
@@ -172,9 +173,9 @@ impl CoolDown {
 <hr class="section-divider">
 <h2 id="registering"><a href="#registering" class="anchor-link" aria-hidden="true">#</a>Registering a Timer Task</h2>
 <p>
-Register a timer with plain <code>Workflow::register</code> — to the FSM a timer is an ordinary
-<code>Single</code> state, so there is no special builder method (the companion <code>impl Task</code>
-the macro generated does the wait internally).
+Register a timer with <code>Workflow::register</code>, the same call every other model uses. To the FSM
+a timer is an ordinary single-task state (the companion <code>impl Task</code> the macro generated
+does the wait internally).
 </p>
 
 <div class="code-block">
@@ -217,7 +218,7 @@ workflow engine cancels it and produces <code>CanoError::Timeout</code>.
 </p>
 
 <div class="callout callout-tip">
-<p>The default <code>config()</code> is <code>TaskConfig::minimal()</code> — <strong>no retries</strong>.
+<p>The default <code>config()</code> is <code>TaskConfig::new()</code> — <strong>no retries</strong>.
 A single scheduled sleep doesn't benefit from outer retry wrapping; attach an
 <code>attempt_timeout</code> instead if you need a bound.</p>
 </div>
@@ -248,34 +249,12 @@ impl TimerTask<Step> for CoolDown {
     async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
         Ok(TimerOutcome::Duration(Duration::from_secs(30)))
     }
-    async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Process))
+    async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+        Ok(Step::Process)
     }
 }
 ```
 </div>
-
-<!-- Section: object-safe aliases -->
-<hr class="section-divider">
-<h2 id="object-safe"><a href="#object-safe" class="anchor-link" aria-hidden="true">#</a>Type-Erased Aliases</h2>
-<table class="styled-table">
-<thead>
-<tr>
-<th>Alias</th>
-<th>Expands to</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>DynTimerTask&lt;TState, TResourceKey&gt;</code></td>
-<td><code>dyn TimerTask&lt;TState, TResourceKey&gt;</code></td>
-</tr>
-<tr>
-<td><code>TimerTaskObject&lt;TState, TResourceKey&gt;</code></td>
-<td><code>Arc&lt;dyn TimerTask&lt;TState, TResourceKey&gt;&gt;</code></td>
-</tr>
-</tbody>
-</table>
 
 <!-- Section: When to use -->
 <hr class="section-divider">

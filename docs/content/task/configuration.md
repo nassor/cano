@@ -1,6 +1,6 @@
 +++
 title = "Configuring Tasks: Retries, Timeouts & Circuit Breakers"
-description = "Configure Cano tasks with TaskConfig: retry strategies (fixed, exponential backoff, minimal), per-attempt timeouts, and wiring a circuit breaker."
+description = "Configure Cano tasks with TaskConfig: opt-in retry strategies (fixed, exponential backoff), per-attempt timeouts, and wiring a circuit breaker."
 template = "page.html"
 weight = 1
 +++
@@ -26,7 +26,7 @@ each attempt may run, and whether a circuit breaker guards it.
 
 <h2 id="config-retries"><a href="#config-retries" class="anchor-link" aria-hidden="true">#</a>Configuration &amp; Retries</h2>
 <p>
-Tasks can be configured with retry strategies to handle transient failures.
+Tasks run once by default: a failed attempt fails the task. Opt in to retries to handle transient failures.
 The <code>TaskConfig</code> struct allows you to specify the retry behavior.
 </p>
 
@@ -73,7 +73,7 @@ The <code>TaskConfig</code> struct allows you to specify the retry behavior.
 <span class="code-block-label">Fixed retry config</span>
 
 ```rust
-TaskConfig::default()
+TaskConfig::new()
     .with_fixed_retry(3, Duration::from_secs(1))
 
 ```
@@ -86,20 +86,20 @@ TaskConfig::default()
 <span class="code-block-label">Exponential backoff config</span>
 
 ```rust
-TaskConfig::default()
+TaskConfig::new()
     .with_exponential_retry(5)
 
 ```
 </div>
 </div>
 <div class="card">
-<h3>Minimal Config</h3>
-<p>Fast execution with minimal retry overhead for reliable operations.</p>
+<h3>No Retries (default)</h3>
+<p>One attempt, no retries, no timeout. This is what every task gets when it does not override <code>config()</code>.</p>
 <div class="code-block">
-<span class="code-block-label">Minimal config</span>
+<span class="code-block-label">Default config</span>
 
 ```rust
-TaskConfig::minimal()
+TaskConfig::new()
 
 ```
 </div>
@@ -114,7 +114,7 @@ TaskConfig::minimal()
 <span class="code-block-label">Attempt timeout config</span>
 
 ```rust
-TaskConfig::default()
+TaskConfig::new()
     .with_exponential_retry(3)
     .with_attempt_timeout(Duration::from_secs(2))
 
@@ -134,19 +134,20 @@ whether to retry. The deadline resets on every attempt, and retry exhaustion sti
 <h3 id="config-circuit-breaker"><a href="#config-circuit-breaker" class="anchor-link" aria-hidden="true">#</a>Wiring a Circuit Breaker</h3>
 <p>
 A <code>CircuitBreaker</code> can be attached to a task's config via
-<code>TaskConfig::with_circuit_breaker(Arc::clone(&amp;breaker))</code>. The retry loop consults it
+<code>TaskConfig::with_circuit_breaker(breaker.clone())</code>. The retry loop consults it
 <em>before</em> each attempt; an open breaker short-circuits the whole loop with
 <code>CanoError::CircuitOpen</code> (returned raw, not wrapped in <code>RetryExhausted</code>), so a
-dependency that is already down is not hammered. Share one <code>Arc&lt;CircuitBreaker&gt;</code>
-across every task that hits the same dependency so they trip together.
+dependency that is already down is not hammered. <code>CircuitBreaker</code> is cheap to clone and
+clones share state, so give every task that hits the same dependency a clone of one breaker and
+they trip together.
 </p>
 
 <div class="code-block">
 <span class="code-block-label">Attaching a breaker to a task config</span>
 
 ```rust
-fn build_config(breaker: Arc<CircuitBreaker>) -> TaskConfig {
-    TaskConfig::default()
+fn build_config(breaker: CircuitBreaker) -> TaskConfig {
+    TaskConfig::new()
         .with_exponential_retry(3)
         .with_circuit_breaker(breaker)
 }
@@ -180,22 +181,22 @@ struct ApiClientTask {
 impl ApiClientTask {
     fn config(&self) -> TaskConfig {
         // Exponential backoff for API rate limiting
-        TaskConfig::default()
+        TaskConfig::new()
             .with_exponential_retry(5)
     }
 
-    async fn run(&self, res: &Resources) -> Result<TaskResult<State>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<State, CanoError> {
         println!("📡 Calling API: {}", self.endpoint);
 
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
 
         // Replace this with your HTTP client of choice (reqwest, hyper, etc.)
         let data = String::new();
 
-        store.put("api_response", data)?;
+        store.put("api_response", data);
         println!("✅ API call successful");
 
-        Ok(TaskResult::Single(State::Complete))
+        Ok(State::Complete)
     }
 }
 ```

@@ -46,7 +46,7 @@ impl ScanPages {
     {
         let c = cursor.unwrap_or(Cursor { page: 0 });
         if c.page >= 50 {
-            return Ok(StepOutcome::Done(TaskResult::Single(Stage::Done)));
+            return Ok(StepOutcome::Done(Stage::Done));
         }
         // ...process page c.page...
         Ok(StepOutcome::More(Cursor { page: c.page + 1 }))   // cursor persisted here when a store is attached
@@ -75,7 +75,6 @@ the step at and after the resume point may re-run.
 <li><a href="#persistence">Cursor Persistence &amp; Resume</a></li>
 <li><a href="#idempotency">The Idempotency Contract</a></li>
 <li><a href="#explicit">Explicit Trait-Impl Form</a></li>
-<li><a href="#object-safe">Type-Erased Aliases</a></li>
 <li><a href="#when-to-use">When to Use SteppedTask</a></li>
 </ol>
 </nav>
@@ -124,7 +123,7 @@ the step at and after the resume point may re-run.
 
 <p>
 A <code>SteppedTask</code> has one associated type — <code>type Cursor: serde::Serialize +
-serde::de::DeserializeOwned + Send + Sync + 'static</code> (inferred by
+serde::de::DeserializeOwned + Clone + Send + Sync + 'static</code> (inferred by
 <code>#[task::stepped(state = ...)]</code> from the <code>step</code> signature, or written explicitly)
 — and one required method:
 </p>
@@ -140,15 +139,16 @@ async fn step(
 <ul>
 <li><code>cursor</code> is <code>None</code> on the first call (or a fresh run); on resume it's the
 last <em>persisted</em> cursor.</li>
-<li>The outcome — <code>enum StepOutcome&lt;TCursor, TState&gt; { More(TCursor), Done(TaskResult&lt;TState&gt;) }</code>:
-<code>More(c)</code> continues, threading <code>c</code> into the next call; <code>Done(result)</code>
-ends the loop and forwards <code>result</code> to the FSM.</li>
+<li>The outcome — <code>enum StepOutcome&lt;TCursor, TState&gt; { More(TCursor), Done(TState) }</code>:
+<code>More(c)</code> continues, threading <code>c</code> into the next call; <code>Done(state)</code>
+ends the loop and transitions the FSM to <code>state</code>.</li>
 </ul>
 
 <p>
-Optional: <code>fn config(&amp;self) -&gt; TaskConfig</code> (defaults to <code>TaskConfig::default()</code>
-— guards individual <code>step</code> calls) and <code>fn name(&amp;self) -&gt; Cow&lt;'static, str&gt;</code>
-(defaults to the type name).
+Optional: <code>fn config(&amp;self) -&gt; TaskConfig</code> (defaults to <code>TaskConfig::new()</code>
+— one attempt, no retries; the engine applies it to each <code>step</code> call, so
+<code>TaskConfig::new().with_exponential_retry(3)</code> retries a failing step with the same cursor)
+and <code>fn name(&amp;self) -&gt; Cow&lt;'static, str&gt;</code> (defaults to the type name).
 </p>
 
 <!-- Section: Quick Start -->
@@ -157,11 +157,12 @@ Optional: <code>fn config(&amp;self) -&gt; TaskConfig</code> (defaults to <code>
 <p>
 Attach <code>#[task::stepped(state = MyState)]</code> to an inherent <code>impl</code> block. The macro
 infers <code>Cursor</code> from the <code>Option&lt;_&gt;</code> / <code>StepOutcome&lt;_, _&gt;</code>
-types, injects default <code>config</code> / <code>name</code> if absent, synthesises the
-<code>impl SteppedTask&lt;MyState&gt; for Cruncher</code> header, and emits a companion
-<code>impl Task&lt;MyState&gt; for Cruncher</code> whose <code>run</code> runs the loop in memory (via
-<code>cano::task::stepped::run_stepped</code>) — useful if you register it with plain
-<code>register</code> and don't want persistence.
+types, synthesises the
+<code>impl SteppedTask&lt;MyState&gt; for Cruncher</code> header (<code>config</code> / <code>name</code>
+fall back to the trait defaults), and emits a companion
+<code>impl Task&lt;MyState&gt; for Cruncher</code> whose <code>run</code> runs the loop in memory (no
+cursor rows), so a stepped task can also be a <code>register_split</code> branch. <code>step</code> may
+omit the <code>res</code> parameter when it doesn't read resources.
 </p>
 
 <div class="code-block">
@@ -186,7 +187,7 @@ impl Cruncher {
     {
         let p = cursor.unwrap_or(Progress { processed: 0, total: 1000 });
         if p.processed >= p.total {
-            return Ok(StepOutcome::Done(TaskResult::Single(Stage::Report)));
+            return Ok(StepOutcome::Done(Stage::Report));
         }
         // ... do a chunk of work for batch p.processed ...
         Ok(StepOutcome::More(Progress { processed: p.processed + 1, ..p }))
@@ -199,10 +200,10 @@ impl Cruncher {
 <hr class="section-divider">
 <h2 id="registering"><a href="#registering" class="anchor-link" aria-hidden="true">#</a>Registering a Stepped Task</h2>
 <p>
-Register a stepped task with <code>Workflow::register_stepped(state, task)</code> — <strong>not</strong>
-<code>register</code>. (You <em>can</em> use plain <code>register</code> — the companion
-<code>impl Task</code> the macro emitted runs the loop in memory — but then you lose the cursor
-persistence; <code>register_stepped</code> is what hooks the engine-driven step loop up.)
+Register a stepped task with <code>Workflow::register(state, task)</code>, the same call every task
+model uses. The macro marks the task as stepped, so the engine drives the step loop itself: each
+<code>step</code> runs under the task's <code>config()</code>, and with a checkpoint store and a
+workflow id attached the cursor is persisted after every step.
 </p>
 
 <div class="code-block">
@@ -217,12 +218,12 @@ let checkpoint_store = RedbCheckpointStore::new("/var/lib/myapp/checkpoints.redb
 let workflow = Workflow::new(resources)
     .with_checkpoint_store(Arc::new(checkpoint_store))
     .with_workflow_id("nightly-crunch")
-    .register_stepped(Stage::Crunch, Cruncher)   // cursor persisted after each step
+    .register(Stage::Crunch, Cruncher)           // cursor persisted after each step
     .register(Stage::Report, Reporter)
     .add_exit_state(Stage::Done);
 
 // First run crashes after 600/1000 steps. Restart:
-// let result = workflow.resume_from("nightly-crunch", CancellationToken::disabled()).await?;
+// let result = workflow.resume_from("nightly-crunch").await?;
 // step() is first called with Some(Progress { processed: 600, .. }) — not None.
 ```
 </div>
@@ -231,8 +232,7 @@ let workflow = Workflow::new(resources)
 <hr class="section-divider">
 <h2 id="persistence"><a href="#persistence" class="anchor-link" aria-hidden="true">#</a>Cursor Persistence &amp; Resume</h2>
 <p>
-When a stepped task is registered via <code>register_stepped</code> <em>and</em> a
-<a href="../recovery/"><code>CheckpointStore</code></a> plus a workflow id are attached
+When a <a href="../recovery/"><code>CheckpointStore</code></a> plus a workflow id are attached
 (<code>with_checkpoint_store</code> + <code>with_workflow_id</code>), the engine drives the step loop
 and, after each <code>StepOutcome::More</code>, persists the cursor as a <code>CheckpointRow</code>
 whose <code>kind</code> is <code>RowKind::StepCursor</code> (the cursor is
@@ -249,8 +249,8 @@ Cursor persistence works <strong>whenever a checkpoint store is attached</strong
 <code>CheckpointRow</code> with a <code>serde_json</code>-encoded blob, so it doesn't depend on the
 <code>recovery</code> feature. Only the <em>built-in</em> <code>RedbCheckpointStore</code> lives
 behind that feature gate; a custom <code>CheckpointStore</code> impl gets stepped-cursor persistence
-for free. With no store attached at all, <code>register_stepped</code> degrades gracefully to a plain
-in-memory loop.
+for free. With no store attached, or no workflow id, the engine still drives the step loop but
+writes no cursor rows.
 </p>
 </div>
 
@@ -300,10 +300,10 @@ impl SteppedTask<Stage> for Cruncher {
         -> Result<StepOutcome<MyCursor, Stage>, CanoError>
     {
         let c = cursor.unwrap_or(MyCursor { offset: 0 });
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
         let total: u64 = store.get("row_count")?;
         if c.offset >= total {
-            return Ok(StepOutcome::Done(TaskResult::Single(Stage::Report)));
+            return Ok(StepOutcome::Done(Stage::Report));
         }
         // ... process the page starting at c.offset (idempotently!) ...
         Ok(StepOutcome::More(MyCursor { offset: c.offset + 500 }))
@@ -311,32 +311,6 @@ impl SteppedTask<Stage> for Cruncher {
 }
 ```
 </div>
-
-<!-- Section: object-safe aliases -->
-<hr class="section-divider">
-<h2 id="object-safe"><a href="#object-safe" class="anchor-link" aria-hidden="true">#</a>Type-Erased Aliases</h2>
-<p>
-The object-safe aliases pin the associated type: <code>Cursor</code> to
-<code>Vec&lt;u8&gt;</code> (the encoded form).
-</p>
-<table class="styled-table">
-<thead>
-<tr>
-<th>Alias</th>
-<th>Expands to</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>DynSteppedTask&lt;TState, TResourceKey&gt;</code></td>
-<td><code>dyn SteppedTask&lt;TState, TResourceKey, Cursor = Vec&lt;u8&gt;&gt;</code></td>
-</tr>
-<tr>
-<td><code>SteppedTaskObject&lt;TState, TResourceKey&gt;</code></td>
-<td><code>Arc&lt;dyn SteppedTask&lt;TState, TResourceKey, Cursor = Vec&lt;u8&gt;&gt;&gt;</code></td>
-</tr>
-</tbody>
-</table>
 
 <!-- Section: When to use -->
 <hr class="section-divider">

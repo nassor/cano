@@ -46,13 +46,13 @@ example on this page wires a task into a <code>Workflow</code> and pulls depende
 <!-- Section: Implementing a Task -->
 <hr class="section-divider">
 <h2 id="implementing"><a href="#implementing" class="anchor-link" aria-hidden="true">#</a>Implementing a Task</h2>
-<p>To create a task, implement the <code>Task</code> trait for your struct. The trait requires a <code>run</code> method and an optional <code>config</code> method.</p>
+<p>To create a task, implement the <code>Task</code> trait for your struct. The trait requires a <code>run</code> method that returns the next state and has an optional <code>config</code> method. With no <code>config</code>, a task makes a single attempt: there are no retries unless you opt in.</p>
 
 <div class="diagram-frame">
-<p class="diagram-label">One dispatch: config &rarr; retry envelope &rarr; run &rarr; TaskResult</p>
+<p class="diagram-label">One dispatch: config &rarr; retry envelope &rarr; run &rarr; next state</p>
 <div class="cd-wrap">
 <svg class="cd" viewBox="0 0 780 270" role="img">
-<title>One task dispatch: config() supplies the TaskConfig when the task is registered, run_with_retries drives run(&amp;Resources) one attempt at a time — a failed attempt waits its backoff and retries, a success returns TaskResult::Single(next) and the workflow enters that state, and a failure on the last attempt propagates as a CanoError.</title>
+<title>One task dispatch: config() supplies the TaskConfig when the task is registered, run_with_retries drives run(&amp;Resources) one attempt at a time — a failed attempt waits its backoff and retries, a success returns Ok(next) and the workflow enters that state, and a failure on the last attempt propagates as a CanoError.</title>
 <defs><marker id="life-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
 <path class="e e-dim" d="M660,64 V42 Q660,34 652,34 H365 Q357,34 357,42 V57" marker-end="url(#life-ah)"/>
 <text class="t-mut" x="508" y="26">Err &#8594; wait backoff, then retry</text>
@@ -63,7 +63,7 @@ example on this page wires a task into a <code>Workflow</code> and pulls depende
 <path class="e" d="M357,114 V148 Q357,156 349,156 H109 Q101,156 101,164 V192" marker-end="url(#life-ah)"/>
 <text class="t-mut t-err ta-e" x="345" y="144">last attempt failed</text>
 <path class="e" d="M357,114 V148 Q357,156 365,156 H664 Q672,156 672,164 V192" marker-end="url(#life-ah)"/>
-<text class="t-code t-mut ta-s" x="367" y="144">Ok(TaskResult::Single(next))</text>
+<text class="t-code t-mut ta-s" x="367" y="144">Ok(next)</text>
 <rect class="n" x="16" y="64" width="124" height="46" rx="10"/>
 <text class="t-code" x="78" y="88">config()</text>
 <text class="t-mut" x="78" y="128">once, at register</text>
@@ -94,27 +94,27 @@ struct GeneratorTask;
 
 #[task(state = Action)]
 impl GeneratorTask {
-    // Optional: Configure retries
+    // Optional: opt in to retries (the default is a single attempt)
     fn config(&self) -> TaskConfig {
-        TaskConfig::default().with_fixed_retry(3, std::time::Duration::from_secs(1))
+        TaskConfig::new().with_fixed_retry(3, std::time::Duration::from_secs(1))
     }
 
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Action>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<Action, CanoError> {
         println!("🎲 GeneratorTask: Creating random numbers...");
 
         // 1. Look up the shared store from resources
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
 
         // 2. Perform logic
         let mut rng = rand::rng();
         let numbers: Vec<u32> = (0..10).map(|_| rng.random_range(1..=100)).collect();
 
         // 3. Store results
-        store.put("numbers", numbers)?;
+        store.put("numbers", numbers);
         println!("✅ Stored numbers");
 
         // 4. Return next state
-        Ok(TaskResult::Single(Action::Count))
+        Ok(Action::Count)
     }
 }
 
@@ -130,13 +130,13 @@ like the snippet above.</p>
 <hr class="section-divider">
 <h2 id="resource-free"><a href="#resource-free" class="anchor-link" aria-hidden="true">#</a>Resource-Free Tasks</h2>
 <p>
-When a task performs pure computation and needs no resources, override <code>run_bare()</code> instead of
-<code>run()</code>. This skips the <code>Resources</code> parameter entirely, giving you a cleaner signature
-for self-contained logic.
+When a task performs pure computation and needs no resources, write <code>run</code> without the
+<code>res</code> parameter. The task macros insert it for you, so you get a cleaner signature
+for self-contained logic. Every model macro accepts its methods this way.
 </p>
 
 <div class="code-block">
-<span class="code-block-label"><span class="label-icon">&#9889;</span> Task using run_bare</span>
+<span class="code-block-label"><span class="label-icon">&#9889;</span> Task without a resources parameter</span>
 
 ```rust
 use cano::prelude::*;
@@ -148,11 +148,11 @@ struct PureTask;
 
 #[task(state = Step)]
 impl PureTask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         // No resources needed — pure computation
         let answer = 40 + 2;
         println!("Computed answer: {}", answer);
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -162,7 +162,7 @@ impl PureTask {
 <div class="callout callout-tip">
 <div class="callout-label">Tip</div>
 <p>
-Pair <code>run_bare()</code> with <code>Workflow::bare()</code> (or <code>Resources::empty()</code>)
+Pair a resource-free <code>run</code> with <code>Workflow::bare()</code> (or <code>Resources::new()</code>)
 when building workflows where no tasks need shared state — for example, pure pipelines or
 computational benchmarks.
 </p>
@@ -200,8 +200,8 @@ struct DataTransformer;
 
 #[task(state = State)]
 impl DataTransformer {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<State>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<State, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let raw_data: Vec<i32> = store.get("raw_data")?;
 
         // Transform: filter and multiply
@@ -211,8 +211,8 @@ impl DataTransformer {
             .map(|x| x * 2)
             .collect();
 
-        store.put("processed_data", processed)?;
-        Ok(TaskResult::Single(State::Complete))
+        store.put("processed_data", processed);
+        Ok(State::Complete)
     }
 }
 
@@ -240,8 +240,8 @@ struct ValidatorTask;
 
 #[task(state = State)]
 impl ValidatorTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<State>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<State, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let data: Vec<f64> = store.get("processed_data")?;
 
         let mut errors = Vec::new();
@@ -254,12 +254,12 @@ impl ValidatorTask {
             errors.push("Contains NaN values");
         }
 
-        store.put("validation_errors", errors.clone())?;
+        store.put("validation_errors", errors.clone());
 
         if errors.is_empty() {
-            Ok(TaskResult::Single(State::Process))
+            Ok(State::Process)
         } else {
-            Ok(TaskResult::Single(State::ValidationFailed))
+            Ok(State::ValidationFailed)
         }
     }
 }
@@ -288,8 +288,8 @@ struct RoutingTask;
 
 #[task(state = State)]
 impl RoutingTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<State>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<State, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let item_count: usize = store.get("item_count")?;
         let priority: String = store.get("priority")?;
 
@@ -303,7 +303,7 @@ impl RoutingTask {
         };
 
         println!("Routing to: {:?}", next_state);
-        Ok(TaskResult::Single(next_state))
+        Ok(next_state)
     }
 }
 
@@ -331,8 +331,8 @@ struct AggregatorTask;
 
 #[task(state = State)]
 impl AggregatorTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<State>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<State, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         println!("Aggregating results...");
 
         let mut total = 0;
@@ -346,11 +346,11 @@ impl AggregatorTask {
             }
         }
 
-        store.put("total", total)?;
-        store.put("count", count)?;
+        store.put("total", total);
+        store.put("count", count);
 
         println!("Aggregated {} results, total: {}", count, total);
-        Ok(TaskResult::Single(State::Complete))
+        Ok(State::Complete)
     }
 }
 
@@ -409,7 +409,7 @@ each has its own page with the full reference.
 <div class="card">
 <h3><a href="../router-task/">RouterTask</a></h3>
 <p>Side-effect-free branching: a <code>route</code> method that picks the next state and writes
-nothing. Registered with <code>register_router</code>; leaves no checkpoint row.</p>
+nothing. Registered with <code>register</code> like every other model; leaves no checkpoint row.</p>
 <p><strong>Reach for it when:</strong> branching on a flag / data shape with no side effects.</p>
 </div>
 <div class="card">
@@ -433,14 +433,14 @@ re-joined in one state.</p>
 <div class="card">
 <h3><a href="../stepped-task/">SteppedTask</a></h3>
 <p>Resumable iterative work: a <code>step(cursor)</code> method whose cursor is checkpointed each
-step, so a crash resumes mid-loop. Registered with <code>register_stepped</code>.</p>
+step, so a crash resumes mid-loop. Registered with <code>register</code>.</p>
 <p><strong>Reach for it when:</strong> long page-by-page scans, chunked migrations — crash-resume finer than per-state.</p>
 </div>
 <div class="card">
 <h3><a href="../stream-task/">StreamTask</a></h3>
 <p>Continuous stream consumption: <code>open → process_item → flush_window</code> per tumbling window,
 running until cancelled/exhausted, resumable from a committed cursor. Registered with
-<code>register_stream</code>.</p>
+<code>register</code>.</p>
 <p><strong>Reach for it when:</strong> unbounded sources — Kafka, SSE, file-tail — with per-window emission and resume-from-cursor.</p>
 </div>
 </div>
@@ -470,7 +470,7 @@ All seven models dispatch as a <code>Task</code>, so you can mix them in one wor
 <tr>
 <td><a href="../router-task/"><strong><code>RouterTask</code></strong></a></td>
 <td>You're only <em>deciding</em> the next state — branching on a flag or data shape — with no side effects and no recovery footprint.</td>
-<td><code>register_router</code></td>
+<td><code>register</code></td>
 </tr>
 <tr>
 <td><a href="../poll-task/"><strong><code>PollTask</code></strong></a></td>
@@ -490,12 +490,12 @@ All seven models dispatch as a <code>Task</code>, so you can mix them in one wor
 <tr>
 <td><a href="../stepped-task/"><strong><code>SteppedTask</code></strong></a></td>
 <td>You have a <em>long iterative job</em> (page-by-page scan, chunked migration) you want to crash-resume mid-loop, finer than per-state.</td>
-<td><code>register_stepped</code></td>
+<td><code>register</code></td>
 </tr>
 <tr>
 <td><a href="../stream-task/"><strong><code>StreamTask</code></strong></a></td>
 <td>You're consuming an <em>unbounded / continuous source</em> (Kafka, SSE, file-tail) — per-window emission, bounded memory, runs until cancelled/exhausted, resumable from a cursor.</td>
-<td><code>register_stream</code></td>
+<td><code>register</code></td>
 </tr>
 </tbody>
 </table>

@@ -32,18 +32,25 @@ template = "section.html"
 The Scheduler provides workflow scheduling capabilities for background jobs and automated workflows.
 It supports intervals, cron expressions, and manual triggers. Each registered workflow carries a
 <a href="../resources/"><code>Resources</code></a> dictionary whose <code>setup()</code> and
-<code>teardown()</code> lifecycle hooks run once per <code>scheduler.start()</code> /
-<code>scheduler.stop()</code> call — not once per scheduled run.
+<code>teardown()</code> lifecycle hooks run once per <code>Scheduler::start()</code> /
+<code>RunningScheduler::stop()</code> pair — not once per scheduled run.
 </p>
 
 <div class="callout callout-info">
-<div class="callout-label">Type Constraint</div>
+<div class="callout-label">Mixed State Types</div>
 <p>
-All workflows registered with a single <code>Scheduler</code> instance must share the same
-<code>TState</code> type. The scheduler is generic over <code>Scheduler&lt;TState&gt;</code>,
-so all registered workflows use the same state enum. For workflows with different state enums,
-create separate <code>Scheduler</code> instances.
+<code>Scheduler</code> is not generic over the state type. One scheduler can host workflows with
+different state enums and different resources; each flow keeps its own state type behind the scheduler's
+type-erased registry.
 </p>
+
+```rust
+let running = Scheduler::new()
+    .every("sync", sync_workflow, SyncState::Start, Duration::from_secs(300))
+    .manual("export", export_workflow, ExportState::Start)
+    .start()
+    .await?;
+```
 </div>
 <hr class="section-divider">
 
@@ -52,32 +59,89 @@ create separate <code>Scheduler</code> instances.
 The scheduler is split into two halves to make a double-start impossible at the type level:
 </p>
 <ul>
-<li><strong><code>Scheduler</code></strong> is the <em>builder</em>. Register workflows with <code>every</code> /
-<code>cron</code> / <code>manual</code> and, if you want something other than <code>BackoffPolicy::default()</code>,
-override it per flow via <code>set_backoff</code>. <code>Scheduler</code> is <strong>not</strong> <code>Clone</code>.</li>
+<li><strong><code>Scheduler</code></strong> is the <em>builder</em>. Every method consumes and returns it, so
+registration is one chain: <code>every</code> / <code>cron</code> / <code>manual</code> register a workflow,
+<code>with_backoff</code> overrides the <code>BackoffPolicy</code> of one flow, and
+<code>with_drain_timeout</code> / <code>with_cancel_timeout</code> tune <a href="#graceful-shutdown">shutdown</a>.
+Nothing fails while you chain: a zero interval, a bad cron expression, a duplicate id, or a
+<code>with_backoff</code> for an unknown id is remembered, and <code>start()</code> returns the first one
+before anything is validated or set up.</li>
 <li><strong><code>RunningScheduler</code></strong> is the <em>live handle</em> returned by
-<code>scheduler.start().await?</code>. It owns the spawned driver and per-flow loop tasks. It is cheap to
-clone — every clone shares the same command channel and flow registry, so you can call <code>trigger</code>,
-<code>status</code>, <code>list</code>, <code>reset_flow</code>, <code>cancel_flow</code>, and <code>stop</code> from any task.</li>
+<code>start().await?</code>. It is cheap to clone — every clone controls the same scheduler — so you can call
+<code>trigger</code>, <code>status</code>, <code>list</code>, <code>reset_flow</code>, <code>cancel_flow</code>,
+and <code>stop</code> from any task.</li>
 </ul>
 <p>
 <code>start</code> consumes the builder, so the compiler prevents you from starting the same scheduler
-twice or mutating the registry mid-flight. <code>stop().await</code> on any clone signals graceful
-shutdown and waits for it to complete; <code>wait().await</code> blocks without sending Stop, useful for
-"main blocks until Ctrl+C handler stops the scheduler" patterns.
+twice or changing the registry mid-flight. It validates every workflow and its initial state, sets up each
+workflow's resources in registration order (a setup failure tears down the flows already set up and
+returns the error), then spawns one loop per interval or cron flow. Manual flows get no loop; they run only
+on <code>trigger</code>.
+</p>
+<table class="styled-table">
+<thead>
+<tr>
+<th>RunningScheduler method</th>
+<th>What it does</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>async stop()</code></td>
+<td>Shut down in bounded time: drain, cancel, abort, then tear resources down. Idempotent; see <a href="#graceful-shutdown">Graceful Shutdown</a>.</td>
+</tr>
+<tr>
+<td><code>async wait()</code></td>
+<td>Block until some clone calls <code>stop()</code>, then return its result. It never stops the scheduler itself.</td>
+</tr>
+<tr>
+<td><code>async wait_idle(id)</code></td>
+<td>Wait until the flow is not <code>Running</code> and return its <code>FlowInfo</code> (<code>None</code> for an unknown id). Returns at once for an idle flow.</td>
+</tr>
+<tr>
+<td><code>trigger(id)</code></td>
+<td>Start a run now. Errors when the id is unknown, the scheduler is stopping or stopped, the flow is already running, or the flow is tripped.</td>
+</tr>
+<tr>
+<td><code>cancel_flow(id)</code></td>
+<td>Cooperatively cancel the flow's in-flight run; a no-op when the flow is idle.</td>
+</tr>
+<tr>
+<td><code>reset_flow(id)</code></td>
+<td>Clear the failure streak and the backoff window; a tripped flow returns to <code>Idle</code>.</td>
+</tr>
+<tr>
+<td><code>status(id)</code></td>
+<td>Snapshot of one flow as <code>Option&lt;FlowInfo&gt;</code> (<code>None</code> for an unknown id).</td>
+</tr>
+<tr>
+<td><code>list()</code></td>
+<td>Snapshot of every flow as <code>Vec&lt;FlowInfo&gt;</code>, in registration order.</td>
+</tr>
+</tbody>
+</table>
+<p>
+Only the three waiting methods are <code>async</code>. <code>trigger</code>, <code>cancel_flow</code> and
+<code>reset_flow</code> must be called inside a Tokio runtime (<code>trigger</code> spawns the run).
+Dropping the last clone without calling <code>stop()</code> cancels every in-flight run and aborts the
+scheduler's tasks; resources are <strong>not</strong> torn down on that path, so call
+<code>stop().await</code> for an orderly shutdown.
 </p>
 <hr class="section-divider">
 
 <h2 id="overlap-prevention"><a href="#overlap-prevention" class="anchor-link" aria-hidden="true">#</a>Overlap Prevention</h2>
 <p>
-The scheduler prevents overlapping executions of the same workflow. If a previous execution is still
-running when the next interval or cron trigger fires, the new run is skipped. This prevents resource
-exhaustion from slow-running workflows that accumulate concurrent instances over time.
+The scheduler never runs the same flow twice at once. Interval and cron loops run their workflow inline,
+so a loop cannot start a second run while one is in progress, and a <code>trigger()</code> on a running
+flow returns an error. An interval or cron tick that finds the flow already running because of a manual
+trigger is skipped. This prevents resource exhaustion from slow-running workflows that would otherwise
+accumulate concurrent instances.
 </p>
 <p>
 For example, if a workflow is configured to run every 30 seconds but a particular execution takes
-45 seconds, the scheduler will skip the trigger at the 30-second mark and wait for the next interval
-after the current run completes.
+45 seconds, the next run starts 30 seconds after that execution finishes. A cron loop works the same way:
+once a run returns, it waits for the next firing after that moment, so firings that fell inside the run
+are skipped.
 </p>
 <hr class="section-divider">
 
@@ -89,7 +153,7 @@ after the current run completes.
 <p>Run workflows at fixed time intervals.</p>
 
 ```rust
-scheduler.every_seconds(...)
+.every(..., Duration::from_secs(30))
 
 ```
 </div>
@@ -99,7 +163,7 @@ scheduler.every_seconds(...)
 <p>Run workflows based on cron expressions.</p>
 
 ```rust
-scheduler.cron(..., "0 0 9 * * *")
+.cron(..., "0 0 9 * * *")
 
 ```
 </div>
@@ -109,7 +173,7 @@ scheduler.cron(..., "0 0 9 * * *")
 <p>Trigger workflows on-demand via API.</p>
 
 ```rust
-scheduler.manual(...)
+.manual(...)
 
 ```
 </div>
@@ -120,27 +184,27 @@ scheduler.manual(...)
 <p>The Scheduler supports multiple scheduling strategies. Here are complete examples for each.</p>
 
 <h3 id="interval-scheduling"><a href="#interval-scheduling" class="anchor-link" aria-hidden="true">#</a>1. Interval Scheduling - Fixed Time Intervals</h3>
-<p>Run workflows at regular time intervals. Best for periodic tasks like health checks or data syncing.</p>
+<p>Run workflows at regular time intervals. The first run starts as soon as the scheduler starts; each later run starts one interval after the previous run finishes. Best for periodic tasks like health checks or data syncing.</p>
 
 <div class="diagram-frame">
 <p class="diagram-label">Interval Scheduling Timeline</p>
 <div class="cd-wrap">
 <svg class="cd" viewBox="0 0 760 180" role="img">
-<title>Interval scheduling every 30 seconds: a 2-second run is followed by a 28-second wait, so the workflow is busy for only 2 seconds out of every 30.</title>
+<title>Interval scheduling every 30 seconds: a 2-second run is followed by a 30-second wait, so each run starts 32 seconds after the previous one started.</title>
 <defs><marker id="interval-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
-<path class="e e-dim" d="M150,36 H420" marker-start="url(#interval-ah)" marker-end="url(#interval-ah)"/>
-<text class="t-mut" x="285" y="22">30s period</text>
+<path class="e e-dim" d="M150,36 H438" marker-start="url(#interval-ah)" marker-end="url(#interval-ah)"/>
+<text class="t-mut" x="294" y="22">32s between run starts</text>
 <text class="t-strong ta-s" x="20" y="78">Workflow</text>
-<rect class="band" x="168" y="64" width="252" height="26" rx="6"/>
-<text class="t-mut" x="294" y="78">wait 28s</text>
-<rect class="band" x="438" y="64" width="252" height="26" rx="6"/>
-<text class="t-mut" x="564" y="78">wait 28s</text>
+<rect class="band" x="168" y="64" width="270" height="26" rx="6"/>
+<text class="t-mut" x="303" y="78">wait 30s</text>
+<rect class="band" x="456" y="64" width="270" height="26" rx="6"/>
+<text class="t-mut" x="591" y="78">wait 30s</text>
 <rect class="band-hot" x="150" y="64" width="18" height="26" rx="4"/>
-<rect class="band-hot" x="420" y="64" width="18" height="26" rx="4"/>
-<rect class="band-hot" x="690" y="64" width="18" height="26" rx="4"/>
+<rect class="band-hot" x="438" y="64" width="18" height="26" rx="4"/>
+<rect class="band-hot" x="726" y="64" width="18" height="26" rx="4"/>
 <text class="t-mut t-hot" x="159" y="52">Run 1</text>
-<text class="t-mut t-hot" x="429" y="52">Run 2</text>
-<text class="t-mut t-hot" x="699" y="52">Run 3</text>
+<text class="t-mut t-hot" x="447" y="52">Run 2</text>
+<text class="t-mut t-hot" x="735" y="52">Run 3</text>
 <line class="axis" x1="150" y1="112" x2="726" y2="112"/>
 <path class="e e-dim" d="M726,112 H744" marker-end="url(#interval-ah)"/>
 <line class="tick" x1="150" y1="112" x2="150" y2="118"/>
@@ -157,13 +221,14 @@ scheduler.manual(...)
 <text class="t-mut" x="510" y="132">40s</text>
 <text class="t-mut" x="600" y="132">50s</text>
 <text class="t-mut" x="690" y="132">60s</text>
-<text class="t-mut" x="438" y="160">2s busy, 28s idle — the loop sleeps to the next 30s boundary, it does not spin</text>
+<text class="t-mut" x="438" y="160">2s busy, then a full 30s sleep — the next run starts one interval after the previous run finishes</text>
 </svg>
 </div>
 </div>
 
 ```rust
 use cano::prelude::*;
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum State { Start, Complete }
@@ -173,34 +238,36 @@ struct HealthCheckTask;
 
 #[task(state = State)]
 impl HealthCheckTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<State>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<State, CanoError> {
         println!("Running health check...");
 
         // Check system health
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
         let status = "healthy".to_string();
-        store.put("last_health_check", status)?;
+        store.put("last_health_check", status);
 
-        Ok(TaskResult::Single(State::Complete))
+        Ok(State::Complete)
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let mut scheduler = Scheduler::new();
     let store = MemoryStore::new();
 
-    let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let workflow = Workflow::new(Resources::new().insert(store.clone()))
         .register(State::Start, HealthCheckTask)
         .add_exit_state(State::Complete);
 
-    // Run every 30 seconds
-    scheduler.every_seconds("health_check", workflow, State::Start, 30)?;
+    // Run every 30 seconds. start() consumes the builder and returns a
+    // clone-able RunningScheduler.
+    let running = Scheduler::new()
+        .every("health_check", workflow, State::Start, Duration::from_secs(30))
+        .start()
+        .await?;
 
-    // start() consumes the builder and returns a clone-able RunningScheduler.
-    // wait() blocks until somebody calls stop() on a clone.
-    let running = scheduler.start().await?;
-    running.wait().await?;
+    // Block until Ctrl-C (or SIGTERM on Unix), then drain in-flight runs and tear down.
+    cano::scheduler::shutdown_signal().await?;
+    running.stop().await?;
     Ok(())
 }
 
@@ -213,7 +280,7 @@ plus cron and manual flows).</p>
 </div>
 
 <h3 id="cron-scheduling"><a href="#cron-scheduling" class="anchor-link" aria-hidden="true">#</a>2. Cron Scheduling - Time-Based Expressions</h3>
-<p>Run workflows based on cron expressions. Perfect for scheduled reports, backups, or time-specific tasks.</p>
+<p>Run workflows based on cron expressions (seconds resolution, as parsed by the <code>cron</code> crate). A tick that falls inside a pending backoff window is skipped. Perfect for scheduled reports, backups, or time-specific tasks.</p>
 
 <div class="diagram-frame">
 <p class="diagram-label">Cron Scheduling Timeline</p>
@@ -271,52 +338,53 @@ struct DailyReport {
 
 #[task(state = State)]
 impl DailyReport {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<State>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<State, CanoError> {
         println!("Preparing {} report...", self.report_type);
 
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
 
         // Load data for report
         let data = vec!["metric1".to_string(), "metric2".to_string(), "metric3".to_string()];
-        store.put("report_start", Utc::now().to_rfc3339())?;
+        store.put("report_start", Utc::now().to_rfc3339());
 
         println!("Generating report with {} records", data.len());
         let result = format!("{} report: {} records processed", self.report_type, data.len());
 
         println!("Report completed: {}", result);
-        store.put("last_report", result)?;
+        store.put("last_report", result);
 
-        Ok(TaskResult::Single(State::Complete))
+        Ok(State::Complete)
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let mut scheduler = Scheduler::new();
     let store = MemoryStore::new();
 
     // Morning report workflow
-    let morning_report = Workflow::new(Resources::new().insert("store", store.clone()))
+    let morning_report = Workflow::new(Resources::new().insert(store.clone()))
         .register(State::Start, DailyReport {
             report_type: "Morning".to_string()
         })
         .add_exit_state(State::Complete);
 
     // Evening report workflow
-    let evening_report = Workflow::new(Resources::new().insert("store", store.clone()))
-        .register(State::Start, DailyReport { 
-            report_type: "Evening".to_string() 
+    let evening_report = Workflow::new(Resources::new().insert(store.clone()))
+        .register(State::Start, DailyReport {
+            report_type: "Evening".to_string()
         })
         .add_exit_state(State::Complete);
 
-    // Run daily at 9 AM: "0 0 9 * * *"
-    scheduler.cron("morning_report", morning_report, State::Start, "0 0 9 * * *")?;
+    let running = Scheduler::new()
+        // Run daily at 9 AM: "0 0 9 * * *"
+        .cron("morning_report", morning_report, State::Start, "0 0 9 * * *")
+        // Run daily at 6 PM: "0 0 18 * * *"
+        .cron("evening_report", evening_report, State::Start, "0 0 18 * * *")
+        .start()
+        .await?;
 
-    // Run daily at 6 PM: "0 0 18 * * *"
-    scheduler.cron("evening_report", evening_report, State::Start, "0 0 18 * * *")?;
-
-    let running = scheduler.start().await?;
-    running.wait().await?;
+    cano::scheduler::shutdown_signal().await?;
+    running.stop().await?;
     Ok(())
 }
 
@@ -329,8 +397,9 @@ async fn main() -> Result<(), CanoError> {
 <div class="callout-label">Type-safe lifecycle</div>
 <p>
 <code>trigger()</code> lives on <code>RunningScheduler</code>, which is only obtained by calling
-<code>scheduler.start().await?</code>. The compiler will not let you trigger a workflow before the
-scheduler is running.
+<code>start().await?</code>. The compiler will not let you trigger a workflow before the
+scheduler is running. <code>trigger()</code> is synchronous: it starts the run and returns without waiting
+for it to finish, so use <code>wait_idle(id)</code> or <code>status(id)</code> to see the outcome.
 </p>
 </div>
 
@@ -338,7 +407,7 @@ scheduler is running.
 <p class="diagram-label">Manual Trigger Sequence</p>
 <div class="cd-wrap">
 <svg class="cd" viewBox="0 0 720 284" role="img">
-<title>Manual triggering: an API request calls trigger on the running scheduler, which starts the workflow and relays its completion back to the caller.</title>
+<title>Manual triggering: an API request calls trigger on the running scheduler, which starts the workflow; the caller later sees the outcome through wait_idle.</title>
 <defs><marker id="manual-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
 <line class="lifeline" x1="110" y1="46" x2="110" y2="222"/>
 <line class="lifeline" x1="360" y1="46" x2="360" y2="222"/>
@@ -356,7 +425,7 @@ scheduler is running.
 <path class="e e-dash" d="M610,166 H364" marker-end="url(#manual-ah)"/>
 <text class="t-mut t-ok" x="487" y="154">Complete</text>
 <path class="e e-dash" d="M360,210 H114" marker-end="url(#manual-ah)"/>
-<text class="t-mut t-ok" x="237" y="198">Success ✓</text>
+<text class="t-mut t-ok" x="237" y="198">wait_idle(id) → Completed</text>
 <rect class="n-hot" x="35" y="230" width="650" height="34" rx="10"/>
 <text class="t-strong" x="360" y="248">Nothing runs until trigger() is called — no interval, no cron</text>
 </svg>
@@ -365,7 +434,6 @@ scheduler is running.
 
 ```rust
 use cano::prelude::*;
-use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum State { Start, Complete }
@@ -375,43 +443,46 @@ struct DataExportTask;
 
 #[task(state = State)]
 impl DataExportTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<State>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<State, CanoError> {
         println!("Starting data export...");
 
         // Export data to CSV
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
         let export_path = "/tmp/export.csv".to_string();
-        store.put("export_path", export_path)?;
+        store.put("export_path", export_path);
 
         println!("Export completed");
-        Ok(TaskResult::Single(State::Complete))
+        Ok(State::Complete)
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let mut scheduler = Scheduler::new();
     let store = MemoryStore::new();
 
-    let export_workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let export_workflow = Workflow::new(Resources::new().insert(store.clone()))
         .register(State::Start, DataExportTask)
         .add_exit_state(State::Complete);
 
-    // Register as manual-only workflow
-    scheduler.manual("data_export", export_workflow, State::Start)?;
+    // Register as manual-only workflow. start() returns a live, clone-able handle.
+    let running = Scheduler::new()
+        .manual("data_export", export_workflow, State::Start)
+        .start()
+        .await?;
 
-    // Start consumes the builder and returns a live, clone-able handle.
-    let running = scheduler.start().await?;
-
-    // Trigger manually when needed
+    // trigger() is synchronous: it starts the run and returns.
     println!("Triggering export...");
-    running.trigger("data_export").await?;
+    running.trigger("data_export")?;
+
+    // wait_idle() returns once the run has finished.
+    let info = running.wait_idle("data_export").await.expect("flow exists");
+    println!("Export finished: {:?}", info.status);
 
     // Can be triggered again later
-    tokio::time::sleep(Duration::from_secs(5)).await;
-    running.trigger("data_export").await?;
+    running.trigger("data_export")?;
+    running.wait_idle("data_export").await;
 
-    // stop() sends the Stop command and waits for graceful shutdown.
+    // stop() drains in-flight runs, then tears the resources down.
     running.stop().await?;
     Ok(())
 }
@@ -475,7 +546,6 @@ enum State { Start, Complete }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let mut scheduler = Scheduler::new();
     let store = MemoryStore::new();
 
     // Define simple tasks
@@ -484,9 +554,9 @@ async fn main() -> Result<(), CanoError> {
 
     #[task(state = State)]
     impl DataSyncTask {
-        async fn run(&self, _res: &Resources) -> Result<TaskResult<State>, CanoError> {
+        async fn run(&self) -> Result<State, CanoError> {
             println!("Syncing data...");
-            Ok(TaskResult::Single(State::Complete))
+            Ok(State::Complete)
         }
     }
 
@@ -494,9 +564,9 @@ async fn main() -> Result<(), CanoError> {
     struct BackupTask;
     #[task(state = State)]
     impl BackupTask {
-        async fn run(&self, _res: &Resources) -> Result<TaskResult<State>, CanoError> {
+        async fn run(&self) -> Result<State, CanoError> {
             println!("Running backup...");
-            Ok(TaskResult::Single(State::Complete))
+            Ok(State::Complete)
         }
     }
 
@@ -505,9 +575,9 @@ async fn main() -> Result<(), CanoError> {
 
     #[task(state = State)]
     impl WeeklyReportTask {
-        async fn run(&self, _res: &Resources) -> Result<TaskResult<State>, CanoError> {
+        async fn run(&self) -> Result<State, CanoError> {
             println!("Generating weekly report...");
-            Ok(TaskResult::Single(State::Complete))
+            Ok(State::Complete)
         }
     }
 
@@ -516,56 +586,60 @@ async fn main() -> Result<(), CanoError> {
 
     #[task(state = State)]
     impl EmergencyExportTask {
-        async fn run(&self, _res: &Resources) -> Result<TaskResult<State>, CanoError> {
+        async fn run(&self) -> Result<State, CanoError> {
             println!("Emergency export...");
-            Ok(TaskResult::Single(State::Complete))
+            Ok(State::Complete)
         }
     }
 
     // 1. Interval: Data sync every 5 minutes
-    let sync_workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let sync_workflow = Workflow::new(Resources::new().insert(store.clone()))
         .register(State::Start, DataSyncTask)
         .add_exit_state(State::Complete);
 
-    scheduler.every_seconds("data_sync", sync_workflow, State::Start, 300)?;
-
     // 2. Cron: Daily backup at 3 AM
-    let backup_workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let backup_workflow = Workflow::new(Resources::new().insert(store.clone()))
         .register(State::Start, BackupTask)
         .add_exit_state(State::Complete);
 
-    scheduler.cron("daily_backup", backup_workflow, State::Start, "0 0 3 * * *")?;
-
     // 3. Cron: Weekly report on Mondays at 9 AM
-    let report_workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let report_workflow = Workflow::new(Resources::new().insert(store.clone()))
         .register(State::Start, WeeklyReportTask)
         .add_exit_state(State::Complete);
 
-    scheduler.cron("weekly_report", report_workflow, State::Start, "0 0 9 * * MON")?;
-
     // 4. Manual: Emergency data export
-    let export_workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let export_workflow = Workflow::new(Resources::new().insert(store.clone()))
         .register(State::Start, EmergencyExportTask)
         .add_exit_state(State::Complete);
 
-    scheduler.manual("emergency_export", export_workflow, State::Start)?;
+    // One chain registers every flow; start() returns the live handle.
+    let running = Scheduler::new()
+        .every("data_sync", sync_workflow, State::Start, Duration::from_secs(300))
+        .cron("daily_backup", backup_workflow, State::Start, "0 0 3 * * *")
+        .cron("weekly_report", report_workflow, State::Start, "0 0 9 * * MON")
+        .manual("emergency_export", export_workflow, State::Start)
+        .start()
+        .await?;
 
-    // Start consumes the builder and returns a live handle.
-    let running = scheduler.start().await?;
-
-    // Monitor and trigger as needed
+    // Report on every flow once a minute until Ctrl-C (or SIGTERM on Unix).
+    let shutdown = cano::scheduler::shutdown_signal();
+    tokio::pin!(shutdown);
     loop {
-        tokio::time::sleep(Duration::from_secs(60)).await;
+        tokio::select! {
+            _ = &mut shutdown => break,
+            _ = tokio::time::sleep(Duration::from_secs(60)) => {
+                for info in running.list() {
+                    println!("{}: {:?} (runs: {})", info.id, info.status, info.run_count);
+                }
 
-        // Check status of all workflows
-        let workflows = running.list().await;
-        for info in workflows {
-            println!("{}: {:?} (runs: {})", info.id, info.status, info.run_count);
+                // Example: trigger the emergency export if some condition holds.
+                // running.trigger("emergency_export")?;
+            }
         }
-
-        // Example: Trigger emergency export if needed based on some condition
-        // running.trigger("emergency_export").await?;
     }
+
+    running.stop().await?;
+    Ok(())
 }
 
 ```
@@ -588,17 +662,23 @@ on a dedicated page:</p>
 <h2 id="cancellation"><a href="#cancellation" class="anchor-link" aria-hidden="true">#</a>Cancelling a Flow</h2>
 <p>
 <code>RunningScheduler::cancel_flow(id)</code> requests cooperative cancellation of a flow's in-flight
-run. The running workflow aborts at its next await point, its <a href="../saga/">saga compensation
-stack</a> drains (rolling back completed steps), and the flow returns to <code>Status::Idle</code>. A
-deliberate cancel is <strong>not</strong> counted as a failure against the
+run and returns immediately. The run's <code>CancellationToken</code> fires: the running workflow aborts at
+its next await point, its <a href="../saga/">saga compensation stack</a> drains (rolling back completed
+steps), and the flow returns to <code>Status::Idle</code>. A <code>CompensatableTask</code> that is
+mid-run is never interrupted, and the compensation drain itself always completes. A deliberate cancel is
+<strong>not</strong> counted as a failure against the
 <a href="#backoff-guide">BackoffPolicy</a> — the streak is left untouched and the flow never trips, so
 its next scheduled run fires normally. Cancelling a flow that isn't currently running is an idempotent
-no-op.
+no-op; an unknown id is an error. Use <code>wait_idle</code> to wait for the run to wind down.
 </p>
 
 ```rust
 // Stop the in-flight run of a flow; its saga rolls back and the flow goes Idle.
-running.cancel_flow("order").await?;
+running.cancel_flow("order")?;
+
+// cancel_flow returns at once; wait for the cancelled run to settle.
+let info = running.wait_idle("order").await.expect("flow exists");
+assert_eq!(info.status, Status::Idle);
 ```
 
 <div class="callout callout-tip">
@@ -609,27 +689,56 @@ triggers a saga, cancels it mid-flight, and watches the compensators roll back i
 
 <h2 id="graceful-shutdown"><a href="#graceful-shutdown" class="anchor-link" aria-hidden="true">#</a>Graceful Shutdown</h2>
 <p>
-When <code>stop()</code> is called, the scheduler signals all scheduling loops to stop and then
-<strong>cooperatively cancels every in-flight flow</strong> — interval, cron, and manual alike — the
-same way <code>cancel_flow</code> does: each running workflow aborts at its next await and drains its
-saga before the scheduler runs resource <code>teardown</code> (reverse registration order) and returns.
-Shutdown latency is therefore bounded by the time to the next await plus the compensation drain, not by
-how long the workflows would naturally take.
+<code>stop()</code> shuts the scheduler down in bounded time. Every flow goes through each phase together,
+so the worst case is the two timeouts plus teardown, no matter how many flows are registered.
 </p>
+<ol>
+<li><strong>Drain</strong> — stop dispatching (the interval and cron loops exit, <code>trigger</code> is
+rejected) and wait up to the drain timeout for in-flight runs to finish on their own. Default 20 seconds,
+set with <code>with_drain_timeout</code>.</li>
+<li><strong>Cancel</strong> — fire every in-flight run's <code>CancellationToken</code> and wait up to the
+cancel timeout. Cancelled runs abort at their next await and drain their saga compensation stacks.
+Default 5 seconds, set with <code>with_cancel_timeout</code>.</li>
+<li><strong>Abort</strong> — drop whatever is still running, return those flows to <code>Status::Idle</code>,
+and make <code>stop()</code> return a timeout error that names the aborted flows.</li>
+<li><strong>Teardown</strong> — run every flow's resource <code>teardown</code> in reverse registration
+order. This happens on every path, including after an abort.</li>
+</ol>
 
 ```rust
-// Stop the scheduler: in-flight flows are cancelled + rolled back, then teardown runs.
+use std::time::Duration;
+
+let running = Scheduler::new()
+    .every("fetch", workflow, State::Start, Duration::from_secs(60))
+    .with_drain_timeout(Duration::from_secs(20))
+    .with_cancel_timeout(Duration::from_secs(5))
+    .start()
+    .await?;
+
+// Resolves on Ctrl-C, or on SIGTERM on Unix.
+cano::scheduler::shutdown_signal().await?;
+
+// Drain, cancel, abort, teardown.
 running.stop().await?;
 ```
 
 <p>
-A bounded wait (up to 30 seconds) caps the drain; a second <code>stop()</code> after success is
-idempotent — it returns the same cached result.
+<code>stop()</code> is idempotent: later calls from any clone return the first result, and
+<code>wait()</code> returns that same result once some clone has called <code>stop()</code>. To cap the
+whole sequence, wrap the call: <code>tokio::time::timeout(d, running.stop())</code>. If that future is
+dropped mid-sequence, the remaining tasks are aborted, and a later <code>stop()</code> still tears the
+resources down.
+</p>
+<p>
+A <code>StreamTask</code> ends only when its token fires or its input ends, so a stream flow waits out the
+whole drain timeout before the cancel phase reaches it. A scheduler that hosts stream flows usually sets
+<code>with_drain_timeout(Duration::ZERO)</code>.
 </p>
 
 <div class="callout callout-tip">
 <p>Runnable example: <code>cargo run --example scheduler_graceful_shutdown --features scheduler</code> —
-spawns a Ctrl-C handler, runs scheduled flows, and shuts down cleanly on signal.</p>
+waits for Ctrl-C (or SIGTERM on Unix) with <code>shutdown_signal()</code>, then calls <code>stop()</code>
+and shuts down cleanly while flows are running.</p>
 </div>
 <hr class="section-divider">
 
@@ -662,7 +771,7 @@ flows finish, a final pass aggregates across batches.</li>
 ```rust
 // Level 1: a workflow that map-reduces over one batch.
 fn batch_workflow(batch: Vec<Item>, results: SharedResults) -> Workflow<State> {
-    Workflow::new(Resources::new().insert("results", results))
+    Workflow::new(Resources::new().insert(results))
         .register_split(
             State::Process,
             batch.iter().map(|item| ProcessTask::new(item)).collect::<Vec<_>>(),
@@ -675,13 +784,17 @@ fn batch_workflow(batch: Vec<Item>, results: SharedResults) -> Workflow<State> {
 
 // Level 2: the scheduler runs several batch workflows concurrently.
 let results = SharedResults::default();
-let mut scheduler = Scheduler::new();
-scheduler.manual("batch-a", batch_workflow(batch_a, results.clone()), State::Start)?;
-scheduler.manual("batch-b", batch_workflow(batch_b, results.clone()), State::Start)?;
-let running = scheduler.start().await?;
-running.trigger("batch-a").await?;
-running.trigger("batch-b").await?;
-// ...wait for both flows to finish, then reduce across all batch summaries in `results`.
+let running = Scheduler::new()
+    .manual("batch-a", batch_workflow(batch_a, results.clone()), State::Process)
+    .manual("batch-b", batch_workflow(batch_b, results.clone()), State::Process)
+    .start()
+    .await?;
+running.trigger("batch-a")?;
+running.trigger("batch-b")?;
+// Wait for both flows to finish, then reduce across all batch summaries in `results`.
+running.wait_idle("batch-a").await;
+running.wait_idle("batch-b").await;
+running.stop().await?;
 
 ```
 

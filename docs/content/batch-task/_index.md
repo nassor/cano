@@ -41,11 +41,11 @@ impl Crunch {
         Ok((*n as u64) * (*n as u64))
     }
     async fn finish(&self, _res: &Resources, outputs: Vec<Result<u64, CanoError>>)
-        -> Result<TaskResult<Stage>, CanoError>
+        -> Result<Stage, CanoError>
     {
         let total: u64 = outputs.into_iter().flatten().sum();
         println!("sum of squares = {total}");
-        Ok(TaskResult::Single(Stage::Done))
+        Ok(Stage::Done)
     }
     fn concurrency(&self) -> usize { 8 }                  // up to 8 process_item in flight
     fn item_retry(&self) -> RetryMode { RetryMode::fixed(2, std::time::Duration::from_millis(50)) }
@@ -54,12 +54,12 @@ impl Crunch {
 </div>
 
 <div class="callout callout-info">
-<div class="callout-label">Not the same as <code>TaskResult::Split</code></div>
+<div class="callout-label">Not the same as Split / Join</div>
 <p>
-<a href="../split-join/">Split / Join</a> fans out over <em>states</em>: the FSM re-enters with one
-workflow branch per state, then a <code>JoinStrategy</code> reconciles them. A <code>BatchTask</code>
+<a href="../split-join/">Split / Join</a> fans out over <em>tasks</em>: several tasks run in parallel
+for one workflow state, then a <code>JoinStrategy</code> reconciles them. A <code>BatchTask</code>
 fans out over <em>data</em>: many items, all inside <em>one</em> state, re-joined before the
-transition. Use Split for "run these N <em>workflows</em> in parallel"; use a <code>BatchTask</code>
+transition. Use Split for "run these N <em>tasks</em> in parallel"; use a <code>BatchTask</code>
 for "map this one operation over N <em>items</em>".
 </p>
 </div>
@@ -74,7 +74,6 @@ for "map this one operation over N <em>items</em>".
 <li><a href="#tuning">Concurrency &amp; Retry Tuning</a></li>
 <li><a href="#vs-split">BatchTask vs Split &amp; Join</a></li>
 <li><a href="#explicit">Explicit Trait-Impl Form</a></li>
-<li><a href="#object-safe">Type-Erased Aliases</a></li>
 <li><a href="#when-to-use">When to Use BatchTask</a></li>
 </ol>
 </nav>
@@ -87,10 +86,10 @@ for "map this one operation over N <em>items</em>".
 <p class="diagram-label">BatchTask: load &rarr; process_item (&times;N) &rarr; finish</p>
 <div class="cd-wrap">
 <svg class="cd" viewBox="0 0 708 246" role="img">
-<title>A BatchTask fans out over data inside one state: load produces the items, process_item runs over all N with bounded concurrency, and finish re-joins the per-item results in input order before returning a TaskResult.</title>
+<title>A BatchTask fans out over data inside one state: load produces the items, process_item runs over all N with bounded concurrency, and finish re-joins the per-item results in input order before returning the next state.</title>
 <defs><marker id="batch-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
 <path class="e e-dim" d="M626,64 V44 Q626,36 618,36 H84 Q76,36 76,44 V59" marker-end="url(#batch-ah)"/>
-<text class="t-mut" x="351" y="18">Err in load or finish &rarr; retry the whole cycle</text>
+<text class="t-mut" x="351" y="18">Err in load or finish &rarr; config() retry of the whole cycle</text>
 <path class="e" d="M128,87 H262" marker-end="url(#batch-ah)"/>
 <text class="t-code" x="195" y="70">items: Vec&lt;Item&gt;</text>
 <path class="e" d="M444,87 H570" marker-end="url(#batch-ah)"/>
@@ -106,7 +105,7 @@ for "map this one operation over N <em>items</em>".
 <rect class="n" x="574" y="64" width="104" height="46" rx="10"/>
 <text class="t-code" x="626" y="88">finish</text>
 <path class="e" d="M626,110 V171" marker-end="url(#batch-ah)"/>
-<text class="t-code t-mut ta-e" x="616" y="142">TaskResult</text>
+<text class="t-code t-mut ta-e" x="616" y="142">Ok(state)</text>
 <rect class="n-ok" x="568" y="176" width="116" height="46" rx="10"/>
 <text x="626" y="200">Next State</text>
 </svg>
@@ -135,7 +134,7 @@ the method signatures, or written explicitly) — and three methods:
 <td>Process one item. Takes <code>&amp;Item</code> because <code>item_retry</code> may re-invoke it. Returning <code>Err</code> does <strong>not</strong> fail the batch — it lands in that slot of <code>finish</code>'s <code>outputs</code>.</td>
 </tr>
 <tr>
-<td><code>async fn finish(&amp;self, res, outputs: Vec&lt;Result&lt;Self::ItemOutput, CanoError&gt;&gt;) -&gt; Result&lt;TaskResult&lt;TState&gt;, CanoError&gt;</code></td>
+<td><code>async fn finish(&amp;self, res, outputs: Vec&lt;Result&lt;Self::ItemOutput, CanoError&gt;&gt;) -&gt; Result&lt;TState, CanoError&gt;</code></td>
 <td>Aggregate — one slot per input item, <strong>in input order</strong> — and decide the next state. This is where the partial-failure <em>policy</em> lives (e.g. "≥ 50% must succeed"). An <code>Err</code> here fails the batch.</td>
 </tr>
 </tbody>
@@ -163,8 +162,8 @@ the method signatures, or written explicitly) — and three methods:
 </tr>
 <tr>
 <td><code>fn config(&amp;self) -&gt; TaskConfig</code></td>
-<td><code>TaskConfig::default()</code></td>
-<td>Retry config for the <em>whole</em> <code>load → process → finish</code> cycle — the batch only <code>Err</code>s (triggering this) when <code>load</code> or <code>finish</code> <code>Err</code>s.</td>
+<td><code>TaskConfig::new()</code> (one attempt, no retries)</td>
+<td>Retry config for the <em>whole</em> <code>load → process → finish</code> cycle — the batch only <code>Err</code>s (triggering this) when <code>load</code> or <code>finish</code> <code>Err</code>s. Opt in with <code>TaskConfig::new().with_exponential_retry(3)</code>.</td>
 </tr>
 <tr>
 <td><code>fn name(&amp;self) -&gt; Cow&lt;'static, str&gt;</code></td>
@@ -178,14 +177,14 @@ the method signatures, or written explicitly) — and three methods:
 <hr class="section-divider">
 <h2 id="quick-start"><a href="#quick-start" class="anchor-link" aria-hidden="true">#</a>Quick Start with <code>#[task::batch]</code></h2>
 <p>
-Attach <code>#[task::batch(state = MyState)]</code> (optionally <code>key = MyKey</code>) to an
-inherent <code>impl</code> block. The macro infers <code>Item</code> / <code>ItemOutput</code> from
-the signatures, injects default bodies for <code>concurrency</code> / <code>item_retry</code> /
-<code>config</code> / <code>name</code> if absent, synthesises the
+Attach <code>#[task::batch(state = MyState)]</code> to an inherent <code>impl</code> block. The macro
+infers <code>Item</code> / <code>ItemOutput</code> from the signatures, synthesises the
 <code>impl BatchTask&lt;MyState&gt; for Fetcher</code> header, and emits a companion
 <code>impl Task&lt;MyState&gt; for Fetcher</code> whose <code>run</code> runs the bounded-concurrency
-loop (via <code>cano::task::batch::run_batch</code>, which uses
-<code>futures_util::buffer_unordered</code>). No engine changes.
+loop (built on <code>futures_util::buffer_unordered</code>), so a batch can also be a
+<code>register_split</code> branch. <code>concurrency</code> / <code>item_retry</code> /
+<code>config</code> / <code>name</code> fall back to the trait defaults when absent, and <code>load</code>
+and <code>finish</code> may omit the <code>res</code> parameter when they don't read resources.
 </p>
 
 <div class="code-block">
@@ -206,7 +205,7 @@ impl FetchUrls {
     fn item_retry(&self) -> RetryMode { RetryMode::fixed(2, Duration::from_millis(50)) }
 
     async fn load(&self, res: &Resources) -> Result<Vec<String>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
         Ok(store.get("urls")?)
     }
 
@@ -216,14 +215,14 @@ impl FetchUrls {
     }
 
     async fn finish(&self, res: &Resources, outputs: Vec<Result<usize, CanoError>>)
-        -> Result<TaskResult<Step>, CanoError>
+        -> Result<Step, CanoError>
     {
         let ok = outputs.iter().filter(|r| r.is_ok()).count();
         let total: usize = outputs.iter().filter_map(|r| r.as_ref().ok()).sum();
-        let store = res.get::<MemoryStore, _>("store")?;
-        store.put("total_bytes", total)?;
+        let store = res.get::<MemoryStore>()?;
+        store.put("total_bytes", total);
         if ok * 2 >= outputs.len() {                 // partial-failure policy: ≥ 50% must succeed
-            Ok(TaskResult::Single(Step::Summarise))
+            Ok(Step::Summarise)
         } else {
             Err(CanoError::task_execution("too many fetch failures"))
         }
@@ -238,8 +237,8 @@ impl FetchUrls {
 <code>process_item</code> returning <code>Err</code> is <em>not</em> a batch failure — that error
 lands in the matching slot of <code>finish</code>'s <code>outputs</code> vector. Decide the
 partial-failure policy in <code>finish</code>: count the <code>Ok</code>s, set a threshold, and
-either transition or <code>Err</code> out (which then triggers the outer <code>config()</code>
-retry, re-running the <em>whole</em> <code>load → process → finish</code> cycle).
+either transition or <code>Err</code> out (which fails the state, or — when <code>config()</code> enables
+retries — re-runs the <em>whole</em> <code>load → process → finish</code> cycle).
 </p>
 </div>
 
@@ -247,8 +246,8 @@ retry, re-running the <em>whole</em> <code>load → process → finish</code> cy
 <hr class="section-divider">
 <h2 id="registering"><a href="#registering" class="anchor-link" aria-hidden="true">#</a>Registering a Batch Task</h2>
 <p>
-Register a batch task with plain <code>Workflow::register</code> — to the FSM it's an ordinary
-<code>Single</code> state; the fan-out and re-join happen inside the generated <code>run</code>.
+Register a batch task with <code>Workflow::register</code>, the same call every task model uses. To the
+FSM it's one ordinary state; the fan-out and re-join happen inside the generated <code>run</code>.
 </p>
 
 <div class="code-block">
@@ -281,9 +280,9 @@ slot becomes an <code>Err</code> — orthogonal to the outer <code>config()</cod
 </div>
 <div class="card">
 <h3><code>config()</code> — whole-cycle retry</h3>
-<p>Defaults to <code>TaskConfig::default()</code>. This governs retries of the entire
-<code>load → process → finish</code> cycle, which only happens when <code>load</code> or
-<code>finish</code> returns <code>Err</code>.</p>
+<p>Defaults to <code>TaskConfig::new()</code> (one attempt, no retries). This governs retries of the
+entire <code>load → process → finish</code> cycle, which only happens when <code>load</code> or
+<code>finish</code> returns <code>Err</code>; opt in with <code>TaskConfig::new().with_exponential_retry(3)</code>.</p>
 </div>
 </div>
 
@@ -305,7 +304,7 @@ slot becomes an <code>Err</code> — orthogonal to the outer <code>config()</cod
 <h3>Split &amp; Join</h3>
 <p><strong>Fans out over:</strong> workflow states / branches.</p>
 <ul>
-<li>One state ⇒ many parallel <code>Task</code>s, each transitioning</li>
+<li>One state ⇒ many parallel <code>Task</code>s, reconciled by a join strategy</li>
 <li><code>JoinStrategy</code> — <code>All</code>, <code>Any</code>, <code>Quorum</code>, …</li>
 <li>Optional <a href="../split-join/#bulkhead">bulkhead</a> caps concurrency</li>
 <li>See the <a href="../split-join/">Split &amp; Join</a> guide</li>
@@ -341,7 +340,7 @@ impl BatchTask<Step> for FetchUrls {
     fn concurrency(&self) -> usize { 8 }
 
     async fn load(&self, res: &Resources) -> Result<Vec<String>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
         Ok(store.get("urls")?)
     }
 
@@ -350,11 +349,11 @@ impl BatchTask<Step> for FetchUrls {
     }
 
     async fn finish(&self, _res: &Resources, outputs: Vec<Result<usize, CanoError>>)
-        -> Result<TaskResult<Step>, CanoError>
+        -> Result<Step, CanoError>
     {
         let ok = outputs.iter().filter(|r| r.is_ok()).count();
         if ok * 2 >= outputs.len() {
-            Ok(TaskResult::Single(Step::Summarise))
+            Ok(Step::Summarise)
         } else {
             Err(CanoError::task_execution("too many fetch failures"))
         }
@@ -362,33 +361,6 @@ impl BatchTask<Step> for FetchUrls {
 }
 ```
 </div>
-
-<!-- Section: object-safe aliases -->
-<hr class="section-divider">
-<h2 id="object-safe"><a href="#object-safe" class="anchor-link" aria-hidden="true">#</a>Type-Erased Aliases</h2>
-<p>
-The object-safe aliases pin the associated types: <code>Item</code> to
-<code>Box&lt;dyn Any + Send + Sync&gt;</code> and <code>ItemOutput</code> to
-<code>Box&lt;dyn Any + Send&gt;</code>.
-</p>
-<table class="styled-table">
-<thead>
-<tr>
-<th>Alias</th>
-<th>Expands to</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>DynBatchTask&lt;TState, TResourceKey&gt;</code></td>
-<td><code>dyn BatchTask&lt;TState, TResourceKey, Item = …, ItemOutput = …&gt;</code></td>
-</tr>
-<tr>
-<td><code>BatchTaskObject&lt;TState, TResourceKey&gt;</code></td>
-<td><code>Arc&lt;dyn BatchTask&lt;TState, TResourceKey, Item = …, ItemOutput = …&gt;&gt;</code></td>
-</tr>
-</tbody>
-</table>
 
 <!-- Section: When to use -->
 <hr class="section-divider">

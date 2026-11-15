@@ -31,14 +31,14 @@ The engine is built on three core concepts: **Tasks** for logic, **Workflows** f
 
 - **Type-Safe State Machines**: Enum-driven transitions with compile-time guarantees.
 - **Multiple Processing Models**: `Task` for general-purpose work, plus `RouterTask`, `PollTask`, `TimerTask`, `BatchTask`, `SteppedTask`, and `StreamTask` for specialized shapes — mixed freely in one workflow.
-- **Resource Dependency Injection**: Typed, lifecycle-managed `Resources` dictionary with `setup`/`teardown`/`health` hooks, looked up by key and type, plus `#[derive(FromResources)]` for ergonomic wiring.
+- **Resource Dependency Injection**: Typed, lifecycle-managed `Resources` with `setup`/`teardown`/`health` hooks, looked up by type (`res.get::<T>()`) or by name for a second instance, plus `#[derive(FromResources)]` for ergonomic wiring.
 - **Parallel Execution (Split/Join)**: Run tasks concurrently and join results with strategies like `All`, `Any`, `Quorum`, or `PartialResults`, with an optional bulkhead to cap concurrency.
-- **Robust Retry Logic**: Configurable strategies including exponential backoff with jitter and per-attempt timeouts.
+- **Retry Logic**: Tasks run once by default; opt into fixed or exponential backoff with jitter and per-attempt timeouts.
 - **Circuit Breaker**: Shared `CircuitBreaker` short-circuits calls to failing dependencies before the retry loop, with configurable failure threshold, cool-down, and half-open probing.
 - **Rate Limiting**: Token-bucket (`RateLimiter`) and fixed-window (`WindowedRateLimiter`) throttles that compose into a `MultiRateLimiter` enforcing several weighted tiers at once.
-- **Built-in Scheduling**: Cron-based, interval, and manual triggers for background jobs.
+- **Built-in Scheduling**: Cron, interval and manual triggers for background jobs, with a bounded graceful stop (drain, then cancel, then abort).
 - **Crash Recovery**: Pluggable `CheckpointStore` records every FSM state entry; `Workflow::resume_from` rehydrates a crashed run and continues. Ships with an embedded, ACID `RedbCheckpointStore` behind the `recovery` feature.
-- **Sagas / Compensation**: Pair a forward step with a `compensate` action via `CompensatableTask` + `register_with_compensation`; if a later step fails, the engine rolls back the work already done in reverse order (and replays the rollback across a crash when checkpointing is on).
+- **Sagas / Compensation**: Pair a forward step with a `compensate` action via `CompensatableTask`; if a later step fails, the engine rolls back the work already done in reverse order (and replays the rollback across a crash when checkpointing is on).
 - **Observability**: Optional `tracing` (spans + events, plus `TracingObserver`) and `metrics` (a `MetricsObserver` plus low-cardinality counters / histograms / gauges via the [`metrics`](https://docs.rs/metrics) facade) features for deep insight into workflow, task, retry, split/join, circuit-breaker, scheduler, processing-loop, recovery and saga internals; plus synchronous `WorkflowObserver` hooks for lifecycle/failure events and `Resource::health()` probes (`Resources::check_all_health`).
 - **Performance-Focused**: Minimizes heap allocations by leveraging stack-based objects wherever possible, giving you control over where allocations occur.
 
@@ -96,9 +96,9 @@ impl FetchPriceTask {
         TaskConfig::new().with_exponential_retry(2)
     }
 
-    async fn run(&self, res: &Resources) -> Result<TaskResult<FlowState>, CanoError> {
-        // Look up the shared store from the workflow's resources.
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<FlowState, CanoError> {
+        // Look up the shared store from the workflow's resources by type.
+        let store = res.get::<MemoryStore>()?;
 
         // Simulate the network round-trip.
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -112,8 +112,8 @@ impl FetchPriceTask {
             )));
         }
 
-        store.put(&format!("quotes_{}", self.exchange), self.quotes.to_vec())?;
-        Ok(TaskResult::Single(FlowState::Aggregate))
+        store.put(&format!("quotes_{}", self.exchange), self.quotes.to_vec());
+        Ok(FlowState::Aggregate)
     }
 }
 
@@ -125,8 +125,8 @@ struct AggregatePricesTask {
 
 #[task(state = FlowState)]
 impl AggregatePricesTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<FlowState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<FlowState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
 
         let batches: Vec<Vec<f64>> = self
             .exchanges
@@ -138,13 +138,13 @@ impl AggregatePricesTask {
 
         let quotes: Vec<f64> = batches.into_iter().flatten().collect();
         let reference = quotes.iter().sum::<f64>() / quotes.len() as f64;
-        store.put("average_price", reference)?;
+        store.put("average_price", reference);
         println!(
             "Reference {reference:.2} from {} quotes across {reporting}/{total} exchanges",
             quotes.len()
         );
 
-        Ok(TaskResult::Single(FlowState::Monitor))
+        Ok(FlowState::Monitor)
     }
 }
 
@@ -162,7 +162,7 @@ struct Tick {
 
 // Consumes the tick feed continuously, emitting once per window instead of once at the
 // end. The feed is bounded here so the example terminates; a real source (Kafka, a
-// WebSocket) would run until the CancellationToken fires.
+// WebSocket) would run until the workflow's CancellationToken fires.
 struct MonitorTicksTask;
 
 #[task::stream(state = FlowState)]
@@ -174,7 +174,6 @@ impl MonitorTicksTask {
     // `cursor` is the last committed position, so a resumed run skips what it already saw.
     async fn open(
         &self,
-        _res: &Resources,
         cursor: Option<u64>,
     ) -> Result<Pin<Box<dyn Stream<Item = Tick> + Send>>, CanoError> {
         let resume_at = cursor.map_or(0, |seq| seq + 1);
@@ -191,7 +190,7 @@ impl MonitorTicksTask {
     // Per-item work: how far this tick strays from the reference the split produced.
     // The returned cursor is the position to commit once this item's window flushes.
     async fn process_item(&self, res: &Resources, item: Tick) -> Result<(f64, u64), CanoError> {
-        let reference: f64 = res.get::<MemoryStore, _>("store")?.get("average_price")?;
+        let reference: f64 = res.get::<MemoryStore>()?.get("average_price")?;
         Ok(((item.price - reference) / reference * 100.0, item.seq))
     }
 
@@ -201,7 +200,7 @@ impl MonitorTicksTask {
         res: &Resources,
         deviations: Vec<f64>,
     ) -> Result<WindowSignal<FlowState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
         let outliers = deviations.iter().filter(|d| d.abs() >= ALERT_PCT).count();
         let worst = deviations.iter().fold(0.0f64, |acc, d| acc.max(d.abs()));
         println!(
@@ -210,26 +209,22 @@ impl MonitorTicksTask {
         );
 
         let seen: usize = store.get("outliers").unwrap_or(0);
-        store.put("outliers", seen + outliers)?;
+        store.put("outliers", seen + outliers);
         Ok(WindowSignal::Continue)
     }
 
     // The feed ran dry: the partial window is flushed, then this picks the next state.
-    async fn on_close(
-        &self,
-        res: &Resources,
-        reason: CloseReason,
-    ) -> Result<TaskResult<FlowState>, CanoError> {
-        let total: usize = res.get::<MemoryStore, _>("store")?.get("outliers").unwrap_or(0);
+    async fn on_close(&self, res: &Resources, reason: CloseReason) -> Result<FlowState, CanoError> {
+        let total: usize = res.get::<MemoryStore>()?.get("outliers").unwrap_or(0);
         println!("Tick feed closed ({reason:?}): {total} outlier(s) beyond {ALERT_PCT:.0}%");
-        Ok(TaskResult::Single(FlowState::Complete))
+        Ok(FlowState::Complete)
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    // 1. Register shared resources (the store is one resource among many).
-    let resources = Resources::new().insert("store", MemoryStore::new());
+    // 1. Register shared resources, keyed by type.
+    let resources = Resources::new().insert(MemoryStore::new());
 
     // 2. Build one fetch task per exchange, each carrying its own retry budget.
     let exchanges: Vec<&'static str> = EXCHANGES.iter().map(|&(name, _, _)| name).collect();
@@ -250,18 +245,16 @@ async fn main() -> Result<(), CanoError> {
         .with_timeout(Duration::from_secs(5));
 
     // 4. Build the workflow: Start -> Split fetches -> Aggregate -> Monitor -> Complete.
-    //    `register_stream` is the durable, cancellable path; plain `register` would run a
-    //    non-persistent in-memory companion loop instead.
+    //    One `register` call serves every task model; the stream task gets the
+    //    engine's windowing, cancellation and cursor persistence.
     let workflow = Workflow::new(resources)
         .register_split(FlowState::Start, fetchers, join_config)
         .register(FlowState::Aggregate, AggregatePricesTask { exchanges })
-        .register_stream(FlowState::Monitor, MonitorTicksTask)
+        .register(FlowState::Monitor, MonitorTicksTask)
         .add_exit_state(FlowState::Complete);
 
     // 5. Run.
-    let result = workflow
-        .orchestrate(FlowState::Start, CancellationToken::disabled())
-        .await?;
+    let result = workflow.orchestrate(FlowState::Start).await?;
     println!("Workflow finished: {result:?}");
 
     Ok(())
@@ -276,7 +269,7 @@ For complete documentation, examples, and guides, please visit our website:
 
 You can also find:
 - **[API Documentation](https://docs.rs/cano)** on docs.rs
-- **[Examples Directory](./examples/)** in the repository
+- **[Examples Directory](./cano/examples/)** in the repository
 
 ## Contributing
 

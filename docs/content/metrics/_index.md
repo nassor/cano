@@ -27,7 +27,6 @@ sibling observability feature, see <a href="../tracing/">Tracing</a>.</p>
 <li><a href="#cardinality">Cardinality</a></li>
 <li><a href="#cost">Cost</a></li>
 <li><a href="#correlating-traces">Correlating with Traces</a></li>
-<li><a href="#known-limitation">Known Limitation</a></li>
 <li><a href="#full-example">Full Example</a></li>
 </ol>
 </nav>
@@ -209,7 +208,7 @@ exporter's responsibility. Metric names follow <code>metrics</code>-crate unders
 <div class="card">
 <h3>Task Dispatch</h3>
 <ul>
-<li><code>cano_task_duration_seconds{state, kind}</code> — histogram (seconds); <code>kind</code> ∈ <code>single</code>|<code>router</code>|<code>split</code>|<code>compensatable</code>|<code>stepped</code></li>
+<li><code>cano_task_duration_seconds{state, kind}</code> — histogram (seconds); <code>kind</code> ∈ <code>single</code>|<code>router</code>|<code>split</code>|<code>compensatable</code>|<code>stepped</code>|<code>stream</code></li>
 <li><code>cano_task_attempts_total{outcome}</code> — counter; per-attempt inside the retry loop; <code>outcome</code> ∈ <code>completed</code>|<code>failed</code></li>
 <li><code>cano_circuit_rejections_total</code> — counter; attempts short-circuited by an open breaker</li>
 </ul>
@@ -248,6 +247,9 @@ exporter's responsibility. Metric names follow <code>metrics</code>-crate unders
 <li><code>cano_batch_runs_total{outcome}</code> — counter; <code>outcome</code> ∈ <code>completed</code>|<code>failed</code></li>
 <li><code>cano_batch_items_total{result}</code> — counter; <code>result</code> ∈ <code>ok</code>|<code>err</code></li>
 <li><code>cano_step_iterations_total{outcome}</code> — counter; <code>outcome</code> ∈ <code>more</code>|<code>done</code></li>
+<li><code>cano_stream_runs_total{outcome}</code> — counter; <code>outcome</code> ∈ <code>completed</code>|<code>cancelled</code>|<code>failed</code></li>
+<li><code>cano_stream_windows_total</code> — counter; windows flushed</li>
+<li><code>cano_stream_items_total{result}</code> — counter; <code>result</code> ∈ <code>ok</code>|<code>err</code></li>
 </ul>
 </div>
 <div class="card">
@@ -268,6 +270,7 @@ exporter's responsibility. Metric names follow <code>metrics</code>-crate unders
 <li><code>cano_scheduler_flow_backoff_total{flow}</code> — counter</li>
 <li><code>cano_scheduler_flow_tripped_total{flow}</code> — counter</li>
 <li><code>cano_scheduler_active_flows</code> — gauge; flows currently executing</li>
+<li>Each scheduled run also records the workflow-level <code>cano_workflow_runs_total</code> and <code>cano_workflow_duration_seconds</code>, like a direct <code>orchestrate</code> call.</li>
 </ul>
 </div>
 </div>
@@ -389,26 +392,6 @@ and <code>request_id</code> labels propagated purely from span context.</p>
 </div>
 <hr class="section-divider">
 
-<h2 id="known-limitation"><a href="#known-limitation" class="anchor-link" aria-hidden="true">#</a>Known Limitation</h2>
-
-<div class="callout callout-info">
-<span class="callout-label">Note</span>
-<p>
-The <code>#[task::poll]</code> and <code>#[task::stepped]</code> macros have two usage forms.
-The <strong>trait-impl</strong> form (<code>impl PollTask&lt;S&gt; for T</code> /
-<code>impl SteppedTask&lt;S&gt; for T</code>) inlines the loop body into the synthesised
-<code>Task::run</code>, so <code>cano_poll_iterations_total</code> and
-<code>cano_step_iterations_total</code> are <em>not</em> emitted for that form.
-</p>
-<p>
-The <strong>inherent-impl</strong> form (<code>#[task::poll(state = S)] impl T { async fn poll ... }</code>
-/ <code>#[task::stepped(state = S)] impl T { async fn step ... }</code>, the recommended form) and
-<code>Workflow::register_stepped</code> (engine-owned loop) both emit the iteration counters as
-expected.
-</p>
-</div>
-<hr class="section-divider">
-
 <h2 id="full-example"><a href="#full-example" class="anchor-link" aria-hidden="true">#</a>Full Example</h2>
 <p>
 Install a <code>DebuggingRecorder</code> (useful for tests and self-contained demos), call
@@ -430,9 +413,9 @@ struct FetchTask;
 
 #[task]
 impl Task<Step> for FetchTask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         tokio::time::sleep(Duration::from_millis(5)).await;
-        Ok(TaskResult::Single(Step::Process))
+        Ok(Step::Process)
     }
 }
 
@@ -440,9 +423,9 @@ struct ProcessTask;
 
 #[task]
 impl Task<Step> for ProcessTask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         tokio::time::sleep(Duration::from_millis(3)).await;
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -469,17 +452,17 @@ async fn main() {
     // 2. Run the workflow a few times directly.
     for _ in 0..3 {
         workflow()
-            .orchestrate(Step::Fetch, CancellationToken::disabled())
+            .orchestrate(Step::Fetch)
             .await
             .expect("workflow run");
     }
 
     // 3. Run the same workflow under the scheduler for ~1.2s, firing every 1s.
-    let mut scheduler = Scheduler::new();
-    scheduler
-        .every_seconds("demo_flow", workflow(), Step::Fetch, 1)
-        .expect("register flow");
-    let running = scheduler.start().await.expect("start scheduler");
+    let running = Scheduler::new()
+        .every("demo_flow", workflow(), Step::Fetch, Duration::from_secs(1))
+        .start()
+        .await
+        .expect("start scheduler");
     tokio::time::sleep(Duration::from_millis(1200)).await;
     running.stop().await.expect("stop scheduler");
 
