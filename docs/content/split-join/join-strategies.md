@@ -105,7 +105,7 @@ required.
 <div class="diagram-frame">
 <p class="diagram-label">All: the join waits for the slowest task</p>
 <div class="cd-wrap">
-<svg class="cd" viewBox="0 0 720 238" role="img" aria-labelledby="joins-all-title joins-all-desc">
+<svg class="cd" viewBox="0 0 720 248" role="img" aria-labelledby="joins-all-title joins-all-desc">
 <title id="joins-all-title">All strategy timeline</title>
 <desc id="joins-all-desc">Three tasks start together and finish at different times, and each one succeeds. The join fires when the slowest task finishes, and the workflow advances to the join state. If any task had failed, the join would fail after the last task finished.</desc>
 <text class="ta-e" x="110" y="68">Task 1</text>
@@ -121,8 +121,8 @@ required.
 <text class="t-mut ta-e" x="700" y="190">time</text>
 <line class="e e-hot" x1="520" y1="44" x2="520" y2="176"/>
 <text class="t-mut t-hot" x="520" y="30">join</text>
-<rect class="n-hot" x="130" y="194" width="570" height="34" rx="10"/>
-<text class="t-strong" x="415" y="211">All 3 succeeded: advance to the join state</text>
+<rect class="n-hot" x="130" y="204" width="570" height="34" rx="10"/>
+<text class="t-strong" x="415" y="221">All 3 succeeded: advance to the join state</text>
 </svg>
 </div>
 </div>
@@ -142,7 +142,7 @@ Joins on the first success and aborts the rest. If every task fails, the join fa
 <div class="diagram-frame">
 <p class="diagram-label">Any: the first success joins and aborts the rest</p>
 <div class="cd-wrap">
-<svg class="cd" viewBox="0 0 720 238" role="img" aria-labelledby="joins-any-title joins-any-desc">
+<svg class="cd" viewBox="0 0 720 248" role="img" aria-labelledby="joins-any-title joins-any-desc">
 <title id="joins-any-title">Any strategy timeline</title>
 <desc id="joins-any-desc">Three redundant tasks start together. Task 2 succeeds first, so the join fires at that moment and the workflow advances. Tasks 1 and 3 are still running and are aborted.</desc>
 <text class="ta-e" x="110" y="68">Task 1</text>
@@ -162,8 +162,8 @@ Joins on the first success and aborts the rest. If every task fails, the join fa
 <text class="t-mut ta-e" x="700" y="190">time</text>
 <line class="e e-hot" x1="250" y1="44" x2="250" y2="176"/>
 <text class="t-mut t-hot" x="250" y="30">first success</text>
-<rect class="n-hot" x="130" y="194" width="570" height="34" rx="10"/>
-<text class="t-strong" x="415" y="211">First success: advance. The other tasks are aborted</text>
+<rect class="n-hot" x="130" y="204" width="570" height="34" rx="10"/>
+<text class="t-strong" x="415" y="221">First success: advance. The other tasks are aborted</text>
 </svg>
 </div>
 </div>
@@ -184,7 +184,7 @@ are still worth waiting for.
 <div class="diagram-frame">
 <p class="diagram-label">Quorum(3): the join waits for every task, then counts</p>
 <div class="cd-wrap">
-<svg class="cd" viewBox="0 0 720 278" role="img" aria-labelledby="joins-quorum-title joins-quorum-desc">
+<svg class="cd" viewBox="0 0 720 288" role="img" aria-labelledby="joins-quorum-title joins-quorum-desc">
 <title id="joins-quorum-title">Quorum strategy timeline</title>
 <desc id="joins-quorum-desc">Four tasks start together. Three succeed and one fails, finishing at different times. The join fires when the last task finishes, counts three successes against a quorum of three, and the workflow advances.</desc>
 <text class="ta-e" x="110" y="68">Task 1</text>
@@ -203,8 +203,8 @@ are still worth waiting for.
 <text class="t-mut ta-e" x="700" y="230">time</text>
 <line class="e e-hot" x1="520" y1="44" x2="520" y2="216"/>
 <text class="t-mut t-hot" x="520" y="30">join</text>
-<rect class="n-hot" x="130" y="234" width="570" height="34" rx="10"/>
-<text class="t-strong" x="415" y="251">3 of 4 succeeded, quorum of 3 met: advance</text>
+<rect class="n-hot" x="130" y="244" width="570" height="34" rx="10"/>
+<text class="t-strong" x="415" y="261">3 of 4 succeeded, quorum of 3 met: advance</text>
 </svg>
 </div>
 </div>
@@ -226,7 +226,7 @@ whose size varies.
 <div class="diagram-frame">
 <p class="diagram-label">Percentage(0.75): the join waits for every task, then counts</p>
 <div class="cd-wrap">
-<svg class="cd" viewBox="0 0 720 278" role="img" aria-labelledby="joins-percentage-title joins-percentage-desc">
+<svg class="cd" viewBox="0 0 720 288" role="img" aria-labelledby="joins-percentage-title joins-percentage-desc">
 <title id="joins-percentage-title">Percentage strategy timeline</title>
 <desc id="joins-percentage-desc">Four tasks start together. Task 2 fails and the other three succeed. The join fires when the last task finishes. Three of four is 75 percent, which meets the configured fraction, so the workflow advances.</desc>
 <text class="ta-e" x="110" y="68">Task 1</text>
@@ -245,8 +245,8 @@ whose size varies.
 <text class="t-mut ta-e" x="700" y="230">time</text>
 <line class="e e-hot" x1="520" y1="44" x2="520" y2="216"/>
 <text class="t-mut t-hot" x="520" y="30">join</text>
-<rect class="n-hot" x="130" y="234" width="570" height="34" rx="10"/>
-<text class="t-strong" x="415" y="251">3 of 4 succeeded, 75% met: advance</text>
+<rect class="n-hot" x="130" y="244" width="570" height="34" rx="10"/>
+<text class="t-strong" x="415" y="261">3 of 4 succeeded, 75% met: advance</text>
 </svg>
 </div>
 </div>
@@ -270,7 +270,7 @@ walks through it.
 <div class="diagram-frame">
 <p class="diagram-label">PartialResults(2): the second success joins and aborts the rest</p>
 <div class="cd-wrap">
-<svg class="cd" viewBox="0 0 720 278" role="img" aria-labelledby="joins-partial-results-title joins-partial-results-desc">
+<svg class="cd" viewBox="0 0 720 288" role="img" aria-labelledby="joins-partial-results-title joins-partial-results-desc">
 <title id="joins-partial-results-title">PartialResults strategy timeline</title>
 <desc id="joins-partial-results-desc">Four tasks start together. Task 1 succeeds, task 2 fails and the failure is tolerated, then task 3 succeeds. The second success fires the join. Task 4 is still running and is aborted. The outcome is two successes, one failure and one aborted task.</desc>
 <text class="ta-e" x="110" y="68">Task 1</text>
@@ -291,8 +291,8 @@ walks through it.
 <text class="t-mut ta-e" x="700" y="230">time</text>
 <line class="e e-hot" x1="380" y1="44" x2="380" y2="216"/>
 <text class="t-mut t-hot" x="380" y="30">second success</text>
-<rect class="n-hot" x="130" y="234" width="570" height="34" rx="10"/>
-<text class="t-strong" x="415" y="251">2 succeeded: advance. 1 failed, 1 aborted</text>
+<rect class="n-hot" x="130" y="244" width="570" height="34" rx="10"/>
+<text class="t-strong" x="415" y="261">2 succeeded: advance. 1 failed, 1 aborted</text>
 </svg>
 </div>
 </div>
@@ -315,7 +315,7 @@ SLAs.
 <div class="diagram-frame">
 <p class="diagram-label">PartialTimeout: the deadline joins with whatever finished</p>
 <div class="cd-wrap">
-<svg class="cd" viewBox="0 0 720 278" role="img" aria-labelledby="joins-partial-timeout-title joins-partial-timeout-desc">
+<svg class="cd" viewBox="0 0 720 288" role="img" aria-labelledby="joins-partial-timeout-title joins-partial-timeout-desc">
 <title id="joins-partial-timeout-title">PartialTimeout strategy timeline</title>
 <desc id="joins-partial-timeout-desc">Four tasks start together with a timeout set. Tasks 1 and 3 succeed before the deadline. At the deadline tasks 2 and 4 are still running, so they are aborted, and the workflow advances with the two results it has.</desc>
 <text class="ta-e" x="110" y="68">Task 1</text>
@@ -338,8 +338,8 @@ SLAs.
 <text class="t-mut ta-e" x="700" y="230">time</text>
 <line class="e e-hot" x1="400" y1="44" x2="400" y2="216"/>
 <text class="t-mut t-hot" x="400" y="30">timeout</text>
-<rect class="n-hot" x="130" y="234" width="570" height="34" rx="10"/>
-<text class="t-strong" x="415" y="251">Timeout: advance with 2 results. The rest are aborted</text>
+<rect class="n-hot" x="130" y="244" width="570" height="34" rx="10"/>
+<text class="t-strong" x="415" y="261">Timeout: advance with 2 results. The rest are aborted</text>
 </svg>
 </div>
 </div>

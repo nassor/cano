@@ -284,7 +284,7 @@ workflow id with <code>with_workflow_id</code>, and the compensation stack survi
 <text class="t-code" x="532" y="216">Workflow::resume_from</text>
 <path class="e e-dash" d="M396,280 H666" marker-end="url(#sagaresume-ah)"/>
 <text class="t-code t-mut" x="528" y="252">RowKind::CompensationCompletion</text>
-<text class="t-mut" x="528" y="268">rows in sequence order rebuild the stack</text>
+<text class="t-mut" x="530" y="268">rebuild the stack in sequence</text>
 <rect class="n-hot" x="20" y="312" width="740" height="34" rx="10"/>
 <text class="t-strong" x="390" y="334">A failure after the resume point still rolls back what the crashed process did</text>
 </svg>

@@ -71,7 +71,7 @@ to the same state until the queue drains.
 <path class="e" d="M130,248 V286" marker-end="url(#patterns-queue-ah)"/>
 <path class="e" d="M360,248 V286" marker-end="url(#patterns-queue-ah)"/>
 <path class="e" d="M590,248 V286" marker-end="url(#patterns-queue-ah)"/>
-<text class="t-mut" x="245" y="266">one call per item, run concurrently</text>
+<text class="t-mut" x="245" y="266">one call per item</text>
 <rect class="n-ok" x="60" y="290" width="140" height="52" rx="10"/>
 <text class="t-strong" x="130" y="311">item 1</text>
 <text class="t-code t-mut" x="130" y="331">Ok</text>
