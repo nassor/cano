@@ -75,8 +75,10 @@ macros `cano-macros`. The API is pre-1.0 and changes between minor versions.
   (`InMemoryCheckpointStore`, `RecordingObserver`).
 - Don't push to `main` directly. Work on a branch and open a pull request.
 - Don't move or delete a pushed tag, and don't publish from a dirty tree.
-- Don't upgrade Zola for the site past the version pinned in `.github/workflows/docs.yml` without
-  checking the templates: newer releases reject filters `base.html` uses.
+- Don't change the Zola version pinned in `.github/workflows/docs.yml` (0.23.4) without building
+  and link-checking the site with the new one first.
+- Don't write `{{`, `}}` or `{%` anywhere in `docs/content`, code blocks included: Zola runs page
+  bodies through Tera and fails the build. Rewrite a Rust sample to avoid `{{` in format strings.
 
 ## Gate
 
@@ -128,8 +130,9 @@ python3 search-index.py public   # or python build-local.py for a browsable loca
    - `version` in `[workspace.package]` of the root `Cargo.toml`;
    - the `cano-macros = { version = "0.N", path = "../cano-macros" }` requirement in
      `cano/Cargo.toml` on a minor bump;
-   - `version` under `[extra]` in `docs/config.toml` (the `cano_dep` shortcode renders install
-     snippets from it);
+   - `version` under `[extra]` in `docs/config.toml` (the header badge), and every
+     `cano = { version = "0.N", ... }` install snippet on a minor bump
+     (`rg -n 'version = "0\.' docs/content README.md`);
    - rename `## Unreleased` to `## X.Y.Z - YYYY-MM-DD` in `CHANGELOG.md` and start a new empty
      `## Unreleased`.
 4. **Gate**: `cargo update`, then the full gate above, then

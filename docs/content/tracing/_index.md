@@ -56,12 +56,12 @@ observer events as <code>tracing</code> events under the <code>cano::observer</c
 
 ```toml
 [dependencies]
-{{ cano_dep(features=["tracing"]) }}
+cano = { version = "0.15", features = ["tracing"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Or enable everything (scheduler + tracing + recovery + metrics):
-{{ cano_dep(features=["all"], commented=true) }}
+# cano = { version = "0.15", features = ["all"] }
 
 ```
 
@@ -269,7 +269,7 @@ execution in log output.</p>
 ```toml
 # Enable everything: scheduler + tracing + recovery + metrics
 [dependencies]
-{{ cano_dep(features=["all"]) }}
+cano = { version = "0.15", features = ["all"] }
 
 ```
 <hr class="section-divider">

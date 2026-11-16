@@ -58,6 +58,12 @@
     --err:         light-dark(hsl(0 72% 46%),      hsl(0 91% 74%));
     --err-dim:     light-dark(hsl(0 72% 46% / 0.10), hsl(0 91% 74% / 0.14));
 
+    /* Inline code: a tinted blue chip, so an identifier stands apart from
+       prose in both themes. */
+    --code-fg:     light-dark(hsl(220 70% 40%),    hsl(212 90% 76%));
+    --code-bg:     light-dark(hsl(220 60% 97%),    hsl(220 30% 12%));
+    --code-border: light-dark(hsl(220 40% 89%),    hsl(220 22% 21%));
+
     /* Type */
     --font-sans: 'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
     --font-mono: 'Geist Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
@@ -739,16 +745,19 @@ pre code {
 :not(pre) > code {
     font-family: var(--font-mono);
     font-size: 0.85em;
-    padding: 0.15em 0.36em;
-    background: var(--muted);
+    padding: 0.12em 0.4em;
+    background: var(--code-bg);
+    border: 1px solid var(--code-border);
     border-radius: var(--r-sm);
-    color: var(--foreground);
+    color: var(--code-fg);
     overflow-wrap: break-word;
 }
+a > code, a:hover > code { color: inherit; }
 
 h1 code, h2 code, h3 code, h4 code, .brand code, .subtitle code {
     font-size: 0.88em;
     background: none;
+    border: 0;
     padding: 0;
     color: inherit;
 }
@@ -781,7 +790,7 @@ h1 code, h2 code, h3 code, h4 code, .brand code, .subtitle code {
     font: 500 0.75rem/1.7 var(--font-mono);
     color: var(--foreground);
 }
-.code-block-label code { font-size: 0.95em; background: none; padding: 0; }
+.code-block-label code { font-size: 0.95em; background: none; border: 0; padding: 0; color: inherit; }
 .code-block-label .label-icon { opacity: 0.8; }
 .code-block > pre { margin: 0; border-radius: 0 0 var(--r-lg) var(--r-lg); }
 

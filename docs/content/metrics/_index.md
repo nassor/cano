@@ -55,14 +55,14 @@ observer hooks as <code>metrics</code>-crate counters.
 
 ```toml
 [dependencies]
-{{ cano_dep(features=["metrics"]) }}
+cano = { version = "0.15", features = ["metrics"] }
 
 # The metrics crate is a facade — you also need a recorder/exporter:
 metrics-exporter-prometheus = "0.16"  # for production
 # or: metrics-util = "0.18"           # for testing / debugging snapshots
 
 # Or enable everything (scheduler + tracing + recovery + metrics):
-{{ cano_dep(features=["all"], commented=true) }}
+# cano = { version = "0.15", features = ["all"] }
 
 ```
 
@@ -337,7 +337,7 @@ wiring you do in your application — Cano never depends on <code>metrics-tracin
 
 ```toml
 [dependencies]
-{{ cano_dep(features=["metrics", "tracing"]) }}
+cano = { version = "0.15", features = ["metrics", "tracing"] }
 metrics-tracing-context = "0.18"
 tracing-subscriber = "0.3"
 
@@ -479,7 +479,7 @@ async fn main() {
         let label_str = if labels.is_empty() {
             String::new()
         } else {
-            format!("{{{}}}", labels.join(","))
+            format!("{}{}{}", '{', labels.join(","), '}')
         };
         match value {
             DebugValue::Counter(v) => println!("  {}{label_str} = {v}", key.name()),
@@ -487,7 +487,8 @@ async fn main() {
             DebugValue::Histogram(s) => {
                 let n = s.len();
                 let sum: f64 = s.iter().map(|x| x.into_inner()).sum();
-                println!("  {}{label_str} = {{count={n}, sum={sum:.6}s}}", key.name());
+                let summary = format!("count={n}, sum={sum:.6}s");
+                println!("  {}{label_str} = {}{summary}{}", key.name(), '{', '}');
             }
         }
     }
