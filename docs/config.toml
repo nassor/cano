@@ -44,7 +44,7 @@ path = "@/task/configuration.md"
 title = "Resources"
 path = "@/resources/_index.md"
 [[extra.nav.items.children]]
-title = "Lifecycle & Concurrency"
+title = "Lifecycle and concurrency"
 path = "@/resources/lifecycle-and-concurrency.md"
 [[extra.nav.items.children]]
 title = "MemoryStore"
@@ -53,17 +53,17 @@ path = "@/store/_index.md"
 title = "Workflows"
 path = "@/workflows/_index.md"
 [[extra.nav.items.children]]
-title = "Validation & Errors"
+title = "Validation and errors"
 path = "@/workflows/validation-and-errors.md"
 [[extra.nav.items]]
 title = "Scheduler"
 path = "@/scheduler/_index.md"
 [[extra.nav.items.children]]
-title = "Backoff & Trip"
+title = "Backoff and trip"
 path = "@/scheduler/backoff-and-trip.md"
 
 [[extra.nav]]
-label = "Processing Models"
+label = "Processing models"
 [[extra.nav.items]]
 title = "RouterTask"
 path = "@/router-task/_index.md"
@@ -84,24 +84,24 @@ title = "StreamTask"
 path = "@/stream-task/_index.md"
 
 [[extra.nav]]
-label = "Advanced Workflows"
+label = "Advanced workflows"
 [[extra.nav.items]]
-title = "Split & Join"
+title = "Split and join"
 path = "@/split-join/_index.md"
 [[extra.nav.items.children]]
-title = "Join Strategies"
+title = "Join strategies"
 path = "@/split-join/join-strategies.md"
 [[extra.nav.items.children]]
-title = "Parallel Patterns"
+title = "Parallel patterns"
 path = "@/split-join/parallel-patterns.md"
 [[extra.nav.items]]
 title = "Resilience"
 path = "@/resilience/_index.md"
 [[extra.nav.items.children]]
-title = "Circuit Breakers"
+title = "Circuit breakers"
 path = "@/resilience/circuit-breakers.md"
 [[extra.nav.items.children]]
-title = "Rate Limiting"
+title = "Rate limiting"
 path = "@/resilience/rate-limiting.md"
 [[extra.nav.items]]
 title = "Recovery"

@@ -7,41 +7,39 @@ template = "section.html"
 <div class="content-wrapper">
 
 <h1>Scheduler</h1>
-<p class="subtitle">Automate your workflows with flexible scheduling and concurrency.</p>
+<p class="subtitle">Run workflows on an interval, on a cron schedule, or on demand.</p>
 <p class="feature-tag">Behind the <code>scheduler</code> feature gate (<code>features = ["scheduler"]</code>).</p>
 
 <nav class="page-toc" aria-label="Table of contents">
 <div class="page-toc-title">On this page</div>
 <ol>
-<li><a href="#lifecycle">Lifecycle: Scheduler &rarr; RunningScheduler</a></li>
-<li><a href="#overlap-prevention">Overlap Prevention</a></li>
-<li><a href="#scheduling-strategies">Scheduling Strategies</a></li>
-<li><a href="#strategy-examples">Strategy Examples</a></li>
-<li class="toc-sub"><a href="#interval-scheduling">Interval Scheduling</a></li>
-<li class="toc-sub"><a href="#cron-scheduling">Cron Scheduling</a></li>
-<li class="toc-sub"><a href="#manual-triggering">Manual Triggering</a></li>
-<li class="toc-sub"><a href="#mixed-scheduling">Mixed Scheduling</a></li>
-<li><a href="#backoff-guide">Backoff &amp; Trip State</a></li>
-<li><a href="#cancellation">Cancelling a Flow</a></li>
-<li><a href="#graceful-shutdown">Graceful Shutdown</a></li>
-<li><a href="#multi-level-map-reduce">Advanced: Multi-Level Map-Reduce</a></li>
+<li><a href="#lifecycle"><code>Scheduler</code> and <code>RunningScheduler</code></a></li>
+<li><a href="#overlap-prevention">Overlap prevention</a></li>
+<li><a href="#scheduling-strategies">Scheduling strategies</a></li>
+<li><a href="#strategy-examples">Strategy examples</a></li>
+<li class="toc-sub"><a href="#interval-scheduling">Interval scheduling</a></li>
+<li class="toc-sub"><a href="#cron-scheduling">Cron scheduling</a></li>
+<li class="toc-sub"><a href="#manual-triggering">Manual triggering</a></li>
+<li class="toc-sub"><a href="#mixed-scheduling">Mixed scheduling</a></li>
+<li><a href="#backoff-guide">Backoff and trip state</a></li>
+<li><a href="#cancellation">Cancelling a flow</a></li>
+<li><a href="#graceful-shutdown">Graceful shutdown</a></li>
+<li><a href="#multi-level-map-reduce">Multi-level map-reduce</a></li>
 </ol>
 </nav>
 
 <p>
-The Scheduler provides workflow scheduling capabilities for background jobs and automated workflows.
-It supports intervals, cron expressions, and manual triggers. Each registered workflow carries a
-<a href="../resources/"><code>Resources</code></a> dictionary whose <code>setup()</code> and
-<code>teardown()</code> lifecycle hooks run once per <code>Scheduler::start()</code> /
-<code>RunningScheduler::stop()</code> pair — not once per scheduled run.
+The scheduler runs workflows as background jobs on an interval, a cron expression, or a manual trigger.
+Each registered workflow carries its own <a href="../resources/"><code>Resources</code></a>, whose
+<code>setup()</code> and <code>teardown()</code> hooks run once per <code>Scheduler::start()</code> and
+<code>RunningScheduler::stop()</code> pair, not once per run.
 </p>
 
 <div class="callout callout-info">
-<div class="callout-label">Mixed State Types</div>
+<div class="callout-label">Mixed state types</div>
 <p>
-<code>Scheduler</code> is not generic over the state type. One scheduler can host workflows with
-different state enums and different resources; each flow keeps its own state type behind the scheduler's
-type-erased registry.
+<code>Scheduler</code> is not generic over the state type. One scheduler hosts workflows with different
+state enums and different resources.
 </p>
 
 ```rust
@@ -54,98 +52,69 @@ let running = Scheduler::new()
 </div>
 <hr class="section-divider">
 
-<h2 id="lifecycle"><a href="#lifecycle" class="anchor-link" aria-hidden="true">#</a>Lifecycle: <code>Scheduler</code> &rarr; <code>RunningScheduler</code></h2>
+<h2 id="lifecycle"><a href="#lifecycle" class="anchor-link" aria-hidden="true">#</a><code>Scheduler</code> and <code>RunningScheduler</code></h2>
 <p>
-The scheduler is split into two halves to make a double-start impossible at the type level:
+The scheduler has two halves, so a double start cannot compile.
 </p>
 <ul>
-<li><strong><code>Scheduler</code></strong> is the <em>builder</em>. Every method consumes and returns it, so
-registration is one chain: <code>every</code> / <code>cron</code> / <code>manual</code> register a workflow,
-<code>with_backoff</code> overrides the <code>BackoffPolicy</code> of one flow, and
-<code>with_drain_timeout</code> / <code>with_cancel_timeout</code> tune <a href="#graceful-shutdown">shutdown</a>.
-Nothing fails while you chain: a zero interval, a bad cron expression, a duplicate id, or a
-<code>with_backoff</code> for an unknown id is remembered, and <code>start()</code> returns the first one
-before anything is validated or set up.</li>
-<li><strong><code>RunningScheduler</code></strong> is the <em>live handle</em> returned by
-<code>start().await?</code>. It is cheap to clone — every clone controls the same scheduler — so you can call
-<code>trigger</code>, <code>status</code>, <code>list</code>, <code>reset_flow</code>, <code>cancel_flow</code>,
-and <code>stop</code> from any task.</li>
+<li><code>Scheduler</code> is the builder. Every method consumes and returns it, so registration is one chain:
+<code>every</code>, <code>cron</code> and <code>manual</code> register a workflow,
+<code>with_backoff</code> overrides the <a href="backoff-and-trip/"><code>BackoffPolicy</code></a> of one flow,
+and <code>with_drain_timeout</code> and <code>with_cancel_timeout</code> tune
+<a href="#graceful-shutdown">shutdown</a>. A zero interval, a bad cron expression, a duplicate id, or a
+<code>with_backoff</code> for an unknown id is remembered while you chain, and <code>start()</code> returns
+the first one before it validates or sets up anything.</li>
+<li><code>RunningScheduler</code> is the live handle that <code>start().await?</code> returns. Clones are
+cheap and control the same scheduler, so <code>trigger</code>, <code>status</code>, <code>list</code>,
+<code>reset_flow</code>, <code>cancel_flow</code> and <code>stop</code> work from any task.</li>
 </ul>
 <p>
-<code>start</code> consumes the builder, so the compiler prevents you from starting the same scheduler
-twice or changing the registry mid-flight. It validates every workflow and its initial state, sets up each
-workflow's resources in registration order (a setup failure tears down the flows already set up and
-returns the error), then spawns one loop per interval or cron flow. Manual flows get no loop; they run only
-on <code>trigger</code>.
+<code>start</code> consumes the builder. It validates every workflow and its initial state, sets up each
+workflow's resources in registration order (a setup failure tears down the flows already set up and returns
+the error), then spawns one loop per interval or cron flow. Manual flows get no loop and run only on
+<code>trigger</code>.
 </p>
-<table class="styled-table">
-<thead>
-<tr>
-<th>RunningScheduler method</th>
-<th>What it does</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>async stop()</code></td>
-<td>Shut down in bounded time: drain, cancel, abort, then tear resources down. Idempotent; see <a href="#graceful-shutdown">Graceful Shutdown</a>.</td>
-</tr>
-<tr>
-<td><code>async wait()</code></td>
-<td>Block until some clone calls <code>stop()</code>, then return its result. It never stops the scheduler itself.</td>
-</tr>
-<tr>
-<td><code>async wait_idle(id)</code></td>
-<td>Wait until the flow is not <code>Running</code> and return its <code>FlowInfo</code> (<code>None</code> for an unknown id). Returns at once for an idle flow.</td>
-</tr>
-<tr>
-<td><code>trigger(id)</code></td>
-<td>Start a run now. Errors when the id is unknown, the scheduler is stopping or stopped, the flow is already running, or the flow is tripped.</td>
-</tr>
-<tr>
-<td><code>cancel_flow(id)</code></td>
-<td>Cooperatively cancel the flow's in-flight run; a no-op when the flow is idle.</td>
-</tr>
-<tr>
-<td><code>reset_flow(id)</code></td>
-<td>Clear the failure streak and the backoff window; a tripped flow returns to <code>Idle</code>.</td>
-</tr>
-<tr>
-<td><code>status(id)</code></td>
-<td>Snapshot of one flow as <code>Option&lt;FlowInfo&gt;</code> (<code>None</code> for an unknown id).</td>
-</tr>
-<tr>
-<td><code>list()</code></td>
-<td>Snapshot of every flow as <code>Vec&lt;FlowInfo&gt;</code>, in registration order.</td>
-</tr>
-</tbody>
-</table>
+<p>The methods of <code>RunningScheduler</code>, each with its signature:</p>
+<dl class="key-list">
+<dt><code>async fn stop(&amp;self) -&gt; CanoResult&lt;()&gt;</code></dt>
+<dd>Drains, cancels, aborts, then tears resources down, in bounded time. Idempotent. See <a href="#graceful-shutdown">Graceful shutdown</a>.</dd>
+<dt><code>async fn wait(&amp;self) -&gt; CanoResult&lt;()&gt;</code></dt>
+<dd>Blocks until some clone calls <code>stop()</code>, then returns its result. It never stops the scheduler itself.</dd>
+<dt><code>async fn wait_idle(&amp;self, id: &amp;str) -&gt; Option&lt;FlowInfo&gt;</code></dt>
+<dd>Waits until the flow is not <code>Running</code> and returns its <code>FlowInfo</code>, or <code>None</code> for an unknown id. Returns at once for a flow that is not running.</dd>
+<dt><code>fn trigger(&amp;self, id: &amp;str) -&gt; CanoResult&lt;()&gt;</code></dt>
+<dd>Starts a run now. Errors when the id is unknown, the scheduler is stopping or stopped, the flow is already running, or the flow is tripped. A pending backoff window does not block it.</dd>
+<dt><code>fn cancel_flow(&amp;self, id: &amp;str) -&gt; CanoResult&lt;()&gt;</code></dt>
+<dd>Cooperatively cancels the flow's in-flight run. A no-op when the flow is idle; an unknown id is an error.</dd>
+<dt><code>fn reset_flow(&amp;self, id: &amp;str) -&gt; CanoResult&lt;()&gt;</code></dt>
+<dd>Clears the failure streak and the backoff window. A flow that is not running returns to <code>Idle</code>.</dd>
+<dt><code>fn status(&amp;self, id: &amp;str) -&gt; Option&lt;FlowInfo&gt;</code></dt>
+<dd>Snapshot of one flow, or <code>None</code> for an unknown id.</dd>
+<dt><code>fn list(&amp;self) -&gt; Vec&lt;FlowInfo&gt;</code></dt>
+<dd>Snapshot of every flow, in registration order.</dd>
+</dl>
 <p>
 Only the three waiting methods are <code>async</code>. <code>trigger</code>, <code>cancel_flow</code> and
-<code>reset_flow</code> must be called inside a Tokio runtime (<code>trigger</code> spawns the run).
-Dropping the last clone without calling <code>stop()</code> cancels every in-flight run and aborts the
-scheduler's tasks; resources are <strong>not</strong> torn down on that path, so call
-<code>stop().await</code> for an orderly shutdown.
+<code>reset_flow</code> must be called inside a Tokio runtime, because <code>trigger</code> spawns the run.
+Dropping the last clone without calling <code>stop()</code> aborts every loop and run and does not tear
+resources down, so call <code>stop().await</code> for an orderly shutdown.
 </p>
 <hr class="section-divider">
 
-<h2 id="overlap-prevention"><a href="#overlap-prevention" class="anchor-link" aria-hidden="true">#</a>Overlap Prevention</h2>
+<h2 id="overlap-prevention"><a href="#overlap-prevention" class="anchor-link" aria-hidden="true">#</a>Overlap prevention</h2>
 <p>
-The scheduler never runs the same flow twice at once. Interval and cron loops run their workflow inline,
-so a loop cannot start a second run while one is in progress, and a <code>trigger()</code> on a running
-flow returns an error. An interval or cron tick that finds the flow already running because of a manual
-trigger is skipped. This prevents resource exhaustion from slow-running workflows that would otherwise
-accumulate concurrent instances.
+The scheduler never runs the same flow twice at once. Interval and cron loops run their workflow inline, so
+a loop cannot start a second run while one is in progress. A tick that finds the flow running because of a
+manual trigger is skipped, and a <code>trigger()</code> on a running flow returns an error.
 </p>
 <p>
-For example, if a workflow is configured to run every 30 seconds but a particular execution takes
-45 seconds, the next run starts 30 seconds after that execution finishes. A cron loop works the same way:
-once a run returns, it waits for the next firing after that moment, so firings that fell inside the run
-are skipped.
+If a workflow is set to run every 30 seconds and one execution takes 45 seconds, the next run starts 30
+seconds after that execution finishes. A cron loop works the same way: after a run returns, it waits for
+the next firing after that moment, so firings that fell inside the run are skipped.
 </p>
 <hr class="section-divider">
 
-<h2 id="scheduling-strategies"><a href="#scheduling-strategies" class="anchor-link" aria-hidden="true">#</a>Scheduling Strategies</h2>
+<h2 id="scheduling-strategies"><a href="#scheduling-strategies" class="anchor-link" aria-hidden="true">#</a>Scheduling strategies</h2>
 <div class="mode-grid">
 <div class="mode-card">
 <div class="mode-icon" aria-hidden="true">⏱</div>
@@ -170,7 +139,7 @@ are skipped.
 <div class="mode-card">
 <div class="mode-icon" aria-hidden="true">👆</div>
 <h3>Manual</h3>
-<p>Trigger workflows on-demand via API.</p>
+<p>Trigger workflows on demand.</p>
 
 ```rust
 .manual(...)
@@ -180,19 +149,20 @@ are skipped.
 </div>
 <hr class="section-divider">
 
-<h2 id="strategy-examples"><a href="#strategy-examples" class="anchor-link" aria-hidden="true">#</a>Scheduling Strategy Examples</h2>
-<p>The Scheduler supports multiple scheduling strategies. Here are complete examples for each.</p>
+<h2 id="strategy-examples"><a href="#strategy-examples" class="anchor-link" aria-hidden="true">#</a>Strategy examples</h2>
+<p>Each strategy has a complete example below.</p>
 
-<h3 id="interval-scheduling"><a href="#interval-scheduling" class="anchor-link" aria-hidden="true">#</a>1. Interval Scheduling - Fixed Time Intervals</h3>
-<p>Run workflows at regular time intervals. The first run starts as soon as the scheduler starts; each later run starts one interval after the previous run finishes. Best for periodic tasks like health checks or data syncing.</p>
+<h3 id="interval-scheduling"><a href="#interval-scheduling" class="anchor-link" aria-hidden="true">#</a>Interval scheduling</h3>
+<p>Runs a workflow at a fixed interval. The first run starts as soon as the scheduler starts, and each later run starts one interval after the previous run finishes. After a failure the wait stretches to the flow's <a href="backoff-and-trip/">backoff window</a> when that is longer.</p>
 
 <div class="diagram-frame">
-<p class="diagram-label">Interval Scheduling Timeline</p>
+<p class="diagram-label">Interval scheduling timeline</p>
 <div class="cd-wrap">
-<svg class="cd" viewBox="0 0 760 180" role="img">
-<title>Interval scheduling every 30 seconds: a 2-second run is followed by a 30-second wait, so each run starts 32 seconds after the previous one started.</title>
-<defs><marker id="interval-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
-<path class="e e-dim" d="M150,36 H438" marker-start="url(#interval-ah)" marker-end="url(#interval-ah)"/>
+<svg class="cd" viewBox="0 0 760 180" role="img" aria-labelledby="sched-interval-title sched-interval-desc">
+<title id="sched-interval-title">Interval scheduling timeline</title>
+<desc id="sched-interval-desc">A workflow scheduled every 30 seconds. Run 1 starts at 0 seconds and takes 2 seconds. The scheduler then waits a full 30 seconds, so run 2 starts 32 seconds after run 1 started, and run 3 starts 32 seconds after run 2.</desc>
+<defs><marker id="sched-interval-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<path class="e e-dim" d="M150,36 H438" marker-start="url(#sched-interval-ah)" marker-end="url(#sched-interval-ah)"/>
 <text class="t-mut" x="294" y="22">32s between run starts</text>
 <text class="t-strong ta-s" x="20" y="78">Workflow</text>
 <rect class="band" x="168" y="64" width="270" height="26" rx="6"/>
@@ -206,7 +176,7 @@ are skipped.
 <text class="t-mut t-hot" x="447" y="52">Run 2</text>
 <text class="t-mut t-hot" x="735" y="52">Run 3</text>
 <line class="axis" x1="150" y1="112" x2="726" y2="112"/>
-<path class="e e-dim" d="M726,112 H744" marker-end="url(#interval-ah)"/>
+<path class="e e-dim" d="M726,112 H744" marker-end="url(#sched-interval-ah)"/>
 <line class="tick" x1="150" y1="112" x2="150" y2="118"/>
 <line class="tick" x1="240" y1="112" x2="240" y2="118"/>
 <line class="tick" x1="330" y1="112" x2="330" y2="118"/>
@@ -221,7 +191,7 @@ are skipped.
 <text class="t-mut" x="510" y="132">40s</text>
 <text class="t-mut" x="600" y="132">50s</text>
 <text class="t-mut" x="690" y="132">60s</text>
-<text class="t-mut" x="438" y="160">2s busy, then a full 30s sleep — the next run starts one interval after the previous run finishes</text>
+<text class="t-mut" x="438" y="160">A 2s run, then a full 30s wait: the next run starts one interval after the previous run finishes</text>
 </svg>
 </div>
 </div>
@@ -279,15 +249,16 @@ async fn main() -> Result<(), CanoError> {
 plus cron and manual flows).</p>
 </div>
 
-<h3 id="cron-scheduling"><a href="#cron-scheduling" class="anchor-link" aria-hidden="true">#</a>2. Cron Scheduling - Time-Based Expressions</h3>
-<p>Run workflows based on cron expressions (seconds resolution, as parsed by the <code>cron</code> crate). A tick that falls inside a pending backoff window is skipped. Perfect for scheduled reports, backups, or time-specific tasks.</p>
+<h3 id="cron-scheduling"><a href="#cron-scheduling" class="anchor-link" aria-hidden="true">#</a>Cron scheduling</h3>
+<p>Runs a workflow on a cron expression (a leading seconds field, parsed by the <code>cron</code> crate and evaluated in UTC). A tick that falls inside a pending backoff window is skipped.</p>
 
 <div class="diagram-frame">
-<p class="diagram-label">Cron Scheduling Timeline</p>
+<p class="diagram-label">Cron scheduling timeline</p>
 <div class="cd-wrap">
-<svg class="cd" viewBox="0 0 760 180" role="img">
-<title>Cron scheduling: the workflow is idle through the day and runs for one hour at 09:00 and again at 18:00, repeating at the same wall-clock times daily.</title>
-<defs><marker id="cron-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<svg class="cd" viewBox="0 0 760 180" role="img" aria-labelledby="sched-cron-title sched-cron-desc">
+<title id="sched-cron-title">Cron scheduling timeline</title>
+<desc id="sched-cron-desc">One day on a UTC clock. The workflow is idle most of the day. It runs at 09:00 (expression 0 0 9 * * *) and again at 18:00 (expression 0 0 18 * * *), drawn here as one-hour runs, and repeats at the same wall-clock times each day.</desc>
+<defs><marker id="sched-cron-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
 <text class="t-code t-mut" x="378" y="26">0 0 9 * * *</text>
 <text class="t-code t-mut" x="594" y="26">0 0 18 * * *</text>
 <text class="t-mut t-hot" x="378" y="48">Run 1 · 09:00</text>
@@ -300,7 +271,7 @@ plus cron and manual flows).</p>
 <text class="t-mut" x="378" y="104">1h</text>
 <text class="t-mut" x="594" y="104">1h</text>
 <line class="axis" x1="150" y1="122" x2="726" y2="122"/>
-<path class="e e-dim" d="M726,122 H744" marker-end="url(#cron-ah)"/>
+<path class="e e-dim" d="M726,122 H744" marker-end="url(#sched-cron-ah)"/>
 <line class="tick" x1="150" y1="122" x2="150" y2="128"/>
 <line class="tick" x1="222" y1="122" x2="222" y2="128"/>
 <line class="tick" x1="294" y1="122" x2="294" y2="128"/>
@@ -319,7 +290,7 @@ plus cron and manual flows).</p>
 <text class="t-mut" x="582" y="142">18:00</text>
 <text class="t-mut" x="654" y="142">21:00</text>
 <text class="t-mut" x="726" y="142">24:00</text>
-<text class="t-mut" x="438" y="166">two 1-hour runs a day — idle the other 22 hours, then the same times tomorrow</text>
+<text class="t-mut" x="438" y="166">Two runs a day at 09:00 and 18:00 UTC, idle the rest of the time, the same times tomorrow</text>
 </svg>
 </div>
 </div>
@@ -390,44 +361,46 @@ async fn main() -> Result<(), CanoError> {
 
 ```
 
-<h3 id="manual-triggering"><a href="#manual-triggering" class="anchor-link" aria-hidden="true">#</a>3. Manual Triggering - On-Demand Execution</h3>
-<p>Trigger workflows manually via API. Ideal for user-initiated tasks or event-driven processing.</p>
+<h3 id="manual-triggering"><a href="#manual-triggering" class="anchor-link" aria-hidden="true">#</a>Manual triggering</h3>
+<p>Runs a workflow only when <code>trigger</code> is called. Suits user-initiated tasks and event-driven processing.</p>
 
 <div class="callout callout-info">
-<div class="callout-label">Type-safe lifecycle</div>
+<div class="callout-label">Triggering needs a running scheduler</div>
 <p>
-<code>trigger()</code> lives on <code>RunningScheduler</code>, which is only obtained by calling
-<code>start().await?</code>. The compiler will not let you trigger a workflow before the
-scheduler is running. <code>trigger()</code> is synchronous: it starts the run and returns without waiting
-for it to finish, so use <code>wait_idle(id)</code> or <code>status(id)</code> to see the outcome.
+<code>trigger()</code> lives on <code>RunningScheduler</code>, so the compiler rejects a trigger before
+<code>start()</code>. It is synchronous: it starts the run and returns without waiting for it. Use
+<code>wait_idle(id)</code> or <code>status(id)</code> to see the outcome.
 </p>
 </div>
 
 <div class="diagram-frame">
-<p class="diagram-label">Manual Trigger Sequence</p>
+<p class="diagram-label">Manual trigger sequence</p>
 <div class="cd-wrap">
-<svg class="cd" viewBox="0 0 720 284" role="img">
-<title>Manual triggering: an API request calls trigger on the running scheduler, which starts the workflow; the caller later sees the outcome through wait_idle.</title>
-<defs><marker id="manual-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
-<line class="lifeline" x1="110" y1="46" x2="110" y2="222"/>
-<line class="lifeline" x1="360" y1="46" x2="360" y2="222"/>
-<line class="lifeline" x1="610" y1="46" x2="610" y2="222"/>
-<rect class="n" x="35" y="8" width="150" height="38" rx="8"/>
-<text class="t-strong" x="110" y="28">API Request</text>
+<svg class="cd" viewBox="0 0 720 322" role="img" aria-labelledby="sched-manual-title sched-manual-desc">
+<title id="sched-manual-title">Manual trigger sequence</title>
+<desc id="sched-manual-desc">Sequence diagram with three participants: the caller, the running scheduler and the workflow. The caller calls trigger on the scheduler, which spawns the workflow run and returns at once. The caller then calls wait_idle. When the workflow finishes, the scheduler answers wait_idle with the flow's info, whose status is Completed. A manual flow runs only when trigger is called.</desc>
+<defs><marker id="sched-manual-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<line class="lifeline" x1="110" y1="46" x2="110" y2="268"/>
+<line class="lifeline" x1="360" y1="46" x2="360" y2="268"/>
+<line class="lifeline" x1="610" y1="46" x2="610" y2="268"/>
+<rect class="n-cop" x="35" y="8" width="150" height="38" rx="8"/>
+<text class="t-strong" x="110" y="28">Caller</text>
 <rect class="n-hot" x="285" y="8" width="150" height="38" rx="8"/>
 <text class="t-strong" x="360" y="28">Scheduler</text>
 <rect class="n" x="535" y="8" width="150" height="38" rx="8"/>
 <text class="t-strong" x="610" y="28">Workflow</text>
-<path class="e" d="M110,78 H356" marker-end="url(#manual-ah)"/>
+<path class="e" d="M110,78 H356" marker-end="url(#sched-manual-ah)"/>
 <text class="t-code" x="233" y="66">trigger("data_export")</text>
-<path class="e" d="M360,122 H606" marker-end="url(#manual-ah)"/>
-<text class="t-mut" x="483" y="110">Start Workflow</text>
-<path class="e e-dash" d="M610,166 H364" marker-end="url(#manual-ah)"/>
-<text class="t-mut t-ok" x="487" y="154">Complete</text>
-<path class="e e-dash" d="M360,210 H114" marker-end="url(#manual-ah)"/>
-<text class="t-mut t-ok" x="237" y="198">wait_idle(id) → Completed</text>
-<rect class="n-hot" x="35" y="230" width="650" height="34" rx="10"/>
-<text class="t-strong" x="360" y="248">Nothing runs until trigger() is called — no interval, no cron</text>
+<path class="e" d="M360,122 H606" marker-end="url(#sched-manual-ah)"/>
+<text class="t-mut" x="483" y="110">spawn the run</text>
+<path class="e" d="M110,166 H356" marker-end="url(#sched-manual-ah)"/>
+<text class="t-code" x="233" y="154">wait_idle("data_export")</text>
+<path class="e e-dash" d="M610,210 H364" marker-end="url(#sched-manual-ah)"/>
+<text class="t-mut t-ok" x="487" y="198">run finished</text>
+<path class="e e-dash" d="M360,254 H114" marker-end="url(#sched-manual-ah)"/>
+<text class="t-mut t-ok" x="237" y="242">FlowInfo: Completed</text>
+<rect class="n-hot" x="35" y="278" width="650" height="34" rx="10"/>
+<text class="t-strong" x="360" y="296">A manual flow runs only when trigger() is called</text>
 </svg>
 </div>
 </div>
@@ -489,15 +462,16 @@ async fn main() -> Result<(), CanoError> {
 
 ```
 
-<h3 id="mixed-scheduling"><a href="#mixed-scheduling" class="anchor-link" aria-hidden="true">#</a>4. Mixed Scheduling - Combining Strategies</h3>
-<p>Use multiple scheduling strategies together for complex automation scenarios.</p>
+<h3 id="mixed-scheduling"><a href="#mixed-scheduling" class="anchor-link" aria-hidden="true">#</a>Mixed scheduling</h3>
+<p>One scheduler can combine all three strategies.</p>
 
 <div class="diagram-frame">
-<p class="diagram-label">Mixed Strategy Overview</p>
+<p class="diagram-label">Mixed strategy overview</p>
 <div class="cd-wrap">
-<svg class="cd" viewBox="0 0 760 254" role="img">
-<title>Mixed scheduling over one day: an interval flow pulses all day long, two cron flows take one hour each at 03:00 and 09:00, and a manual export fires once at 14:30.</title>
-<defs><marker id="mixed-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<svg class="cd" viewBox="0 13 760 244" role="img" aria-labelledby="sched-mixed-title sched-mixed-desc">
+<title id="sched-mixed-title">Mixed strategy overview</title>
+<desc id="sched-mixed-desc">Four flows in one scheduler over one day. An interval flow runs every 5 minutes, about 288 runs a day; the pulses drawn show the cadence, not every run. Two cron flows are drawn as one-hour bands, the daily backup at 03:00 and the weekly report at 09:00 on Mondays. The manual emergency export is drawn at 14:30, when something calls trigger.</desc>
+<defs><marker id="sched-mixed-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
 <text class="t-mut t-hot" x="438" y="38">every 5 min · 288 runs/day (cadence illustrated)</text>
 <text class="t-strong ta-s" x="20" y="61">Interval</text>
 <rect class="band" x="150" y="48" width="576" height="26" rx="6"/>
@@ -513,7 +487,7 @@ async fn main() -> Result<(), CanoError> {
 <rect class="band" x="150" y="140" width="576" height="26" rx="6"/>
 <rect class="band-hot" x="498" y="140" width="6" height="26" rx="2"/>
 <line class="axis" x1="150" y1="190" x2="726" y2="190"/>
-<path class="e e-dim" d="M726,190 H744" marker-end="url(#mixed-ah)"/>
+<path class="e e-dim" d="M726,190 H744" marker-end="url(#sched-mixed-ah)"/>
 <line class="tick" x1="150" y1="190" x2="150" y2="196"/>
 <line class="tick" x1="222" y1="190" x2="222" y2="196"/>
 <line class="tick" x1="294" y1="190" x2="294" y2="196"/>
@@ -532,7 +506,7 @@ async fn main() -> Result<(), CanoError> {
 <text class="t-mut" x="582" y="210">18:00</text>
 <text class="t-mut" x="654" y="210">21:00</text>
 <text class="t-mut" x="726" y="210">24:00</text>
-<text class="t-mut" x="438" y="234">one scheduler, three trigger sources — interval, cron, and on-demand</text>
+<text class="t-mut" x="438" y="234">One scheduler, three trigger sources: interval, cron and on demand</text>
 </svg>
 </div>
 </div>
@@ -645,31 +619,30 @@ async fn main() -> Result<(), CanoError> {
 ```
 
 <div class="callout callout-tip">
-<p>Runnable example: <code>cargo run --example scheduler_mixed_workflows --features scheduler</code> —
-interval, cron, and manual flows side by side, plus a <code>trigger</code> on the manual one.</p>
+<p>Runnable example: <code>cargo run --example scheduler_mixed_workflows --features scheduler</code>.
+It runs interval, cron, and manual flows side by side and triggers the manual one.</p>
 </div>
 <hr class="section-divider">
 
-<h2 id="backoff-guide"><a href="#backoff-guide" class="anchor-link" aria-hidden="true">#</a>Backoff &amp; Trip State</h2>
-<p>When a scheduled flow keeps failing, the scheduler backs it off and can trip it. How that works,
-how to override the policy, the <code>Status</code> variants, and how to recover a tripped flow live
-on a dedicated page:</p>
-<ul>
-<li><a href="backoff-and-trip/">Scheduler Backoff, Trip State &amp; Recovery</a></li>
-</ul>
+<h2 id="backoff-guide"><a href="#backoff-guide" class="anchor-link" aria-hidden="true">#</a>Backoff and trip state</h2>
+<p>A flow that keeps failing is backed off and can be tripped. The
+<a href="backoff-and-trip/">backoff and trip page</a> covers the policy, the <code>Status</code> variants,
+and how to recover a tripped flow.</p>
 <hr class="section-divider">
 
-<h2 id="cancellation"><a href="#cancellation" class="anchor-link" aria-hidden="true">#</a>Cancelling a Flow</h2>
+<h2 id="cancellation"><a href="#cancellation" class="anchor-link" aria-hidden="true">#</a>Cancelling a flow</h2>
 <p>
-<code>RunningScheduler::cancel_flow(id)</code> requests cooperative cancellation of a flow's in-flight
-run and returns immediately. The run's <code>CancellationToken</code> fires: the running workflow aborts at
-its next await point, its <a href="../saga/">saga compensation stack</a> drains (rolling back completed
-steps), and the flow returns to <code>Status::Idle</code>. A <code>CompensatableTask</code> that is
-mid-run is never interrupted, and the compensation drain itself always completes. A deliberate cancel is
-<strong>not</strong> counted as a failure against the
-<a href="#backoff-guide">BackoffPolicy</a> — the streak is left untouched and the flow never trips, so
-its next scheduled run fires normally. Cancelling a flow that isn't currently running is an idempotent
-no-op; an unknown id is an error. Use <code>wait_idle</code> to wait for the run to wind down.
+<code>RunningScheduler::cancel_flow(id)</code> asks the flow's in-flight run to stop and returns at once.
+The run's <code>CancellationToken</code> fires, the workflow stops at its next await point, its
+<a href="../saga/">saga compensation stack</a> rolls back the completed steps, and the flow returns to
+<code>Status::Idle</code>. A <code>CompensatableTask</code> that is mid-run is never interrupted, and the
+compensation drain always completes. A cancelled run that rolls back cleanly does not count as a failure:
+the streak and any backoff window stay as they were. If a compensator fails, the run ends with
+<code>CompensationFailed</code> and is handled as a failure (backoff or trip).
+</p>
+<p>
+Cancelling a flow that is not running is a no-op; an unknown id is an error. Use <code>wait_idle</code> to
+wait for the run to wind down.
 </p>
 
 ```rust
@@ -682,27 +655,62 @@ assert_eq!(info.status, Status::Idle);
 ```
 
 <div class="callout callout-tip">
-<p>Runnable example: <code>cargo run --example scheduler_cancellation --features scheduler</code> —
-triggers a saga, cancels it mid-flight, and watches the compensators roll back in reverse.</p>
+<p>Runnable example: <code>cargo run --example scheduler_cancellation --features scheduler</code>.
+It triggers a saga, cancels it mid-flight, and watches the compensators roll back in reverse.</p>
 </div>
 <hr class="section-divider">
 
-<h2 id="graceful-shutdown"><a href="#graceful-shutdown" class="anchor-link" aria-hidden="true">#</a>Graceful Shutdown</h2>
+<h2 id="graceful-shutdown"><a href="#graceful-shutdown" class="anchor-link" aria-hidden="true">#</a>Graceful shutdown</h2>
 <p>
 <code>stop()</code> shuts the scheduler down in bounded time. Every flow goes through each phase together,
-so the worst case is the two timeouts plus teardown, no matter how many flows are registered.
+so the worst case is the two timeouts plus teardown, however many flows are registered. When every run
+finishes during the drain or the cancel phase, the later phases are skipped and teardown follows.
 </p>
+<div class="diagram-frame">
+<p class="diagram-label">Stop sequence</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 44 780 173" role="img" aria-labelledby="sched-stop-title sched-stop-desc">
+<title id="sched-stop-title">Stop sequence</title>
+<desc id="sched-stop-desc">stop() runs four phases in order. Drain stops dispatching and waits up to the drain timeout, 20 seconds by default, for in-flight runs to finish. If runs remain, Cancel fires every run's token and waits up to the cancel timeout, 5 seconds by default. If runs still remain, Abort drops them, returns their flows to Idle, and makes stop return a timeout error. Teardown then runs every flow's resource teardown in reverse registration order. When every run has finished during Drain or Cancel, the sequence skips ahead to Teardown.</desc>
+<defs><marker id="sched-stop-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<circle class="n" cx="14" cy="98" r="5"/>
+<path class="e" d="M21,98 H36" marker-end="url(#sched-stop-ah)"/>
+<rect class="n" x="40" y="60" width="150" height="76" rx="12"/>
+<text class="t-strong" x="115" y="84">Drain</text>
+<text class="t-mut" x="115" y="104">stops dispatching</text>
+<text class="t-mut" x="115" y="122">waits for runs, 20s</text>
+<path class="e" d="M190,98 H226" marker-end="url(#sched-stop-ah)"/>
+<rect class="n-warn" x="230" y="60" width="150" height="76" rx="12"/>
+<text class="t-strong" x="305" y="84">Cancel</text>
+<text class="t-mut" x="305" y="104">fires run tokens</text>
+<text class="t-mut" x="305" y="122">waits for runs, 5s</text>
+<path class="e" d="M380,98 H416" marker-end="url(#sched-stop-ah)"/>
+<rect class="n-err" x="420" y="60" width="150" height="76" rx="12"/>
+<text class="t-strong" x="495" y="84">Abort</text>
+<text class="t-mut" x="495" y="104">drops what is left</text>
+<text class="t-mut" x="495" y="122">flows go Idle, Err</text>
+<path class="e" d="M570,98 H606" marker-end="url(#sched-stop-ah)"/>
+<rect class="n-ok" x="610" y="60" width="150" height="76" rx="12"/>
+<text class="t-strong" x="685" y="84">Teardown</text>
+<text class="t-mut" x="685" y="104">resources, reverse</text>
+<text class="t-mut" x="685" y="122">registration order</text>
+<path class="e e-dash" d="M115,136 V164 Q115,172 123,172 H677 Q685,172 685,164 V140" marker-end="url(#sched-stop-ah)"/>
+<path class="e e-dash" d="M305,136 V172"/>
+<text class="t-mut" x="400" y="194">every run finished: the later phases are skipped</text>
+</svg>
+</div>
+</div>
 <ol>
-<li><strong>Drain</strong> — stop dispatching (the interval and cron loops exit, <code>trigger</code> is
-rejected) and wait up to the drain timeout for in-flight runs to finish on their own. Default 20 seconds,
-set with <code>with_drain_timeout</code>.</li>
-<li><strong>Cancel</strong> — fire every in-flight run's <code>CancellationToken</code> and wait up to the
-cancel timeout. Cancelled runs abort at their next await and drain their saga compensation stacks.
-Default 5 seconds, set with <code>with_cancel_timeout</code>.</li>
-<li><strong>Abort</strong> — drop whatever is still running, return those flows to <code>Status::Idle</code>,
-and make <code>stop()</code> return a timeout error that names the aborted flows.</li>
-<li><strong>Teardown</strong> — run every flow's resource <code>teardown</code> in reverse registration
-order. This happens on every path, including after an abort.</li>
+<li>Drain: stop dispatching (the interval and cron loops exit, <code>trigger</code> is rejected) and wait up
+to the drain timeout for in-flight runs to finish on their own. The default is 20 seconds; set it with
+<code>with_drain_timeout</code>.</li>
+<li>Cancel: fire every in-flight run's <code>CancellationToken</code> and wait up to the cancel timeout.
+Cancelled runs abort at their next await and drain their saga compensation stacks. The default is 5
+seconds; set it with <code>with_cancel_timeout</code>.</li>
+<li>Abort: drop whatever is still running, return those flows to <code>Status::Idle</code>, and make
+<code>stop()</code> return a timeout error that names the aborted flows.</li>
+<li>Teardown: run every flow's resource <code>teardown</code> in reverse registration order. This happens on
+every path, including after an abort.</li>
 </ol>
 
 ```rust
@@ -736,37 +744,26 @@ whole drain timeout before the cancel phase reaches it. A scheduler that hosts s
 </p>
 
 <div class="callout callout-tip">
-<p>Runnable example: <code>cargo run --example scheduler_graceful_shutdown --features scheduler</code> —
-waits for Ctrl-C (or SIGTERM on Unix) with <code>shutdown_signal()</code>, then calls <code>stop()</code>
-and shuts down cleanly while flows are running.</p>
+<p>Runnable example: <code>cargo run --example scheduler_graceful_shutdown --features scheduler</code>.
+It waits for Ctrl-C (or SIGTERM on Unix) with <code>shutdown_signal()</code>, then calls <code>stop()</code>
+while flows are running.</p>
 </div>
 <hr class="section-divider">
 
-
-<h2 id="multi-level-map-reduce"><a href="#multi-level-map-reduce" class="anchor-link" aria-hidden="true">#</a>Advanced Pattern: Multi-Level Map-Reduce</h2>
+<h2 id="multi-level-map-reduce"><a href="#multi-level-map-reduce" class="anchor-link" aria-hidden="true">#</a>Multi-level map-reduce</h2>
 <p>
-The scheduler composes naturally with <a href="../split-join/">split/join</a> to give you
-a two-level map-reduce. <strong>Level 1</strong> lives inside a single workflow: a state registered with
-<code>register_split</code> fans a batch out across parallel tasks, and a <code>JoinConfig</code> reduces
-their results back into one summary state. <strong>Level 2</strong> lives at the scheduler: register several
-of those batch workflows — each with different parameters (a different batch of records, a different region,
-a different tenant) — as <code>manual</code> flows or interval flows, and trigger them concurrently. Because
-every workflow carries its own <a href="../resources/"><code>Resources</code></a> dictionary, you hand each
-one a shared accumulator (an <code>Arc&lt;RwLock&lt;…&gt;&gt;</code> wrapped in a <code>Resource</code>); every
-batch independently appends its summary, and a final reduce step folds them together.
+The scheduler combines with <a href="../split-join/">split/join</a> into a two-level map-reduce. Level 1
+lives inside one workflow: a state registered with <code>register_split</code> fans a batch out across
+parallel tasks, and a <code>JoinConfig</code> (for example <code>JoinStrategy::All</code> or
+<code>Percentage(0.75)</code>) reduces their results into one summary state. Level 2 lives at the
+scheduler: several such batch workflows, each with its own parameters, run as <code>manual</code> or
+interval flows and are triggered concurrently. Each workflow carries its own
+<a href="../resources/"><code>Resources</code></a>, so a shared accumulator (an
+<code>Arc&lt;RwLock&lt;…&gt;&gt;</code> wrapped in a <code>Resource</code>) lets every batch append its
+summary for a final reduce.
 </p>
 
-<ul>
-<li><strong>Map (level 1)</strong> — <code>register_split</code> runs N tasks over a batch in parallel.</li>
-<li><strong>Reduce (level 1)</strong> — <code>JoinConfig</code> (e.g. <code>JoinStrategy::All</code> or
-<code>Percentage(0.75)</code>) merges the parallel results into a single batch summary.</li>
-<li><strong>Map (level 2)</strong> — the scheduler holds several batch workflows and fires them concurrently
-via <code>trigger</code> (or on intervals), each with its own parameters and <code>Resources</code>.</li>
-<li><strong>Reduce (level 2)</strong> — a shared accumulator resource collects every batch summary; once all
-flows finish, a final pass aggregates across batches.</li>
-</ul>
-
-<p>The skeleton — one batch workflow with a parallel state, plus a scheduler wiring up a couple of batches:</p>
+<p>The skeleton: one batch workflow with a parallel state, and a scheduler wiring up two batches.</p>
 
 ```rust
 // Level 1: a workflow that map-reduces over one batch.
@@ -800,9 +797,9 @@ running.stop().await?;
 
 <div class="callout callout-tip">
 <p>
-The full runnable program is <code>examples/scheduler_mapreduce_books.rs</code> —
-<code>cargo run --example scheduler_mapreduce_books --features scheduler</code>. It downloads several books
-from Project Gutenberg, splits download + analysis across parallel tasks within each batch workflow, runs
+The full runnable program is <code>examples/scheduler_mapreduce_books.rs</code>
+(<code>cargo run --example scheduler_mapreduce_books --features scheduler</code>). It downloads several books
+from Project Gutenberg, splits download and analysis across parallel tasks within each batch workflow, runs
 multiple batch workflows concurrently, and reduces all results into global rankings. See also
 <code>examples/scheduler_book_prepositions.rs</code> for the single-workflow variant.</p>
 </div>

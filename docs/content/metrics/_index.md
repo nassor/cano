@@ -12,81 +12,76 @@ template = "section.html"
 <div class="callout callout-info">
 <span class="callout-label">See also</span>
 <p>This page covers Cano's built-in <code>metrics</code> instrumentation and the <code>MetricsObserver</code>.
-For the synchronous callback API (<code>WorkflowObserver</code>) that <code>MetricsObserver</code> builds on,
-see <a href="../observers/">Observers</a>. For <code>tracing</code>-crate span instrumentation, the
-sibling observability feature, see <a href="../tracing/">Tracing</a>.</p>
+For the callback API (<code>WorkflowObserver</code>) that <code>MetricsObserver</code> builds on,
+see <a href="../observers/">Observers</a>. For <code>tracing</code>-crate span instrumentation, see
+<a href="../tracing/">Tracing</a>.</p>
 </div>
 
 <nav class="page-toc" aria-label="Table of contents">
 <div class="page-toc-title">On this page</div>
 <ol>
 <li><a href="#setup">Setup</a></li>
-<li><a href="#two-surfaces">Two Surfaces</a></li>
-<li><a href="#what-gets-measured">What Gets Measured</a></li>
-<li><a href="#describe">Registering Descriptions</a></li>
+<li><a href="#two-surfaces">Two surfaces</a></li>
+<li><a href="#what-gets-measured">What gets measured</a></li>
+<li><a href="#describe">Registering descriptions</a></li>
 <li><a href="#cardinality">Cardinality</a></li>
 <li><a href="#cost">Cost</a></li>
-<li><a href="#correlating-traces">Correlating with Traces</a></li>
-<li><a href="#full-example">Full Example</a></li>
+<li><a href="#correlating-traces">Correlating with traces</a></li>
+<li><a href="#full-example">Full example</a></li>
 </ol>
 </nav>
 
 <p>
-Cano provides optional metrics instrumentation through the <code>metrics</code> feature using the
-<a href="https://docs.rs/metrics/latest/metrics/" target="_blank">metrics</a> facade crate.
-The <code>metrics</code> crate is recorder-agnostic: you install any compatible exporter
-(Prometheus, StatsD, a debugging snapshotter, …) and Cano emits to it. All instrumentation is
-behind conditional compilation — zero overhead when the feature is disabled.
+This page is a reference for the metrics Cano emits, with a short how-to for installing a recorder.
+Cano uses the <a href="https://docs.rs/metrics/latest/metrics/" target="_blank">metrics</a> facade
+crate, so you install any compatible exporter (Prometheus, StatsD, a debugging snapshotter) and Cano
+emits to it. All instrumentation is behind conditional compilation, so it costs nothing when the
+feature is off.
 </p>
 
 <p>
-For a callback-style API — get notified on workflow lifecycle and failure events without depending
-on the <code>metrics</code> ecosystem — see <a href="../observers/">Observers</a>. The
-<code>metrics</code> feature ships a ready-made <code>MetricsObserver</code> that bridges the two:
-attach it with <code>.with_observer(Arc::new(MetricsObserver::new()))</code> to re-emit those
-observer hooks as <code>metrics</code>-crate counters.
+To get callbacks on lifecycle and failure events without depending on the <code>metrics</code>
+ecosystem, see <a href="../observers/">Observers</a>. Attach
+<code>.with_observer(Arc::new(MetricsObserver::new()))</code> to re-emit those hooks as
+<code>metrics</code> counters.
 </p>
 <hr class="section-divider">
 
 <h2 id="setup"><a href="#setup" class="anchor-link" aria-hidden="true">#</a>Setup</h2>
-<p>Enable the <code>metrics</code> feature flag in your <code>Cargo.toml</code>. You can also use
-<code>features = ["all"]</code> to enable everything (<code>scheduler</code> + <code>tracing</code> +
-<code>recovery</code> + <code>metrics</code>) at once.</p>
+<p>Enable the <code>metrics</code> feature in your <code>Cargo.toml</code>. <code>features = ["all"]</code>
+enables every optional feature (<code>scheduler</code>, <code>tracing</code>, <code>recovery</code>,
+<code>metrics</code> and <code>testing</code>).</p>
 
 ```toml
 [dependencies]
 cano = { version = "0.15", features = ["metrics"] }
 
-# The metrics crate is a facade — you also need a recorder/exporter:
-metrics-exporter-prometheus = "0.16"  # for production
-# or: metrics-util = "0.18"           # for testing / debugging snapshots
-
-# Or enable everything (scheduler + tracing + recovery + metrics):
-# cano = { version = "0.15", features = ["all"] }
-
+# The metrics crate is a facade, so you also need a recorder or exporter:
+metrics-exporter-prometheus = "0.18"  # for production
+# or: metrics-util = "0.20"           # for testing and debugging snapshots
 ```
 
 <p>
-Because <code>metrics</code> is a facade, Cano only depends on the shared interface. Your application
-picks the concrete recorder (e.g. <code>metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()</code>
-for a Prometheus scrape endpoint, or <code>metrics_util::debugging::DebuggingRecorder</code> in tests).
-Call <code>cano::metrics::describe()</code> once, after installing your recorder, so exporters receive
-help text and units.
+Your application picks the concrete recorder: for example
+<code>metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()</code> for a Prometheus
+scrape endpoint, or <code>metrics_util::debugging::DebuggingRecorder</code> in tests. Call
+<code>cano::metrics::describe()</code> once, after installing the recorder, so exporters receive help
+text and units.
 </p>
 <hr class="section-divider">
 
-<h2 id="two-surfaces"><a href="#two-surfaces" class="anchor-link" aria-hidden="true">#</a>Two Surfaces</h2>
+<h2 id="two-surfaces"><a href="#two-surfaces" class="anchor-link" aria-hidden="true">#</a>Two surfaces</h2>
 <p>
-The <code>metrics</code> feature exposes instrumentation through two complementary surfaces, mirroring how
-<a href="../tracing/">Tracing</a> pairs engine spans with the <code>TracingObserver</code> bridge.
+The feature has two surfaces, mirroring how <a href="../tracing/">Tracing</a> pairs engine spans with
+the <code>TracingObserver</code> bridge.
 </p>
 
 <div class="card-stack">
 <div class="card">
-<h3 id="metrics-observer"><a href="#metrics-observer" class="anchor-link" aria-hidden="true">#</a><code>MetricsObserver</code> — opt-in lifecycle counters</h3>
+<h3 id="metrics-observer"><a href="#metrics-observer" class="anchor-link" aria-hidden="true">#</a><code>MetricsObserver</code>: opt-in lifecycle counters</h3>
 <p>
-<code>MetricsObserver</code> is a <code>WorkflowObserver</code> that re-emits the observer hooks as
-<code>metrics</code>-crate counters. Wire it up in one line:
+<code>MetricsObserver</code> is a <code>WorkflowObserver</code> that re-emits observer hooks as
+<code>metrics</code> counters. It is in the prelude behind the <code>metrics</code> feature.
 </p>
 
 ```rust
@@ -99,73 +94,73 @@ Workflow::bare()
     .with_observer(Arc::new(MetricsObserver::new()))
 ```
 
-<p>It emits these counters (each incremented on the corresponding observer hook):</p>
+<p>Each metric below is emitted by the hook named after the colon:</p>
 <ul>
-<li><code>cano_state_enters_total{state}</code> — on <code>on_state_enter</code></li>
-<li><code>cano_observed_task_runs_total{task, outcome}</code> — on <code>on_task_success</code> / <code>on_task_failure</code> (<code>outcome</code> ∈ <code>completed</code>|<code>failed</code>)</li>
-<li><code>cano_task_retries_total{task}</code> — on <code>on_retry</code></li>
-<li><code>cano_circuit_open_events_total{task}</code> — on <code>on_circuit_open</code></li>
-<li><code>cano_checkpoints_observed_total</code> — on <code>on_checkpoint</code></li>
-<li><code>cano_resumes_total</code> — on <code>on_resume</code></li>
-<li><code>cano_observed_cancellations_total</code> — on <code>on_cancelled</code> (run cancelled via a <code>CancellationToken</code>)</li>
+<li><code>cano_state_enters_total{state}</code>: <code>on_state_enter</code></li>
+<li><code>cano_observed_task_runs_total{task, outcome}</code>: <code>on_task_success</code> and <code>on_task_failure</code>, with <code>outcome</code> of <code>completed</code> or <code>failed</code></li>
+<li><code>cano_task_retries_total{task}</code>: <code>on_retry</code></li>
+<li><code>cano_circuit_open_events_total{task}</code>: <code>on_circuit_open</code></li>
+<li><code>cano_checkpoints_observed_total</code>: <code>on_checkpoint</code></li>
+<li><code>cano_resumes_total</code>: <code>on_resume</code></li>
+<li><code>cano_observed_workflow_timeouts_total</code>: <code>on_workflow_timeout</code></li>
+<li><code>cano_observed_workflow_timeout_limit_seconds</code> and <code>cano_observed_workflow_timeout_elapsed_seconds</code>: histograms recorded by <code>on_workflow_timeout</code></li>
+<li><code>cano_observed_cancellations_total</code>: <code>on_cancelled</code>, a run cancelled through a <code>CancellationToken</code></li>
+<li><code>cano_observed_unknown_resume_states_total</code>: <code>on_unknown_resume_state</code></li>
 </ul>
 <p>
-<code>on_task_start</code> is intentionally <em>not</em> counted — every dispatch already shows up in
-<code>cano_observed_task_runs_total{outcome}</code>, so a separate "start" counter would just be the
-sum of the <code>completed</code> and <code>failed</code> rows.
-</p>
-<p>
-<code>MetricsObserver</code> is in the prelude behind the <code>metrics</code> feature — no extra import needed
-when you use <code>use cano::prelude::*</code>.
+<code>on_task_start</code> emits nothing: <code>cano_observed_task_runs_total</code> already counts every
+dispatch by outcome. <code>on_checkpoint_clear_failed</code> emits nothing either, because
+<code>cano_checkpoint_clears_total{result="err"}</code> already counts each failed clear.
 </p>
 </div>
 <div class="card">
-<h3 id="always-on"><a href="#always-on" class="anchor-link" aria-hidden="true">#</a>Always-on direct instrumentation — engine internals</h3>
+<h3 id="always-on"><a href="#always-on" class="anchor-link" aria-hidden="true">#</a>Always-on direct instrumentation</h3>
 <p>
-Compiled in whenever the <code>metrics</code> feature is on, regardless of whether a
-<code>MetricsObserver</code> is attached. Covers engine internals the observer hooks do not reach:
-workflow run duration, circuit-breaker state transitions, per-attempt retry-loop outcomes,
-poll/batch/step iteration counts, scheduler flow telemetry, and checkpoint store operations.
-See <a href="#what-gets-measured">What Gets Measured</a> for the full list.
+Compiled in whenever the <code>metrics</code> feature is on, whether or not a
+<code>MetricsObserver</code> is attached. It covers engine internals the observer hooks do not reach:
+workflow run duration, circuit breaker state transitions, per-attempt retry loop outcomes,
+poll, batch and step iteration counts, scheduler flow telemetry, and checkpoint store operations.
+See <a href="#what-gets-measured">What gets measured</a> for the list.
 </p>
 </div>
 </div>
 <hr class="section-divider">
 
-<h2 id="what-gets-measured"><a href="#what-gets-measured" class="anchor-link" aria-hidden="true">#</a>What Gets Measured</h2>
+<h2 id="what-gets-measured"><a href="#what-gets-measured" class="anchor-link" aria-hidden="true">#</a>What gets measured</h2>
 <p>
-Histograms record raw <code>f64</code> seconds samples — bucketing and quantile computation are the
-exporter's responsibility. Metric names follow <code>metrics</code>-crate underscore conventions.
+Histograms record raw <code>f64</code> seconds. Bucketing and quantiles are the exporter's job. Metric
+names follow the <code>metrics</code> crate's underscore convention.
 </p>
 
 <div class="diagram-frame">
 <p class="diagram-label">Where the counters fire along one run</p>
 <div class="cd-wrap">
-<svg class="cd" viewBox="0 0 780 510" role="img">
-<title>Emission points along a single workflow run: entering orchestrate, entering a state, acquiring the resilience guards, each retry-loop attempt, the split join and the exit state each emit their counters and histograms into the metrics facade, which forwards them to whatever recorder the application installed.</title>
-<defs><marker id="emit-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<svg class="cd" viewBox="0 0 780 510" role="img" aria-labelledby="metrics-emit-title metrics-emit-desc">
+<title id="metrics-emit-title">Emission points along one workflow run</title>
+<desc id="metrics-emit-desc">Six steps of a run listed top to bottom, each with a metric it emits into the metrics facade, which forwards to the recorder your application installed. Calling orchestrate sets the cano_workflow_active gauge. Entering a state increments cano_state_enters_total, which needs the MetricsObserver. Acquiring the circuit breaker and rate limiter increments cano_circuit_acquires_total and cano_rate_limiter_throttled_total. Each task attempt inside the retry loop increments cano_task_attempts_total, and each retry increments cano_task_retries_total, which needs the MetricsObserver. A split and join increments cano_split_branch_results_total. Reaching the exit state records cano_workflow_runs_total and cano_workflow_duration_seconds.</desc>
+<defs><marker id="metrics-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
 <text class="t-mut" x="110" y="34">one run, top to bottom</text>
 <text class="t-mut" x="556" y="34">emit point</text>
-<path class="e" d="M200,82 H592" marker-end="url(#emit-ah)"/>
+<path class="e" d="M200,82 H592" marker-end="url(#metrics-ah)"/>
 <text class="t-code t-mut" x="380" y="66">cano_workflow_active</text>
-<path class="e" d="M200,150 H592" marker-end="url(#emit-ah)"/>
+<path class="e" d="M200,150 H592" marker-end="url(#metrics-ah)"/>
 <text class="t-code t-mut" x="380" y="134">cano_state_enters_total{state}</text>
-<path class="e" d="M200,218 H592" marker-end="url(#emit-ah)"/>
+<path class="e" d="M200,218 H592" marker-end="url(#metrics-ah)"/>
 <text class="t-code t-mut" x="380" y="185">cano_circuit_acquires_total{result}</text>
 <text class="t-code t-mut" x="380" y="202">cano_rate_limiter_throttled_total{result}</text>
-<path class="e" d="M200,286 H592" marker-end="url(#emit-ah)"/>
+<path class="e" d="M200,286 H592" marker-end="url(#metrics-ah)"/>
 <text class="t-code t-mut" x="380" y="253">cano_task_attempts_total{outcome}</text>
 <text class="t-code t-mut" x="380" y="270">cano_task_retries_total{task}</text>
-<path class="e" d="M200,354 H592" marker-end="url(#emit-ah)"/>
+<path class="e" d="M200,354 H592" marker-end="url(#metrics-ah)"/>
 <text class="t-code t-mut" x="380" y="338">cano_split_branch_results_total{result}</text>
-<path class="e" d="M200,422 H592" marker-end="url(#emit-ah)"/>
+<path class="e" d="M200,422 H592" marker-end="url(#metrics-ah)"/>
 <text class="t-code t-mut" x="380" y="389">cano_workflow_runs_total{outcome}</text>
 <text class="t-code t-mut" x="380" y="406">cano_workflow_duration_seconds{outcome}</text>
-<path class="e e-dim" d="M110,106 V122" marker-end="url(#emit-ah)"/>
-<path class="e e-dim" d="M110,174 V190" marker-end="url(#emit-ah)"/>
-<path class="e e-dim" d="M110,242 V258" marker-end="url(#emit-ah)"/>
-<path class="e e-dim" d="M110,310 V326" marker-end="url(#emit-ah)"/>
-<path class="e e-dim" d="M110,378 V394" marker-end="url(#emit-ah)"/>
+<path class="e e-dim" d="M110,106 V122" marker-end="url(#metrics-ah)"/>
+<path class="e e-dim" d="M110,174 V190" marker-end="url(#metrics-ah)"/>
+<path class="e e-dim" d="M110,242 V258" marker-end="url(#metrics-ah)"/>
+<path class="e e-dim" d="M110,310 V326" marker-end="url(#metrics-ah)"/>
+<path class="e e-dim" d="M110,378 V394" marker-end="url(#metrics-ah)"/>
 <rect class="n" x="20" y="58" width="180" height="48" rx="10"/>
 <text class="t-code" x="110" y="83">orchestrate()</text>
 <rect class="n" x="20" y="126" width="180" height="48" rx="10"/>
@@ -190,8 +185,8 @@ exporter's responsibility. Metric names follow <code>metrics</code>-crate unders
 <rect class="n-cop" x="600" y="58" width="160" height="388" rx="12"/>
 <text class="t-strong" x="680" y="242">metrics facade</text>
 <text class="t-mut" x="680" y="264">&rarr; your recorder</text>
-<text class="t-mut" x="390" y="470">Dots mark emission points. Recovery, scheduler and poll/batch/step loop counters emit on the same rail.</text>
-<text class="t-mut" x="390" y="490">MetricsObserver supplies the state and retry counters; the rest is always-on engine instrumentation.</text>
+<text class="t-mut" x="390" y="470">Dots mark emission points. Recovery, scheduler and poll, batch and step counters emit on the same rail.</text>
+<text class="t-mut" x="390" y="490">MetricsObserver supplies the state and retry counters. The rest is always-on engine instrumentation.</text>
 </svg>
 </div>
 </div>
@@ -200,87 +195,87 @@ exporter's responsibility. Metric names follow <code>metrics</code>-crate unders
 <div class="card">
 <h3>Workflow</h3>
 <ul>
-<li><code>cano_workflow_runs_total{outcome}</code> — counter; <code>outcome</code> ∈ <code>completed</code>|<code>failed</code>|<code>timeout</code></li>
-<li><code>cano_workflow_duration_seconds{outcome}</code> — histogram (seconds)</li>
-<li><code>cano_workflow_active</code> — gauge; workflows currently executing</li>
+<li><code>cano_workflow_runs_total{outcome}</code>: counter; <code>outcome</code> is <code>completed</code> or <code>failed</code>. A run that trips its total timeout counts as <code>failed</code>.</li>
+<li><code>cano_workflow_duration_seconds{outcome}</code>: histogram (seconds)</li>
+<li><code>cano_workflow_active</code>: gauge; workflows currently executing</li>
 </ul>
 </div>
 <div class="card">
-<h3>Task Dispatch</h3>
+<h3>Task dispatch</h3>
 <ul>
-<li><code>cano_task_duration_seconds{state, kind}</code> — histogram (seconds); <code>kind</code> ∈ <code>single</code>|<code>router</code>|<code>split</code>|<code>compensatable</code>|<code>stepped</code>|<code>stream</code></li>
-<li><code>cano_task_attempts_total{outcome}</code> — counter; per-attempt inside the retry loop; <code>outcome</code> ∈ <code>completed</code>|<code>failed</code></li>
-<li><code>cano_circuit_rejections_total</code> — counter; attempts short-circuited by an open breaker</li>
+<li><code>cano_task_duration_seconds{state, kind}</code>: histogram (seconds); <code>kind</code> is <code>single</code>, <code>router</code>, <code>split</code>, <code>compensatable</code>, <code>stepped</code> or <code>stream</code></li>
+<li><code>cano_task_attempts_total{outcome}</code>: counter; per attempt inside the retry loop; <code>outcome</code> is <code>completed</code> or <code>failed</code></li>
+<li><code>cano_circuit_rejections_total</code>: counter; attempts short-circuited by an open breaker</li>
 </ul>
 </div>
 <div class="card">
-<h3>Split / Join</h3>
+<h3>Split and join</h3>
 <ul>
-<li><code>cano_split_branch_results_total{result}</code> — counter; <code>result</code> ∈ <code>success</code>|<code>failure</code>|<code>cancelled</code></li>
+<li><code>cano_split_branch_results_total{result}</code>: counter; <code>result</code> is <code>success</code>, <code>failure</code> or <code>cancelled</code></li>
 </ul>
 </div>
 </div>
 
 <div class="card-stack">
 <div class="card">
-<h3 id="circuit-breaker-metrics"><a href="#circuit-breaker-metrics" class="anchor-link" aria-hidden="true">#</a>Circuit Breaker</h3>
+<h3 id="circuit-breaker-metrics"><a href="#circuit-breaker-metrics" class="anchor-link" aria-hidden="true">#</a>Circuit breaker</h3>
 <ul>
-<li><code>cano_circuit_transitions_total{transition}</code> — counter; <code>transition</code> ∈ <code>closed_to_open</code>|<code>open_to_halfopen</code>|<code>halfopen_to_closed</code>|<code>halfopen_to_open</code></li>
-<li><code>cano_circuit_acquires_total{result}</code> — counter; <code>result</code> ∈ <code>acquired</code>|<code>rejected</code></li>
-<li><code>cano_circuit_outcomes_total{outcome}</code> — counter; <code>outcome</code> ∈ <code>success</code>|<code>failure</code></li>
+<li><code>cano_circuit_transitions_total{transition}</code>: counter; <code>transition</code> is <code>closed_to_open</code>, <code>open_to_halfopen</code>, <code>halfopen_to_closed</code> or <code>halfopen_to_open</code></li>
+<li><code>cano_circuit_acquires_total{result}</code>: counter; <code>result</code> is <code>acquired</code> or <code>rejected</code></li>
+<li><code>cano_circuit_outcomes_total{outcome}</code>: counter; <code>outcome</code> is <code>success</code> or <code>failure</code></li>
 </ul>
 </div>
 <div class="card">
-<h3 id="rate-limiter-metrics"><a href="#rate-limiter-metrics" class="anchor-link" aria-hidden="true">#</a>Rate Limiter</h3>
+<h3 id="rate-limiter-metrics"><a href="#rate-limiter-metrics" class="anchor-link" aria-hidden="true">#</a>Rate limiter</h3>
 <ul>
-<li><code>cano_rate_limiter_acquired_total</code> — counter; successful acquisitions (via <code>try_acquire</code> / <code>acquire</code> / their <code>_n</code> forms)</li>
-<li><code>cano_rate_limiter_tokens_consumed_total</code> — counter; weighted units consumed (sum of acquire <code>cost</code>s)</li>
-<li><code>cano_rate_limiter_throttled_total{result}</code> — counter; <code>result</code> ∈ <code>waited</code>|<code>rejected</code></li>
-<li><code>cano_rate_limiter_wait_seconds</code> — histogram (seconds); wall-clock time <code>acquire</code> blocked</li>
-<li><code>cano_multi_rate_limiter_throttled_total{tier}</code> — counter; <code>MultiRateLimiter</code> rejections, by the tier that blocked them</li>
+<li><code>cano_rate_limiter_acquired_total</code>: counter; successful acquisitions through <code>try_acquire</code>, <code>acquire</code> and their <code>_n</code> forms</li>
+<li><code>cano_rate_limiter_tokens_consumed_total</code>: counter; weighted units consumed (the sum of acquire costs)</li>
+<li><code>cano_rate_limiter_throttled_total{result}</code>: counter; <code>result</code> is <code>waited</code> or <code>rejected</code></li>
+<li><code>cano_rate_limiter_wait_seconds</code>: histogram (seconds); wall-clock time <code>acquire</code> blocked</li>
+<li><code>cano_multi_rate_limiter_throttled_total{tier}</code>: counter; <code>MultiRateLimiter</code> rejections, by the tier that blocked them</li>
 </ul>
 </div>
 <div class="card">
-<h3 id="processing-loops"><a href="#processing-loops" class="anchor-link" aria-hidden="true">#</a>Processing Loops</h3>
+<h3 id="processing-loops"><a href="#processing-loops" class="anchor-link" aria-hidden="true">#</a>Processing loops</h3>
 <ul>
-<li><code>cano_poll_iterations_total{outcome}</code> — counter; <code>outcome</code> ∈ <code>ready</code>|<code>pending</code></li>
-<li><code>cano_batch_runs_total{outcome}</code> — counter; <code>outcome</code> ∈ <code>completed</code>|<code>failed</code></li>
-<li><code>cano_batch_items_total{result}</code> — counter; <code>result</code> ∈ <code>ok</code>|<code>err</code></li>
-<li><code>cano_step_iterations_total{outcome}</code> — counter; <code>outcome</code> ∈ <code>more</code>|<code>done</code></li>
-<li><code>cano_stream_runs_total{outcome}</code> — counter; <code>outcome</code> ∈ <code>completed</code>|<code>cancelled</code>|<code>failed</code></li>
-<li><code>cano_stream_windows_total</code> — counter; windows flushed</li>
-<li><code>cano_stream_items_total{result}</code> — counter; <code>result</code> ∈ <code>ok</code>|<code>err</code></li>
+<li><code>cano_poll_iterations_total{outcome}</code>: counter; <code>outcome</code> is <code>ready</code> or <code>pending</code></li>
+<li><code>cano_batch_runs_total{outcome}</code>: counter; <code>outcome</code> is <code>completed</code> or <code>failed</code></li>
+<li><code>cano_batch_items_total{result}</code>: counter; <code>result</code> is <code>ok</code> or <code>err</code></li>
+<li><code>cano_step_iterations_total{outcome}</code>: counter; <code>outcome</code> is <code>more</code> or <code>done</code></li>
+<li><code>cano_stream_runs_total{outcome}</code>: counter; <code>outcome</code> is <code>completed</code>, <code>cancelled</code> or <code>failed</code></li>
+<li><code>cano_stream_windows_total</code>: counter; windows flushed</li>
+<li><code>cano_stream_items_total{result}</code>: counter; <code>result</code> is <code>ok</code> or <code>err</code></li>
 </ul>
 </div>
 <div class="card">
-<h3 id="recovery-saga-metrics"><a href="#recovery-saga-metrics" class="anchor-link" aria-hidden="true">#</a>Recovery &amp; Saga</h3>
+<h3 id="recovery-saga-metrics"><a href="#recovery-saga-metrics" class="anchor-link" aria-hidden="true">#</a>Recovery and saga</h3>
 <ul>
-<li><code>cano_checkpoint_appends_total{result}</code> — counter; <code>result</code> ∈ <code>ok</code>|<code>err</code></li>
-<li><code>cano_checkpoint_clears_total{result}</code> — counter; <code>result</code> ∈ <code>ok</code>|<code>err</code></li>
-<li><code>cano_compensations_run_total{result}</code> — counter; <code>result</code> ∈ <code>ok</code>|<code>err</code></li>
-<li><code>cano_compensation_drains_total{outcome}</code> — counter; <code>outcome</code> ∈ <code>clean</code>|<code>partial</code></li>
+<li><code>cano_checkpoint_appends_total{result}</code>: counter; <code>result</code> is <code>ok</code> or <code>err</code></li>
+<li><code>cano_checkpoint_clears_total{result}</code>: counter; <code>result</code> is <code>ok</code> or <code>err</code></li>
+<li><code>cano_compensations_run_total{result}</code>: counter; <code>result</code> is <code>ok</code> or <code>err</code></li>
+<li><code>cano_compensation_drains_total{outcome}</code>: counter; <code>outcome</code> is <code>clean</code> or <code>partial</code></li>
 </ul>
 </div>
 <div class="card">
 <h3 id="scheduler-metrics"><a href="#scheduler-metrics" class="anchor-link" aria-hidden="true">#</a>Scheduler</h3>
-<p class="feature-tag" style="margin-top: 0; margin-bottom: 0.5rem;">Also requires the <code>scheduler</code> feature.</p>
+<p class="feature-tag">Also requires the <code>scheduler</code> feature.</p>
 <ul>
-<li><code>cano_scheduler_flow_runs_total{flow, outcome}</code> — counter; <code>outcome</code> ∈ <code>completed</code>|<code>failed</code></li>
-<li><code>cano_scheduler_flow_duration_seconds{flow}</code> — histogram (seconds)</li>
-<li><code>cano_scheduler_flow_backoff_total{flow}</code> — counter</li>
-<li><code>cano_scheduler_flow_tripped_total{flow}</code> — counter</li>
-<li><code>cano_scheduler_active_flows</code> — gauge; flows currently executing</li>
-<li>Each scheduled run also records the workflow-level <code>cano_workflow_runs_total</code> and <code>cano_workflow_duration_seconds</code>, like a direct <code>orchestrate</code> call.</li>
+<li><code>cano_scheduler_flow_runs_total{flow, outcome}</code>: counter; <code>outcome</code> is <code>completed</code> or <code>failed</code></li>
+<li><code>cano_scheduler_flow_duration_seconds{flow}</code>: histogram (seconds)</li>
+<li><code>cano_scheduler_flow_backoff_total{flow}</code>: counter</li>
+<li><code>cano_scheduler_flow_tripped_total{flow}</code>: counter</li>
+<li><code>cano_scheduler_active_flows</code>: gauge; flows currently executing</li>
+<li>Each scheduled run also records <code>cano_workflow_runs_total</code> and <code>cano_workflow_duration_seconds</code>, like a direct <code>orchestrate</code> call.</li>
 </ul>
 </div>
 </div>
 <hr class="section-divider">
 
-<h2 id="describe"><a href="#describe" class="anchor-link" aria-hidden="true">#</a>Registering Descriptions</h2>
+<h2 id="describe"><a href="#describe" class="anchor-link" aria-hidden="true">#</a>Registering descriptions</h2>
 <p>
-<code>cano::metrics::describe()</code> registers a human-readable description and unit for every metric
-Cano emits. Call it once, after installing your recorder, so exporters receive help text in their
-output (e.g. Prometheus <code># HELP</code> / <code># TYPE</code> lines).
+<code>cano::metrics::describe()</code> registers a description and unit for every metric Cano emits.
+Call it once, after installing your recorder, so exporters include help text (for Prometheus, the
+<code># HELP</code> and <code># TYPE</code> lines).
 </p>
 
 ```rust
@@ -293,46 +288,45 @@ cano::metrics::describe();
 ```
 
 <p>
-If you skip <code>describe()</code>, metrics still flow — only the help text and units are missing
-from the exporter output.
+Without <code>describe()</code>, metrics still flow. Only the help text and units are missing from the
+exporter output.
 </p>
 <hr class="section-divider">
 
 <h2 id="cardinality"><a href="#cardinality" class="anchor-link" aria-hidden="true">#</a>Cardinality</h2>
 <p>
-Labels are deliberately minimal to keep cardinality bounded:
+Labels are minimal, which keeps cardinality bounded:
 </p>
 <ul>
-<li><code>state</code> — <code>format!("{:?}")</code> of your FSM state enum; bounded by registered states.</li>
-<li><code>task</code> — <code>Task::name()</code>, which defaults to <code>std::any::type_name</code>; bounded by registered task types.</li>
-<li><code>flow</code> — the scheduler flow id string; bounded by registered flows.</li>
-<li>All other label values (<code>outcome</code>, <code>kind</code>, <code>result</code>, <code>transition</code>) are fixed, bounded enum labels.</li>
+<li><code>state</code> is <code>format!("{:?}")</code> of your FSM state enum, bounded by the registered states.</li>
+<li><code>task</code> is <code>Task::name()</code>, which defaults to <code>std::any::type_name</code>, bounded by the registered task types.</li>
+<li><code>flow</code> is the scheduler flow id, bounded by the registered flows.</li>
+<li>All other label values (<code>outcome</code>, <code>kind</code>, <code>result</code>, <code>transition</code>, <code>tier</code>) come from fixed sets.</li>
 </ul>
 <p>
-The deepest hot-path metrics — per-attempt retry-loop counters (<code>cano_task_attempts_total</code>),
-circuit-breaker internals, and poll/batch/step iteration counters — carry no per-state label,
-keeping their cardinality constant regardless of how many states your workflow defines.
+The hot-path metrics carry no per-state label: per-attempt counters
+(<code>cano_task_attempts_total</code>), circuit breaker internals, and poll, batch and step iteration
+counters. Their cardinality stays constant however many states a workflow defines.
 </p>
 <hr class="section-divider">
 
 <h2 id="cost"><a href="#cost" class="anchor-link" aria-hidden="true">#</a>Cost</h2>
 <p>
-Compiling the <code>metrics</code> feature in adds a small, bounded per-state-transition cost (formatting
-the state label as a string for the <code>state</code> label) even when no recorder is installed. If
-you are building a latency-critical service that does not collect metrics, leave the feature off.
-Otherwise, when a recorder is installed, the overhead is the same as any other <code>metrics</code>-crate
-emission — a hash-map lookup plus atomic increment, comparable to a log line.
+With the <code>metrics</code> feature compiled in, every state transition formats the state label as a
+string, even when no recorder is installed. The cost is small and bounded, but a latency-critical
+service that collects no metrics should leave the feature off. With a recorder installed, each
+emission costs a hash-map lookup plus an atomic increment, comparable to a log line.
 </p>
 <hr class="section-divider">
 
-<h2 id="correlating-traces"><a href="#correlating-traces" class="anchor-link" aria-hidden="true">#</a>Correlating with Traces</h2>
+<h2 id="correlating-traces"><a href="#correlating-traces" class="anchor-link" aria-hidden="true">#</a>Correlating with traces</h2>
 <p>
-When you also enable the <a href="../tracing/"><code>tracing</code></a> feature, <code>metrics</code> and
-<code>tracing</code> interoperate through tracing <strong>spans</strong>: the
+With the <a href="../tracing/"><code>tracing</code></a> feature also on, <code>metrics</code> and
+<code>tracing</code> interoperate through spans. The
 <a href="https://docs.rs/metrics-tracing-context/" target="_blank"><code>metrics-tracing-context</code></a>
-crate makes any metric emitted <em>inside</em> a span inherit that span's fields as labels. This is
-wiring you do in your application — Cano never depends on <code>metrics-tracing-context</code> itself
-(the same posture it takes toward <code>tracing-subscriber</code>).
+crate makes any metric emitted inside a span inherit that span's fields as labels. You wire it up in
+your application. Cano never depends on it, in the same way it never depends on
+<code>tracing-subscriber</code>.
 </p>
 
 ```toml
@@ -340,7 +334,6 @@ wiring you do in your application — Cano never depends on <code>metrics-tracin
 cano = { version = "0.15", features = ["metrics", "tracing"] }
 metrics-tracing-context = "0.18"
 tracing-subscriber = "0.3"
-
 ```
 
 ```rust
@@ -358,45 +351,46 @@ tracing_subscriber::registry()
     .with(MetricsLayer::new())
     .with(tracing_subscriber::fmt::layer())
     .init();
-
 ```
 
 <p>
-With both layers installed, a span you attach to the <code>Workflow::orchestrate</code> future via
-<code>.instrument(span)</code> (<code>tracing::Instrument</code>; never hold <code>span.enter()</code> across
-the <code>.await</code>) — e.g.
-<code>info_span!("api_request", request_id = …)</code> — tags every <code>cano_*</code> metric recorded
-during that run with <code>request_id</code>. Cano's own default <code>workflow_orchestrate</code> and
-<code>workflow_resume</code> spans carry a <code>workflow_id</code> field whenever one is set via
-<code>with_workflow_id</code>, so that becomes a metric label too. Span fields are <em>merged</em> with
-the explicit labels Cano already attaches (<code>state</code>, <code>task</code>, <code>flow</code>,
-<code>outcome</code>, …) — Cano deliberately does not name any span field after an existing metric
-label, so there is no merge ambiguity.
+With both layers installed, a span attached to the <code>Workflow::orchestrate</code> future through
+<code>.instrument(span)</code> tags every <code>cano_*</code> metric recorded during that run. For
+example, <code>info_span!("api_request", request_id = "abc")</code> adds a <code>request_id</code>
+label. Use <code>tracing::Instrument</code>, and never hold a <code>span.enter()</code> guard across
+the <code>.await</code>.
+</p>
+<p>
+Cano's default <code>workflow_orchestrate</code> and <code>workflow_resume</code> spans carry a
+<code>workflow_id</code> field when <code>with_workflow_id</code> is set, so it becomes a label too.
+Span fields merge with the labels Cano already attaches (<code>state</code>, <code>task</code>,
+<code>flow</code>, <code>outcome</code>). No Cano span field reuses one of those names, so the merge is
+unambiguous.
 </p>
 
 <div class="callout callout-warning">
 <span class="callout-label">Cardinality</span>
 <p>
-<code>TracingContextLayer::all()</code> promotes <em>every</em> field of every entered span as a label —
-including Cano-internal span fields such as <code>max_attempts</code> from the retry-loop spans. For
-production, prefer <code>TracingContextLayer::new(filter)</code> with a <code>LabelFilter</code> that
-allow-lists just the fields you author, to keep metric cardinality bounded.
+<code>TracingContextLayer::all()</code> promotes every field of every entered span to a label,
+including Cano's own span fields such as <code>max_attempts</code> from the retry loop. In production,
+use <code>TracingContextLayer::new(filter)</code> with a <code>LabelFilter</code> that allow-lists the
+fields you author.
 </p>
 </div>
 
 <div class="callout callout-tip">
 <p>Runnable example: <code>cargo run --example metrics_tracing_context --features "metrics tracing"</code>
-— wires the two layers, runs a workflow under a <code>workflow_id</code> and another inside a user
-<code>api_request</code> span, and prints the captured metrics so you can see the <code>workflow_id</code>
-and <code>request_id</code> labels propagated purely from span context.</p>
+wires the two layers, runs a workflow under a <code>workflow_id</code> and another inside a user
+<code>api_request</code> span, and prints the captured metrics so you can see the
+<code>workflow_id</code> and <code>request_id</code> labels that came from span context.</p>
 </div>
 <hr class="section-divider">
 
-<h2 id="full-example"><a href="#full-example" class="anchor-link" aria-hidden="true">#</a>Full Example</h2>
+<h2 id="full-example"><a href="#full-example" class="anchor-link" aria-hidden="true">#</a>Full example</h2>
 <p>
-Install a <code>DebuggingRecorder</code> (useful for tests and self-contained demos), call
-<code>cano::metrics::describe()</code>, attach a <code>MetricsObserver</code>, run a workflow directly
-and then under the scheduler, then dump the captured snapshot. This mirrors the
+This program installs a <code>DebuggingRecorder</code> (useful in tests and self-contained demos),
+calls <code>cano::metrics::describe()</code>, attaches a <code>MetricsObserver</code>, runs a workflow
+directly and then under the scheduler, and dumps the captured snapshot. It mirrors the
 <code>metrics_demo</code> example shipped with the crate.
 </p>
 
@@ -457,7 +451,7 @@ async fn main() {
             .expect("workflow run");
     }
 
-    // 3. Run the same workflow under the scheduler for ~1.2s, firing every 1s.
+    // 3. Run the same workflow under the scheduler for about 1.2 s, firing every second.
     let running = Scheduler::new()
         .every("demo_flow", workflow(), Step::Fetch, Duration::from_secs(1))
         .start()
@@ -493,12 +487,11 @@ async fn main() {
         }
     }
 }
-
 ```
 </div>
 
 <div class="callout callout-tip">
-<p>Runnable example: <code>cargo run --example metrics_demo --features "metrics scheduler"</code> — installs a
+<p>Runnable example: <code>cargo run --example metrics_demo --features "metrics scheduler"</code> installs a
 <code>DebuggingRecorder</code>, attaches a <code>MetricsObserver</code>, runs a workflow and a scheduled
 flow, and prints every emitted metric. For a real Prometheus exporter, swap in
 <code>metrics_exporter_prometheus::PrometheusBuilder::new().install()</code> before

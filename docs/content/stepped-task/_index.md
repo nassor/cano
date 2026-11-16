@@ -6,26 +6,23 @@ template = "section.html"
 
 <div class="content-wrapper">
 <h1>SteppedTask</h1>
-<p class="subtitle">Resumable iterative work — checkpoint a cursor, resume mid-loop after a crash.</p>
+<p class="subtitle">Resumable iterative work: checkpoint a cursor, resume mid-loop after a crash.</p>
 
 <p>
 A <code>SteppedTask</code> does work in discrete steps. Each step takes the previous step's cursor and
-returns either "more work, here's the new cursor" or "done, here's the next state". When a
-<a href="../recovery/">checkpoint store</a> is attached, the engine persists that cursor after every
-step — so a crash mid-loop resumes from where it left off, not from step zero. It is one of the
+returns either "more work, here is the new cursor" or "done, here is the next state". When a
+<a href="../recovery/">checkpoint store</a> is attached, the engine persists the cursor after every
+step, so a crash mid-loop resumes from the last cursor instead of step zero. It is one of the
 <a href="../task/">Task</a> family of processing models, alongside
 <a href="../router-task/">RouterTask</a>, <a href="../poll-task/">PollTask</a>,
-<a href="../timer-task/">TimerTask</a>, <a href="../batch-task/">BatchTask</a>, and
-<a href="../stream-task/">StreamTask</a>, and it reads
-typed dependencies from
-<a href="../resources/">Resources</a> like the rest. New to Cano? Read
-<a href="../workflows/">Workflows</a> and <a href="../resources/">Resources</a> first; for the
-cursor-persistence half, <a href="../recovery/">Recovery</a>.
-
+<a href="../timer-task/">TimerTask</a>, <a href="../batch-task/">BatchTask</a> and
+<a href="../stream-task/">StreamTask</a>, and it reads typed dependencies from
+<a href="../resources/">Resources</a>. New to Cano? Read
+<a href="../workflows/">Workflows</a> and <a href="../resources/">Resources</a> first.
 </p>
 
 <div class="code-block">
-<span class="code-block-label">At a glance — each <code>step</code> returns <code>More(cursor)</code> or <code>Done(state)</code></span>
+<span class="code-block-label">At a glance: each <code>step</code> returns <code>More(cursor)</code> or <code>Done(state)</code></span>
 
 ```rust
 use cano::prelude::*;
@@ -56,12 +53,11 @@ impl ScanPages {
 </div>
 
 <div class="callout callout-info">
-<div class="callout-label">Key concept</div>
+<div class="callout-label">Granularity</div>
 <p>
-A <code>SteppedTask</code> gives you crash-resume granularity <em>finer than a workflow state</em>.
-A long job that would otherwise restart from the top after a crash instead restarts from its last
-persisted cursor — the page number, the offset, the continuation token. The price is idempotency:
-the step at and after the resume point may re-run.
+A <code>SteppedTask</code> resumes at a finer grain than a workflow state. A long job restarts from its
+last persisted cursor (a page number, an offset, a continuation token) instead of from the top. The
+cost is idempotency: the step at and after the resume point may run again.
 </p>
 </div>
 
@@ -69,25 +65,26 @@ the step at and after the resume point may re-run.
 <nav class="page-toc" aria-label="Table of contents">
 <div class="page-toc-title">On this page</div>
 <ol>
-<li><a href="#how-it-works">How the Step Loop Works</a></li>
-<li><a href="#quick-start">Quick Start with <code>#[task::stepped]</code></a></li>
-<li><a href="#registering">Registering a Stepped Task</a></li>
-<li><a href="#persistence">Cursor Persistence &amp; Resume</a></li>
-<li><a href="#idempotency">The Idempotency Contract</a></li>
-<li><a href="#explicit">Explicit Trait-Impl Form</a></li>
-<li><a href="#when-to-use">When to Use SteppedTask</a></li>
+<li><a href="#how-it-works">How the step loop works</a></li>
+<li><a href="#quick-start">Quick start with <code>#[task::stepped]</code></a></li>
+<li><a href="#registering">Registering a stepped task</a></li>
+<li><a href="#persistence">Cursor persistence and resume</a></li>
+<li><a href="#idempotency">The idempotency contract</a></li>
+<li><a href="#explicit">Explicit trait-impl form</a></li>
+<li><a href="#when-to-use">When to use SteppedTask</a></li>
 </ol>
 </nav>
 
 <!-- Section: how it works -->
 <hr class="section-divider">
-<h2 id="how-it-works"><a href="#how-it-works" class="anchor-link" aria-hidden="true">#</a>How the Step Loop Works</h2>
+<h2 id="how-it-works"><a href="#how-it-works" class="anchor-link" aria-hidden="true">#</a>How the step loop works</h2>
 
 <div class="diagram-frame">
-<p class="diagram-label">The step loop, with a crash &amp; resume from the last cursor</p>
+<p class="diagram-label">The step loop, and a crash resumed from the last cursor</p>
 <div class="cd-wrap">
-<svg class="cd" viewBox="0 0 748 226" role="img">
-<title>The step loop: each step returns More(cursor), the engine persists that cursor to the checkpoint store and calls step again with it; after a crash, resume_from reads the last persisted cursor and re-enters the loop at that step, while Done(result) leaves for the next state.</title>
+<svg class="cd" viewBox="0 0 748 226" role="img" aria-labelledby="stepped-loop-title stepped-loop-desc">
+<title id="stepped-loop-title">The step loop and crash resume</title>
+<desc id="stepped-loop-desc">The engine calls step with no cursor. Each step that returns More(cursor) has its cursor persisted to the checkpoint store, and the engine calls step again with that cursor. A step that returns Done(result) leaves the loop for the next state. After a crash, resume_from reads the last persisted cursor, c2, and re-enters the loop at step(Some c2).</desc>
 <defs><marker id="stepped-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
 <path class="e" d="M68,90 V110 Q68,118 76,118 H120 Q128,118 128,126 V141" marker-end="url(#stepped-ah)"/>
 <text class="t-code" x="108" y="104">More(c1)</text>
@@ -101,7 +98,7 @@ the step at and after the resume point may re-run.
 <text class="t-mut t-err" x="480" y="154">crash</text>
 <path class="e e-hot e-dash" d="M566,146 V120 Q566,112 558,112 H513 Q505,112 505,104 V95" marker-end="url(#stepped-ah)"/>
 <text class="t-code t-hot ta-s" x="578" y="130">step(Some c2)</text>
-<text class="t-mut" x="461" y="26">&hellip; repeats until Done</text>
+<text class="t-mut" x="461" y="26">repeats until Done</text>
 <rect class="n" x="20" y="44" width="96" height="46" rx="10"/>
 <text class="t-code" x="68" y="68">step(None)</text>
 <rect class="n" x="200" y="44" width="118" height="46" rx="10"/>
@@ -109,7 +106,7 @@ the step at and after the resume point may re-run.
 <rect class="n" x="402" y="44" width="118" height="46" rx="10"/>
 <text class="t-code" x="461" y="68">step(Some c2)</text>
 <rect class="n-ok" x="624" y="44" width="104" height="46" rx="10"/>
-<text x="676" y="68">Next State</text>
+<text x="676" y="68">Next state</text>
 <rect class="n-cop" x="74" y="146" width="168" height="44" rx="10"/>
 <text x="158" y="169">persist cursor c1</text>
 <rect class="n-cop" x="276" y="146" width="168" height="44" rx="10"/>
@@ -122,10 +119,10 @@ the step at and after the resume point may re-run.
 </div>
 
 <p>
-A <code>SteppedTask</code> has one associated type — <code>type Cursor: serde::Serialize +
-serde::de::DeserializeOwned + Clone + Send + Sync + 'static</code> (inferred by
-<code>#[task::stepped(state = ...)]</code> from the <code>step</code> signature, or written explicitly)
-— and one required method:
+A <code>SteppedTask</code> has one associated type, <code>type Cursor: serde::Serialize +
+serde::de::DeserializeOwned + Clone + Send + Sync + 'static</code>, and one required method. The
+<code>#[task::stepped(state = ...)]</code> macro infers <code>Cursor</code> from the <code>step</code>
+signature, or you write it explicitly.
 </p>
 
 ```rust
@@ -137,36 +134,34 @@ async fn step(
 ```
 
 <ul>
-<li><code>cursor</code> is <code>None</code> on the first call (or a fresh run); on resume it's the
-last <em>persisted</em> cursor.</li>
-<li>The outcome — <code>enum StepOutcome&lt;TCursor, TState&gt; { More(TCursor), Done(TState) }</code>:
-<code>More(c)</code> continues, threading <code>c</code> into the next call; <code>Done(state)</code>
-ends the loop and transitions the FSM to <code>state</code>.</li>
+<li><code>cursor</code> is <code>None</code> on the first call of a fresh run. On resume it is the
+last persisted cursor.</li>
+<li><code>StepOutcome&lt;TCursor, TState&gt;</code> is <code>More(TCursor)</code> or
+<code>Done(TState)</code>. <code>More(c)</code> passes <code>c</code> to the next call;
+<code>Done(state)</code> ends the loop and moves the workflow to <code>state</code>.</li>
 </ul>
 
 <p>
-Optional: <code>fn config(&amp;self) -&gt; TaskConfig</code> (defaults to <code>TaskConfig::new()</code>
-— one attempt, no retries; the engine applies it to each <code>step</code> call, so
-<code>TaskConfig::new().with_exponential_retry(3)</code> retries a failing step with the same cursor)
-and <code>fn name(&amp;self) -&gt; Cow&lt;'static, str&gt;</code> (defaults to the type name).
+<code>fn config(&amp;self) -&gt; TaskConfig</code> defaults to <code>TaskConfig::new()</code>: one
+attempt, no retries. The engine applies it to each <code>step</code> call, so
+<code>TaskConfig::new().with_exponential_retry(3)</code> retries a failing step with the same cursor.
+<code>fn name(&amp;self) -&gt; Cow&lt;'static, str&gt;</code> defaults to the type name.
 </p>
 
 <!-- Section: Quick Start -->
 <hr class="section-divider">
-<h2 id="quick-start"><a href="#quick-start" class="anchor-link" aria-hidden="true">#</a>Quick Start with <code>#[task::stepped]</code></h2>
+<h2 id="quick-start"><a href="#quick-start" class="anchor-link" aria-hidden="true">#</a>Quick start with <code>#[task::stepped]</code></h2>
 <p>
-Attach <code>#[task::stepped(state = MyState)]</code> to an inherent <code>impl</code> block. The macro
-infers <code>Cursor</code> from the <code>Option&lt;_&gt;</code> / <code>StepOutcome&lt;_, _&gt;</code>
-types, synthesises the
-<code>impl SteppedTask&lt;MyState&gt; for Cruncher</code> header (<code>config</code> / <code>name</code>
-fall back to the trait defaults), and emits a companion
-<code>impl Task&lt;MyState&gt; for Cruncher</code> whose <code>run</code> runs the loop in memory (no
-cursor rows), so a stepped task can also be a <code>register_split</code> branch. <code>step</code> may
-omit the <code>res</code> parameter when it doesn't read resources.
+Put <code>#[task::stepped(state = MyState)]</code> on an inherent <code>impl</code> block. The macro
+infers <code>Cursor</code> from the <code>Option&lt;_&gt;</code> and <code>StepOutcome&lt;_, _&gt;</code>
+types and writes the <code>impl SteppedTask&lt;MyState&gt; for Cruncher</code> header. It also emits a
+companion <code>impl Task&lt;MyState&gt; for Cruncher</code> whose <code>run</code> executes the loop
+in memory, with no cursor rows, so a stepped task can be a <code>register_split</code> branch.
+<code>step</code> may omit the <code>res</code> parameter when it does not read resources.
 </p>
 
 <div class="code-block">
-<span class="code-block-label"><span class="label-icon">&#128260;</span> Inference form — <code>#[task::stepped(state = ...)]</code> on an inherent impl</span>
+<span class="code-block-label"><span class="label-icon">&#128260;</span> Inference form: <code>#[task::stepped(state = ...)]</code> on an inherent impl</span>
 
 ```rust
 use cano::prelude::*;
@@ -198,12 +193,12 @@ impl Cruncher {
 
 <!-- Section: registering -->
 <hr class="section-divider">
-<h2 id="registering"><a href="#registering" class="anchor-link" aria-hidden="true">#</a>Registering a Stepped Task</h2>
+<h2 id="registering"><a href="#registering" class="anchor-link" aria-hidden="true">#</a>Registering a stepped task</h2>
 <p>
 Register a stepped task with <code>Workflow::register(state, task)</code>, the same call every task
-model uses. The macro marks the task as stepped, so the engine drives the step loop itself: each
-<code>step</code> runs under the task's <code>config()</code>, and with a checkpoint store and a
-workflow id attached the cursor is persisted after every step.
+model uses. The engine drives the step loop itself: each <code>step</code> runs under the task's
+<code>config()</code>, and with a checkpoint store and a workflow id attached the cursor is persisted
+after every step.
 </p>
 
 <div class="code-block">
@@ -222,63 +217,58 @@ let workflow = Workflow::new(resources)
     .register(Stage::Report, Reporter)
     .add_exit_state(Stage::Done);
 
-// First run crashes after 600/1000 steps. Restart:
+// The first run crashes after 600 of 1000 steps. After a restart:
 // let result = workflow.resume_from("nightly-crunch").await?;
-// step() is first called with Some(Progress { processed: 600, .. }) — not None.
+// step() is first called with Some(Progress { processed: 600, .. }), not None.
 ```
 </div>
 
 <!-- Section: persistence -->
 <hr class="section-divider">
-<h2 id="persistence"><a href="#persistence" class="anchor-link" aria-hidden="true">#</a>Cursor Persistence &amp; Resume</h2>
+<h2 id="persistence"><a href="#persistence" class="anchor-link" aria-hidden="true">#</a>Cursor persistence and resume</h2>
 <p>
-When a <a href="../recovery/"><code>CheckpointStore</code></a> plus a workflow id are attached
-(<code>with_checkpoint_store</code> + <code>with_workflow_id</code>), the engine drives the step loop
-and, after each <code>StepOutcome::More</code>, persists the cursor as a <code>CheckpointRow</code>
-whose <code>kind</code> is <code>RowKind::StepCursor</code> (the cursor is
-<a href="https://docs.rs/serde_json"><code>serde_json</code></a>-encoded). On
-<code>Workflow::resume_from(workflow_id)</code>, the latest persisted cursor for that state is
-rehydrated and passed to the first <code>step</code> call instead of <code>None</code> — so a crash
-mid-loop resumes from where it left off.
+With a <a href="../recovery/"><code>CheckpointStore</code></a> and a workflow id attached
+(<code>with_checkpoint_store</code> and <code>with_workflow_id</code>), the engine persists the cursor
+after each <code>StepOutcome::More</code> as a <code>CheckpointRow</code> whose <code>kind</code> is
+<code>RowKind::StepCursor</code>, encoded with
+<a href="https://docs.rs/serde_json"><code>serde_json</code></a>. <code>Workflow::resume_from(workflow_id)</code>
+passes the latest persisted cursor for the state to the first <code>step</code> call instead of
+<code>None</code>. A cursor is used once: if the workflow visits the same state again, that visit
+starts from <code>None</code>.
 </p>
 
 <div class="callout callout-info">
-<div class="callout-label">No <code>recovery</code> feature required</div>
+<div class="callout-label">Works without the <code>recovery</code> feature</div>
 <p>
-Cursor persistence works <strong>whenever a checkpoint store is attached</strong> — it's just a
-<code>CheckpointRow</code> with a <code>serde_json</code>-encoded blob, so it doesn't depend on the
-<code>recovery</code> feature. Only the <em>built-in</em> <code>RedbCheckpointStore</code> lives
-behind that feature gate; a custom <code>CheckpointStore</code> impl gets stepped-cursor persistence
-for free. With no store attached, or no workflow id, the engine still drives the step loop but
-writes no cursor rows.
+Any <code>CheckpointStore</code> receives cursor rows. Only the built-in <code>RedbCheckpointStore</code>
+needs the <code>recovery</code> feature. With no store or no workflow id attached, the engine still
+drives the step loop and writes no cursor rows.
 </p>
 </div>
 
 <!-- Section: idempotency -->
 <hr class="section-divider">
-<h2 id="idempotency"><a href="#idempotency" class="anchor-link" aria-hidden="true">#</a>The Idempotency Contract</h2>
+<h2 id="idempotency"><a href="#idempotency" class="anchor-link" aria-hidden="true">#</a>The idempotency contract</h2>
 
 <div class="callout callout-warning">
-<span class="callout-label">Important</span>
-<p><strong><code>step</code> must be idempotent with respect to observable effects.</strong> The
-cursor is persisted <em>after</em> a step returns <code>More</code> — so when you resume, the engine
-cannot tell whether that step's side effects already happened before the crash. The step at and after
-the resume point may therefore re-run: make it safe to re-apply (upserts, dedupe keys, "if not
-already processed" guards, conditional writes). Steps before the resume point are never re-run.</p>
+<span class="callout-label">Make <code>step</code> idempotent</span>
+<p>The engine persists the cursor after a step returns <code>More</code>. On resume it cannot tell
+whether the side effects of the last step ran before the crash, so the step at and after the resume
+point may run again. Make it safe to re-apply: upserts, dedupe keys, "if not already processed"
+guards, conditional writes. Steps before the resume point do not run again.</p>
 </div>
 
 <!-- Section: explicit -->
 <hr class="section-divider">
-<h2 id="explicit"><a href="#explicit" class="anchor-link" aria-hidden="true">#</a>Explicit Trait-Impl Form</h2>
+<h2 id="explicit"><a href="#explicit" class="anchor-link" aria-hidden="true">#</a>Explicit trait-impl form</h2>
 <p>
-Prefer the trait header explicit — e.g. to declare a named <code>Cursor</code> type, or for a
-generic impl? Put a bare <code>#[task::stepped]</code> on an
-<code>impl SteppedTask&lt;...&gt; for ...</code> block and declare <code>type Cursor</code> yourself.
-The companion <code>impl Task</code> is still emitted.
+To name the <code>Cursor</code> type or write a generic impl, put a bare <code>#[task::stepped]</code>
+on an <code>impl SteppedTask&lt;...&gt; for ...</code> block and declare <code>type Cursor</code>
+yourself. The companion <code>impl Task</code> is still emitted.
 </p>
 
 <div class="code-block">
-<span class="code-block-label"><span class="label-icon">&#9998;</span> Explicit form — <code>#[task::stepped]</code> on a trait impl</span>
+<span class="code-block-label"><span class="label-icon">&#9998;</span> Explicit form: <code>#[task::stepped]</code> on a trait impl</span>
 
 ```rust
 use cano::prelude::*;
@@ -314,27 +304,22 @@ impl SteppedTask<Stage> for Cruncher {
 
 <!-- Section: When to use -->
 <hr class="section-divider">
-<h2 id="when-to-use"><a href="#when-to-use" class="anchor-link" aria-hidden="true">#</a>When to Use SteppedTask</h2>
-<p>Reach for a <code>SteppedTask</code> when you have long iterative work and want crash-resume
-granularity finer than per-workflow-state:</p>
-<ul>
-<li><strong>large dataset scans</strong> — page-by-page with a continuation token;</li>
-<li><strong>chunked uploads / migrations</strong> — an offset cursor that advances as you go;</li>
-<li><strong>any long job</strong> where restarting from the top after a crash would waste hours of
-already-done work.</li>
-</ul>
+<h2 id="when-to-use"><a href="#when-to-use" class="anchor-link" aria-hidden="true">#</a>When to use SteppedTask</h2>
+<p>Use a <code>SteppedTask</code> for long iterative work where restarting from the top after a crash
+would waste hours: scanning a large dataset page by page with a continuation token, or advancing an
+offset through a chunked upload or migration.</p>
 <p>
-If the work isn't iterative — or a single dispatch is short enough that re-running it on resume is
-cheap — a plain <a href="../task/">Task</a> with <a href="../recovery/">checkpointing</a> at the
-state level is simpler.
+If the work is not iterative, or one dispatch is short enough that re-running it on resume is cheap,
+a plain <a href="../task/">Task</a> with <a href="../recovery/">state-level checkpointing</a> is
+simpler.
 </p>
 
 <div class="callout callout-tip">
-<div class="callout-label">Runnable example &amp; crash test</div>
+<div class="callout-label">Runnable example and crash test</div>
 <p>
-Run the example with <code>cargo run --example stepped_task --features recovery</code>; the
-crash-recovery integration test lives at <code>tests/stepped_resume_e2e.rs</code> (it kills a
-stepped run mid-loop and asserts <code>resume_from</code> picks up from the persisted cursor).
+Run the example with <code>cargo run --example stepped_task --features recovery</code>. The
+crash-recovery integration test is <code>tests/stepped_resume_e2e.rs</code>: it kills a stepped run
+mid-loop and asserts that <code>resume_from</code> picks up from the persisted cursor.
 </p>
 </div>
 </div>

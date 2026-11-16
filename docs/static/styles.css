@@ -465,6 +465,7 @@ h1, h2, h3, h4 {
     line-height: 1.2;
     letter-spacing: -0.022em;
     text-wrap: balance;
+    overflow-wrap: break-word;
     scroll-margin-top: calc(var(--header-h) + var(--s5));
 }
 
@@ -567,6 +568,7 @@ hr:not(.section-divider) { border: 0; height: 1px; background: var(--border); ma
     opacity: 0.7;
 }
 .feature-tag code { color: var(--foreground); }
+.card .feature-tag { margin-bottom: var(--s2); }
 
 /* --------------------------------------------------------------------------
    7. Callouts
@@ -794,6 +796,7 @@ h1 code, h2 code, h3 code, h4 code, .brand code, .subtitle code {
 }
 .code-block-label code { font-size: 0.95em; background: none; border: 0; padding: 0; color: inherit; }
 .code-block-label .label-icon { opacity: 0.8; }
+.diagram-label code { font-size: 1em; text-transform: none; letter-spacing: 0; background: none; border: 0; padding: 0; color: var(--foreground); }
 .code-block > pre { margin: 0; border-radius: 0 0 var(--r-lg) var(--r-lg); }
 
 /* Legacy inline label helper kept for backwards compatibility */

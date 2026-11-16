@@ -100,7 +100,7 @@ where
     type Output: Serialize + DeserializeOwned + Send + Sync + 'static;
 
     /// Retry / timeout / circuit configuration for the forward [`run`](Self::run).
-    /// Defaults to the standard exponential-backoff policy (same as [`Task::config`](crate::task::Task::config)).
+    /// Defaults to [`TaskConfig::new()`]: one attempt, no retries (same as [`Task::config`](crate::task::Task::config)).
     fn config(&self) -> TaskConfig {
         TaskConfig::new()
     }

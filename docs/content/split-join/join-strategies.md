@@ -1,665 +1,379 @@
 +++
-title = "Join Strategies"
-description = "Cano join strategies in depth: All, Any, Quorum, Percentage, PartialResults, and PartialTimeout, each wired up in code, with a comparison table."
+title = "Join strategies"
+description = "Cano join strategies: All, Any, Quorum, Percentage, PartialResults and PartialTimeout, each wired into a split, with a comparison table."
 template = "page.html"
 weight = 1
 +++
 
 <div class="content-wrapper">
 
-<h1>Join Strategies</h1>
-<p class="subtitle">Pick a completion condition for a split, and see each strategy wired up in code.</p>
+<h1>Join strategies</h1>
+<p class="subtitle">Pick the completion condition for a split.</p>
 
 <p>
-A split advances when its <code>JoinStrategy</code> is satisfied. This page works through all six
-strategies with runnable <code>JoinConfig</code> wiring, then compares them side by side. See
-<a href="../">Split &amp; Join</a> for how splitting a state and the bulkhead work.
+A split advances when its <code>JoinStrategy</code> is satisfied. This page is a reference for the six
+strategies, each with a timeline and the <code>JoinConfig</code> wiring. <a href="../">Split and join</a>
+covers registering a split and the bulkhead.
 </p>
 
 <nav class="page-toc" aria-label="Table of contents">
 <div class="page-toc-title">On this page</div>
 <ol>
-<li><a href="#join-strategy-examples">Join Strategy Examples</a></li>
+<li><a href="#join-strategy-examples">Join strategy examples</a></li>
 <li class="toc-sub"><a href="#strategy-all">All</a></li>
 <li class="toc-sub"><a href="#strategy-any">Any</a></li>
 <li class="toc-sub"><a href="#strategy-quorum">Quorum</a></li>
 <li class="toc-sub"><a href="#strategy-percentage">Percentage</a></li>
 <li class="toc-sub"><a href="#strategy-partial-results">PartialResults</a></li>
 <li class="toc-sub"><a href="#strategy-partial-timeout">PartialTimeout</a></li>
-<li><a href="#comparison-table">Comparison Table</a></li>
+<li><a href="#comparison-table">Comparison table</a></li>
 </ol>
 </nav>
 <hr class="section-divider">
 
-<h2 id="join-strategy-examples"><a href="#join-strategy-examples" class="anchor-link" aria-hidden="true">#</a>Join Strategy Examples</h2>
-<p>Each strategy handles parallel task completion differently. The examples below isolate the
-<code>JoinConfig</code> wiring for each one.</p>
+<h2 id="join-strategy-examples"><a href="#join-strategy-examples" class="anchor-link" aria-hidden="true">#</a>Join strategy examples</h2>
+<p>
+A strategy counts the tasks that succeeded. <code>Any</code> and <code>PartialResults</code> abort the
+tasks still running as soon as they are satisfied, and an aborted task is dropped at its next
+<code>.await</code>. <code>PartialTimeout</code> aborts them when the timeout expires. The other
+strategies wait for every task. For all of them except <code>PartialTimeout</code>, an expired
+<code>.with_timeout()</code> fails the join with a <code>CanoError::Workflow</code> error.
+</p>
+<p>
+Every example below builds its workflow with this shared setup. A split branch's returned state is
+ignored: the workflow always continues at the join state.
+</p>
+
+```rust
+use cano::prelude::*;
+use std::time::Duration;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum State { Start, Fanout, Aggregate, Complete }
+
+struct Prepare;
+
+#[task(state = State)]
+impl Prepare {
+    async fn run(&self) -> Result<State, CanoError> {
+        Ok(State::Fanout)
+    }
+}
+
+struct Worker { id: u32 }
+
+#[task(state = State)]
+impl Worker {
+    async fn run(&self) -> Result<State, CanoError> {
+        println!("worker {} finished", self.id);
+        Ok(State::Aggregate)
+    }
+}
+
+struct Summarize;
+
+#[task(state = State)]
+impl Summarize {
+    async fn run(&self) -> Result<State, CanoError> {
+        Ok(State::Complete)
+    }
+}
+
+// Splits `Fanout` into `workers` tasks and joins with `join_config`.
+fn build(join_config: JoinConfig<State>, workers: u32) -> Workflow<State> {
+    Workflow::new(Resources::new())
+        .register(State::Start, Prepare)
+        .register_split(State::Fanout, (1..=workers).map(|id| Worker { id }), join_config)
+        .register(State::Aggregate, Summarize)
+        .add_exit_state(State::Complete)
+}
+```
 
 <div class="callout callout-tip">
-<p>Runnable example: <code>cargo run --example join_strategies</code> — runs the same parallel split four
-times with <code>Any</code>, <code>Quorum</code>, <code>Percentage</code>, and <code>PartialResults</code>,
-with staggered task delays so you can see exactly when each one returns.</p>
+<p>Runnable example: <code>cargo run --example join_strategies</code> runs one split four times with
+<code>Any</code>, <code>Quorum</code>, <code>Percentage</code> and <code>PartialResults</code>, using
+staggered task delays so you can see when each one returns.</p>
 </div>
 
-<h3 id="strategy-all"><a href="#strategy-all" class="anchor-link" aria-hidden="true">#</a>All — Wait for Every Task</h3>
-<p>Waits for all tasks to complete successfully. Fails if any task fails. Use it when every result is required.</p>
-
-<div class="diagram-frame">
-<p class="diagram-label">All Strategy</p>
-<div class="cd-wrap">
-<svg class="cd" viewBox="0 0 840 374" role="img" style="max-width: 860px">
-<title>All strategy: the workflow starts three tasks, every one of them reports success, and only when the last result lands does the join fire — nothing is cancelled.</title>
-<defs><marker id="all-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
-<rect class="n" x="10" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="80" y="28">Workflow</text>
-<rect class="n" x="180" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="250" y="28">Task 1</text>
-<rect class="n" x="350" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="420" y="28">Task 2</text>
-<rect class="n" x="520" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="590" y="28">Task 3</text>
-<line class="lifeline" x1="80" y1="46" x2="80" y2="310"/>
-<line class="lifeline" x1="250" y1="46" x2="250" y2="310"/>
-<line class="lifeline" x1="420" y1="46" x2="420" y2="310"/>
-<line class="lifeline" x1="590" y1="46" x2="590" y2="310"/>
-<text class="t-mut" x="165" y="66">Start</text>
-<path class="e" d="M80,78 H247" marker-end="url(#all-ah)"/>
-<text class="t-mut" x="250" y="110">Start</text>
-<path class="e" d="M80,122 H417" marker-end="url(#all-ah)"/>
-<text class="t-mut" x="335" y="154">Start</text>
-<path class="e" d="M80,166 H587" marker-end="url(#all-ah)"/>
-<text class="t-mut t-ok" x="165" y="198">Complete ✓</text>
-<path class="e e-dash" d="M250,210 H83" marker-end="url(#all-ah)"/>
-<text class="t-mut t-ok" x="250" y="242">Complete ✓</text>
-<path class="e e-dash" d="M420,254 H83" marker-end="url(#all-ah)"/>
-<text class="t-mut t-ok" x="335" y="286">Complete ✓</text>
-<path class="e e-dash" d="M590,298 H83" marker-end="url(#all-ah)"/>
-<rect class="n-hot" x="16" y="318" width="808" height="34" rx="10"/>
-<text class="t-strong" x="420" y="336">All Complete → Proceed</text>
-</svg>
-</div>
-</div>
-
-```rust
-use cano::prelude::*;
-use std::time::Duration;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum DataState { Start, ParallelProcessing, Aggregate, Complete }
-
-#[derive(Clone)]
-struct DataLoader;
-#[derive(Clone)]
-struct ProcessorTask { id: u32 }
-impl ProcessorTask { fn new(id: u32) -> Self { Self { id } } }
-#[derive(Clone)]
-struct Aggregator;
-
-#[task(state = DataState)]
-impl DataLoader {
-    async fn run(&self) -> Result<DataState, CanoError> {
-        Ok(DataState::ParallelProcessing)
-    }
-}
-
-#[task(state = DataState)]
-impl ProcessorTask {
-    async fn run(&self) -> Result<DataState, CanoError> {
-        Ok(DataState::Aggregate)
-    }
-}
-
-#[task(state = DataState)]
-impl Aggregator {
-    async fn run(&self) -> Result<DataState, CanoError> {
-        Ok(DataState::Complete)
-    }
-}
-
-fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
-    // All Strategy: best for workflows requiring complete data
-    let join_config = JoinConfig::new(JoinStrategy::All, DataState::Aggregate)
-        .with_timeout(Duration::from_secs(10));
-
-    Workflow::new(Resources::new().insert(store))
-        .register(DataState::Start, DataLoader)
-        .register_split(
-            DataState::ParallelProcessing,
-            vec![ProcessorTask::new(1), ProcessorTask::new(2), ProcessorTask::new(3)],
-            join_config,
-        )
-        .register(DataState::Aggregate, Aggregator)
-        .add_exit_state(DataState::Complete)
-}
-```
-
-<h3 id="strategy-any"><a href="#strategy-any" class="anchor-link" aria-hidden="true">#</a>Any — First to Complete</h3>
-<p>Proceeds as soon as the first task completes successfully; the rest are cancelled. Ideal for redundant
-calls where the fastest response wins.</p>
-
-<div class="diagram-frame">
-<p class="diagram-label">Any Strategy</p>
-<div class="cd-wrap">
-<svg class="cd" viewBox="0 0 840 374" role="img" style="max-width: 860px">
-<title>Any strategy: three redundant tasks start, the fast one reports success first, the join fires on that single result and both slow tasks are cancelled before they finish.</title>
-<defs><marker id="any-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
-<rect class="n" x="10" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="80" y="28">Workflow</text>
-<rect class="n-ghost" x="180" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="250" y="28">Task 1 (slow)</text>
-<rect class="n" x="350" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="420" y="28">Task 2 (fast)</text>
-<rect class="n-ghost" x="520" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="590" y="28">Task 3 (slow)</text>
-<line class="lifeline" x1="80" y1="46" x2="80" y2="352"/>
-<line class="n-ghost" x1="250" y1="46" x2="250" y2="352"/>
-<line class="lifeline" x1="420" y1="46" x2="420" y2="352"/>
-<line class="n-ghost" x1="590" y1="46" x2="590" y2="352"/>
-<text class="t-mut" x="165" y="66">Start</text>
-<path class="e" d="M80,78 H247" marker-end="url(#any-ah)"/>
-<text class="t-mut" x="250" y="110">Start</text>
-<path class="e" d="M80,122 H417" marker-end="url(#any-ah)"/>
-<text class="t-mut" x="335" y="154">Start</text>
-<path class="e" d="M80,166 H587" marker-end="url(#any-ah)"/>
-<text class="t-mut t-ok" x="250" y="198">Complete ✓</text>
-<path class="e e-dash" d="M420,210 H83" marker-end="url(#any-ah)"/>
-<rect class="n-hot" x="16" y="230" width="808" height="34" rx="10"/>
-<text class="t-strong" x="420" y="248">First Complete → Proceed</text>
-<text class="t-mut t-warn" x="165" y="284">Cancel ⏱</text>
-<path class="e e-dim" d="M80,296 H247" marker-end="url(#any-ah)"/>
-<text class="t-mut t-warn" x="335" y="328">Cancel ⏱</text>
-<path class="e e-dim" d="M80,340 H587" marker-end="url(#any-ah)"/>
-</svg>
-</div>
-</div>
-
-```rust
-use cano::prelude::*;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum DataState { Start, ParallelProcessing, Complete }
-
-#[derive(Clone)]
-struct DataLoader;
-
-#[task(state = DataState)]
-impl DataLoader {
-    async fn run(&self) -> Result<DataState, CanoError> {
-        Ok(DataState::ParallelProcessing)
-    }
-}
-
-#[derive(Clone)]
-struct ApiCallTask { provider: String }
-impl ApiCallTask { fn new(provider: &str) -> Self { Self { provider: provider.into() } } }
-
-#[task(state = DataState)]
-impl ApiCallTask {
-    async fn run(&self) -> Result<DataState, CanoError> {
-        Ok(DataState::Complete)
-    }
-}
-
-fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
-    // Any Strategy: best for redundant API calls or fastest-wins scenarios
-    let join_config = JoinConfig::new(JoinStrategy::Any, DataState::Complete);
-
-    // Call 3 different data sources, use whoever responds first
-    Workflow::new(Resources::new().insert(store))
-        .register(DataState::Start, DataLoader)
-        .register_split(
-            DataState::ParallelProcessing,
-            vec![
-                ApiCallTask::new("provider1"),
-                ApiCallTask::new("provider2"),
-                ApiCallTask::new("provider3"),
-            ],
-            join_config,
-        )
-        .add_exit_state(DataState::Complete)
-}
-```
-
-<h3 id="strategy-quorum"><a href="#strategy-quorum" class="anchor-link" aria-hidden="true">#</a>Quorum(n) — Wait for N Tasks</h3>
-<p>Waits for every task to finish, then proceeds if at least a specific number of them succeeded. Useful for
-distributed consensus and majority-vote writes where the stragglers are still worth waiting for.</p>
-
-<div class="diagram-frame">
-<p class="diagram-label">Quorum Strategy</p>
-<div class="cd-wrap">
-<svg class="cd" viewBox="0 0 840 462" role="img" style="max-width: 860px">
-<title>Quorum strategy: four tasks start and the join waits for all of them to finish, whatever order they arrive in; three succeed and one fails, which still meets the quorum of 3 of 4.</title>
-<defs><marker id="quorum-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
-<rect class="n" x="10" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="80" y="28">Workflow</text>
-<rect class="n" x="180" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="250" y="28">Task 1</text>
-<rect class="n" x="350" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="420" y="28">Task 2</text>
-<rect class="n" x="520" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="590" y="28">Task 3</text>
-<rect class="n" x="690" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="760" y="28">Task 4</text>
-<line class="lifeline" x1="80" y1="46" x2="80" y2="440"/>
-<line class="lifeline" x1="250" y1="46" x2="250" y2="440"/>
-<line class="lifeline" x1="420" y1="46" x2="420" y2="440"/>
-<line class="lifeline" x1="590" y1="46" x2="590" y2="440"/>
-<line class="lifeline" x1="760" y1="46" x2="760" y2="440"/>
-<text class="t-mut" x="165" y="66">Start</text>
-<path class="e" d="M80,78 H247" marker-end="url(#quorum-ah)"/>
-<text class="t-mut" x="250" y="110">Start</text>
-<path class="e" d="M80,122 H417" marker-end="url(#quorum-ah)"/>
-<text class="t-mut" x="335" y="154">Start</text>
-<path class="e" d="M80,166 H587" marker-end="url(#quorum-ah)"/>
-<text class="t-mut" x="420" y="198">Start</text>
-<path class="e" d="M80,210 H757" marker-end="url(#quorum-ah)"/>
-<text class="t-mut t-ok" x="165" y="242">Complete ✓</text>
-<path class="e e-dash" d="M250,254 H83" marker-end="url(#quorum-ah)"/>
-<text class="t-mut t-ok" x="335" y="286">Complete ✓</text>
-<path class="e e-dash" d="M590,298 H83" marker-end="url(#quorum-ah)"/>
-<text class="t-mut t-ok" x="250" y="330">Complete ✓</text>
-<path class="e e-dash" d="M420,342 H83" marker-end="url(#quorum-ah)"/>
-<text class="t-mut t-err" x="420" y="374">Failed ✗</text>
-<path class="e e-dash" d="M760,386 H83" marker-end="url(#quorum-ah)"/>
-<rect class="n-hot" x="16" y="398" width="808" height="34" rx="10"/>
-<text class="t-strong" x="420" y="416">All finished, Quorum (3/4) Met → Proceed</text>
-</svg>
-</div>
-</div>
-
-```rust
-use cano::prelude::*;
-use std::time::Duration;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum DataState { Start, ParallelProcessing, Aggregate, Complete }
-
-#[derive(Clone)]
-struct PrepareData;
-#[derive(Clone)]
-struct WriteReplica { id: u32 }
-impl WriteReplica { fn new(id: u32) -> Self { Self { id } } }
-#[derive(Clone)]
-struct ConfirmWrite;
-
-#[task(state = DataState)]
-impl PrepareData {
-    async fn run(&self) -> Result<DataState, CanoError> {
-        Ok(DataState::ParallelProcessing)
-    }
-}
-
-#[task(state = DataState)]
-impl WriteReplica {
-    async fn run(&self) -> Result<DataState, CanoError> {
-        Ok(DataState::Aggregate)
-    }
-}
-
-#[task(state = DataState)]
-impl ConfirmWrite {
-    async fn run(&self) -> Result<DataState, CanoError> {
-        Ok(DataState::Complete)
-    }
-}
-
-fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
-    // Quorum Strategy: write to 5 replicas, succeed when 3 confirm
-    let join_config = JoinConfig::new(JoinStrategy::Quorum(3), DataState::Aggregate)
-        .with_timeout(Duration::from_secs(5));
-
-    Workflow::new(Resources::new().insert(store))
-        .register(DataState::Start, PrepareData)
-        .register_split(
-            DataState::ParallelProcessing,
-            vec![
-                WriteReplica::new(1),
-                WriteReplica::new(2),
-                WriteReplica::new(3),
-                WriteReplica::new(4),
-                WriteReplica::new(5),
-            ],
-            join_config,
-        )
-        .register(DataState::Aggregate, ConfirmWrite)
-        .add_exit_state(DataState::Complete)
-}
-```
-
-<h3 id="strategy-percentage"><a href="#strategy-percentage" class="anchor-link" aria-hidden="true">#</a>Percentage(p) — Wait for a Fraction of Tasks</h3>
-<p>Waits for every task to finish, then proceeds if at least a fraction of them succeeded. Scales with the
-batch size, so it works well when the number of split tasks varies.</p>
-
-<div class="diagram-frame">
-<p class="diagram-label">Percentage Strategy</p>
-<div class="cd-wrap">
-<svg class="cd" viewBox="0 0 840 462" role="img" style="max-width: 860px">
-<title>Percentage strategy: four tasks start and the join waits for all of them to finish; three succeed and one fails, which still meets the configured fraction of 75%.</title>
-<defs><marker id="pct-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
-<rect class="n" x="10" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="80" y="28">Workflow</text>
-<rect class="n" x="180" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="250" y="28">Task 1</text>
-<rect class="n" x="350" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="420" y="28">Task 2</text>
-<rect class="n" x="520" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="590" y="28">Task 3</text>
-<rect class="n" x="690" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="760" y="28">Task 4</text>
-<line class="lifeline" x1="80" y1="46" x2="80" y2="440"/>
-<line class="lifeline" x1="250" y1="46" x2="250" y2="440"/>
-<line class="lifeline" x1="420" y1="46" x2="420" y2="440"/>
-<line class="lifeline" x1="590" y1="46" x2="590" y2="440"/>
-<line class="lifeline" x1="760" y1="46" x2="760" y2="440"/>
-<text class="t-mut" x="165" y="66">Start</text>
-<path class="e" d="M80,78 H247" marker-end="url(#pct-ah)"/>
-<text class="t-mut" x="250" y="110">Start</text>
-<path class="e" d="M80,122 H417" marker-end="url(#pct-ah)"/>
-<text class="t-mut" x="335" y="154">Start</text>
-<path class="e" d="M80,166 H587" marker-end="url(#pct-ah)"/>
-<text class="t-mut" x="420" y="198">Start</text>
-<path class="e" d="M80,210 H757" marker-end="url(#pct-ah)"/>
-<text class="t-mut t-ok" x="165" y="242">Complete ✓</text>
-<path class="e e-dash" d="M250,254 H83" marker-end="url(#pct-ah)"/>
-<text class="t-mut t-ok" x="250" y="286">Complete ✓</text>
-<path class="e e-dash" d="M420,298 H83" marker-end="url(#pct-ah)"/>
-<text class="t-mut t-ok" x="420" y="330">Complete ✓</text>
-<path class="e e-dash" d="M760,342 H83" marker-end="url(#pct-ah)"/>
-<text class="t-mut t-err" x="335" y="374">Failed ✗</text>
-<path class="e e-dash" d="M590,386 H83" marker-end="url(#pct-ah)"/>
-<rect class="n-hot" x="16" y="398" width="808" height="34" rx="10"/>
-<text class="t-strong" x="420" y="416">All finished, 75% (3/4) Met → Proceed</text>
-</svg>
-</div>
-</div>
-
-```rust
-use cano::prelude::*;
-use std::time::Duration;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum DataState { Start, ParallelProcessing, Aggregate, Complete }
-
-#[derive(Clone)]
-struct LoadRecords;
-#[derive(Clone)]
-struct RecordProcessor { idx: usize }
-impl RecordProcessor { fn new(idx: usize) -> Self { Self { idx } } }
-#[derive(Clone)]
-struct SummarizeResults;
-
-#[task(state = DataState)]
-impl LoadRecords {
-    async fn run(&self) -> Result<DataState, CanoError> {
-        Ok(DataState::ParallelProcessing)
-    }
-}
-
-#[task(state = DataState)]
-impl RecordProcessor {
-    async fn run(&self) -> Result<DataState, CanoError> {
-        Ok(DataState::Aggregate)
-    }
-}
-
-#[task(state = DataState)]
-impl SummarizeResults {
-    async fn run(&self) -> Result<DataState, CanoError> {
-        Ok(DataState::Complete)
-    }
-}
-
-fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
-    // Percentage Strategy: process 100 records, proceed when 75 complete
-    let join_config = JoinConfig::new(JoinStrategy::Percentage(0.75), DataState::Aggregate)
-        .with_timeout(Duration::from_secs(10));
-
-    let tasks: Vec<RecordProcessor> = (0..100).map(RecordProcessor::new).collect();
-
-    Workflow::new(Resources::new().insert(store))
-        .register(DataState::Start, LoadRecords)
-        .register_split(DataState::ParallelProcessing, tasks, join_config)
-        .register(DataState::Aggregate, SummarizeResults)
-        .add_exit_state(DataState::Complete)
-}
-```
-
-<h3 id="strategy-partial-results"><a href="#strategy-partial-results" class="anchor-link" aria-hidden="true">#</a>PartialResults(n) — Accept Partial Completion</h3>
+<h3 id="strategy-all"><a href="#strategy-all" class="anchor-link" aria-hidden="true">#</a>All: wait for every task</h3>
 <p>
-Proceeds once <code>n</code> tasks have <em>succeeded</em> and cancels the rest; failures along the way
-are tolerated. If the split finishes (or times out) with fewer than <code>n</code> successes, the join
-fails with a <code>CanoError::Workflow</code> that lists the task errors. Good for latency-bounded fan-out where
-some failures are tolerable. A fuller, runnable walk-through lives in
-<code>cargo run --example workflow_partial_results</code>.
+Joins after every task has succeeded. If any task fails, the join fails with a
+<code>CanoError::Workflow</code> error once all tasks have finished. Use it when every result is
+required.
 </p>
 
 <div class="diagram-frame">
-<p class="diagram-label">PartialResults Strategy</p>
+<p class="diagram-label">All: the join waits for the slowest task</p>
 <div class="cd-wrap">
-<svg class="cd" viewBox="0 0 840 504" role="img" style="max-width: 860px">
-<title>PartialResults strategy: four tasks start and the join counts successes, so a failure does not advance it — two successes arrive, the join fires, the last task is cancelled, and the failure is reported to observers.</title>
-<defs><marker id="partial-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
-<rect class="n" x="10" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="80" y="28">Workflow</text>
-<rect class="n" x="180" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="250" y="28">Task 1</text>
-<rect class="n" x="350" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="420" y="28">Task 2</text>
-<rect class="n" x="520" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="590" y="28">Task 3</text>
-<rect class="n-ghost" x="690" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="760" y="28">Task 4</text>
-<line class="lifeline" x1="80" y1="46" x2="80" y2="440"/>
-<line class="lifeline" x1="250" y1="46" x2="250" y2="440"/>
-<line class="lifeline" x1="420" y1="46" x2="420" y2="440"/>
-<line class="lifeline" x1="590" y1="46" x2="590" y2="440"/>
-<line class="n-ghost" x1="760" y1="46" x2="760" y2="440"/>
-<text class="t-mut" x="165" y="66">Start</text>
-<path class="e" d="M80,78 H247" marker-end="url(#partial-ah)"/>
-<text class="t-mut" x="250" y="110">Start</text>
-<path class="e" d="M80,122 H417" marker-end="url(#partial-ah)"/>
-<text class="t-mut" x="335" y="154">Start</text>
-<path class="e" d="M80,166 H587" marker-end="url(#partial-ah)"/>
-<text class="t-mut" x="420" y="198">Start</text>
-<path class="e" d="M80,210 H757" marker-end="url(#partial-ah)"/>
-<text class="t-mut t-ok" x="165" y="242">Complete ✓</text>
-<path class="e e-dash" d="M250,254 H83" marker-end="url(#partial-ah)"/>
-<text class="t-mut t-err" x="250" y="286">Failed ✗</text>
-<path class="e e-dash" d="M420,298 H83" marker-end="url(#partial-ah)"/>
-<text class="t-mut t-ok" x="335" y="330">Complete ✓</text>
-<path class="e e-dash" d="M590,342 H83" marker-end="url(#partial-ah)"/>
-<rect class="n-hot" x="16" y="362" width="808" height="34" rx="10"/>
-<text class="t-strong" x="420" y="380">2 successes → Proceed</text>
-<text class="t-mut t-warn" x="420" y="416">Cancel ⏱</text>
-<path class="e e-dim" d="M80,428 H757" marker-end="url(#partial-ah)"/>
-<rect class="n-hot" x="16" y="448" width="808" height="34" rx="10"/>
-<text class="t-strong" x="420" y="466">Outcome: <tspan class="t-ok">2 success</tspan>, <tspan class="t-err">1 error (observers)</tspan>, <tspan class="t-warn">1 cancelled</tspan></text>
+<svg class="cd" viewBox="0 0 720 238" role="img" aria-labelledby="joins-all-title joins-all-desc">
+<title id="joins-all-title">All strategy timeline</title>
+<desc id="joins-all-desc">Three tasks start together and finish at different times, and each one succeeds. The join fires when the slowest task finishes, and the workflow advances to the join state. If any task had failed, the join would fail after the last task finished.</desc>
+<text class="ta-e" x="110" y="68">Task 1</text>
+<rect class="n-ok" x="130" y="54" width="170" height="28" rx="6"/>
+<text class="t-mut t-ok" x="215" y="68">succeeded</text>
+<text class="ta-e" x="110" y="108">Task 2</text>
+<rect class="n-ok" x="130" y="94" width="290" height="28" rx="6"/>
+<text class="t-mut t-ok" x="275" y="108">succeeded</text>
+<text class="ta-e" x="110" y="148">Task 3</text>
+<rect class="n-ok" x="130" y="134" width="390" height="28" rx="6"/>
+<text class="t-mut t-ok" x="325" y="148">succeeded</text>
+<line class="axis" x1="130" y1="176" x2="700" y2="176"/>
+<text class="t-mut ta-e" x="700" y="190">time</text>
+<line class="e e-hot" x1="520" y1="44" x2="520" y2="176"/>
+<text class="t-mut t-hot" x="520" y="30">join</text>
+<rect class="n-hot" x="130" y="194" width="570" height="34" rx="10"/>
+<text class="t-strong" x="415" y="211">All 3 succeeded: advance to the join state</text>
 </svg>
 </div>
 </div>
 
 ```rust
-use cano::prelude::*;
-use std::time::Duration;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum DataState { Start, ParallelProcessing, Aggregate, Complete }
-
-#[derive(Clone)]
-struct PrepareRequest;
-#[derive(Clone)]
-struct ServiceCall { name: String }
-impl ServiceCall { fn new(name: &str) -> Self { Self { name: name.into() } } }
-#[derive(Clone)]
-struct MergePartialResults;
-
-#[task(state = DataState)]
-impl PrepareRequest {
-    async fn run(&self) -> Result<DataState, CanoError> {
-        Ok(DataState::ParallelProcessing)
-    }
-}
-
-#[task(state = DataState)]
-impl ServiceCall {
-    async fn run(&self) -> Result<DataState, CanoError> {
-        Ok(DataState::Aggregate)
-    }
-}
-
-#[task(state = DataState)]
-impl MergePartialResults {
-    async fn run(&self) -> Result<DataState, CanoError> {
-        Ok(DataState::Complete)
-    }
-}
-
-fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
-    // PartialResults Strategy: proceed after any 2 of 4 service calls succeed
-    let join_config = JoinConfig::new(JoinStrategy::PartialResults(2), DataState::Aggregate)
-        .with_timeout(Duration::from_secs(5));
-
-    Workflow::new(Resources::new().insert(store))
-        .register(DataState::Start, PrepareRequest)
-        .register_split(
-            DataState::ParallelProcessing,
-            vec![
-                ServiceCall::new("fast-service"),
-                ServiceCall::new("medium-service"),
-                ServiceCall::new("slow-service"),
-                ServiceCall::new("backup-service"),
-            ],
-            join_config,
-        )
-        .register(DataState::Aggregate, MergePartialResults)
-        .add_exit_state(DataState::Complete)
-}
+let join_config = JoinConfig::new(JoinStrategy::All, State::Aggregate)
+    .with_timeout(Duration::from_secs(10));
+let workflow = build(join_config, 3);
 ```
 
-<h3 id="strategy-partial-timeout"><a href="#strategy-partial-timeout" class="anchor-link" aria-hidden="true">#</a>PartialTimeout — Deadline-Based Completion</h3>
-<p>Accepts whatever has finished (successes or failures) when the timeout expires and proceeds with those
-results; the remaining tasks are cancelled. If no task finished before the deadline, the join fails with a
-<code>CanoError::Workflow</code>. The go-to strategy for hard SLAs. Requires <code>.with_timeout()</code>;
-<code>validate()</code> rejects a <code>PartialTimeout</code> split without one before the workflow runs.</p>
+<h3 id="strategy-any"><a href="#strategy-any" class="anchor-link" aria-hidden="true">#</a>Any: first success</h3>
+<p>
+Joins on the first success and aborts the rest. If every task fails, the join fails with a
+<code>CanoError::Workflow</code> error. Use it for redundant calls where the fastest answer wins.
+</p>
 
 <div class="diagram-frame">
-<p class="diagram-label">PartialTimeout Strategy</p>
+<p class="diagram-label">Any: the first success joins and aborts the rest</p>
 <div class="cd-wrap">
-<svg class="cd" viewBox="0 0 840 504" role="img" style="max-width: 860px">
-<title>PartialTimeout strategy: four tasks start, two report success before the deadline, and the timeout itself fires the join — the two tasks still running are cancelled and the workflow proceeds with the results it has.</title>
-<defs><marker id="ptimeout-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
-<rect class="n" x="10" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="80" y="28">Workflow</text>
-<rect class="n" x="180" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="250" y="28">Task 1</text>
-<rect class="n-ghost" x="350" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="420" y="28">Task 2</text>
-<rect class="n" x="520" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="590" y="28">Task 3</text>
-<rect class="n-ghost" x="690" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="760" y="28">Task 4</text>
-<line class="lifeline" x1="80" y1="46" x2="80" y2="440"/>
-<line class="lifeline" x1="250" y1="46" x2="250" y2="440"/>
-<line class="n-ghost" x1="420" y1="46" x2="420" y2="440"/>
-<line class="lifeline" x1="590" y1="46" x2="590" y2="440"/>
-<line class="n-ghost" x1="760" y1="46" x2="760" y2="440"/>
-<text class="t-mut" x="165" y="66">Start</text>
-<path class="e" d="M80,78 H247" marker-end="url(#ptimeout-ah)"/>
-<text class="t-mut" x="250" y="110">Start</text>
-<path class="e" d="M80,122 H417" marker-end="url(#ptimeout-ah)"/>
-<text class="t-mut" x="335" y="154">Start</text>
-<path class="e" d="M80,166 H587" marker-end="url(#ptimeout-ah)"/>
-<text class="t-mut" x="420" y="198">Start</text>
-<path class="e" d="M80,210 H757" marker-end="url(#ptimeout-ah)"/>
-<text class="t-mut t-ok" x="165" y="242">Complete ✓</text>
-<path class="e e-dash" d="M250,254 H83" marker-end="url(#ptimeout-ah)"/>
-<text class="t-mut t-ok" x="335" y="286">Complete ✓</text>
-<path class="e e-dash" d="M590,298 H83" marker-end="url(#ptimeout-ah)"/>
-<rect class="n-hot" x="16" y="318" width="808" height="34" rx="10"/>
-<text class="t-strong" x="420" y="336">Timeout Reached</text>
-<text class="t-mut t-warn" x="250" y="372">Cancel ⏱</text>
-<path class="e e-dim" d="M80,384 H417" marker-end="url(#ptimeout-ah)"/>
-<text class="t-mut t-warn" x="420" y="416">Cancel ⏱</text>
-<path class="e e-dim" d="M80,428 H757" marker-end="url(#ptimeout-ah)"/>
-<rect class="n-hot" x="16" y="448" width="808" height="34" rx="10"/>
-<text class="t-strong" x="420" y="466">Proceed with 2 results</text>
+<svg class="cd" viewBox="0 0 720 238" role="img" aria-labelledby="joins-any-title joins-any-desc">
+<title id="joins-any-title">Any strategy timeline</title>
+<desc id="joins-any-desc">Three redundant tasks start together. Task 2 succeeds first, so the join fires at that moment and the workflow advances. Tasks 1 and 3 are still running and are aborted.</desc>
+<text class="ta-e" x="110" y="68">Task 1</text>
+<rect class="band" x="130" y="54" width="120" height="28" rx="6"/>
+<text class="t-mut" x="190" y="68">running</text>
+<rect class="n-ghost" x="250" y="54" width="170" height="28" rx="6"/>
+<text class="t-mut t-warn" x="335" y="68">aborted</text>
+<text class="ta-e" x="110" y="108">Task 2</text>
+<rect class="n-ok" x="130" y="94" width="120" height="28" rx="6"/>
+<text class="t-mut t-ok" x="190" y="108">succeeded</text>
+<text class="ta-e" x="110" y="148">Task 3</text>
+<rect class="band" x="130" y="134" width="120" height="28" rx="6"/>
+<text class="t-mut" x="190" y="148">running</text>
+<rect class="n-ghost" x="250" y="134" width="270" height="28" rx="6"/>
+<text class="t-mut t-warn" x="385" y="148">aborted</text>
+<line class="axis" x1="130" y1="176" x2="700" y2="176"/>
+<text class="t-mut ta-e" x="700" y="190">time</text>
+<line class="e e-hot" x1="250" y1="44" x2="250" y2="176"/>
+<text class="t-mut t-hot" x="250" y="30">first success</text>
+<rect class="n-hot" x="130" y="194" width="570" height="34" rx="10"/>
+<text class="t-strong" x="415" y="211">First success: advance. The other tasks are aborted</text>
 </svg>
 </div>
 </div>
 
 ```rust
-use cano::prelude::*;
-use std::time::Duration;
+// Three redundant providers: the first to succeed wins.
+let join_config = JoinConfig::new(JoinStrategy::Any, State::Aggregate);
+let workflow = build(join_config, 3);
+```
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum DataState { Start, ParallelProcessing, Aggregate, Complete }
+<h3 id="strategy-quorum"><a href="#strategy-quorum" class="anchor-link" aria-hidden="true">#</a>Quorum(n): at least n successes</h3>
+<p>
+Waits for every task to finish, then joins if at least <code>n</code> succeeded. Otherwise the join
+fails with a <code>CanoError::Workflow</code> error. Use it for majority writes where the stragglers
+are still worth waiting for.
+</p>
 
-#[derive(Clone)]
-struct LoadUserContext;
-#[derive(Clone)]
-struct RecommendationEngine { kind: String }
-impl RecommendationEngine { fn new(kind: &str) -> Self { Self { kind: kind.into() } } }
-#[derive(Clone)]
-struct AggregateWithinSla;
+<div class="diagram-frame">
+<p class="diagram-label">Quorum(3): the join waits for every task, then counts</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 720 278" role="img" aria-labelledby="joins-quorum-title joins-quorum-desc">
+<title id="joins-quorum-title">Quorum strategy timeline</title>
+<desc id="joins-quorum-desc">Four tasks start together. Three succeed and one fails, finishing at different times. The join fires when the last task finishes, counts three successes against a quorum of three, and the workflow advances.</desc>
+<text class="ta-e" x="110" y="68">Task 1</text>
+<rect class="n-ok" x="130" y="54" width="120" height="28" rx="6"/>
+<text class="t-mut t-ok" x="190" y="68">succeeded</text>
+<text class="ta-e" x="110" y="108">Task 2</text>
+<rect class="n-ok" x="130" y="94" width="200" height="28" rx="6"/>
+<text class="t-mut t-ok" x="230" y="108">succeeded</text>
+<text class="ta-e" x="110" y="148">Task 3</text>
+<rect class="n-err" x="130" y="134" width="270" height="28" rx="6"/>
+<text class="t-mut t-err" x="265" y="148">failed</text>
+<text class="ta-e" x="110" y="188">Task 4</text>
+<rect class="n-ok" x="130" y="174" width="390" height="28" rx="6"/>
+<text class="t-mut t-ok" x="325" y="188">succeeded</text>
+<line class="axis" x1="130" y1="216" x2="700" y2="216"/>
+<text class="t-mut ta-e" x="700" y="230">time</text>
+<line class="e e-hot" x1="520" y1="44" x2="520" y2="216"/>
+<text class="t-mut t-hot" x="520" y="30">join</text>
+<rect class="n-hot" x="130" y="234" width="570" height="34" rx="10"/>
+<text class="t-strong" x="415" y="251">3 of 4 succeeded, quorum of 3 met: advance</text>
+</svg>
+</div>
+</div>
 
-#[task(state = DataState)]
-impl LoadUserContext {
-    async fn run(&self) -> Result<DataState, CanoError> {
-        Ok(DataState::ParallelProcessing)
-    }
-}
+```rust
+// Write to 5 replicas; 3 must confirm.
+let join_config = JoinConfig::new(JoinStrategy::Quorum(3), State::Aggregate)
+    .with_timeout(Duration::from_secs(5));
+let workflow = build(join_config, 5);
+```
 
-#[task(state = DataState)]
-impl RecommendationEngine {
-    async fn run(&self) -> Result<DataState, CanoError> {
-        Ok(DataState::Aggregate)
-    }
-}
+<h3 id="strategy-percentage"><a href="#strategy-percentage" class="anchor-link" aria-hidden="true">#</a>Percentage(p): a fraction of successes</h3>
+<p>
+Waits for every task to finish, then joins if at least <code>ceil(total * p)</code> succeeded. The value
+must be in <code>(0.0, 1.0]</code>. Because the requirement scales with the task count, it suits splits
+whose size varies.
+</p>
 
-#[task(state = DataState)]
-impl AggregateWithinSla {
-    async fn run(&self) -> Result<DataState, CanoError> {
-        Ok(DataState::Complete)
-    }
-}
+<div class="diagram-frame">
+<p class="diagram-label">Percentage(0.75): the join waits for every task, then counts</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 720 278" role="img" aria-labelledby="joins-percentage-title joins-percentage-desc">
+<title id="joins-percentage-title">Percentage strategy timeline</title>
+<desc id="joins-percentage-desc">Four tasks start together. Task 2 fails and the other three succeed. The join fires when the last task finishes. Three of four is 75 percent, which meets the configured fraction, so the workflow advances.</desc>
+<text class="ta-e" x="110" y="68">Task 1</text>
+<rect class="n-ok" x="130" y="54" width="200" height="28" rx="6"/>
+<text class="t-mut t-ok" x="230" y="68">succeeded</text>
+<text class="ta-e" x="110" y="108">Task 2</text>
+<rect class="n-err" x="130" y="94" width="120" height="28" rx="6"/>
+<text class="t-mut t-err" x="190" y="108">failed</text>
+<text class="ta-e" x="110" y="148">Task 3</text>
+<rect class="n-ok" x="130" y="134" width="270" height="28" rx="6"/>
+<text class="t-mut t-ok" x="265" y="148">succeeded</text>
+<text class="ta-e" x="110" y="188">Task 4</text>
+<rect class="n-ok" x="130" y="174" width="390" height="28" rx="6"/>
+<text class="t-mut t-ok" x="325" y="188">succeeded</text>
+<line class="axis" x1="130" y1="216" x2="700" y2="216"/>
+<text class="t-mut ta-e" x="700" y="230">time</text>
+<line class="e e-hot" x1="520" y1="44" x2="520" y2="216"/>
+<text class="t-mut t-hot" x="520" y="30">join</text>
+<rect class="n-hot" x="130" y="234" width="570" height="34" rx="10"/>
+<text class="t-strong" x="415" y="251">3 of 4 succeeded, 75% met: advance</text>
+</svg>
+</div>
+</div>
 
-fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
-    // PartialTimeout Strategy: real-time recommendations with a 500ms SLA
-    let join_config = JoinConfig::new(JoinStrategy::PartialTimeout, DataState::Aggregate)
-        .with_timeout(Duration::from_millis(500));
+```rust
+// 100 records; at least 75 must succeed.
+let join_config = JoinConfig::new(JoinStrategy::Percentage(0.75), State::Aggregate)
+    .with_timeout(Duration::from_secs(10));
+let workflow = build(join_config, 100);
+```
 
-    Workflow::new(Resources::new().insert(store))
-        .register(DataState::Start, LoadUserContext)
-        .register_split(
-            DataState::ParallelProcessing,
-            vec![
-                RecommendationEngine::new("collaborative"),
-                RecommendationEngine::new("content-based"),
-                RecommendationEngine::new("trending"),
-                RecommendationEngine::new("personalized"),
-            ],
-            join_config,
-        )
-        .register(DataState::Aggregate, AggregateWithinSla)
-        .add_exit_state(DataState::Complete)
-}
+<h3 id="strategy-partial-results"><a href="#strategy-partial-results" class="anchor-link" aria-hidden="true">#</a>PartialResults(n): stop after n successes</h3>
+<p>
+Joins as soon as <code>n</code> tasks have succeeded and aborts the rest. Failures along the way are
+tolerated and reported to observers. If the split ends with fewer than <code>n</code> successes, the join
+fails with a <code>CanoError::Workflow</code> error that lists the task errors. Use it
+when latency matters and some failures are acceptable. <code>cargo run --example workflow_partial_results</code>
+walks through it.
+</p>
+
+<div class="diagram-frame">
+<p class="diagram-label">PartialResults(2): the second success joins and aborts the rest</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 720 278" role="img" aria-labelledby="joins-partial-results-title joins-partial-results-desc">
+<title id="joins-partial-results-title">PartialResults strategy timeline</title>
+<desc id="joins-partial-results-desc">Four tasks start together. Task 1 succeeds, task 2 fails and the failure is tolerated, then task 3 succeeds. The second success fires the join. Task 4 is still running and is aborted. The outcome is two successes, one failure and one aborted task.</desc>
+<text class="ta-e" x="110" y="68">Task 1</text>
+<rect class="n-ok" x="130" y="54" width="120" height="28" rx="6"/>
+<text class="t-mut t-ok" x="190" y="68">succeeded</text>
+<text class="ta-e" x="110" y="108">Task 2</text>
+<rect class="n-err" x="130" y="94" width="170" height="28" rx="6"/>
+<text class="t-mut t-err" x="215" y="108">failed</text>
+<text class="ta-e" x="110" y="148">Task 3</text>
+<rect class="n-ok" x="130" y="134" width="250" height="28" rx="6"/>
+<text class="t-mut t-ok" x="255" y="148">succeeded</text>
+<text class="ta-e" x="110" y="188">Task 4</text>
+<rect class="band" x="130" y="174" width="250" height="28" rx="6"/>
+<text class="t-mut" x="255" y="188">running</text>
+<rect class="n-ghost" x="380" y="174" width="140" height="28" rx="6"/>
+<text class="t-mut t-warn" x="450" y="188">aborted</text>
+<line class="axis" x1="130" y1="216" x2="700" y2="216"/>
+<text class="t-mut ta-e" x="700" y="230">time</text>
+<line class="e e-hot" x1="380" y1="44" x2="380" y2="216"/>
+<text class="t-mut t-hot" x="380" y="30">second success</text>
+<rect class="n-hot" x="130" y="234" width="570" height="34" rx="10"/>
+<text class="t-strong" x="415" y="251">2 succeeded: advance. 1 failed, 1 aborted</text>
+</svg>
+</div>
+</div>
+
+```rust
+// Proceed after any 2 of 4 service calls succeed.
+let join_config = JoinConfig::new(JoinStrategy::PartialResults(2), State::Aggregate)
+    .with_timeout(Duration::from_secs(5));
+let workflow = build(join_config, 4);
+```
+
+<h3 id="strategy-partial-timeout"><a href="#strategy-partial-timeout" class="anchor-link" aria-hidden="true">#</a>PartialTimeout: whatever finished by the deadline</h3>
+<p>
+Joins when every task has finished or the timeout expires, whichever comes first, and accepts whatever
+completed by then. Successes and failures both count, so a join with only failures still advances.
+If no task finished, the join fails with a <code>CanoError::Workflow</code> error. Use it for hard
+SLAs.
+</p>
+
+<div class="diagram-frame">
+<p class="diagram-label">PartialTimeout: the deadline joins with whatever finished</p>
+<div class="cd-wrap">
+<svg class="cd" viewBox="0 0 720 278" role="img" aria-labelledby="joins-partial-timeout-title joins-partial-timeout-desc">
+<title id="joins-partial-timeout-title">PartialTimeout strategy timeline</title>
+<desc id="joins-partial-timeout-desc">Four tasks start together with a timeout set. Tasks 1 and 3 succeed before the deadline. At the deadline tasks 2 and 4 are still running, so they are aborted, and the workflow advances with the two results it has.</desc>
+<text class="ta-e" x="110" y="68">Task 1</text>
+<rect class="n-ok" x="130" y="54" width="120" height="28" rx="6"/>
+<text class="t-mut t-ok" x="190" y="68">succeeded</text>
+<text class="ta-e" x="110" y="108">Task 2</text>
+<rect class="band" x="130" y="94" width="270" height="28" rx="6"/>
+<text class="t-mut" x="265" y="108">running</text>
+<rect class="n-ghost" x="400" y="94" width="160" height="28" rx="6"/>
+<text class="t-mut t-warn" x="480" y="108">aborted</text>
+<text class="ta-e" x="110" y="148">Task 3</text>
+<rect class="n-ok" x="130" y="134" width="200" height="28" rx="6"/>
+<text class="t-mut t-ok" x="230" y="148">succeeded</text>
+<text class="ta-e" x="110" y="188">Task 4</text>
+<rect class="band" x="130" y="174" width="270" height="28" rx="6"/>
+<text class="t-mut" x="265" y="188">running</text>
+<rect class="n-ghost" x="400" y="174" width="240" height="28" rx="6"/>
+<text class="t-mut t-warn" x="520" y="188">aborted</text>
+<line class="axis" x1="130" y1="216" x2="700" y2="216"/>
+<text class="t-mut ta-e" x="700" y="230">time</text>
+<line class="e e-hot" x1="400" y1="44" x2="400" y2="216"/>
+<text class="t-mut t-hot" x="400" y="30">timeout</text>
+<rect class="n-hot" x="130" y="234" width="570" height="34" rx="10"/>
+<text class="t-strong" x="415" y="251">Timeout: advance with 2 results. The rest are aborted</text>
+</svg>
+</div>
+</div>
+
+<div class="callout callout-warning">
+<span class="callout-label">PartialTimeout needs a timeout</span>
+<p>
+<code>validate()</code> rejects a <code>PartialTimeout</code> split without <code>.with_timeout()</code>
+with <code>CanoError::Configuration</code>, before the workflow runs.
+</p>
+</div>
+
+```rust
+// Real-time recommendations with a 500 ms SLA.
+let join_config = JoinConfig::new(JoinStrategy::PartialTimeout, State::Aggregate)
+    .with_timeout(Duration::from_millis(500));
+let workflow = build(join_config, 4);
 ```
 <hr class="section-divider">
 
-<h2 id="comparison-table"><a href="#comparison-table" class="anchor-link" aria-hidden="true">#</a>Comparison Table</h2>
+<h2 id="comparison-table"><a href="#comparison-table" class="anchor-link" aria-hidden="true">#</a>Comparison table</h2>
 <table class="styled-table">
 <thead>
 <tr>
 <th>Strategy</th>
-<th>Trigger Condition</th>
-<th>Cancels Others</th>
-<th>Best Use Case</th>
+<th>Joins when</th>
+<th>Aborts the rest</th>
+<th>Use for</th>
 </tr>
 </thead>
 <tbody>
 <tr>
 <td><code>All</code></td>
-<td>All tasks succeed</td>
+<td>All tasks succeeded</td>
 <td>No</td>
 <td>Complete data required</td>
 </tr>
@@ -667,31 +381,31 @@ fn build_workflow(store: MemoryStore) -> Workflow<DataState> {
 <td><code>Any</code></td>
 <td>First success</td>
 <td>Yes</td>
-<td>Redundant API calls</td>
+<td>Redundant calls</td>
 </tr>
 <tr>
 <td><code>Quorum(n)</code></td>
-<td>All tasks finished, at least N succeeded</td>
+<td>All finished, at least n succeeded</td>
 <td>No</td>
-<td>Distributed consensus</td>
+<td>Majority writes</td>
 </tr>
 <tr>
 <td><code>Percentage(p)</code></td>
-<td>All tasks finished, at least P% succeeded</td>
+<td>All finished, at least a fraction p succeeded</td>
 <td>No</td>
-<td>Batch processing</td>
+<td>Batches of varying size</td>
 </tr>
 <tr>
 <td><code>PartialResults(n)</code></td>
-<td>N tasks succeed (failures tolerated)</td>
+<td>n tasks succeeded</td>
 <td>Yes</td>
-<td>Latency optimization</td>
+<td>Fan-out under a latency bound</td>
 </tr>
 <tr>
 <td><code>PartialTimeout</code></td>
-<td>Timeout reached</td>
-<td>Yes</td>
-<td>Strict SLA requirements</td>
+<td>All finished or timeout, accepting successes and failures</td>
+<td>At the timeout</td>
+<td>Hard SLAs</td>
 </tr>
 </tbody>
 </table>

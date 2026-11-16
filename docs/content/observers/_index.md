@@ -1,52 +1,51 @@
 +++
-title = "Observers & Health Probes"
+title = "Observers and health probes"
 description = "Subscribe to Cano workflow lifecycle and failure events, and report on the health of a workflow's resources."
 template = "section.html"
 +++
 
 <div class="content-wrapper">
-<h1>Observers &amp; Health Probes</h1>
+<h1>Observers and health probes</h1>
 <p class="subtitle">Lifecycle hooks for your workflows, and on-demand health for their dependencies.</p>
 
 <p>
-Cano gives you two opt-in observability surfaces that sit alongside the
-<a href="../tracing/">tracing</a> integration and the <a href="../metrics/">metrics</a> feature:
+Cano has two opt-in observability surfaces next to the <a href="../tracing/">tracing</a> integration
+and the <a href="../metrics/">metrics</a> feature. This page is a reference for both, with a short
+how-to for attaching an observer.
 </p>
 <ul>
-<li><strong><code>WorkflowObserver</code></strong> — synchronous callbacks fired at every
-workflow lifecycle and failure event (state entry, task start/success/failure, retry,
-circuit-open, and — when a <a href="../recovery/">checkpoint store</a> is attached —
-checkpoint and resume). No feature flag, no <code>async-trait</code> overhead.</li>
-<li><strong>Resource health</strong> — <code>Resource::health()</code> plus
-<code>Resources::check_all_health()</code> / <code>aggregate_health()</code> to report on
-the state of databases, HTTP clients, and other dependencies on demand.</li>
+<li><code>WorkflowObserver</code> is a set of synchronous callbacks for state entry, task start,
+success and failure, retries, open circuit breakers, checkpoints, resume, cancellation, total timeout,
+checkpoint clear failures and unknown resume states. It needs no feature flag.</li>
+<li>Resource health is <code>Resource::health()</code> plus <code>Resources::check_all_health()</code>
+and <code>aggregate_health()</code>, for reporting on databases, HTTP clients and other dependencies
+on demand.</li>
 </ul>
 <p>
-Observers are <strong>additive</strong>: attaching one does not change or suppress the
-<code>tracing</code> spans and events the engine already emits.
+Observers are additive: attaching one does not change or suppress the <code>tracing</code> spans and
+events the engine already emits.
 </p>
 
 <nav class="page-toc" aria-label="Table of contents">
 <div class="page-toc-title">On this page</div>
 <ol>
-<li><a href="#attaching">Attaching an Observer</a></li>
-<li><a href="#events">Lifecycle Events</a></li>
-<li><a href="#task-ids">Task Identifiers</a></li>
-<li><a href="#sync">Synchronous by Design</a></li>
+<li><a href="#attaching">Attaching an observer</a></li>
+<li><a href="#events">Lifecycle events</a></li>
+<li><a href="#task-ids">Task identifiers</a></li>
+<li><a href="#sync">Synchronous by design</a></li>
 <li><a href="#tracing-observer">Built-in: TracingObserver</a></li>
-<li><a href="#health">Resource Health Probes</a></li>
-<li><a href="#full-example">Full Example</a></li>
+<li><a href="#health">Resource health probes</a></li>
+<li><a href="#full-example">Full example</a></li>
 </ol>
 </nav>
 <hr class="section-divider">
 
-<h2 id="attaching"><a href="#attaching" class="anchor-link" aria-hidden="true">#</a>Attaching an Observer</h2>
+<h2 id="attaching"><a href="#attaching" class="anchor-link" aria-hidden="true">#</a>Attaching an observer</h2>
 <p>
-Implement <code>WorkflowObserver</code> for any <code>Send + Sync + 'static</code> type,
-wrap it in an <code>Arc</code>, and register it with <code>Workflow::with_observer</code>.
-Call it more than once to register several observers — each event is delivered to every
-observer in registration order. Registration is O(1), and a workflow with no observers
-pays nothing per dispatch.
+Implement <code>WorkflowObserver</code> for any <code>Send + Sync + 'static</code> type, wrap it in
+an <code>Arc</code>, and register it with <code>Workflow::with_observer</code>. Call it more than once
+to register several observers; each event reaches every observer in registration order. A workflow
+with no observers pays nothing per dispatch.
 </p>
 
 ```rust
@@ -93,62 +92,50 @@ async fn main() -> Result<(), CanoError> {
 ```
 <hr class="section-divider">
 
-<h2 id="events"><a href="#events" class="anchor-link" aria-hidden="true">#</a>Lifecycle Events</h2>
+<h2 id="events"><a href="#events" class="anchor-link" aria-hidden="true">#</a>Lifecycle events</h2>
 <p>
-Every method on <code>WorkflowObserver</code> has a default no-op body — override only the
-ones you care about.
+<code>WorkflowObserver</code> has twelve hooks. Each has a default no-op body, so you override only the
+ones you need.
 </p>
 
 <div class="diagram-frame">
-<p class="diagram-label">One state of an observed run, and the hooks that end a run</p>
+<p class="diagram-label">Hook order across one state of an observed run</p>
 <div class="cd-wrap">
-<svg class="cd" viewBox="0 0 780 554" role="img">
-<title>Hook order across one state: the engine reports on_state_enter and on_task_start, the first attempt fails so on_retry fires, the second attempt succeeds and on_task_success fires, a checkpoint is reported when a checkpoint store is attached, and entering the next state starts the cycle again.</title>
-<defs><marker id="obs-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
-<line class="lifeline" x1="120" y1="46" x2="120" y2="424"/>
-<line class="lifeline" x1="390" y1="46" x2="390" y2="424"/>
-<line class="lifeline" x1="650" y1="46" x2="650" y2="424"/>
+<svg class="cd" viewBox="0 0 780 478" role="img" aria-labelledby="observers-order-title observers-order-desc">
+<title id="observers-order-title">Hook order across one state</title>
+<desc id="observers-order-desc">Three lifelines: the engine, the task and the workflow observer. The engine reports on_state_enter to the observer. When a checkpoint store is attached it then reports on_checkpoint. It reports on_task_start and runs attempt 1 on the task, which returns an error. The engine reports on_retry, runs attempt 2, which returns the next state, and reports on_task_success. Entering the next state reports on_state_enter again and the cycle repeats. A task that fails for good reports on_task_failure instead of on_task_success.</desc>
+<defs><marker id="observers-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<line class="lifeline" x1="120" y1="46" x2="120" y2="430"/>
+<line class="lifeline" x1="390" y1="46" x2="390" y2="430"/>
+<line class="lifeline" x1="650" y1="46" x2="650" y2="430"/>
 <rect class="n" x="50" y="8" width="140" height="38" rx="8"/>
 <text class="t-strong" x="120" y="28">Engine</text>
 <rect class="n" x="320" y="8" width="140" height="38" rx="8"/>
 <text class="t-strong" x="390" y="28">Task</text>
 <rect class="n-hot" x="560" y="8" width="180" height="38" rx="8"/>
 <text class="t-strong" x="650" y="28">WorkflowObserver</text>
-<path class="e" d="M120,80 H646" marker-end="url(#obs-ah)"/>
+<path class="e" d="M120,80 H646" marker-end="url(#observers-ah)"/>
 <text class="t-code ta-s" x="136" y="68">on_state_enter("Load")</text>
-<path class="e" d="M120,114 H646" marker-end="url(#obs-ah)"/>
-<text class="t-code ta-s" x="136" y="102">on_task_start("load")</text>
-<path class="e" d="M120,148 H386" marker-end="url(#obs-ah)"/>
-<text class="t-mut ta-s" x="136" y="136">attempt 1</text>
-<path class="e e-dash" d="M390,182 H124" marker-end="url(#obs-ah)"/>
-<text class="t-code t-err ta-e" x="374" y="170">Err(CanoError)</text>
-<path class="e" d="M120,216 H646" marker-end="url(#obs-ah)"/>
-<text class="t-code t-warn ta-s" x="136" y="204">on_retry("load", 1)</text>
-<path class="e" d="M120,250 H386" marker-end="url(#obs-ah)"/>
-<text class="t-mut ta-s" x="136" y="238">attempt 2</text>
-<path class="e e-dash" d="M390,284 H124" marker-end="url(#obs-ah)"/>
-<text class="t-code t-ok ta-e" x="374" y="272">Ok(next state)</text>
-<path class="e" d="M120,318 H646" marker-end="url(#obs-ah)"/>
-<text class="t-code t-ok ta-s" x="136" y="306">on_task_success("load")</text>
-<path class="e e-dash" d="M120,368 H646" marker-end="url(#obs-ah)"/>
-<text class="t-mut ta-s" x="136" y="336">only with a checkpoint store</text>
-<text class="t-code ta-s" x="136" y="354">on_checkpoint(id, seq)</text>
-<path class="e" d="M120,412 H646" marker-end="url(#obs-ah)"/>
-<text class="t-code ta-s" x="136" y="400">on_state_enter("Done")</text>
-<rect class="n-warn" x="12" y="442" width="180" height="38" rx="10"/>
-<text class="t-code t-warn" x="102" y="462">on_circuit_open</text>
-<text class="t-mut" x="102" y="494">breaker is open</text>
-<rect class="n-err" x="204" y="442" width="180" height="38" rx="10"/>
-<text class="t-code t-err" x="294" y="462">on_task_failure</text>
-<text class="t-mut" x="294" y="494">retries exhausted</text>
-<rect class="n-ghost" x="396" y="442" width="180" height="38" rx="10"/>
-<text class="t-code t-warn" x="486" y="462">on_cancelled</text>
-<text class="t-mut" x="486" y="494">token cancelled</text>
-<rect class="n-warn" x="588" y="442" width="180" height="38" rx="10"/>
-<text class="t-code t-warn" x="678" y="462">on_workflow_timeout</text>
-<text class="t-mut" x="678" y="494">total budget spent</text>
-<text class="t-mut" x="390" y="520">on_resume fires once at the start of resume_from; every other hook fires inside the run.</text>
-<text class="t-mut" x="390" y="540">All hooks are synchronous — they run inline on the workflow's task.</text>
+<path class="e e-dash" d="M120,134 H646" marker-end="url(#observers-ah)"/>
+<text class="t-mut ta-s" x="136" y="104">only with a checkpoint store</text>
+<text class="t-code ta-s" x="136" y="122">on_checkpoint(id, seq)</text>
+<path class="e" d="M120,174 H646" marker-end="url(#observers-ah)"/>
+<text class="t-code ta-s" x="136" y="162">on_task_start("load")</text>
+<path class="e" d="M120,208 H386" marker-end="url(#observers-ah)"/>
+<text class="t-mut ta-s" x="136" y="196">attempt 1</text>
+<path class="e e-dash" d="M390,242 H124" marker-end="url(#observers-ah)"/>
+<text class="t-code t-err ta-e" x="374" y="230">Err(CanoError)</text>
+<path class="e" d="M120,276 H646" marker-end="url(#observers-ah)"/>
+<text class="t-code t-warn ta-s" x="136" y="264">on_retry("load", 1)</text>
+<path class="e" d="M120,310 H386" marker-end="url(#observers-ah)"/>
+<text class="t-mut ta-s" x="136" y="298">attempt 2</text>
+<path class="e e-dash" d="M390,344 H124" marker-end="url(#observers-ah)"/>
+<text class="t-code t-ok ta-e" x="374" y="332">Ok(next state)</text>
+<path class="e" d="M120,378 H646" marker-end="url(#observers-ah)"/>
+<text class="t-code t-ok ta-s" x="136" y="366">on_task_success("load")</text>
+<path class="e" d="M120,418 H646" marker-end="url(#observers-ah)"/>
+<text class="t-code ta-s" x="136" y="406">on_state_enter("Done")</text>
+<text class="t-mut" x="390" y="458">A task that fails for good reports on_task_failure instead of on_task_success.</text>
 </svg>
 </div>
 </div>
@@ -156,84 +143,106 @@ ones you care about.
 <div class="card-stack">
 <div class="card">
 <h3 id="on-state-enter"><a href="#on-state-enter" class="anchor-link" aria-hidden="true">#</a><code>on_state_enter(state: &amp;str)</code></h3>
-<p>Fired each time the FSM enters a state — including the initial state and the terminal
-exit state. <code>state</code> is the <code>Debug</code> rendering of the state value.</p>
+<p>Fired each time the FSM enters a state, including the initial state and the exit state.
+<code>state</code> is the <code>Debug</code> rendering of the state value.</p>
 </div>
 <div class="card">
 <h3 id="on-task-start"><a href="#on-task-start" class="anchor-link" aria-hidden="true">#</a><code>on_task_start(task_id: &amp;str)</code></h3>
 <p>Fired immediately before a task begins executing, before the retry loop. For a
-split/join state, fired once per parallel task.</p>
+split/join state it fires once per parallel task.</p>
 </div>
 <div class="card">
 <h3 id="on-task-success"><a href="#on-task-success" class="anchor-link" aria-hidden="true">#</a><code>on_task_success(task_id: &amp;str)</code></h3>
-<p>Fired when a task completes successfully (after any retries).</p>
+<p>Fired when a task completes successfully, after any retries.</p>
 </div>
 <div class="card">
 <h3 id="on-task-failure"><a href="#on-task-failure" class="anchor-link" aria-hidden="true">#</a><code>on_task_failure(task_id: &amp;str, err: &amp;CanoError)</code></h3>
-<p>Fired when a task ultimately fails: retries exhausted, a non-retried per-attempt timeout,
-a panic, or rejection by an open circuit breaker.</p>
+<p>Fired when a task fails for good: retries exhausted, a per-attempt timeout that is not retried,
+a panic, or rejection by an open circuit breaker. It also fires for an in-flight task that a
+cancellation or the total timeout drops, before <code>on_cancelled</code> or <code>on_workflow_timeout</code>.</p>
 </div>
 <div class="card">
 <h3 id="on-retry"><a href="#on-retry" class="anchor-link" aria-hidden="true">#</a><code>on_retry(task_id: &amp;str, attempt: u32)</code></h3>
 <p>Fired before each retry. <code>attempt</code> is the 1-based number of the attempt that
-just failed — the retry that follows is attempt <code>attempt + 1</code>.</p>
+just failed, so the retry that follows is attempt <code>attempt + 1</code>. A task with no retry
+policy never fires it.</p>
 </div>
 <div class="card">
 <h3 id="on-circuit-open"><a href="#on-circuit-open" class="anchor-link" aria-hidden="true">#</a><code>on_circuit_open(task_id: &amp;str)</code></h3>
 <p>Fired when a <a href="../resilience/circuit-breakers/"><code>CircuitBreaker</code></a> attached via
-<code>TaskConfig::with_circuit_breaker</code> rejects a call because it is open. Followed by
-an <code>on_task_failure</code> carrying a <code>CanoError::CircuitOpen</code>. <code>on_retry</code>
-and <code>on_circuit_open</code> are your bridge to the <a href="../resilience/">Resilience</a>
-machinery — see that guide for retries, timeouts, circuit breakers, and bulkheads.</p>
+<code>TaskConfig::with_circuit_breaker</code> rejects a call because it is open. An
+<code>on_task_failure</code> carrying a <code>CanoError::CircuitOpen</code> follows. For retries,
+timeouts, circuit breakers and bulkheads, see <a href="../resilience/">Resilience</a>.</p>
 </div>
 <div class="card">
 <h3 id="on-checkpoint"><a href="#on-checkpoint" class="anchor-link" aria-hidden="true">#</a><code>on_checkpoint(workflow_id: &amp;str, sequence: u64)</code></h3>
-<p>Fired after each <a href="../recovery/"><code>CheckpointRow</code></a> is durably appended —
-once per state entry, only on a workflow configured with <code>Workflow::with_checkpoint_store</code>.</p>
+<p>Fired after each <a href="../recovery/"><code>CheckpointRow</code></a> is durably appended. That
+is one row per state entry (router states write none), plus a row for each saga completion and each
+stepped or stream cursor save. It never fires without <code>Workflow::with_checkpoint_store</code>.</p>
 </div>
 <div class="card">
 <h3 id="on-resume"><a href="#on-resume" class="anchor-link" aria-hidden="true">#</a><code>on_resume(workflow_id: &amp;str, sequence: u64)</code></h3>
-<p>Fired once at the start of <a href="../recovery/"><code>Workflow::resume_from</code></a>.
-<code>sequence</code> is the last persisted row's sequence; execution continues from the state
-that row recorded.</p>
+<p>Fired once at the start of <a href="../recovery/"><code>Workflow::resume_from</code></a>, after
+the run is rehydrated. <code>sequence</code> is the last persisted row's sequence; execution continues
+from the state that row recorded.</p>
 </div>
 <div class="card">
 <h3 id="on-workflow-timeout"><a href="#on-workflow-timeout" class="anchor-link" aria-hidden="true">#</a><code>on_workflow_timeout(elapsed: Duration, limit: Duration)</code></h3>
-<p>Fired when <a href="../resilience/#workflow-total-timeout"><code>Workflow::with_total_timeout</code></a>'s
-wall-clock budget is exhausted before the FSM reaches an exit state. Fires once per timeout trip,
-before the compensation drain runs. Followed on the public API's return by
-<code>CanoError::WithStateContext</code> wrapping a <code>CanoError::WorkflowTimeout</code> (clean
-rollback) or <code>CanoError::CompensationFailed</code> if a <code>compensate</code> also fails
-(its <code>errors[0]</code> carries the wrapped timeout).</p>
-
+<p>Fired when the budget of <a href="../resilience/#workflow-total-timeout"><code>Workflow::with_total_timeout</code></a>
+runs out before the FSM reaches an exit state. It fires once per trip, before the compensation drain.
+The call then returns <code>CanoError::WithStateContext</code> wrapping a
+<code>CanoError::WorkflowTimeout</code> after a clean rollback, or
+<code>CanoError::CompensationFailed</code> when a <code>compensate</code> also fails
+(its <code>errors[0]</code> is the wrapped timeout).</p>
+</div>
+<div class="card">
 <h3 id="on-cancelled"><a href="#on-cancelled" class="anchor-link" aria-hidden="true">#</a><code>on_cancelled(state: &amp;str)</code></h3>
-<p>Fired when a run is cancelled via a
-<a href="../resilience/#cancellation"><code>CancellationToken</code></a> — either observed at a state
-boundary or while a cancellable task was in flight. <code>state</code> is the <code>Debug</code>
-rendering of the state the cancel was observed at. Fires exactly once per cancelled run, before the
-compensation drain. Followed on the public API's return by <code>CanoError::WithStateContext</code>
-wrapping a <code>CanoError::Cancelled</code> (clean rollback) or <code>CanoError::CompensationFailed</code>
-whose <code>errors[0]</code> is the wrapped cancel (dirty rollback).</p>
+<p>Fired when a run is cancelled through a
+<a href="../resilience/#cancellation"><code>CancellationToken</code></a>, whether the cancel is seen at a
+state boundary or while a cancellable task is in flight. <code>state</code> is the <code>Debug</code>
+rendering of the state where it was seen. It fires exactly once per cancelled run, before the
+compensation drain. The call then returns <code>CanoError::WithStateContext</code> wrapping a
+<code>CanoError::Cancelled</code> after a clean rollback, or <code>CanoError::CompensationFailed</code>
+whose <code>errors[0]</code> is the wrapped cancel.</p>
+</div>
+<div class="card">
+<h3 id="on-checkpoint-clear-failed"><a href="#on-checkpoint-clear-failed" class="anchor-link" aria-hidden="true">#</a><code>on_checkpoint_clear_failed(workflow_id: &amp;str, error: &amp;CanoError)</code></h3>
+<p>Fired when clearing the checkpoint log fails, after a successful run or after a clean compensation
+drain. The engine does not return the error, so the run keeps its own result. A stranded log can
+later cause a duplicate-sequence error on a fresh run with the same workflow id, or a second
+compensation on <code>resume_from</code>. Use this hook to log or count the failure.</p>
+</div>
+<div class="card">
+<h3 id="on-unknown-resume-state"><a href="#on-unknown-resume-state" class="anchor-link" aria-hidden="true">#</a><code>on_unknown_resume_state(workflow_id: &amp;str, sequence: u64, unknown_state_label: &amp;str)</code></h3>
+<p>Fired during <a href="../recovery/"><code>Workflow::resume_from</code></a> for each checkpoint row
+whose state label is not registered on the current workflow, usually because a state was renamed or
+removed without bumping <code>Workflow::with_workflow_version</code>. It fires while the run is
+rehydrated, before <code>on_resume</code>. The engine drops that row from the rehydrated transition
+path and continues the resume.</p>
 </div>
 </div>
 
+<p>On a single-task state the hooks fire in this order:</p>
+<ol>
+<li><code>on_state_enter</code></li>
+<li><code>on_checkpoint</code>, when a checkpoint store is attached and the state is not a router</li>
+<li><code>on_task_start</code></li>
+<li><code>on_retry</code> or <code>on_circuit_open</code>, zero or more times</li>
+<li><code>on_task_success</code> or <code>on_task_failure</code></li>
+</ol>
 <p>
-On a single-task state the sequence is: <code>on_state_enter</code> → <code>on_task_start</code>
-→ (zero or more <code>on_retry</code> / <code>on_circuit_open</code>) →
-<code>on_task_success</code> <em>or</em> <code>on_task_failure</code> → <code>on_state_enter</code>
-of the next state. Split states fire <code>on_task_start</code> for every parallel task and
-then <code>on_task_success</code> / <code>on_task_failure</code> per task once the join
-completes.
+The next state then starts with its own <code>on_state_enter</code>. A split state fires
+<code>on_task_start</code> for every parallel task, and <code>on_task_success</code> or
+<code>on_task_failure</code> per task.
 </p>
 <hr class="section-divider">
 
-<h2 id="task-ids"><a href="#task-ids" class="anchor-link" aria-hidden="true">#</a>Task Identifiers</h2>
+<h2 id="task-ids"><a href="#task-ids" class="anchor-link" aria-hidden="true">#</a>Task identifiers</h2>
 <p>
-The <code>task_id</code> passed to the hooks comes from <code>Task::name()</code>. The default
-returns <code>std::any::type_name::&lt;Self&gt;()</code> (e.g.
-<code>"my_crate::tasks::FetchTask"</code>); parallel split tasks are reported as
-<code>"{name}[{index}]"</code>. Override <code>name()</code> to give a task a stable,
-friendlier label:
+The <code>task_id</code> passed to the hooks comes from <code>Task::name()</code>. The default is
+<code>std::any::type_name::&lt;Self&gt;()</code>, for example <code>"my_crate::tasks::FetchTask"</code>.
+Parallel split tasks are reported as <code>"{name}[{index}]"</code>. Override <code>name()</code> to
+give a task a stable, shorter label:
 </p>
 
 ```rust
@@ -258,14 +267,16 @@ impl FetchOrders {
 ```
 <hr class="section-divider">
 
-<h2 id="sync"><a href="#sync" class="anchor-link" aria-hidden="true">#</a>Synchronous by Design</h2>
+<h2 id="sync"><a href="#sync" class="anchor-link" aria-hidden="true">#</a>Synchronous by design</h2>
 <p>
-Observer methods are <strong>synchronous</strong> and run inline on the workflow's task. Keep
-them cheap and non-blocking. They are also <strong>isolated</strong>: every hook, including
-<code>on_retry</code> and <code>on_circuit_open</code>, runs under <code>catch_unwind</code>, so a
-panicking observer is reported (as a <code>tracing</code> error event, or a one-line stderr notice
-without the feature) and never fails the task or the workflow. When an event needs async work — writing to a database, pushing
-to a metrics backend — hand it off to a channel and process it elsewhere:
+Observer methods are synchronous and run inline on the workflow's task, so keep them cheap and
+non-blocking. Every hook, including <code>on_retry</code> and <code>on_circuit_open</code>, runs under
+<code>catch_unwind</code>. A panicking observer is reported as a <code>tracing</code> error event (a
+one-line stderr notice without the feature) and never fails the task or the workflow.
+</p>
+<p>
+When an event needs async work, such as a database write or a push to a metrics backend, hand it to a
+channel and process it elsewhere:
 </p>
 
 ```rust
@@ -278,7 +289,7 @@ struct ChannelObserver {
 
 impl WorkflowObserver for ChannelObserver {
     fn on_task_failure(&self, task_id: &str, err: &CanoError) {
-        // Push and return — a separate task drains the receiver.
+        // Push and return. A separate task drains the receiver.
         let _ = self.tx.send(format!("{task_id} failed: {err}"));
     }
 }
@@ -296,10 +307,11 @@ fn main() {
 <p class="feature-tag">Behind the <code>tracing</code> feature gate (<code>features = ["tracing"]</code>).</p>
 
 <p>
-<code>TracingObserver</code> is a ready-made observer that re-emits every hook as a
-<a href="../tracing/"><code>tracing</code></a> event under the <code>cano::observer</code> target — it's a
-bridge from these callbacks to the <a href="../tracing/">Tracing</a> integration's flat events (it does
-<em>not</em> reproduce the engine's nested span tree). Wire it up in one line — no custom observer needed:
+<code>TracingObserver</code> re-emits every hook as a flat <a href="../tracing/"><code>tracing</code></a>
+event under the <code>cano::observer</code> target. It does not reproduce the nested span tree of the
+engine's built-in instrumentation (<code>workflow_orchestrate</code>, <code>single_task_execution</code>,
+<code>task_attempt</code>), so use it alongside that instrumentation, or alone when the high-level events
+are enough. Filter its output with <code>RUST_LOG=cano::observer=debug</code>.
 </p>
 
 ```rust
@@ -331,36 +343,54 @@ async fn main() -> Result<(), CanoError> {
 }
 ```
 
-<p>It emits <strong>events, not spans</strong> — it does not reproduce the nested span tree the
-<code>tracing</code> feature's built-in instrumentation creates
-(<code>workflow_orchestrate</code> → <code>single_task_execution</code> → <code>task_attempt</code>, …).
-Use it alongside that instrumentation, or on its own when the high-level events are all you need.
-Because the events carry the <code>cano::observer</code> target, you can filter them separately:
-<code>RUST_LOG=cano::observer=debug</code>.</p>
+<p>
+Each entry below shows the event level and fields. The message text follows in the definition.
+</p>
+<dl class="key-list">
+<dt><code>on_state_enter</code> <small>DEBUG, field <code>state</code></small></dt>
+<dd><code>"workflow entered state"</code></dd>
 
-<table>
-<thead><tr><th>Hook</th><th>Level</th><th>Message</th><th>Fields</th></tr></thead>
-<tbody>
-<tr><td><code>on_state_enter</code></td><td><code>DEBUG</code></td><td><code>"workflow entered state"</code></td><td><code>state</code></td></tr>
-<tr><td><code>on_task_start</code></td><td><code>DEBUG</code></td><td><code>"task started"</code></td><td><code>task_id</code></td></tr>
-<tr><td><code>on_task_success</code></td><td><code>INFO</code></td><td><code>"task succeeded"</code></td><td><code>task_id</code></td></tr>
-<tr><td><code>on_task_failure</code></td><td><code>ERROR</code></td><td><code>"task failed"</code></td><td><code>task_id</code>, <code>error</code></td></tr>
-<tr><td><code>on_retry</code></td><td><code>WARN</code></td><td><code>"task retry"</code></td><td><code>task_id</code>, <code>attempt</code></td></tr>
-<tr><td><code>on_circuit_open</code></td><td><code>WARN</code></td><td><code>"circuit breaker rejected task"</code></td><td><code>task_id</code></td></tr>
-<tr><td><code>on_checkpoint</code></td><td><code>DEBUG</code></td><td><code>"checkpoint appended"</code></td><td><code>workflow_id</code>, <code>sequence</code></td></tr>
-<tr><td><code>on_resume</code></td><td><code>INFO</code></td><td><code>"workflow resumed from checkpoint"</code></td><td><code>workflow_id</code>, <code>sequence</code></td></tr>
-<tr><td><code>on_workflow_timeout</code></td><td><code>WARN</code></td><td><code>"workflow total timeout exceeded"</code></td><td><code>elapsed_ms</code>, <code>limit_ms</code></td></tr>
-<tr><td><code>on_cancelled</code></td><td><code>WARN</code></td><td><code>"workflow cancelled"</code></td><td><code>state</code></td></tr>
-</tbody>
-</table>
+<dt><code>on_task_start</code> <small>DEBUG, field <code>task_id</code></small></dt>
+<dd><code>"task started"</code></dd>
+
+<dt><code>on_task_success</code> <small>INFO, field <code>task_id</code></small></dt>
+<dd><code>"task succeeded"</code></dd>
+
+<dt><code>on_task_failure</code> <small>ERROR, fields <code>task_id</code>, <code>error</code></small></dt>
+<dd><code>"task failed"</code></dd>
+
+<dt><code>on_retry</code> <small>WARN, fields <code>task_id</code>, <code>attempt</code></small></dt>
+<dd><code>"task retry"</code></dd>
+
+<dt><code>on_circuit_open</code> <small>WARN, field <code>task_id</code></small></dt>
+<dd><code>"circuit breaker rejected task"</code></dd>
+
+<dt><code>on_checkpoint</code> <small>DEBUG, fields <code>workflow_id</code>, <code>sequence</code></small></dt>
+<dd><code>"checkpoint appended"</code></dd>
+
+<dt><code>on_resume</code> <small>INFO, fields <code>workflow_id</code>, <code>sequence</code></small></dt>
+<dd><code>"workflow resumed from checkpoint"</code></dd>
+
+<dt><code>on_workflow_timeout</code> <small>WARN, fields <code>elapsed_ms</code>, <code>limit_ms</code></small></dt>
+<dd><code>"workflow total timeout exceeded"</code></dd>
+
+<dt><code>on_cancelled</code> <small>WARN, field <code>state</code></small></dt>
+<dd><code>"workflow cancelled"</code></dd>
+
+<dt><code>on_checkpoint_clear_failed</code> <small>WARN, fields <code>workflow_id</code>, <code>error</code></small></dt>
+<dd><code>"checkpoint log clear failed"</code></dd>
+
+<dt><code>on_unknown_resume_state</code> <small>WARN, fields <code>workflow_id</code>, <code>sequence</code>, <code>unknown_state_label</code></small></dt>
+<dd>A message that starts <code>"checkpoint row references a state not registered on the current workflow"</code>.</dd>
+</dl>
 <hr class="section-divider">
 
-<h2 id="health"><a href="#health" class="anchor-link" aria-hidden="true">#</a>Resource Health Probes</h2>
+<h2 id="health"><a href="#health" class="anchor-link" aria-hidden="true">#</a>Resource health probes</h2>
 <p>
-Every <a href="../resources/">Resource</a> has a <code>health()</code> method that defaults
-to <code>HealthStatus::Healthy</code>. Override it to report on a connection pool, a
-downstream API, or anything else the workflow depends on. <code>health()</code> is pure
-observability — the engine never calls it during normal execution.
+Every <a href="../resources/">Resource</a> has a <code>health()</code> method that defaults to
+<code>HealthStatus::Healthy</code>. Override it to report on a connection pool, a downstream API or
+anything else the workflow depends on. The engine never calls <code>health()</code> during normal
+execution.
 </p>
 
 ```rust
@@ -385,18 +415,17 @@ impl Resource for ReadReplica {
 ```
 
 <p>
-<code>HealthStatus</code> is <code>#[non_exhaustive]</code> with three variants —
-<code>Healthy</code>, <code>Degraded(String)</code>, <code>Unhealthy(String)</code> — so
-always include a wildcard arm when matching it.
+<code>HealthStatus</code> is <code>#[non_exhaustive]</code> with three variants,
+<code>Healthy</code>, <code>Degraded(String)</code> and <code>Unhealthy(String)</code>, so a
+<code>match</code> needs a wildcard arm.
 </p>
 
 <p>
-Aggregate the whole dictionary with <code>Resources::check_all_health()</code> (a
-<code>Vec&lt;(Cow&lt;str&gt;, HealthStatus)&gt;</code> in insertion order, each entry labelled by its name,
-or by its type name when it was inserted without one)
-or fold straight to the worst status with <code>aggregate_health()</code>
-(<code>Healthy</code> &lt; <code>Degraded</code> &lt; <code>Unhealthy</code>). Both run the
-checks sequentially.
+<code>Resources::check_all_health()</code> returns a <code>Vec&lt;(Cow&lt;'static, str&gt;, HealthStatus)&gt;</code>
+in insertion order. Each entry is labelled with its name, or with its type name when it was inserted
+without one. <code>aggregate_health()</code> folds the same checks to the worst status
+(<code>Healthy</code> &lt; <code>Degraded</code> &lt; <code>Unhealthy</code>). Both run the checks one
+after another.
 </p>
 
 ```rust
@@ -421,17 +450,17 @@ async fn main() {
 ```
 
 <p>
-A natural use is a readiness endpoint: build the workflow's <code>Resources</code> once,
-expose <code>aggregate_health()</code> on an HTTP route, and return <code>503</code> when it
-is not <code>Healthy</code>.
+A readiness endpoint is the usual consumer: build the workflow's <code>Resources</code> once, expose
+<code>aggregate_health()</code> on an HTTP route, and return <code>503</code> when the result is not
+<code>Healthy</code>.
 </p>
 <hr class="section-divider">
 
-<h2 id="full-example"><a href="#full-example" class="anchor-link" aria-hidden="true">#</a>Full Example</h2>
+<h2 id="full-example"><a href="#full-example" class="anchor-link" aria-hidden="true">#</a>Full example</h2>
 <p>
-A workflow with a flaky task and a circuit-breaker-guarded task, observed end to end, plus
-resource health probes. This is the <code>workflow_observer</code> example shipped with the
-crate — run it with <code>cargo run --example workflow_observer</code>.
+A task that fails twice and then succeeds, watched through every retry. The <code>workflow_observer</code>
+example shipped with the crate is a fuller version that adds a circuit-breaker-guarded task and health
+probes. Run it with <code>cargo run --example workflow_observer</code>.
 </p>
 
 ```rust

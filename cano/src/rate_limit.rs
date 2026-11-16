@@ -42,7 +42,7 @@
 //! synchronous [`parking_lot::Mutex`] with no awaits held across the critical section.
 //!
 //! [`RateLimiter`] also implements [`Resource`] (no-op lifecycle), so it can be registered in
-//! [`Resources`](crate::resource::Resources) and looked up by key inside a task body.
+//! [`Resources`](crate::resource::Resources) and looked up by type inside a task body.
 //!
 //! ```rust
 //! use cano::prelude::*;
@@ -505,7 +505,8 @@ impl std::fmt::Debug for Permit {
 pub struct WindowPolicy {
     /// Maximum units admitted within one window.
     pub limit: u64,
-    /// Window length. The window opens on the first call and resets `window` later.
+    /// Window length. The first window opens when the limiter is built; once it has
+    /// elapsed, the next call opens a new one.
     pub window: Duration,
 }
 

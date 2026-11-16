@@ -1,6 +1,6 @@
 +++
 title = "MemoryStore"
-description = "MemoryStore in Cano - the default thread-safe, in-memory shared state for passing data between workflow stages."
+description = "MemoryStore in Cano: the default thread-safe, in-memory shared state for passing data between workflow stages."
 template = "section.html"
 +++
 
@@ -9,52 +9,47 @@ template = "section.html"
 <p class="subtitle">The default in-memory shared state for passing data between workflow stages.</p>
 
 <p>
-The store is the shared data layer that connects workflow stages. Tasks write
-values during their execution and read values produced by upstream stages. The default
-implementation, <code>MemoryStore</code>, is an <code>Arc&lt;RwLock&lt;HashMap&gt;&gt;</code>
-that is safe to clone and share across async tasks. Custom backends can be registered
-as typed <code>Resource</code> values and retrieved by concrete type.
+The store is the shared data layer between workflow stages. Tasks write values as they run and read the values
+produced upstream. The default implementation, <code>MemoryStore</code>, is an <code>Arc&lt;RwLock&lt;HashMap&gt;&gt;</code>
+that is safe to clone and share across async tasks. A custom backend is a typed <code>Resource</code> read by its concrete type.
 </p>
 
 <p>
-<code>MemoryStore</code> is registered inside a <a href="../resources/"><code>Resources</code></a>
-dictionary and retrieved in tasks with
-<code>res.get::&lt;MemoryStore&gt;()?</code>. This makes the store one
-of many typed dependencies a workflow can carry, alongside database pools, HTTP clients,
-configuration, or any other type that implements the <code>Resource</code> trait. See
-<a href="../resources/">Resources</a> for lifecycle semantics, named instances, and
-the full <code>insert</code> / <code>get</code> API.
+<code>MemoryStore</code> is inserted into a <a href="../resources/"><code>Resources</code></a> map and read in tasks with
+<code>res.get::&lt;MemoryStore&gt;()?</code>. It is one typed dependency among others, such as database pools and HTTP clients.
+<a href="../resources/">Resources</a> covers the lifecycle, named instances and the full <code>insert</code> and <code>get</code> API.
 </p>
 
 <!-- Table of Contents -->
 <nav class="page-toc" aria-label="Table of contents">
 <div class="page-toc-title">On this page</div>
 <ol>
-<li><a href="#thread-safety">Thread Safety Model</a></li>
-<li><a href="#api-reference">API Reference</a></li>
-<li><a href="#basic-usage">Basic Usage</a></li>
-<li><a href="#zero-copy">Zero-Copy Reads</a></li>
-<li><a href="#workflow-usage">Store in a Workflow</a></li>
-<li><a href="#custom-backends">Custom Store Backends</a></li>
-<li><a href="#error-handling">Error Handling</a></li>
+<li><a href="#thread-safety">Thread safety model</a></li>
+<li><a href="#api-reference">API reference</a></li>
+<li><a href="#basic-usage">Basic usage</a></li>
+<li><a href="#zero-copy">Zero-copy reads</a></li>
+<li><a href="#workflow-usage">Store in a workflow</a></li>
+<li><a href="#custom-backends">Custom store resources</a></li>
+<li><a href="#error-handling">Error handling</a></li>
 </ol>
 </nav>
 
 <!-- Section: Thread Safety Model -->
 <hr class="section-divider">
-<h2 id="thread-safety"><a href="#thread-safety" class="anchor-link" aria-hidden="true">#</a>Thread Safety Model</h2>
+<h2 id="thread-safety"><a href="#thread-safety" class="anchor-link" aria-hidden="true">#</a>Thread safety model</h2>
 
 <div class="diagram-frame">
 <p class="diagram-label">One shared map, many readers and writers</p>
 <div class="cd-wrap">
-<svg class="cd" viewBox="0 0 770 280" role="img">
-<title>One MemoryStore — an Arc&lt;RwLock&lt;HashMap&gt;&gt; — shared by three tasks: Task A and Task B hold the read lock concurrently while Task C takes the write lock exclusively.</title>
-<defs><marker id="store-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
-<path class="e" d="M242,124 H330 Q342,124 342,112 V88 Q342,76 354,76 H494" marker-end="url(#store-ah)"/>
+<svg class="cd" viewBox="0 24 770 263" role="img" aria-labelledby="store-lock-title store-lock-desc">
+<title id="store-lock-title">One shared MemoryStore, three tasks</title>
+<desc id="store-lock-desc">One MemoryStore, an Arc around an RwLock around a HashMap, is shared by three tasks. Task A and Task B read through get() and hold the shared read lock at the same time. Task C writes through put() and takes the exclusive write lock, so readers wait.</desc>
+<defs><marker id="store-lock-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<path class="e" d="M242,124 H330 Q342,124 342,112 V88 Q342,76 354,76 H494" marker-end="url(#store-lock-ah)"/>
 <text class="t-code t-mut" x="424" y="59">.get()</text>
-<path class="e" d="M242,132 H494" marker-end="url(#store-ah)"/>
+<path class="e" d="M242,132 H494" marker-end="url(#store-lock-ah)"/>
 <text class="t-code t-mut" x="424" y="115">.get()</text>
-<path class="e" d="M242,140 H330 Q342,140 342,152 V210 Q342,222 354,222 H494" marker-end="url(#store-ah)"/>
+<path class="e" d="M242,140 H330 Q342,140 342,152 V210 Q342,222 354,222 H494" marker-end="url(#store-lock-ah)"/>
 <text class="t-code t-mut" x="424" y="205">.put()</text>
 <rect class="n-ghost" x="468" y="40" width="252" height="128" rx="12"/>
 <rect class="n-hot" x="28" y="96" width="214" height="72" rx="10"/>
@@ -64,19 +59,18 @@ the full <code>insert</code> / <code>get</code> API.
 <text x="594" y="77">Task A (read)</text>
 <rect class="n" x="498" y="110" width="192" height="44" rx="10"/>
 <text x="594" y="133">Task B (read)</text>
-<text class="t-mut" x="594" y="186">shared read lock — concurrent</text>
+<text class="t-mut" x="594" y="186">shared read lock, concurrent</text>
 <rect class="n" x="498" y="200" width="192" height="44" rx="10"/>
 <text x="594" y="223">Task C (write)</text>
-<text class="t-mut" x="594" y="264">exclusive write lock — readers wait</text>
+<text class="t-mut" x="594" y="264">exclusive write lock, readers wait</text>
 </svg>
 </div>
 </div>
 
 <p>
-<code>MemoryStore</code> uses <code>Arc&lt;RwLock&lt;_&gt;&gt;</code> for interior mutability.
-Multiple readers hold shared locks concurrently; writers get exclusive access.
-Because <code>MemoryStore</code> wraps its inner map in <code>Arc</code>, cloning the store
-produces a second handle to the <em>same</em> underlying data -- not a copy.
+<code>MemoryStore</code> wraps its map in <code>Arc&lt;RwLock&lt;_&gt;&gt;</code> (a <code>parking_lot</code> lock).
+Readers share the lock and writers get exclusive access. Cloning the store gives a second handle to the
+same underlying data, not a copy.
 </p>
 
 <div class="code-block">
@@ -84,7 +78,7 @@ produces a second handle to the <em>same</em> underlying data -- not a copy.
 
 ```rust
 let store = MemoryStore::new();
-let store2 = store.clone(); // same backing map — not a copy
+let store2 = store.clone(); // same backing map, not a copy
 
 store.put("key", 42i32);
 let val: i32 = store2.get("key")?; // returns 42
@@ -94,73 +88,47 @@ let val: i32 = store2.get("key")?; // returns 42
 
 <!-- Section: API Reference -->
 <hr class="section-divider">
-<h2 id="api-reference"><a href="#api-reference" class="anchor-link" aria-hidden="true">#</a>API Reference</h2>
+<h2 id="api-reference"><a href="#api-reference" class="anchor-link" aria-hidden="true">#</a>API reference</h2>
 
-<table class="styled-table">
-<thead>
-<tr>
-<th>Method</th>
-<th>Signature</th>
-<th>Notes</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>get</code></td>
-<td><code>get&lt;T: Clone&gt;(&amp;self, key: &amp;str) -&gt; StoreResult&lt;T&gt;</code></td>
-<td>Returns a clone. Errors on missing key or type mismatch.</td>
-</tr>
-<tr>
-<td><code>get_shared</code></td>
-<td><code>get_shared&lt;T: Send + Sync&gt;(&amp;self, key: &amp;str) -&gt; StoreResult&lt;Arc&lt;T&gt;&gt;</code></td>
-<td>Zero-copy read. Returns the stored <code>Arc</code> pointer directly when possible.</td>
-</tr>
-<tr>
-<td><code>put</code></td>
-<td><code>put&lt;T: Send + Sync&gt;(&amp;self, key: &amp;str, value: T)</code></td>
-<td>Inserts or replaces. Infallible. Values do not need to implement <code>Clone</code>.</td>
-</tr>
-<tr>
-<td><code>remove</code></td>
-<td><code>remove(&amp;self, key: &amp;str)</code></td>
-<td>Infallible. Silent no-op on missing keys.</td>
-</tr>
-<tr>
-<td><code>append</code></td>
-<td><code>append&lt;T: Send + Sync + Clone&gt;(&amp;self, key: &amp;str, item: T) -&gt; StoreResult&lt;()&gt;</code></td>
-<td>Appends to an existing <code>Vec&lt;T&gt;</code>, or creates one. Type mismatch errors if the key holds a non-Vec.</td>
-</tr>
-<tr>
-<td><code>contains_key</code></td>
-<td><code>contains_key(&amp;self, key: &amp;str) -&gt; bool</code></td>
-<td>Returns <code>true</code> if the key exists.</td>
-</tr>
-<tr>
-<td><code>keys</code></td>
-<td><code>keys(&amp;self) -&gt; Vec&lt;Arc&lt;str&gt;&gt;</code></td>
-<td>Returns all keys. Order is unspecified (HashMap).</td>
-</tr>
-<tr>
-<td><code>len</code></td>
-<td><code>len(&amp;self) -&gt; usize</code></td>
-<td>Number of key-value pairs currently stored.</td>
-</tr>
-<tr>
-<td><code>is_empty</code></td>
-<td><code>is_empty(&amp;self) -&gt; bool</code></td>
-<td><code>true</code> when the store holds no entries.</td>
-</tr>
-<tr>
-<td><code>clear</code></td>
-<td><code>clear(&amp;self)</code></td>
-<td>Infallible. Removes all entries.</td>
-</tr>
-</tbody>
-</table>
+<p>
+Every public method on <code>MemoryStore</code>. A facet marks a method as infallible; the others return
+<code>StoreResult&lt;T&gt;</code>, which is <code>Result&lt;T, StoreError&gt;</code>.
+</p>
+<dl class="key-list">
+<dt><code>get&lt;T: 'static + Clone&gt;(&amp;self, key: &amp;str) -&gt; StoreResult&lt;T&gt;</code></dt>
+<dd>Returns a clone of the value. <code>KeyNotFound</code> for a missing key, <code>TypeMismatch</code> for a value of another type.</dd>
+
+<dt><code>get_shared&lt;T: 'static + Send + Sync&gt;(&amp;self, key: &amp;str) -&gt; StoreResult&lt;Arc&lt;T&gt;&gt;</code></dt>
+<dd>Zero-copy read: returns a clone of the stored <code>Arc</code>. Same errors as <code>get</code>.</dd>
+
+<dt><code>put&lt;T: 'static + Send + Sync&gt;(&amp;self, key: &amp;str, value: T)</code> <small>infallible</small></dt>
+<dd>Inserts or replaces the value. It does not need to implement <code>Clone</code>.</dd>
+
+<dt><code>remove(&amp;self, key: &amp;str)</code> <small>infallible</small></dt>
+<dd>Removes the key. A missing key is a no-op.</dd>
+
+<dt><code>append&lt;T: 'static + Send + Sync + Clone&gt;(&amp;self, key: &amp;str, item: T) -&gt; StoreResult&lt;()&gt;</code></dt>
+<dd>Pushes onto the <code>Vec&lt;T&gt;</code> at the key, creating it when the key is absent. <code>AppendTypeMismatch</code> when the key holds anything else.</dd>
+
+<dt><code>contains_key(&amp;self, key: &amp;str) -&gt; bool</code> <small>infallible</small></dt>
+<dd><code>true</code> when the key exists.</dd>
+
+<dt><code>keys(&amp;self) -&gt; Vec&lt;Arc&lt;str&gt;&gt;</code> <small>infallible</small></dt>
+<dd>All keys, in unspecified order.</dd>
+
+<dt><code>len(&amp;self) -&gt; usize</code> <small>infallible</small></dt>
+<dd>The number of entries.</dd>
+
+<dt><code>is_empty(&amp;self) -&gt; bool</code> <small>infallible</small></dt>
+<dd><code>true</code> when the store holds no entries.</dd>
+
+<dt><code>clear(&amp;self)</code> <small>infallible</small></dt>
+<dd>Removes every entry.</dd>
+</dl>
 
 <!-- Section: Basic Usage -->
 <hr class="section-divider">
-<h2 id="basic-usage"><a href="#basic-usage" class="anchor-link" aria-hidden="true">#</a>Basic Usage</h2>
+<h2 id="basic-usage"><a href="#basic-usage" class="anchor-link" aria-hidden="true">#</a>Basic usage</h2>
 
 <div class="code-block">
 <span class="code-block-label"><span class="label-icon">&#128204;</span> Common store operations</span>
@@ -189,7 +157,7 @@ fn main() -> Result<(), CanoError> {
         let result: String = store.get("result")?;
     }
 
-    // Remove a key — silent no-op if absent
+    // Remove a key; a missing key is a no-op
     store.remove("scratch");
     Ok(())
 }
@@ -201,21 +169,19 @@ fn main() -> Result<(), CanoError> {
 <div class="callout-label">Tip</div>
 <p>
 Use <code>contains_key()</code> before <code>get()</code> for optional keys, or handle the
-<code>KeyNotFound</code> error directly. The <code>append()</code> method is handy for
-building up collections across multiple workflow stages without overwriting previous entries.
+<code>KeyNotFound</code> error directly. <code>append()</code> builds up a collection across stages without
+overwriting earlier entries.
 </p>
 </div>
 
 <!-- Section: Zero-Copy Reads -->
 <hr class="section-divider">
-<h2 id="zero-copy"><a href="#zero-copy" class="anchor-link" aria-hidden="true">#</a>Zero-Copy Reads with get_shared()</h2>
+<h2 id="zero-copy"><a href="#zero-copy" class="anchor-link" aria-hidden="true">#</a>Zero-copy reads with get_shared()</h2>
 
 <p>
-<code>get_shared()</code> returns an <code>Arc&lt;T&gt;</code> pointing to the value
-in the store. When <code>MemoryStore</code> stored the value, it wrapped it in an
-<code>Arc</code> internally. <code>get_shared()</code> returns a clone of that pointer --
-a cheap reference-count bump, not a data copy. This is useful when passing large
-values (e.g., a model's weight tensor or a large dataset) to multiple downstream tasks.
+<code>get_shared()</code> returns an <code>Arc&lt;T&gt;</code> pointing at the stored value. The store keeps every
+value in an <code>Arc</code>, so the call is a reference-count bump, not a data copy. It suits large values, such as
+model weights or a dataset, that several downstream tasks read.
 </p>
 
 <div class="code-block">
@@ -229,7 +195,7 @@ fn main() -> Result<(), CanoError> {
     let store = MemoryStore::new();
     store.put("dataset", vec![0u8; 1_000_000]); // 1 MB
 
-    // Both handles point to the same allocation — no copy
+    // Both handles point to the same allocation, so nothing is copied
     let handle_a: Arc<Vec<u8>> = store.get_shared("dataset")?;
     let handle_b: Arc<Vec<u8>> = store.get_shared("dataset")?;
 
@@ -253,20 +219,18 @@ fn main() -> Result<(), CanoError> {
 <span class="method-badge method-badge-zerocopy">Zero-copy</span>
 <h4>get_shared()</h4>
 <p>
-Prefer <code>get_shared()</code> for large or frequently-read values.
+Prefer <code>get_shared()</code> for large or frequently read values.
 </p>
 </div>
 </div>
 
 <!-- Section: Store in a Workflow -->
 <hr class="section-divider">
-<h2 id="workflow-usage"><a href="#workflow-usage" class="anchor-link" aria-hidden="true">#</a>Store in a Workflow</h2>
+<h2 id="workflow-usage"><a href="#workflow-usage" class="anchor-link" aria-hidden="true">#</a>Store in a workflow</h2>
 
 <p>
-Register the store inside a <code>Resources</code> dictionary and pass it to
-<code>Workflow::new()</code>. Each task retrieves the store via
-<code>res.get::&lt;MemoryStore&gt;()?</code>, so the same handle is shared
-across all registered tasks for the duration of a single <code>orchestrate()</code> call.
+Insert the store into a <code>Resources</code> map and pass the map to <code>Workflow::new()</code>.
+Each task reads it with <code>res.get::&lt;MemoryStore&gt;()?</code>, so every task shares one handle.
 </p>
 
 <div class="code-block">
@@ -329,20 +293,19 @@ async fn main() -> Result<(), CanoError> {
 </div>
 
 <div class="callout callout-tip">
-<p>Runnable example: <code>cargo run --example workflow_stack_store</code> — uses a <code>MemoryStore</code>
+<p>Runnable example: <code>cargo run --example workflow_stack_store</code>. It uses a <code>MemoryStore</code>
 as a shared stack passed between workflow stages.</p>
 </div>
 
 <!-- Section: Custom Store Backends -->
 <hr class="section-divider">
-<h2 id="custom-backends"><a href="#custom-backends" class="anchor-link" aria-hidden="true">#</a>Custom Store Resources</h2>
+<h2 id="custom-backends"><a href="#custom-backends" class="anchor-link" aria-hidden="true">#</a>Custom store resources</h2>
 
 <p>
-For custom storage, define a concrete type with the API your workflow needs and
-implement <code>Resource</code> for it. Register that type in <code>Resources</code>, then retrieve it by
-concrete type inside tasks. A second instance of the same type is registered with
-<code>insert_named</code> and retrieved with <code>get_named</code>. This keeps storage dependencies explicit and avoids
-an unnecessary storage trait layer now that <code>Resources</code> provides typed dependency lookup.
+For custom storage, define a concrete type with the API your workflow needs and implement <code>Resource</code> for it.
+Insert it into <code>Resources</code> and read it by concrete type inside tasks. A second instance of the same type goes
+under a name with <code>insert_named</code> and is read with <code>get_named</code>. Storage dependencies stay explicit,
+with no storage trait in between.
 </p>
 
 <div class="code-block">
@@ -440,22 +403,21 @@ fn main() -> Result<(), CanoError> {
 <div class="callout callout-tip">
 <div class="callout-label">Typed resources keep it simple</div>
 <p>
-Because <code>Resources</code> retrieves dependencies by concrete type, your custom store can expose
-the exact methods it needs. If you need dynamic dispatch, wrap your backend in a concrete
-resource type that owns an object-safe client or repository trait.
+<code>Resources</code> looks dependencies up by concrete type, so a custom store can expose exactly the methods it needs.
+For dynamic dispatch, wrap the backend in a concrete resource type that owns an object-safe client or repository trait.
 </p>
 </div>
 
 <div class="callout callout-tip">
-<p>Runnable example: <code>cargo run --example store_custom_backend</code> — a small
-<code>NamespacedStore</code> wrapping a <code>MemoryStore</code> with key prefixing, registered as a
-resource and retrieved by type, plus a <code>get_shared::&lt;T&gt;()</code> demo (<code>Arc::ptr_eq</code>
-proves the zero-copy share of a large value between tasks).</p>
+<p>Runnable example: <code>cargo run --example store_custom_backend</code>. A small
+<code>NamespacedStore</code> wraps a <code>MemoryStore</code> with key prefixing and is registered as a
+resource and read by type. A <code>get_shared::&lt;T&gt;()</code> demo uses <code>Arc::ptr_eq</code>
+to show a large value shared between tasks without a copy.</p>
 </div>
 
 <!-- Section: Error Handling -->
 <hr class="section-divider">
-<h2 id="error-handling"><a href="#error-handling" class="anchor-link" aria-hidden="true">#</a>Error Handling</h2>
+<h2 id="error-handling"><a href="#error-handling" class="anchor-link" aria-hidden="true">#</a>Error handling</h2>
 
 <p>
 Fallible store operations (<code>get</code>, <code>get_shared</code>, <code>append</code>) return
