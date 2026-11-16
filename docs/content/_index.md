@@ -178,7 +178,7 @@ Each of these is opt-in and costs nothing when unused: the FSM dispatch path sta
 
 ```toml
 [dependencies]
-cano = { version = "0.15", features = ["all"] }
+cano = { version = "0.16", features = ["all"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 

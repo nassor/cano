@@ -55,7 +55,7 @@ enables every optional feature (<code>scheduler</code>, <code>tracing</code>, <c
 
 ```toml
 [dependencies]
-cano = { version = "0.15", features = ["tracing"] }
+cano = { version = "0.16", features = ["tracing"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ```
@@ -275,7 +275,7 @@ the task spans, <code>Workflow completed successfully</code>) nest under it. A s
 
 ```toml
 [dependencies]
-cano = { version = "0.15", features = ["scheduler", "tracing"] }
+cano = { version = "0.16", features = ["scheduler", "tracing"] }
 ```
 <hr class="section-divider">
 

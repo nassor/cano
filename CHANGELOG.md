@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.16.0 - 2026-11-15 - API Simplification
+
 ### Changed
 
 - **Breaking:** `CancellationToken` is `tokio_util::sync::CancellationToken`; `CancellationHandle`

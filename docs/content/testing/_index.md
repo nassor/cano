@@ -43,7 +43,7 @@ helpers compile only for tests and never ship in a release build:
 
 ```toml
 [dev-dependencies]
-cano = { version = "0.15", features = ["testing"] }
+cano = { version = "0.16", features = ["testing"] }
 ```
 
 <p>The <code>testing</code> feature pulls in no extra dependencies.</p>
