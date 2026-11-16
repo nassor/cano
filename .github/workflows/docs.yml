@@ -1,64 +1,70 @@
-name: Deploy Documentation
-
+name: Docs
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [main]
+    paths:
+      - "docs/**"
+      - ".github/workflows/docs.yml"
+  pull_request:
+    paths:
+      - "docs/**"
+      - ".github/workflows/docs.yml"
   workflow_dispatch:
-
 permissions:
   contents: read
-  pages: write
-  id-token: write
-
 concurrency:
-  group: "pages"
+  # A half-applied Pages deployment is worse than a queued one, so runs wait
+  # instead of cancelling each other.
+  group: pages
   cancel-in-progress: false
-
+env:
+  # The site is developed against 0.22.1: newer releases reject filters the
+  # templates use (`trim_end_matches` in base.html) and handle shortcodes inside
+  # fenced code blocks differently (`cano_dep`).
+  ZOLA_VERSION: 0.22.1
+  ZOLA_SHA256: 0ca09aa40376aaa9ddfb512ff9ad963262ef95edb0d0f2d5ec6961b6f5cf22ef
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      # Pin the version: an unpinned `tool: zola` resolves to whatever the
-      # action's manifest currently offers, so a zola release can break the
-      # docs build without a repo change. 0.22.1 is the version the site is
-      # developed and verified against — notably its handling of shortcodes
-      # (`cano_dep`) inside fenced code blocks, which an unpinned build got
-      # wrong with `Unknown function 'cano_dep'`.
+      - uses: actions/checkout@v7
       - name: Install Zola
-        uses: taiki-e/install-action@v2
-        with:
-          tool: zola@0.22.1
-
-      - name: Build site
+        run: |
+          asset="zola-v${ZOLA_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          curl -sSfL -o "${RUNNER_TEMP}/zola.tar.gz" \
+            "https://github.com/getzola/zola/releases/download/v${ZOLA_VERSION}/${asset}"
+          echo "${ZOLA_SHA256}  ${RUNNER_TEMP}/zola.tar.gz" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/zola-bin"
+          tar -xzf "${RUNNER_TEMP}/zola.tar.gz" -C "${RUNNER_TEMP}/zola-bin" zola
+          echo "${RUNNER_TEMP}/zola-bin" >> "${GITHUB_PATH}"
+      - run: zola --version
+      - run: zola build
         working-directory: docs
-        run: zola build
-
-      # Reads the rendered pages, so it has to follow the build. Every docs
-      # page is hand-authored HTML inside its markdown body, which Zola's own
-      # search index never sees.
+      - name: Link check
+        # Gating: a broken internal link fails here.
+        run: zola check
+        working-directory: docs
       - name: Build search index
-        working-directory: docs
+        # Every page is hand-authored HTML inside its markdown body, which Zola's
+        # own search index never sees; base.html reads the `search-index.json`
+        # this script writes from the rendered `public/` tree.
         run: python3 search-index.py public
-
-      - name: Setup Pages
-        uses: actions/configure-pages@v6
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v5
+        working-directory: docs
+      - uses: actions/upload-pages-artifact@v5
         with:
-          path: 'docs/public'
-
+          path: docs/public
   deploy:
+    # Pull requests get the build and the link check above and stop here. A
+    # `workflow_dispatch` on `main` republishes the site without a new commit.
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: build
-    environment:
-      name: "github-pages"
-      url: ${{ steps.deployment.outputs.page_url }}
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
+      - id: deployment
         uses: actions/deploy-pages@v5
