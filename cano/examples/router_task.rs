@@ -62,14 +62,14 @@ struct Classifier;
 
 #[task::router(state = Step)]
 impl Classifier {
-    async fn route(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        let config = res.get::<Config, _>("config")?;
+    async fn route(&self, res: &Resources) -> Result<Step, CanoError> {
+        let config = res.get::<Config>()?;
         if config.use_fast_path {
             println!("classifier : fast path selected");
-            Ok(TaskResult::Single(Step::FastPath))
+            Ok(Step::FastPath)
         } else {
             println!("classifier : slow path selected");
-            Ok(TaskResult::Single(Step::SlowPath))
+            Ok(Step::SlowPath)
         }
     }
 }
@@ -82,9 +82,9 @@ struct FastProcessor;
 
 #[task(state = Step)]
 impl FastProcessor {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         println!("fast path  : processing quickly...");
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -92,9 +92,9 @@ struct SlowProcessor;
 
 #[task(state = Step)]
 impl SlowProcessor {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         println!("slow path  : processing thoroughly...");
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -104,12 +104,12 @@ impl SlowProcessor {
 
 fn build_workflow(use_fast_path: bool) -> Workflow<Step> {
     let config = Config { use_fast_path };
-    let resources = Resources::new().insert("config", config);
+    let resources = Resources::new().insert(config);
 
     Workflow::new(resources)
-        // `register_router` stores the task as a Router state entry:
+        // `register` stores the task as a Router state entry:
         // dispatched like a normal state but writes no CheckpointRow.
-        .register_router(Step::Classify, Classifier)
+        .register(Step::Classify, Classifier)
         .register(Step::FastPath, FastProcessor)
         .register(Step::SlowPath, SlowProcessor)
         .add_exit_state(Step::Done)
@@ -123,17 +123,13 @@ fn build_workflow(use_fast_path: bool) -> Workflow<Step> {
 async fn main() -> CanoResult<()> {
     println!("=== fast-path run ===");
     let workflow = build_workflow(true);
-    let result = workflow
-        .orchestrate(Step::Classify, CancellationToken::disabled())
-        .await?;
+    let result = workflow.orchestrate(Step::Classify).await?;
     assert_eq!(result, Step::Done);
     println!("completed at {result:?}\n");
 
     println!("=== slow-path run ===");
     let workflow = build_workflow(false);
-    let result = workflow
-        .orchestrate(Step::Classify, CancellationToken::disabled())
-        .await?;
+    let result = workflow.orchestrate(Step::Classify).await?;
     assert_eq!(result, Step::Done);
     println!("completed at {result:?}");
 

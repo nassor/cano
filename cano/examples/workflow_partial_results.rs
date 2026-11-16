@@ -46,8 +46,8 @@ impl ApiTask {
 
 #[task(state = ApiState)]
 impl ApiTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<ApiState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<ApiState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         println!(
             "Task {}: Starting (latency: {}ms)",
             self.id, self.latency_ms
@@ -68,8 +68,8 @@ impl ApiTask {
             store.put(
                 &format!("result_{}", self.id),
                 format!("data_from_{}", self.id),
-            )?;
-            Ok(TaskResult::Single(ApiState::Process))
+            );
+            Ok(ApiState::Process)
         }
     }
 }
@@ -95,7 +95,7 @@ async fn main() -> Result<(), CanoError> {
 
     let store = MemoryStore::new();
 
-    let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let workflow = Workflow::new(Resources::new().insert(store.clone()))
         .register_split(ApiState::Start, tasks, join_config)
         .add_exit_state(ApiState::Complete)
         .add_exit_state(ApiState::Failed);
@@ -103,9 +103,7 @@ async fn main() -> Result<(), CanoError> {
     println!("Starting workflow...");
     let start = std::time::Instant::now();
 
-    let result = workflow
-        .orchestrate(ApiState::Start, CancellationToken::disabled())
-        .await?;
+    let result = workflow.orchestrate(ApiState::Start).await?;
 
     let duration = start.elapsed();
     println!(

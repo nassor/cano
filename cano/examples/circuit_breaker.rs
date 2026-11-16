@@ -53,7 +53,7 @@ impl FlakyClient {
 }
 
 struct CallTask {
-    breaker: Arc<CircuitBreaker>,
+    breaker: CircuitBreaker,
 }
 
 #[task]
@@ -61,14 +61,14 @@ impl Task<Step> for CallTask {
     fn config(&self) -> TaskConfig {
         // Disable retries so each orchestrate() = exactly one call against the breaker.
         // Real workloads usually keep a small retry budget here; we drop it for clarity.
-        TaskConfig::minimal().with_circuit_breaker(Arc::clone(&self.breaker))
+        TaskConfig::new().with_circuit_breaker(self.breaker.clone())
     }
 
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        let client = res.get::<FlakyClient, _>("client")?;
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
+        let client = res.get::<FlakyClient>()?;
         let payload = client.fetch().await?;
         println!("    → got: {payload}");
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -76,31 +76,29 @@ impl Task<Step> for CallTask {
 async fn main() -> Result<(), CanoError> {
     println!("=== Circuit breaker demo ===\n");
 
-    let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+    let breaker = CircuitBreaker::new(CircuitPolicy {
         failure_threshold: 3,
         reset_timeout: Duration::from_millis(150),
         half_open_max_calls: 1,
-    }));
+    });
 
     let client = FlakyClient::new();
     let healthy_handle = Arc::clone(&client.healthy);
     let call_count = Arc::clone(&client.call_count);
 
-    let resources = Resources::new().insert("client", client);
+    let resources = Resources::new().insert(client);
     let workflow = Workflow::new(resources)
         .register(
             Step::Call,
             CallTask {
-                breaker: Arc::clone(&breaker),
+                breaker: breaker.clone(),
             },
         )
         .add_exit_state(Step::Done);
 
     println!("Phase 1 — dependency unhealthy, threshold = 3.");
     for attempt in 1..=5 {
-        let outcome = workflow
-            .orchestrate(Step::Call, CancellationToken::disabled())
-            .await;
+        let outcome = workflow.orchestrate(Step::Call).await;
         // `orchestrate` wraps task failures in `WithStateContext`; unwrap one layer
         // before pattern-matching on the underlying variant.
         let label = match outcome {
@@ -127,10 +125,7 @@ async fn main() -> Result<(), CanoError> {
 
     println!("Phase 3 — half-open trial probes the dependency, then closes the breaker.");
     for attempt in 1..=3 {
-        match workflow
-            .orchestrate(Step::Call, CancellationToken::disabled())
-            .await
-        {
+        match workflow.orchestrate(Step::Call).await {
             Ok(_) => println!(
                 "  recovery call {attempt}: ok | state={:?}",
                 breaker.state()

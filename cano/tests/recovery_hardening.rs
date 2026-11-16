@@ -50,26 +50,23 @@ struct WorkTask;
 
 #[task(state = St)]
 impl StartTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<St>, CanoError> {
-        res.get::<SideEffects, _>("sidefx")?.record("Start");
-        Ok(TaskResult::Single(St::Work))
+    async fn run(&self, res: &Resources) -> Result<St, CanoError> {
+        res.get::<SideEffects>()?.record("Start");
+        Ok(St::Work)
     }
 }
 #[task(state = St)]
 impl WorkTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<St>, CanoError> {
-        res.get::<SideEffects, _>("sidefx")?.record("Work");
-        Ok(TaskResult::Single(St::Done))
+    async fn run(&self, res: &Resources) -> Result<St, CanoError> {
+        res.get::<SideEffects>()?.record("Work");
+        Ok(St::Done)
     }
 }
 
 fn build(store: Arc<dyn CheckpointStore>, id: &str, sidefx: &Path) -> Workflow<St> {
-    Workflow::new(Resources::new().insert(
-        "sidefx",
-        SideEffects {
-            path: sidefx.to_path_buf(),
-        },
-    ))
+    Workflow::new(Resources::new().insert(SideEffects {
+        path: sidefx.to_path_buf(),
+    }))
     .register(St::Start, StartTask)
     .register(St::Work, WorkTask)
     .add_exit_state(St::Done)
@@ -112,7 +109,7 @@ async fn many_workflows_one_redb_file_concurrently() {
         let sidefx = dir.path().join(format!("sfx-{i}.log"));
         handles.push(tokio::spawn(async move {
             build(store, &format!("run-{i}"), &sidefx)
-                .orchestrate(St::Start, CancellationToken::disabled())
+                .orchestrate(St::Start)
                 .await
         }));
     }
@@ -148,9 +145,7 @@ async fn racing_runs_of_one_id_on_a_real_file() {
         let store = Arc::clone(&store);
         let sidefx = dir.path().join(format!("sfx-{i}.log"));
         handles.push(tokio::spawn(async move {
-            build(store, "dup", &sidefx)
-                .orchestrate(St::Start, CancellationToken::disabled())
-                .await
+            build(store, "dup", &sidefx).orchestrate(St::Start).await
         }));
     }
     let mut completed = 0;
@@ -185,7 +180,7 @@ async fn crash_mid_work_then_resume_does_not_re_run_start() {
             ok_appends: AtomicUsize::new(2),
         });
         let err = build(store, wf_id, &sidefx)
-            .orchestrate(St::Start, CancellationToken::disabled())
+            .orchestrate(St::Start)
             .await
             .expect_err("generation 1 must crash before reaching Done");
         assert_eq!(err.inner().category(), "checkpoint_store");
@@ -201,12 +196,7 @@ async fn crash_mid_work_then_resume_does_not_re_run_start() {
     {
         let store: Arc<dyn CheckpointStore> = Arc::new(RedbCheckpointStore::new(&db).unwrap());
         let wf = build(store, wf_id, &sidefx);
-        assert_eq!(
-            wf.resume_from(wf_id, CancellationToken::disabled())
-                .await
-                .unwrap(),
-            St::Done
-        );
+        assert_eq!(wf.resume_from(wf_id).await.unwrap(), St::Done);
     }
     assert_eq!(
         side_effects(&sidefx),

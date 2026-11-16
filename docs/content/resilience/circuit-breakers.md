@@ -35,8 +35,8 @@ failures the breaker <strong>opens</strong>: every subsequent call short-circuit
 retry attempt, so the unhealthy dependency gets a break to recover.
 </p>
 <p>
-A breaker is cheap to clone (it's an <code>Arc</code> inside) — <strong>share one
-<code>Arc&lt;CircuitBreaker&gt;</code> across every task that hits the same dependency</strong> so a
+A breaker is cheap to clone (it's an <code>Arc</code> inside, and clones share state) — <strong>share
+one breaker, by cloning it, across every task that hits the same dependency</strong> so a
 trip from any caller protects every caller, including tasks running in parallel inside a
 <a href="../../split-join/">split/join</a> state. Internally it's a synchronous
 <code>std::sync::Mutex</code> with no awaits held across the critical section, so concurrent
@@ -147,40 +147,40 @@ It consults the breaker before each attempt, records the outcome after the task 
 breaker short-circuits the <em>whole</em> retry loop: the <code>CircuitOpen</code> error is returned
 <strong>raw, never wrapped in <code>RetryExhausted</code></strong>. A per-attempt
 <a href="../#timeouts">timeout</a> firing is recorded as a circuit failure too, so the breaker also
-guards against slow upstreams.
+guards against slow upstreams. An open breaker also fires the observer's <code>on_circuit_open</code>
+hook; like every other hook, a panic inside it is isolated and never fails the task.
 </p>
 
 ```rust
 use cano::prelude::*;
-use std::sync::Arc;
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step { Call, Done }
 
 #[derive(Clone)]
-struct CallUpstream { breaker: Arc<CircuitBreaker> }
+struct CallUpstream { breaker: CircuitBreaker }
 
 #[task(state = Step)]
 impl CallUpstream {
     fn config(&self) -> TaskConfig {
         TaskConfig::new()
             .with_fixed_retry(2, Duration::from_millis(50))
-            .with_circuit_breaker(Arc::clone(&self.breaker))
+            .with_circuit_breaker(self.breaker.clone())
     }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         // ... call the dependency; an Err here counts against the breaker ...
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
-let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+let breaker = CircuitBreaker::new(CircuitPolicy {
     failure_threshold: 3,
     reset_timeout: Duration::from_secs(5),
     half_open_max_calls: 1,
-}));
+});
 let workflow = Workflow::bare()
-    .register(Step::Call, CallUpstream { breaker: Arc::clone(&breaker) })
+    .register(Step::Call, CallUpstream { breaker: breaker.clone() })
     .add_exit_state(Step::Done);
 ```
 
@@ -200,7 +200,7 @@ breaker is already protecting.
 When wiring it through <code>TaskConfig</code> is awkward — e.g. you guard several distinct calls in
 one task body, or the breaker is shared with non-task code — register the breaker as a
 <a href="../../resources/">resource</a> (it implements <code>Resource</code> with no-op lifecycle), look
-it up by key inside the task, and drive the RAII API directly:
+it up by type inside the task (<code>res.get::&lt;CircuitBreaker&gt;()?</code>), and drive the RAII API directly:
 </p>
 
 ```rust

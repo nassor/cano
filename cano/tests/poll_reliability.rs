@@ -44,7 +44,7 @@ impl PollTask<Flow> for ScriptedProbe {
         match self.script.get(n).copied().unwrap_or(Probe::Ready) {
             Probe::Fail => Err(CanoError::task_execution(format!("probe {n} refused"))),
             Probe::Pending => Ok(PollOutcome::Pending { delay_ms: 0 }),
-            Probe::Ready => Ok(PollOutcome::Ready(TaskResult::Single(Flow::Done))),
+            Probe::Ready => Ok(PollOutcome::Ready(Flow::Done)),
         }
     }
 }
@@ -74,10 +74,7 @@ async fn poll_error_budget_resets_on_pending_and_kills_on_burst() {
             },
         )
         .add_exit_state(Flow::Done);
-    let result = workflow
-        .orchestrate(Flow::Work, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Flow::Work).await.unwrap();
     assert_eq!(result, Flow::Done);
     assert_eq!(calls.load(Ordering::SeqCst), 6);
 
@@ -92,10 +89,7 @@ async fn poll_error_budget_resets_on_pending_and_kills_on_burst() {
             },
         )
         .add_exit_state(Flow::Done);
-    let err = workflow
-        .orchestrate(Flow::Work, CancellationToken::disabled())
-        .await
-        .unwrap_err();
+    let err = workflow.orchestrate(Flow::Work).await.unwrap_err();
     assert_eq!(err.category(), "task_execution", "got: {err}");
     assert!(err.to_string().contains("probe 2 refused"), "got: {err}");
     assert_eq!(
@@ -115,7 +109,7 @@ struct StuckProbe;
 #[task::poll]
 impl PollTask<Flow> for StuckProbe {
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal().with_attempt_timeout(Duration::from_millis(200))
+        TaskConfig::new().with_attempt_timeout(Duration::from_millis(200))
     }
 
     async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Flow>, CanoError> {
@@ -133,10 +127,7 @@ async fn poll_eternal_pending_is_bounded_by_attempt_timeout() {
         .add_exit_state(Flow::Done);
 
     let started = Instant::now();
-    let err = workflow
-        .orchestrate(Flow::Work, CancellationToken::disabled())
-        .await
-        .unwrap_err();
+    let err = workflow.orchestrate(Flow::Work).await.unwrap_err();
     let elapsed = started.elapsed();
 
     assert_eq!(err.category(), "timeout", "got: {err}");
@@ -146,6 +137,6 @@ async fn poll_eternal_pending_is_bounded_by_attempt_timeout() {
     );
     assert!(
         elapsed < Duration::from_secs(30),
-        "liveness: took {elapsed:?}"
+        "bounded latency: took {elapsed:?}"
     );
 }

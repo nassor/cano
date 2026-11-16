@@ -36,25 +36,11 @@ pub(crate) fn rewrite(item: TokenStream) -> TokenStream {
     .into()
 }
 
-/// Rewrite a parsed `ItemImpl` directly. Used by callers that have already
-/// massaged the impl block (e.g. the boilerplate-fillers in `task_impl.rs`,
-/// `router_task_impl.rs`, etc.) before handing it back for the async rewrite.
-pub(crate) fn rewrite_impl_block(item: ItemImpl) -> TokenStream2 {
-    rewrite_impl(item)
-}
-
-/// Rewrite a parsed `ItemTrait` directly. Used by callers that have already
-/// parsed the trait definition (e.g. `router_task_impl.rs`) before handing
-/// it back for the async rewrite.
-pub(crate) fn rewrite_trait_def(item: ItemTrait) -> TokenStream2 {
-    rewrite_trait(item)
-}
-
 // ---------------------------------------------------------------------------
 // Trait rewriter
 // ---------------------------------------------------------------------------
 
-fn rewrite_trait(mut t: ItemTrait) -> TokenStream2 {
+pub(crate) fn rewrite_trait(mut t: ItemTrait) -> TokenStream2 {
     let items: Vec<TraitItem> = t
         .items
         .into_iter()
@@ -89,7 +75,7 @@ fn rewrite_trait_method(mut method: TraitItemFn) -> TraitItemFn {
 // Impl rewriter
 // ---------------------------------------------------------------------------
 
-fn rewrite_impl(mut i: ItemImpl) -> TokenStream2 {
+pub(crate) fn rewrite_impl(mut i: ItemImpl) -> TokenStream2 {
     let items: Vec<ImplItem> = i
         .items
         .into_iter()

@@ -50,7 +50,7 @@ class Page(HTMLParser):
       document title and the page text.
     * `nav` — `nav.page-toc` repeats every heading on the page verbatim.
     * `pre` — fenced code blocks. Inline `<code>` is deliberately *kept*: the
-      API names in running prose (`TaskResult`, `CheckpointStore`) are the most
+      API names in running prose (`CompensatableTask`, `CheckpointStore`) are the most
       searched terms on the site.
     * `a.anchor-link` — the `#` glyph Zola puts inside every heading.
     """

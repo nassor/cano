@@ -21,8 +21,8 @@ struct Process;
 
 #[task(state = Step)]
 impl Process {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    async fn run(&self) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 
@@ -37,8 +37,8 @@ impl ThirtySecondTimer {
     async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
         Ok(TimerOutcome::Duration(Duration::from_secs(30)))
     }
-    async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Process))
+    async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+        Ok(Step::Process)
     }
 }
 
@@ -51,10 +51,7 @@ async fn duration_timer_fires_after_expected_delay() {
         .register(Step::Process, Process)
         .add_exit_state(Step::Done);
 
-    let result = workflow
-        .orchestrate(Step::Wait, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Step::Wait).await.unwrap();
     let elapsed = start.elapsed();
 
     assert_eq!(result, Step::Done);
@@ -82,8 +79,8 @@ impl NearFutureInstantTimer {
             Instant::now() + Duration::from_millis(40),
         ))
     }
-    async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Process))
+    async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+        Ok(Step::Process)
     }
 }
 
@@ -95,7 +92,7 @@ async fn instant_timer_fires_at_correct_instant() {
         .register(Step::Wait, NearFutureInstantTimer)
         .register(Step::Process, Process)
         .add_exit_state(Step::Done)
-        .orchestrate(Step::Wait, CancellationToken::disabled())
+        .orchestrate(Step::Wait)
         .await
         .unwrap();
 
@@ -117,13 +114,13 @@ struct OneHourTimer;
 #[task::timer(state = Step)]
 impl OneHourTimer {
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal().with_attempt_timeout(Duration::from_millis(50))
+        TaskConfig::new().with_attempt_timeout(Duration::from_millis(50))
     }
     async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
         Ok(TimerOutcome::Duration(Duration::from_secs(3600)))
     }
-    async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Process))
+    async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+        Ok(Step::Process)
     }
 }
 
@@ -135,7 +132,7 @@ async fn attempt_timeout_cancels_long_timer() {
         .register(Step::Wait, OneHourTimer)
         .register(Step::Process, Process)
         .add_exit_state(Step::Done)
-        .orchestrate(Step::Wait, CancellationToken::disabled())
+        .orchestrate(Step::Wait)
         .await
         .unwrap_err();
 

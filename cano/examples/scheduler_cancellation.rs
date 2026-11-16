@@ -19,7 +19,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use cano::prelude::*;
-use cano::scheduler::Status;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step {
@@ -35,9 +34,9 @@ struct Charge;
 #[saga::task(state = Step)]
 impl Reserve {
     type Output = u32;
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, u32), CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<(Step, u32), CanoError> {
         println!("reserve  : holding inventory (ticket #42)");
-        Ok((TaskResult::Single(Step::Charge), 42))
+        Ok((Step::Charge, 42))
     }
     async fn compensate(&self, _res: &Resources, ticket: u32) -> Result<(), CanoError> {
         println!("reserve  : releasing ticket #{ticket}  (rollback)");
@@ -48,9 +47,9 @@ impl Reserve {
 #[saga::task(state = Step)]
 impl Charge {
     type Output = String;
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, String), CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<(Step, String), CanoError> {
         println!("charge   : capturing $42.00 (auth auth-XYZ)");
-        Ok((TaskResult::Single(Step::Ship), "auth-XYZ".to_string()))
+        Ok((Step::Ship, "auth-XYZ".to_string()))
     }
     async fn compensate(&self, _res: &Resources, auth: String) -> Result<(), CanoError> {
         println!("charge   : refunding auth {auth}  (rollback)");
@@ -65,15 +64,12 @@ struct Ship {
 }
 #[task(state = Step)]
 impl Ship {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         println!("ship     : dispatching shipment…  (cancel_flow will stop this)");
         self.started.store(true, Ordering::SeqCst);
         tokio::time::sleep(Duration::from_secs(10)).await;
         println!("ship     : this line should never print");
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -82,8 +78,8 @@ async fn main() -> CanoResult<()> {
     let ship_started = Arc::new(AtomicBool::new(false));
 
     let workflow = Workflow::bare()
-        .register_with_compensation(Step::Reserve, Reserve)
-        .register_with_compensation(Step::Charge, Charge)
+        .register(Step::Reserve, Reserve)
+        .register(Step::Charge, Charge)
         .register(
             Step::Ship,
             Ship {
@@ -92,26 +88,25 @@ async fn main() -> CanoResult<()> {
         )
         .add_exit_state(Step::Done);
 
-    let mut scheduler = Scheduler::new();
-    scheduler.manual("order", workflow, Step::Reserve)?;
-    let running = scheduler.start().await?;
+    let running = Scheduler::new()
+        .manual("order", workflow, Step::Reserve)
+        .start()
+        .await?;
 
     // Kick off the saga, then cancel it once Ship is in flight.
-    running.trigger("order").await?;
+    running.trigger("order")?;
     while !ship_started.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     println!("\n>>> cancelling the in-flight flow…\n");
-    running.cancel_flow("order").await?;
+    running.cancel_flow("order")?;
 
     // Wait for the cancelled run to settle (saga drained, status back to Idle).
-    loop {
-        let status = running.status("order").await.map(|i| i.status);
-        if status != Some(Status::Running) {
-            println!("\norder flow status after cancel: {status:?}  (Idle — not a failure)");
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(5)).await;
+    if let Some(info) = running.wait_idle("order").await {
+        println!(
+            "\norder flow status after cancel: {:?}  (Idle — not a failure)",
+            info.status
+        );
     }
 
     running.stop().await?;

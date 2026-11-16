@@ -94,5 +94,5 @@ pub(crate) fn expand(item: TokenStream) -> syn::Result<TokenStream> {
     };
 
     let synth_impl: ItemImpl = parse2(synth)?;
-    Ok(crate::async_rewrite::rewrite_impl_block(synth_impl))
+    Ok(crate::async_rewrite::rewrite_impl(synth_impl))
 }

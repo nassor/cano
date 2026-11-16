@@ -92,7 +92,7 @@ impl Cruncher {
         };
 
         if next.processed >= next.total {
-            Ok(StepOutcome::Done(TaskResult::Single(Stage::Report)))
+            Ok(StepOutcome::Done(Stage::Report))
         } else {
             Ok(StepOutcome::More(next))
         }
@@ -109,12 +109,12 @@ struct Reporter {
 
 #[task(state = Stage)]
 impl Reporter {
-    async fn run_bare(&self) -> Result<TaskResult<Stage>, CanoError> {
+    async fn run(&self) -> Result<Stage, CanoError> {
         println!(
             "report  : all {} items processed — transitioning to Done",
             self.total
         );
-        Ok(TaskResult::Single(Stage::Done))
+        Ok(Stage::Done)
     }
 }
 
@@ -134,15 +134,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=== stepped_task example ({TOTAL} items) ===\n");
 
     let workflow = Workflow::bare()
-        .register_stepped(Stage::Crunch, Cruncher { total: TOTAL })
+        .register(Stage::Crunch, Cruncher { total: TOTAL })
         .register(Stage::Report, Reporter { total: TOTAL })
         .add_exit_state(Stage::Done)
         .with_checkpoint_store(checkpoint_store.clone())
         .with_workflow_id(run_id);
 
-    let result = workflow
-        .orchestrate(Stage::Crunch, CancellationToken::disabled())
-        .await?;
+    let result = workflow.orchestrate(Stage::Crunch).await?;
     assert_eq!(result, Stage::Done);
 
     println!("\ncompleted at {result:?}");

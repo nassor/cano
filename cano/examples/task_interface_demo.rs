@@ -36,12 +36,8 @@ impl ProcessingTask1 {
 
 #[task(state = TaskState)]
 impl ProcessingTask1 {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-
-    async fn run(&self, res: &Resources) -> Result<TaskResult<TaskState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<TaskState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
 
         println!("Task '{}' - Loading data", self.name);
         let data = format!("data_for_{}", self.name);
@@ -50,9 +46,9 @@ impl ProcessingTask1 {
         let processed = format!("processed_{}", data);
 
         println!("Task '{}' - Storing {}", self.name, processed);
-        store.put("first_result", processed)?;
+        store.put("first_result", processed);
 
-        Ok(TaskResult::Single(TaskState::ProcessSecond))
+        Ok(TaskState::ProcessSecond)
     }
 }
 
@@ -72,8 +68,8 @@ impl ProcessingTask2 {
 
 #[task(state = TaskState)]
 impl ProcessingTask2 {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<TaskState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<TaskState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
 
         println!("Task '{}' - Single run method: doing everything", self.name);
 
@@ -86,10 +82,10 @@ impl ProcessingTask2 {
         let processed = format!("task_enhanced_{first_result}");
         println!("   Processing: {}", processed);
 
-        store.put("final_result", processed.clone())?;
+        store.put("final_result", processed.clone());
         println!("   Stored final result: {}", processed);
 
-        Ok(TaskResult::Single(TaskState::Complete))
+        Ok(TaskState::Complete)
     }
 }
 
@@ -99,13 +95,13 @@ struct InitializerTask;
 
 #[task(state = TaskState)]
 impl InitializerTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<TaskState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<TaskState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
 
         println!("Initializer Task - Setting up workflow data");
-        store.put("workflow_id", "demo_123".to_string())?;
-        store.put("start_time", std::time::SystemTime::now())?;
-        Ok(TaskResult::Single(TaskState::ProcessFirst))
+        store.put("workflow_id", "demo_123".to_string());
+        store.put("start_time", std::time::SystemTime::now());
+        Ok(TaskState::ProcessFirst)
     }
 }
 
@@ -121,7 +117,7 @@ async fn main() -> Result<(), CanoError> {
     println!();
 
     let store = MemoryStore::new();
-    let resources = Resources::new().insert("store", store.clone());
+    let resources = Resources::new().insert(store.clone());
 
     let workflow = Workflow::new(resources)
         .register(TaskState::Start, InitializerTask)
@@ -141,10 +137,7 @@ async fn main() -> Result<(), CanoError> {
     println!("Executing workflow...");
     println!();
 
-    match workflow
-        .orchestrate(TaskState::Start, CancellationToken::disabled())
-        .await
-    {
+    match workflow.orchestrate(TaskState::Start).await {
         Ok(final_state) => {
             println!();
             println!("Workflow completed successfully!");

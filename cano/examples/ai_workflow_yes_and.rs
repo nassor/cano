@@ -218,9 +218,7 @@ fn get_conversation_history(store: &MemoryStore) -> Result<String, CanoError> {
 fn update_interaction_count(store: &MemoryStore) -> Result<u32, CanoError> {
     let current_count: u32 = store.get::<u32>("interaction_count").unwrap_or(0);
     let new_count = current_count + 1;
-    store
-        .put("interaction_count", new_count)
-        .map_err(|e| CanoError::Store(format!("Failed to update interaction count: {e}")))?;
+    store.put("interaction_count", new_count);
     Ok(new_count)
 }
 
@@ -254,10 +252,10 @@ impl Actor1Task {
 
 #[task(state = ConversationState)]
 impl Actor1Task {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<ConversationState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
-        let cuca = res.get::<CucaResource, _>("cuca")?;
-        let history = get_conversation_history(&store)?;
+    async fn run(&self, res: &Resources) -> Result<ConversationState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
+        let cuca = res.get::<CucaResource>()?;
+        let history = get_conversation_history(store)?;
 
         let subject = Self::pick_subject();
         let is_empty = history.is_empty();
@@ -289,7 +287,7 @@ impl Actor1Task {
 
         println!("Actor1: {response}\n");
 
-        let interaction_count = update_interaction_count(&store)?;
+        let interaction_count = update_interaction_count(store)?;
 
         let next = if interaction_count >= MAX_INTERACTIONS {
             ConversationState::End
@@ -297,7 +295,7 @@ impl Actor1Task {
             ConversationState::Actor2Turn
         };
 
-        Ok(TaskResult::Single(next))
+        Ok(next)
     }
 }
 
@@ -327,10 +325,10 @@ impl Actor2Task {
 
 #[task(state = ConversationState)]
 impl Actor2Task {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<ConversationState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
-        let cuca = res.get::<CucaResource, _>("cuca")?;
-        let history = get_conversation_history(&store)?;
+    async fn run(&self, res: &Resources) -> Result<ConversationState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
+        let cuca = res.get::<CucaResource>()?;
+        let history = get_conversation_history(store)?;
 
         let response = match cuca.complete(&history).await {
             Ok(r) => Self::ensure_yes_and_format(&r),
@@ -344,11 +342,11 @@ impl Actor2Task {
             .append("chat", response.clone())
             .map_err(|e| CanoError::Store(format!("Failed to append to chat: {e}")))?;
 
-        update_interaction_count(&store)?;
+        update_interaction_count(store)?;
 
         println!("Actor2: {response}\n");
 
-        Ok(TaskResult::Single(ConversationState::Actor1Turn))
+        Ok(ConversationState::Actor1Turn)
     }
 }
 
@@ -378,8 +376,8 @@ async fn main() -> Result<(), CanoError> {
 
     let store = MemoryStore::new();
     let resources = Resources::new()
-        .insert("store", store.clone())
-        .insert("cuca", CucaResource::new()?);
+        .insert(store.clone())
+        .insert(CucaResource::new()?);
 
     let workflow = Workflow::new(resources)
         .register(ConversationState::Start, Actor1Task)
@@ -389,9 +387,7 @@ async fn main() -> Result<(), CanoError> {
 
     println!("Starting improvised story...\n");
 
-    let final_state = workflow
-        .orchestrate(ConversationState::Start, CancellationToken::disabled())
-        .await?;
+    let final_state = workflow.orchestrate(ConversationState::Start).await?;
 
     println!("\nStory completed with state: {final_state:?}");
 

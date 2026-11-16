@@ -1,12 +1,7 @@
-//! Shared attribute-arg parser for `#[task(...)]` / `#[compensatable_task(...)]`
-//! / `#[router_task(...)]` / `#[poll_task(...)]` / `#[batch_task(...)]` /
-//! `#[stepped_task(...)]`.
+//! Shared attribute-arg parser for the task macros.
 //!
-//! Recognised keys:
-//! - `state = T` — required when the macro is applied to an inherent `impl X { ... }`
-//!   block (we need to know the trait's `TState` parameter).
-//! - `key = K` — optional resource-key type. Defaults to `::std::borrow::Cow<'static, str>`
-//!   when omitted (matches the trait default).
+//! Recognised key: `state = T` — required when the macro is applied to an inherent
+//! `impl X { ... }` block (it names the trait's `TState` parameter).
 
 use proc_macro2::TokenStream;
 use syn::Type;
@@ -14,7 +9,6 @@ use syn::Type;
 #[derive(Default)]
 pub(crate) struct AttrArgs {
     pub state: Option<Type>,
-    pub key: Option<Type>,
 }
 
 impl AttrArgs {
@@ -27,11 +21,8 @@ impl AttrArgs {
             if meta.path.is_ident("state") {
                 out.state = Some(meta.value()?.parse()?);
                 Ok(())
-            } else if meta.path.is_ident("key") {
-                out.key = Some(meta.value()?.parse()?);
-                Ok(())
             } else {
-                Err(meta.error("unsupported argument; expected `state = T` or `key = K`"))
+                Err(meta.error("unsupported argument; expected `state = T`"))
             }
         });
         syn::parse::Parser::parse2(parser, attr)?;

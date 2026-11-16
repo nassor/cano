@@ -45,7 +45,7 @@ impl BatchTask<Flow> for Uploads {
     }
 
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal() // no outer retry: isolate per-item semantics
+        TaskConfig::new() // no outer retry: isolate per-item semantics
     }
 
     async fn load(&self, _res: &Resources) -> Result<Vec<u32>, CanoError> {
@@ -78,10 +78,10 @@ impl BatchTask<Flow> for Uploads {
         &self,
         _res: &Resources,
         outputs: Vec<Result<u32, CanoError>>,
-    ) -> Result<TaskResult<Flow>, CanoError> {
+    ) -> Result<Flow, CanoError> {
         *self.slots.lock() = outputs.into_iter().map(|r| r.ok()).collect();
         // Partial-failure policy lives HERE: one bad upload is acceptable.
-        Ok(TaskResult::Single(Flow::Done))
+        Ok(Flow::Done)
     }
 }
 
@@ -108,10 +108,7 @@ async fn batch_isolates_poison_items_retries_per_item_and_bounds_concurrency() {
         )
         .add_exit_state(Flow::Done);
 
-    let result = workflow
-        .orchestrate(Flow::Work, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Flow::Work).await.unwrap();
     assert_eq!(
         result,
         Flow::Done,
@@ -165,7 +162,7 @@ impl BatchTask<Flow> for CommitBatch {
 
     fn config(&self) -> TaskConfig {
         // Outer retry of the WHOLE cycle: 1 retry → 2 attempts.
-        TaskConfig::minimal().with_fixed_retry(1, Duration::from_millis(1))
+        TaskConfig::new().with_fixed_retry(1, Duration::from_millis(1))
     }
 
     async fn load(&self, _res: &Resources) -> Result<Vec<u32>, CanoError> {
@@ -182,7 +179,7 @@ impl BatchTask<Flow> for CommitBatch {
         &self,
         _res: &Resources,
         outputs: Vec<Result<u32, CanoError>>,
-    ) -> Result<TaskResult<Flow>, CanoError> {
+    ) -> Result<Flow, CanoError> {
         self.finish_calls.fetch_add(1, Ordering::SeqCst);
         assert_eq!(outputs.len(), 4);
         if self.finish_failures_remaining.load(Ordering::SeqCst) > 0 {
@@ -190,7 +187,7 @@ impl BatchTask<Flow> for CommitBatch {
                 .fetch_sub(1, Ordering::SeqCst);
             return Err(CanoError::task_execution("commit endpoint 503"));
         }
-        Ok(TaskResult::Single(Flow::Done))
+        Ok(Flow::Done)
     }
 }
 
@@ -232,10 +229,7 @@ async fn batch_outer_retry_replays_the_entire_cycle() {
     let workflow = Workflow::bare()
         .register(Flow::Work, probe.task)
         .add_exit_state(Flow::Done);
-    let result = workflow
-        .orchestrate(Flow::Work, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Flow::Work).await.unwrap();
     assert_eq!(result, Flow::Done);
     assert_eq!(probe.load_calls.load(Ordering::SeqCst), 2, "load re-ran");
     assert_eq!(probe.finish_calls.load(Ordering::SeqCst), 2);
@@ -251,10 +245,7 @@ async fn batch_outer_retry_replays_the_entire_cycle() {
     let workflow = Workflow::bare()
         .register(Flow::Work, probe.task)
         .add_exit_state(Flow::Done);
-    let err = workflow
-        .orchestrate(Flow::Work, CancellationToken::disabled())
-        .await
-        .unwrap_err();
+    let err = workflow.orchestrate(Flow::Work).await.unwrap_err();
     // The engine adds state/path context around the failure; `category()` sees
     // through that wrapper to the RetryExhausted underneath.
     assert_eq!(err.category(), "retry_exhausted", "got: {err}");

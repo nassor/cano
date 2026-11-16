@@ -1,8 +1,8 @@
 //! # Cooperative cancellation — saga rollback on cancel
 //!
-//! Demonstrates [`Workflow::orchestrate`](cano::Workflow::orchestrate) with a live token:
+//! Demonstrates [`Workflow::orchestrate_with_token`](cano::Workflow::orchestrate_with_token):
 //! a 3-step saga `Reserve → Charge → Ship → Done` where a sibling task fires a
-//! [`CancellationHandle`](cano::CancellationHandle) once `Ship` is in flight. The in-flight
+//! [`CancellationToken`](CancellationToken) once `Ship` is in flight. The in-flight
 //! task is aborted at its next await point, the saga compensation stack drains in reverse
 //! (`Charge` then `Reserve`), and the call returns
 //! [`CanoError::Cancelled`](cano::CanoError::Cancelled).
@@ -43,10 +43,10 @@ struct Charge;
 #[saga::task(state = Step)]
 impl Reserve {
     type Output = u32;
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, u32), CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<(Step, u32), CanoError> {
         let ticket = 42;
         println!("reserve  : holding inventory (ticket #{ticket})");
-        Ok((TaskResult::Single(Step::Charge), ticket))
+        Ok((Step::Charge, ticket))
     }
     async fn compensate(&self, _res: &Resources, ticket: u32) -> Result<(), CanoError> {
         println!("reserve  : releasing ticket #{ticket}  (rollback)");
@@ -57,10 +57,10 @@ impl Reserve {
 #[saga::task(state = Step)]
 impl Charge {
     type Output = String;
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, String), CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<(Step, String), CanoError> {
         let auth = "auth-XYZ".to_string();
         println!("charge   : capturing $42.00 (auth {auth})");
-        Ok((TaskResult::Single(Step::Ship), auth))
+        Ok((Step::Ship, auth))
     }
     async fn compensate(&self, _res: &Resources, auth: String) -> Result<(), CanoError> {
         println!("charge   : refunding auth {auth}  (rollback)");
@@ -75,15 +75,12 @@ struct Ship {
 }
 #[task(state = Step)]
 impl Ship {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         println!("ship     : dispatching shipment…  (a sibling task will cancel this)");
         self.started.store(true, Ordering::SeqCst);
         tokio::time::sleep(Duration::from_secs(2)).await;
         println!("ship     : this line should never print");
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -91,8 +88,8 @@ impl Ship {
 async fn main() {
     let ship_started = Arc::new(AtomicBool::new(false));
     let workflow = Workflow::bare()
-        .register_with_compensation(Step::Reserve, Reserve)
-        .register_with_compensation(Step::Charge, Charge)
+        .register(Step::Reserve, Reserve)
+        .register(Step::Charge, Charge)
         .register(
             Step::Ship,
             Ship {
@@ -101,7 +98,8 @@ async fn main() {
         )
         .add_exit_state(Step::Done);
 
-    let (handle, token) = CancellationToken::new();
+    let token = CancellationToken::new();
+    let handle = token.clone();
 
     // Sibling task: cancel as soon as `Ship` is in flight.
     let canceller = tokio::spawn(async move {
@@ -111,7 +109,7 @@ async fn main() {
         handle.cancel();
     });
 
-    match workflow.orchestrate(Step::Reserve, token).await {
+    match workflow.orchestrate_with_token(Step::Reserve, &token).await {
         Ok(state) => println!("\nworkflow completed at {state:?}"),
         Err(error) => println!("\nworkflow cancelled, rolled back: {error}"),
     }

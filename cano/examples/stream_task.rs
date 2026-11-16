@@ -23,7 +23,7 @@
 //!   Calm ⇄ Alert ⇄ Calm … ──(source exhausted)──► Done
 //! ```
 //!
-//! Registering these with [`Workflow::register_stream`] + a checkpoint store would
+//! Registering these with [`Workflow::register`] + a checkpoint store would
 //! additionally persist each window's cursor for crash-resume (omitted here to keep
 //! the example focused on mode-flipping and to run under default features).
 
@@ -86,7 +86,7 @@ impl CalmMode {
         res: &Resources,
         _cursor: Option<u64>,
     ) -> Result<Pin<Box<dyn Stream<Item = Reading> + Send>>, CanoError> {
-        Ok(open_source(res.get::<Source, _>("source")?))
+        Ok(open_source(res.get_arc::<Source>()?))
     }
 
     async fn process_item(&self, _res: &Resources, item: Reading) -> Result<(i32, u64), CanoError> {
@@ -103,18 +103,14 @@ impl CalmMode {
         println!("calm  : window {temps:?} → avg {avg:.1}°");
         if hottest >= HIGH {
             println!("calm  : {hottest}° ≥ {HIGH}° — flipping to ALERT");
-            return Ok(WindowSignal::Stop(TaskResult::Single(Mode::Alert)));
+            return Ok(WindowSignal::Stop(Mode::Alert));
         }
         Ok(WindowSignal::Continue)
     }
 
-    async fn on_close(
-        &self,
-        _res: &Resources,
-        reason: CloseReason,
-    ) -> Result<TaskResult<Mode>, CanoError> {
+    async fn on_close(&self, _res: &Resources, reason: CloseReason) -> Result<Mode, CanoError> {
         println!("calm  : source closed ({reason:?}) → Done");
-        Ok(TaskResult::Single(Mode::Done))
+        Ok(Mode::Done)
     }
 }
 
@@ -136,7 +132,7 @@ impl AlertMode {
         res: &Resources,
         _cursor: Option<u64>,
     ) -> Result<Pin<Box<dyn Stream<Item = Reading> + Send>>, CanoError> {
-        Ok(open_source(res.get::<Source, _>("source")?))
+        Ok(open_source(res.get_arc::<Source>()?))
     }
 
     async fn process_item(&self, _res: &Resources, item: Reading) -> Result<(i32, u64), CanoError> {
@@ -153,18 +149,14 @@ impl AlertMode {
         println!("alert : reading {temp}° ({over:+}° vs HIGH) — handling individually");
         if temp <= COOL {
             println!("alert : {temp}° ≤ {COOL}° — cooled off, flipping back to CALM");
-            return Ok(WindowSignal::Stop(TaskResult::Single(Mode::Calm)));
+            return Ok(WindowSignal::Stop(Mode::Calm));
         }
         Ok(WindowSignal::Continue)
     }
 
-    async fn on_close(
-        &self,
-        _res: &Resources,
-        reason: CloseReason,
-    ) -> Result<TaskResult<Mode>, CanoError> {
+    async fn on_close(&self, _res: &Resources, reason: CloseReason) -> Result<Mode, CanoError> {
         println!("alert : source closed ({reason:?}) → Done");
-        Ok(TaskResult::Single(Mode::Done))
+        Ok(Mode::Done)
     }
 }
 
@@ -183,21 +175,16 @@ async fn main() -> CanoResult<()> {
         })
         .collect();
 
-    let resources = Resources::new().insert(
-        "source",
-        Source {
-            queue: Mutex::new(readings),
-        },
-    );
+    let resources = Resources::new().insert(Source {
+        queue: Mutex::new(readings),
+    });
 
     let workflow = Workflow::new(resources)
-        .register_stream(Mode::Calm, CalmMode)
-        .register_stream(Mode::Alert, AlertMode)
+        .register(Mode::Calm, CalmMode)
+        .register(Mode::Alert, AlertMode)
         .add_exit_state(Mode::Done);
 
-    let result = workflow
-        .orchestrate(Mode::Calm, CancellationToken::disabled())
-        .await?;
+    let result = workflow.orchestrate(Mode::Calm).await?;
     assert_eq!(result, Mode::Done);
     println!("\ncompleted at {result:?}");
     Ok(())

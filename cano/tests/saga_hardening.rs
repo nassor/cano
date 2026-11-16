@@ -44,29 +44,24 @@ struct Charge {
 #[saga::task(state = u32)]
 impl Charge {
     type Output = (String, i64);
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
+
     fn name(&self) -> std::borrow::Cow<'static, str> {
         std::borrow::Cow::Owned(format!("charge-{}", self.idx))
     }
-    async fn run(&self, res: &Resources) -> Result<(TaskResult<u32>, (String, i64)), CanoError> {
+    async fn run(&self, res: &Resources) -> Result<(u32, (String, i64)), CanoError> {
         if self.idx == self.fail_at {
             return Err(CanoError::task_execution(format!(
                 "step {} failed",
                 self.idx
             )));
         }
-        let ledger = res.get::<Ledger, _>("ledger")?;
+        let ledger = res.get::<Ledger>()?;
         ledger.apply(&self.account, self.amount);
-        Ok((
-            TaskResult::Single(self.next),
-            (self.account.clone(), self.amount),
-        ))
+        Ok((self.next, (self.account.clone(), self.amount)))
     }
     async fn compensate(&self, res: &Resources, output: (String, i64)) -> Result<(), CanoError> {
         let (account, amount) = output;
-        res.get::<Ledger, _>("ledger")?.apply(&account, -amount);
+        res.get::<Ledger>()?.apply(&account, -amount);
         Ok(())
     }
 }
@@ -75,9 +70,9 @@ const STEPS: u32 = 3;
 const PER_STEP: i64 = 100;
 
 fn saga(ledger: Ledger, account: &str, fail_at: u32) -> Workflow<u32> {
-    let mut wf = Workflow::new(Resources::new().insert("ledger", ledger)).add_exit_state(STEPS);
+    let mut wf = Workflow::new(Resources::new().insert(ledger)).add_exit_state(STEPS);
     for i in 0..STEPS {
-        wf = wf.register_with_compensation(
+        wf = wf.register(
             i,
             Charge {
                 idx: i,
@@ -103,9 +98,7 @@ async fn many_compensatable_workflows_concurrent_with_injected_failures() {
         // Sweep the failure point across all steps (3 of every 4 runs roll back).
         let fail_at = i % (STEPS + 1);
         handles.push(tokio::spawn(async move {
-            let result = saga(ledger.clone(), &account, fail_at)
-                .orchestrate(0, CancellationToken::disabled())
-                .await;
+            let result = saga(ledger.clone(), &account, fail_at).orchestrate(0).await;
             (account, fail_at, result)
         }));
     }
@@ -174,20 +167,18 @@ mod recovery {
     #[saga::task(state = St)]
     impl Step {
         type Output = u32;
-        fn config(&self) -> TaskConfig {
-            TaskConfig::minimal()
-        }
+
         fn name(&self) -> std::borrow::Cow<'static, str> {
             std::borrow::Cow::Borrowed(self.name)
         }
-        async fn run(&self, _res: &Resources) -> Result<(TaskResult<St>, u32), CanoError> {
+        async fn run(&self, _res: &Resources) -> Result<(St, u32), CanoError> {
             if self.fail_forward {
                 return Err(CanoError::task_execution(format!("{} failed", self.name)));
             }
-            Ok((TaskResult::Single(self.next.clone()), self.value))
+            Ok((self.next.clone(), self.value))
         }
         async fn compensate(&self, res: &Resources, output: u32) -> Result<(), CanoError> {
-            res.get::<LogRes, _>("log")?
+            res.get::<LogRes>()?
                 .0
                 .lock()
                 .unwrap()
@@ -230,8 +221,8 @@ mod recovery {
         // Keep our own handle to the same store so we can inspect it after the run without
         // opening a *second* `Database` on the file (which redb would reject).
         let store = Arc::new(RedbCheckpointStore::new(&db).unwrap());
-        let wf = Workflow::new(Resources::new().insert("log", LogRes(log.clone())))
-            .register_with_compensation(
+        let wf = Workflow::new(Resources::new().insert(LogRes(log.clone())))
+            .register(
                 St::Start,
                 Step {
                     name: "A",
@@ -240,7 +231,7 @@ mod recovery {
                     fail_forward: false,
                 },
             )
-            .register_with_compensation(
+            .register(
                 St::Process,
                 Step {
                     name: "B",
@@ -249,7 +240,7 @@ mod recovery {
                     fail_forward: false,
                 },
             )
-            .register_with_compensation(
+            .register(
                 St::Split,
                 Step {
                     name: "C",
@@ -261,10 +252,7 @@ mod recovery {
             .add_exit_state(St::Done)
             .with_checkpoint_store(store.clone());
 
-        let err = wf
-            .resume_from("g", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = wf.resume_from("g").await.unwrap_err();
         assert_eq!(err.message(), "C failed");
         // B re-ran on resume and re-pushed its own entry; its persisted completion row at the
         // resume point must NOT be replayed too, or B would compensate twice.

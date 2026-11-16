@@ -1,6 +1,6 @@
 //! Reliability contracts of [`StreamTask`] under critical scenarios.
 //!
-//! Black-box integration tests (public API only, engine-driven `register_stream`
+//! Black-box integration tests (public API only, engine-driven `register`
 //! path) documenting how the stream processing model behaves when things go wrong
 //! mid-flight:
 //!
@@ -9,7 +9,7 @@
 //! | crash mid-window → `resume_from` | loss is bounded to the uncommitted window; replay is at-least-once |
 //! | cancel mid-window → drain → resume | in-flight window is flushed + committed ⇒ resume produces **no duplicates** |
 //! | flaky source items under `RetryOnError` | error *budget*: failed items are dropped (never re-pulled), counter resets on success |
-//! | `process_item` hangs | `attempt_timeout` is the liveness ceiling; surfaces as `timeout` |
+//! | `process_item` hangs | `attempt_timeout` is the latency ceiling; surfaces as `timeout` |
 
 mod support;
 
@@ -73,12 +73,8 @@ impl StreamTask<Flow> for MeterFeed {
         Ok(WindowSignal::Continue)
     }
 
-    async fn on_close(
-        &self,
-        _res: &Resources,
-        _reason: CloseReason,
-    ) -> Result<TaskResult<Flow>, CanoError> {
-        Ok(TaskResult::Single(Flow::Done))
+    async fn on_close(&self, _res: &Resources, _reason: CloseReason) -> Result<Flow, CanoError> {
+        Ok(Flow::Done)
     }
 }
 
@@ -100,26 +96,20 @@ async fn stream_crash_loses_only_uncommitted_window_and_resumes_from_cursor() {
 
     let store = Arc::new(MemStore::default());
     let workflow = Workflow::bare()
-        .register_stream(Flow::Work, task)
+        .register(Flow::Work, task)
         .add_exit_state(Flow::Done)
         .with_checkpoint_store(store.clone())
         .with_workflow_id("stream-crash");
 
     // Run 1: windows [1,2,3] and [4,5,6] flush and commit; 7 is buffered; 8 errors.
-    let err = workflow
-        .orchestrate(Flow::Work, CancellationToken::disabled())
-        .await
-        .unwrap_err();
+    let err = workflow.orchestrate(Flow::Work).await.unwrap_err();
     assert_eq!(err.category(), "task_execution", "got: {err}");
     assert_eq!(*flushed.lock(), vec![vec![1, 2, 3], vec![4, 5, 6]]);
     // The buffered-but-unflushed item 7 is NOT committed: the cursor stays at 6.
     assert_eq!(store.last_cursor("stream-crash", "Work"), Some(6));
 
     // Run 2: resume re-opens the source *after* the committed cursor.
-    let result = workflow
-        .resume_from("stream-crash", CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.resume_from("stream-crash").await.unwrap();
     assert_eq!(result, Flow::Done);
     assert_eq!(*opened_with.lock(), vec![None, Some(6)]);
     assert_eq!(
@@ -157,7 +147,7 @@ async fn stream_crash_loses_only_uncommitted_window_and_resumes_from_cursor() {
 /// the next item boundary via the engine's biased select.
 struct TickerFeed {
     cancel_at: u64,
-    handle: Mutex<Option<CancellationHandle>>,
+    handle: Mutex<Option<CancellationToken>>,
     processed: Arc<Mutex<Vec<u64>>>,
     flushed: Arc<Mutex<Vec<Vec<u64>>>>,
     closes: Arc<Mutex<Vec<String>>>,
@@ -200,13 +190,9 @@ impl StreamTask<Flow> for TickerFeed {
         Ok(WindowSignal::Continue)
     }
 
-    async fn on_close(
-        &self,
-        _res: &Resources,
-        reason: CloseReason,
-    ) -> Result<TaskResult<Flow>, CanoError> {
+    async fn on_close(&self, _res: &Resources, reason: CloseReason) -> Result<Flow, CanoError> {
         self.closes.lock().push(format!("{reason:?}"));
-        Ok(TaskResult::Single(Flow::Done))
+        Ok(Flow::Done)
     }
 }
 
@@ -221,7 +207,8 @@ async fn stream_cancel_drains_partial_window_commits_cursor_and_resume_dedups() 
     let flushed = Arc::new(Mutex::new(Vec::new()));
     let closes = Arc::new(Mutex::new(Vec::new()));
 
-    let (handle, token) = CancellationToken::new();
+    let token = CancellationToken::new();
+    let handle = token.clone();
     let task = TickerFeed {
         cancel_at: 7,
         handle: Mutex::new(Some(handle)),
@@ -232,14 +219,17 @@ async fn stream_cancel_drains_partial_window_commits_cursor_and_resume_dedups() 
 
     let store = Arc::new(MemStore::default());
     let workflow = Workflow::bare()
-        .register_stream(Flow::Work, task)
+        .register(Flow::Work, task)
         .add_exit_state(Flow::Done)
         .with_checkpoint_store(store.clone())
         .with_workflow_id("stream-cancel");
 
     // Run 1: [1..=5] flushes normally; cancel fires inside item 7; the drain
     // flushes the partial [6,7] and commits cursor 7 before surfacing Cancelled.
-    let err = workflow.orchestrate(Flow::Work, token).await.unwrap_err();
+    let err = workflow
+        .orchestrate_with_token(Flow::Work, &token)
+        .await
+        .unwrap_err();
     assert_eq!(err.category(), "cancelled", "got: {err}");
     assert_eq!(
         *flushed.lock(),
@@ -254,10 +244,7 @@ async fn stream_cancel_drains_partial_window_commits_cursor_and_resume_dedups() 
     );
 
     // Run 2: resume picks up at 8; the run completes and nothing is reprocessed.
-    let result = workflow
-        .resume_from("stream-cancel", CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.resume_from("stream-cancel").await.unwrap();
     assert_eq!(result, Flow::Done);
     assert_eq!(
         *flushed.lock(),
@@ -322,12 +309,8 @@ impl StreamTask<Flow> for FlakyFeed {
         Ok(WindowSignal::Continue)
     }
 
-    async fn on_close(
-        &self,
-        _res: &Resources,
-        _reason: CloseReason,
-    ) -> Result<TaskResult<Flow>, CanoError> {
-        Ok(TaskResult::Single(Flow::Done))
+    async fn on_close(&self, _res: &Resources, _reason: CloseReason) -> Result<Flow, CanoError> {
+        Ok(Flow::Done)
     }
 }
 
@@ -341,7 +324,7 @@ async fn stream_error_budget_drops_failed_items_resets_on_success_and_kills_on_b
     // the rotten items are simply missing from the output.
     let flushed = Arc::new(Mutex::new(Vec::new()));
     let workflow = Workflow::bare()
-        .register_stream(
+        .register(
             Flow::Work,
             FlakyFeed {
                 fail_items: vec![2, 5, 6],
@@ -350,10 +333,7 @@ async fn stream_error_budget_drops_failed_items_resets_on_success_and_kills_on_b
             },
         )
         .add_exit_state(Flow::Done);
-    let result = workflow
-        .orchestrate(Flow::Work, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Flow::Work).await.unwrap();
     assert_eq!(result, Flow::Done);
     assert_eq!(
         *flushed.lock(),
@@ -365,7 +345,7 @@ async fn stream_error_budget_drops_failed_items_resets_on_success_and_kills_on_b
     // propagates and the buffered-but-unflushed item 4 is discarded with the run.
     let flushed = Arc::new(Mutex::new(Vec::new()));
     let workflow = Workflow::bare()
-        .register_stream(
+        .register(
             Flow::Work,
             FlakyFeed {
                 fail_items: vec![5, 6, 7],
@@ -374,10 +354,7 @@ async fn stream_error_budget_drops_failed_items_resets_on_success_and_kills_on_b
             },
         )
         .add_exit_state(Flow::Done);
-    let err = workflow
-        .orchestrate(Flow::Work, CancellationToken::disabled())
-        .await
-        .unwrap_err();
+    let err = workflow.orchestrate(Flow::Work).await.unwrap_err();
     assert_eq!(err.category(), "task_execution");
     assert!(err.to_string().contains("record 7 rotten"), "got: {err}");
     assert_eq!(
@@ -409,7 +386,7 @@ impl StreamTask<Flow> for StallFeed {
     fn config(&self) -> TaskConfig {
         // For streams only attempt_timeout is honored — as a per-item bound. This
         // is also what bounds cancel latency when items can hang.
-        TaskConfig::minimal().with_attempt_timeout(Duration::from_millis(50))
+        TaskConfig::new().with_attempt_timeout(Duration::from_millis(50))
     }
 
     async fn open(
@@ -436,12 +413,8 @@ impl StreamTask<Flow> for StallFeed {
         Ok(WindowSignal::Continue)
     }
 
-    async fn on_close(
-        &self,
-        _res: &Resources,
-        _reason: CloseReason,
-    ) -> Result<TaskResult<Flow>, CanoError> {
-        Ok(TaskResult::Single(Flow::Done))
+    async fn on_close(&self, _res: &Resources, _reason: CloseReason) -> Result<Flow, CanoError> {
+        Ok(Flow::Done)
     }
 }
 
@@ -453,7 +426,7 @@ impl StreamTask<Flow> for StallFeed {
 async fn stream_hung_item_is_bounded_by_attempt_timeout() {
     let flushed = Arc::new(Mutex::new(Vec::new()));
     let workflow = Workflow::bare()
-        .register_stream(
+        .register(
             Flow::Work,
             StallFeed {
                 flushed: flushed.clone(),
@@ -462,16 +435,13 @@ async fn stream_hung_item_is_bounded_by_attempt_timeout() {
         .add_exit_state(Flow::Done);
 
     let started = Instant::now();
-    let err = workflow
-        .orchestrate(Flow::Work, CancellationToken::disabled())
-        .await
-        .unwrap_err();
+    let err = workflow.orchestrate(Flow::Work).await.unwrap_err();
     let elapsed = started.elapsed();
 
     assert_eq!(err.category(), "timeout", "got: {err}");
     assert!(
         elapsed < Duration::from_secs(30),
-        "liveness: the run must fail near the 50ms budget, took {elapsed:?}"
+        "bounded latency: the run must fail near the 50ms budget, took {elapsed:?}"
     );
     assert_eq!(
         *flushed.lock(),

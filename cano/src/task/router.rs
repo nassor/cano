@@ -1,14 +1,13 @@
 //! # RouterTask — Side-Effect-Free Branching
 //!
 //! A [`RouterTask`] inspects the workflow [`Resources`] and returns the next
-//! [`TaskResult`] without performing any side effects. It is the canonical way
+//! next state without performing any side effects. It is the canonical way
 //! to implement branching logic in a Cano workflow.
 //!
 //! ## When to use `RouterTask`
 //!
 //! - **Pure routing**: redirect the FSM to a different state based on a flag, a
 //!   counter in the store, or a configuration value in resources.
-//! - **Fan-out / split**: return [`TaskResult::Split`] to launch parallel branches.
 //! - **Zero side effects**: because a router only *reads* state (no writes), it is
 //!   safe to retry or re-execute without idempotency concerns.
 //!
@@ -31,9 +30,9 @@
 //!
 //! #[task::router(state = Step)]
 //! impl MyRouter {
-//!     async fn route(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+//!     async fn route(&self, _res: &Resources) -> Result<Step, CanoError> {
 //!         // Pure decision: no writes to the store.
-//!         Ok(TaskResult::Single(Step::PathA))
+//!         Ok(Step::PathA)
 //!     }
 //! }
 //!
@@ -43,8 +42,8 @@
 //!
 //! #[task]
 //! impl Task<Step> for DoPathA {
-//!     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-//!         Ok(TaskResult::Single(Step::Done))
+//!     async fn run(&self) -> Result<Step, CanoError> {
+//!         Ok(Step::Done)
 //!     }
 //! }
 //!
@@ -53,7 +52,7 @@
 //!     .register(Step::PathA, DoPathA)
 //!     .add_exit_state(Step::Done);
 //!
-//! let result = workflow.orchestrate(Step::Route, CancellationToken::disabled()).await?;
+//! let result = workflow.orchestrate(Step::Route).await?;
 //! assert_eq!(result, Step::Done);
 //! # Ok(())
 //! # }
@@ -73,8 +72,8 @@
 //!
 //! #[task::router]
 //! impl RouterTask<Step> for SimpleRouter {
-//!     async fn route(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-//!         Ok(TaskResult::Single(Step::Done))
+//!     async fn route(&self, _res: &Resources) -> Result<Step, CanoError> {
+//!         Ok(Step::Done)
 //!     }
 //! }
 //!
@@ -84,7 +83,7 @@
 //!     .register(Step::Route, SimpleRouter)
 //!     .add_exit_state(Step::Done);
 //!
-//! let result = workflow.orchestrate(Step::Route, CancellationToken::disabled()).await?;
+//! let result = workflow.orchestrate(Step::Route).await?;
 //! assert_eq!(result, Step::Done);
 //! # Ok(())
 //! # }
@@ -92,23 +91,19 @@
 
 use crate::error::CanoError;
 use crate::resource::Resources;
-use crate::task::{TaskConfig, TaskResult};
+use crate::task::TaskConfig;
 use std::borrow::Cow;
 use std::fmt;
-use std::hash::Hash;
 
 /// RouterTask trait for side-effect-free workflow branching
 ///
 /// A [`RouterTask`] inspects the workflow [`Resources`] and returns the next
-/// [`TaskResult`] *without* mutating any state. It is the lightweight building block
+/// next state *without* mutating any state. It is the lightweight building block
 /// for conditional routing and fan-out in a Cano workflow.
 ///
 /// # Generic Types
 ///
 /// - **`TState`**: The state enum used by the workflow (must be `Clone + Debug + Send + Sync`).
-/// - **`TResourceKey`**: The key type used to look up resources (defaults to
-///   [`Cow<'static, str>`] — accepts `&'static str` literals without allocating, plus
-///   owned `String` keys for runtime-built names).
 ///
 /// # Implementing RouterTask
 ///
@@ -125,49 +120,28 @@ use std::hash::Hash;
 ///
 /// #[task::router(state = Step)]
 /// impl ThresholdRouter {
-///     async fn route(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-///         let store = res.get::<MemoryStore, _>("store")?;
+///     async fn route(&self, res: &Resources) -> Result<Step, CanoError> {
+///         let store = res.get::<MemoryStore>()?;
 ///         let value: u32 = store.get("value").unwrap_or(0);
 ///         if value >= self.threshold {
-///             Ok(TaskResult::Single(Step::Right))
+///             Ok(Step::Right)
 ///         } else {
-///             Ok(TaskResult::Single(Step::Left))
+///             Ok(Step::Left)
 ///         }
 ///     }
 /// }
 /// ```
-///
-/// # Fan-out with Split
-///
-/// A router may return [`TaskResult::Split`] to launch parallel branches:
-///
-/// ```rust
-/// use cano::prelude::*;
-///
-/// #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-/// enum Step { Dispatch, WorkerA, WorkerB, Done }
-///
-/// struct FanOutRouter;
-///
-/// #[task::router(state = Step)]
-/// impl FanOutRouter {
-///     async fn route(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-///         Ok(TaskResult::Split(vec![Step::WorkerA, Step::WorkerB]))
-///     }
-/// }
-/// ```
 #[crate::task::router]
-pub trait RouterTask<TState, TResourceKey = Cow<'static, str>>: Send + Sync
+pub trait RouterTask<TState>: Send + Sync
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// Get the task configuration that controls execution behaviour.
     ///
     /// Returns the `TaskConfig` that determines how this router should be executed
     /// (retry policy, circuit-breaker, etc.). The default returns `TaskConfig::default()`.
     fn config(&self) -> TaskConfig {
-        crate::task::default_task_config()
+        TaskConfig::new()
     }
 
     /// Human-readable identifier for this router, reported to [`WorkflowObserver`] hooks.
@@ -177,7 +151,7 @@ where
     ///
     /// [`WorkflowObserver`]: crate::observer::WorkflowObserver
     fn name(&self) -> Cow<'static, str> {
-        crate::task::default_task_name::<Self>()
+        Cow::Borrowed(std::any::type_name::<Self>())
     }
 
     /// Inspect resources and return the next workflow state.
@@ -190,26 +164,13 @@ where
     ///
     /// Returns [`CanoError`] if the routing logic encounters an error (e.g. a missing
     /// required resource).
-    async fn route(&self, res: &Resources<TResourceKey>) -> Result<TaskResult<TState>, CanoError>;
+    async fn route(&self, res: &Resources) -> Result<TState, CanoError>;
 }
-
-/// Type alias for a dynamic [`RouterTask`] trait object.
-///
-/// Use this when you need to store different router types in the same collection.
-/// `TResourceKey` defaults to [`Cow<'static, str>`] to match [`Resources`].
-pub type DynRouterTask<TState, TResourceKey = Cow<'static, str>> =
-    dyn RouterTask<TState, TResourceKey> + Send + Sync;
-
-/// Type alias for an `Arc`-wrapped dynamic [`RouterTask`] trait object.
-///
-/// This alias simplifies working with dynamic router collections.
-pub type RouterTaskObject<TState, TResourceKey = Cow<'static, str>> =
-    std::sync::Arc<DynRouterTask<TState, TResourceKey>>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cancel::CancellationToken;
+
     use crate::resource::Resources;
     use crate::task;
     use crate::task::Task;
@@ -225,20 +186,19 @@ mod tests {
     enum Step {
         Decide,
         PathA,
-        PathB,
         Done,
     }
 
     // ---------------------------------------------------------------------------
-    // (a) RouterTask returning TaskResult::Single — trait-impl form
+    // (a) RouterTask — trait-impl form
     // ---------------------------------------------------------------------------
 
     struct SingleRouter;
 
     #[task::router]
     impl RouterTask<Step> for SingleRouter {
-        async fn route(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::PathA))
+        async fn route(&self, _res: &Resources) -> Result<Step, CanoError> {
+            Ok(Step::PathA)
         }
     }
 
@@ -247,7 +207,7 @@ mod tests {
         let router = SingleRouter;
         let res = Resources::new();
         let result = RouterTask::route(&router, &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::PathA));
+        assert_eq!(result, Step::PathA);
     }
 
     #[tokio::test]
@@ -256,28 +216,7 @@ mod tests {
         let router = SingleRouter;
         let res = Resources::new();
         let result = Task::run(&router, &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::PathA));
-    }
-
-    // ---------------------------------------------------------------------------
-    // (b) RouterTask returning TaskResult::Split
-    // ---------------------------------------------------------------------------
-
-    struct SplitRouter;
-
-    #[task::router]
-    impl RouterTask<Step> for SplitRouter {
-        async fn route(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Split(vec![Step::PathA, Step::PathB]))
-        }
-    }
-
-    #[tokio::test]
-    async fn test_router_task_split() {
-        let router = SplitRouter;
-        let res = Resources::new();
-        let result = Task::run(&router, &res).await.unwrap();
-        assert_eq!(result, TaskResult::Split(vec![Step::PathA, Step::PathB]));
+        assert_eq!(result, Step::PathA);
     }
 
     // ---------------------------------------------------------------------------
@@ -291,7 +230,7 @@ mod tests {
         let router: Arc<dyn Task<Step>> = Arc::new(SingleRouter);
         let res = Resources::new();
         let result = Task::run(router.as_ref(), &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::PathA));
+        assert_eq!(result, Step::PathA);
     }
 
     // ---------------------------------------------------------------------------
@@ -302,14 +241,11 @@ mod tests {
 
     #[task::router]
     impl RouterTask<Step> for CustomRouter {
-        fn config(&self) -> TaskConfig {
-            TaskConfig::minimal()
-        }
         fn name(&self) -> Cow<'static, str> {
             Cow::Borrowed("my-custom-router")
         }
-        async fn route(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        async fn route(&self, _res: &Resources) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -348,8 +284,8 @@ mod tests {
 
         #[task]
         impl Task<Step> for PathATask {
-            async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-                Ok(TaskResult::Single(Step::Done))
+            async fn run(&self) -> Result<Step, CanoError> {
+                Ok(Step::Done)
             }
         }
 
@@ -358,10 +294,7 @@ mod tests {
             .register(Step::PathA, PathATask)
             .add_exit_state(Step::Done);
 
-        let result = workflow
-            .orchestrate(Step::Decide, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(Step::Decide).await.unwrap();
         assert_eq!(result, Step::Done);
     }
 
@@ -373,8 +306,8 @@ mod tests {
 
     #[task::router]
     impl RouterTask<Step> for DefaultConfigRouter {
-        async fn route(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        async fn route(&self, _res: &Resources) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -386,7 +319,7 @@ mod tests {
             RouterTask::<Step>::config(&router)
                 .retry_mode
                 .max_attempts(),
-            4
+            1
         );
     }
 

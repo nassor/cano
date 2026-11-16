@@ -53,8 +53,8 @@ impl TracedDataProcessorTask {
         TaskConfig::default()
     }
 
-    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<WorkflowState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
 
         info!(processor_id = %self.processor_id, "Starting data preparation");
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -64,7 +64,7 @@ impl TracedDataProcessorTask {
             "record_2".to_string(),
             "record_3".to_string(),
         ];
-        store.put("prep_timestamp", chrono::Utc::now().to_rfc3339())?;
+        store.put("prep_timestamp", chrono::Utc::now().to_rfc3339());
         info!(processor_id = %self.processor_id, record_count = data.len(), "Data preparation completed");
 
         // Process with custom span
@@ -83,12 +83,12 @@ impl TracedDataProcessorTask {
 
         info!(processor_id = %self.processor_id, "Starting post-processing");
         let result_summary = format!("Processed {} records", processed_data.len());
-        store.put("processing_result", result_summary)?;
-        store.put("completion_timestamp", chrono::Utc::now().to_rfc3339())?;
+        store.put("processing_result", result_summary);
+        store.put("completion_timestamp", chrono::Utc::now().to_rfc3339());
         tokio::time::sleep(Duration::from_millis(30)).await;
         info!(processor_id = %self.processor_id, processed_count = processed_data.len(), "Post-processing completed");
 
-        Ok(TaskResult::Single(WorkflowState::Complete))
+        Ok(WorkflowState::Complete)
     }
 }
 
@@ -106,17 +106,17 @@ impl ValidationTask {
 
 #[task(state = WorkflowState)]
 impl ValidationTask {
-    async fn run_bare(&self) -> Result<TaskResult<WorkflowState>, CanoError> {
+    async fn run(&self) -> Result<WorkflowState, CanoError> {
         info!("Preparing validation");
         info!(should_pass = self.should_pass, "Running validation");
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         if self.should_pass {
             info!("Validation passed");
-            Ok(TaskResult::Single(WorkflowState::Processing))
+            Ok(WorkflowState::Processing)
         } else {
             warn!("Validation failed");
-            Ok(TaskResult::Single(WorkflowState::Error))
+            Ok(WorkflowState::Error)
         }
     }
 }
@@ -143,8 +143,8 @@ impl SimpleMathTask {
         TaskConfig::default().with_fixed_retry(2, Duration::from_millis(100))
     }
 
-    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<WorkflowState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
 
         info!(task_id = %self.task_id, operation = %self.operation, "Starting math task");
 
@@ -165,8 +165,8 @@ impl SimpleMathTask {
             }
         };
 
-        store.put("math_result", result)?;
-        store.put("task_completed_by", self.task_id.clone())?;
+        store.put("math_result", result);
+        store.put("task_completed_by", self.task_id.clone());
 
         info!(
             task_id = %self.task_id,
@@ -177,7 +177,7 @@ impl SimpleMathTask {
             "Math task completed"
         );
 
-        Ok(TaskResult::Single(WorkflowState::Complete))
+        Ok(WorkflowState::Complete)
     }
 }
 
@@ -203,7 +203,7 @@ async fn main() -> CanoResult<()> {
         info!("Example 1: Basic Workflow with Tracing");
 
         let store = MemoryStore::new();
-        let resources = Resources::new().insert("store", store.clone());
+        let resources = Resources::new().insert(store.clone());
         let workflow = Workflow::new(resources)
             .register(WorkflowState::Start, ValidationTask::new(true))
             .register(
@@ -213,9 +213,7 @@ async fn main() -> CanoResult<()> {
             .add_exit_states(vec![WorkflowState::Complete, WorkflowState::Error]);
 
         info!("Starting workflow execution...");
-        let result = workflow
-            .orchestrate(WorkflowState::Start, CancellationToken::disabled())
-            .await?;
+        let result = workflow.orchestrate(WorkflowState::Start).await?;
         info!(final_state = ?result, "Workflow completed");
 
         println!("Basic workflow completed with state: {result:?}\n");
@@ -227,8 +225,8 @@ async fn main() -> CanoResult<()> {
 
         let store = MemoryStore::new();
         // Set some operands for the math task
-        store.put("operand_a", 7)?;
-        store.put("operand_b", 6)?;
+        store.put("operand_a", 7);
+        store.put("operand_b", 6);
 
         // Build a span with a business field so every log event inside this
         // workflow run is decorated with `workflow_id` in structured output.
@@ -238,7 +236,7 @@ async fn main() -> CanoResult<()> {
             operation = "multiply"
         );
 
-        let resources = Resources::new().insert("store", store.clone());
+        let resources = Resources::new().insert(store.clone());
         let task_workflow = Workflow::new(resources)
             .register(
                 WorkflowState::Start,
@@ -250,9 +248,7 @@ async fn main() -> CanoResult<()> {
             .with_tracing_span(workflow_span);
 
         info!("Starting task-based workflow execution (with custom span)...");
-        let result = task_workflow
-            .orchestrate(WorkflowState::Start, CancellationToken::disabled())
-            .await?;
+        let result = task_workflow.orchestrate(WorkflowState::Start).await?;
 
         let math_result: i32 = store.get("math_result").unwrap_or(0);
         let completed_by: String = store.get("task_completed_by").unwrap_or_default();
@@ -275,9 +271,9 @@ async fn main() -> CanoResult<()> {
     {
         info!("Example 3: Scheduler with Workflow Tracing");
 
-        let mut scheduler = Scheduler::new();
+        let scheduler = Scheduler::new();
         let store = MemoryStore::new();
-        let resources = Resources::new().insert("store", store.clone());
+        let resources = Resources::new().insert(store.clone());
 
         // Create a workflow for scheduled execution
         let scheduled_workflow = Workflow::new(resources)
@@ -288,12 +284,12 @@ async fn main() -> CanoResult<()> {
             )
             .add_exit_state(WorkflowState::Complete);
 
-        scheduler.every_seconds(
+        let scheduler = scheduler.every(
             "traced_workflow",
             scheduled_workflow,
             WorkflowState::Start,
-            2,
-        )?;
+            Duration::from_secs(2),
+        );
 
         info!("Starting scheduler...");
         let running = scheduler.start().await?;
@@ -303,7 +299,7 @@ async fn main() -> CanoResult<()> {
         tokio::time::sleep(Duration::from_secs(6)).await;
 
         // Check status
-        if let Some(flow_info) = running.status("traced_workflow").await {
+        if let Some(flow_info) = running.status("traced_workflow") {
             info!(
                 workflow_id = %flow_info.id,
                 run_count = flow_info.run_count,
@@ -323,7 +319,7 @@ async fn main() -> CanoResult<()> {
         info!("Example 4: Error Handling with Tracing");
 
         let store = MemoryStore::new();
-        let resources = Resources::new().insert("store", store);
+        let resources = Resources::new().insert(store);
         let error_workflow = Workflow::new(resources)
             .register(WorkflowState::Start, ValidationTask::new(false)) // This will fail
             .register(
@@ -333,9 +329,7 @@ async fn main() -> CanoResult<()> {
             .add_exit_states(vec![WorkflowState::Complete, WorkflowState::Error]);
 
         info!("Starting workflow that will encounter validation failure...");
-        let result = error_workflow
-            .orchestrate(WorkflowState::Start, CancellationToken::disabled())
-            .await?;
+        let result = error_workflow.orchestrate(WorkflowState::Start).await?;
 
         println!("Error workflow completed with state: {result:?}");
 
@@ -356,9 +350,9 @@ async fn main() -> CanoResult<()> {
         info!("Example 5: TracingObserver (events under the `cano::observer` target)");
 
         let store = MemoryStore::new();
-        store.put("operand_a", 3)?;
-        store.put("operand_b", 4)?;
-        let resources = Resources::new().insert("store", store.clone());
+        store.put("operand_a", 3);
+        store.put("operand_b", 4);
+        let resources = Resources::new().insert(store.clone());
 
         let observed_workflow = Workflow::new(resources)
             .register(
@@ -369,9 +363,7 @@ async fn main() -> CanoResult<()> {
             // One line: re-emit lifecycle/failure events as `tracing` events.
             .with_observer(Arc::new(TracingObserver::new()));
 
-        let result = observed_workflow
-            .orchestrate(WorkflowState::Start, CancellationToken::disabled())
-            .await?;
+        let result = observed_workflow.orchestrate(WorkflowState::Start).await?;
         println!("Observed workflow completed with state: {result:?}");
         println!(
             "   (look for `task started` / `task succeeded` events; filter with RUST_LOG=cano::observer=debug)\n"

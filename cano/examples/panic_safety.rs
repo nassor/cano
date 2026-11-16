@@ -51,10 +51,10 @@ struct Panicker;
 impl Panicker {
     fn config(&self) -> TaskConfig {
         // No retries — let the panic error bubble immediately.
-        TaskConfig::minimal()
+        TaskConfig::new()
     }
 
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         panic!("something went terribly wrong");
     }
 }
@@ -76,13 +76,13 @@ struct ReserveSlot;
 impl ReserveSlot {
     type Output = Reservation;
 
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<(Step, Reservation), CanoError> {
         let r = Reservation {
             slot_id: 42,
             held_by: "order-7001".into(),
         };
         println!("  reserve : holding slot {} for {}", r.slot_id, r.held_by);
-        Ok((TaskResult::Single(Step::PanicTask), r))
+        Ok((Step::PanicTask, r))
     }
 
     async fn compensate(&self, _res: &Resources, r: Reservation) -> Result<(), CanoError> {
@@ -98,11 +98,7 @@ struct PanicAfterReserve;
 
 #[task(state = Step)]
 impl PanicAfterReserve {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         panic!("panic after reservation — should trigger compensation");
     }
 }
@@ -127,10 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .register(Step::PanicTask, Panicker)
             .add_exit_state(Step::Done);
 
-        match workflow
-            .orchestrate(Step::PanicTask, CancellationToken::disabled())
-            .await
-        {
+        match workflow.orchestrate(Step::PanicTask).await {
             Ok(s) => println!("  outcome: Ok({s:?})  (unexpected)"),
             Err(e) => {
                 println!("  outcome: Err(\"{e}\")");
@@ -156,14 +149,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("-- Scenario 2: compensation runs after a downstream panic --");
     {
         let workflow = Workflow::bare()
-            .register_with_compensation(Step::Reserve, ReserveSlot)
+            .register(Step::Reserve, ReserveSlot)
             .register(Step::PanicTask, PanicAfterReserve)
             .add_exit_state(Step::Done);
 
-        match workflow
-            .orchestrate(Step::Reserve, CancellationToken::disabled())
-            .await
-        {
+        match workflow.orchestrate(Step::Reserve).await {
             Ok(s) => println!("  outcome: Ok({s:?})  (unexpected)"),
             Err(e) => {
                 println!("  outcome: Err(\"{e}\")");

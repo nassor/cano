@@ -80,13 +80,13 @@ struct FlakyTask {
 }
 #[derive(Clone)]
 struct GuardedTask {
-    breaker: Arc<CircuitBreaker>,
+    breaker: CircuitBreaker,
 }
 
 #[task(state = Step)]
 impl StartTask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Flaky))
+    async fn run(&self) -> Result<Step, CanoError> {
+        Ok(Step::Flaky)
     }
 }
 
@@ -95,11 +95,11 @@ impl FlakyTask {
     fn config(&self) -> TaskConfig {
         TaskConfig::new().with_fixed_retry(3, Duration::from_millis(10))
     }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
             Err(CanoError::task_execution("not warmed up")) // first call ever → one retry
         } else {
-            Ok(TaskResult::Single(Step::Guarded))
+            Ok(Step::Guarded)
         }
     }
 }
@@ -107,9 +107,9 @@ impl FlakyTask {
 #[task(state = Step)]
 impl GuardedTask {
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal().with_circuit_breaker(Arc::clone(&self.breaker))
+        TaskConfig::new().with_circuit_breaker(self.breaker.clone())
     }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         Err(CanoError::task_execution("dependency down")) // always fails → trips the breaker
     }
 }
@@ -117,11 +117,11 @@ impl GuardedTask {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let metrics = Arc::new(Metrics::default());
-    let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+    let breaker = CircuitBreaker::new(CircuitPolicy {
         failure_threshold: 1,
         reset_timeout: Duration::from_secs(3600), // stays open for the duration of this demo
         half_open_max_calls: 1,
-    }));
+    });
 
     let workflow = Workflow::bare()
         .register(Step::Start, StartTask)
@@ -134,17 +134,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .register(
             Step::Guarded,
             GuardedTask {
-                breaker: Arc::clone(&breaker),
+                breaker: breaker.clone(),
             },
         )
         .add_exit_state(Step::Done)
         .with_observer(metrics.clone());
 
     for run in 1..=2 {
-        match workflow
-            .orchestrate(Step::Start, CancellationToken::disabled())
-            .await
-        {
+        match workflow.orchestrate(Step::Start).await {
             Ok(state) => println!("run {run}: reached {state:?}"),
             Err(error) => println!("run {run}: stopped — {error}"),
         }

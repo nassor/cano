@@ -108,7 +108,7 @@ pub trait WorkflowObserver: Send + Sync + 'static {
     fn on_workflow_timeout(&self, _elapsed: std::time::Duration, _limit: std::time::Duration) {}
 
     /// Called when a run is cancelled via a
-    /// [`CancellationToken`](crate::cancel::CancellationToken) — either observed at a state
+    /// [`CancellationToken`](crate::CancellationToken) — either observed at a state
     /// boundary or while a cancellable task was in flight. `state` is the `Debug` rendering of the
     /// state the cancellation was observed at. Fires exactly once per cancelled run, immediately
     /// before the compensation stack is drained. Followed on the public API's return by a
@@ -191,7 +191,7 @@ pub trait WorkflowObserver: Send + Sync + 'static {
 /// # #[derive(Clone)] struct Work;
 /// # #[task(state = Step)]
 /// # impl Work {
-/// #     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> { Ok(TaskResult::Single(Step::Done)) }
+/// #     async fn run(&self) -> Result<Step, CanoError> { Ok(Step::Done) }
 /// # }
 /// let workflow = Workflow::bare()
 ///     .register(Step::Start, Work)
@@ -348,8 +348,8 @@ mod tests {
     struct OkTask;
     #[task]
     impl Task<S> for OkTask {
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(S::Done))
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(S::Done)
         }
         fn name(&self) -> Cow<'static, str> {
             "OkTask".into()
@@ -359,7 +359,7 @@ mod tests {
     struct FailTask;
     #[task]
     impl Task<S> for FailTask {
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+        async fn run(&self) -> Result<S, CanoError> {
             Err(CanoError::task_execution("boom"))
         }
         fn config(&self) -> TaskConfig {
@@ -371,15 +371,15 @@ mod tests {
     }
 
     struct CircuitTask {
-        breaker: Arc<CircuitBreaker>,
+        breaker: CircuitBreaker,
     }
     #[task]
     impl Task<S> for CircuitTask {
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(S::Done))
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(S::Done)
         }
         fn config(&self) -> TaskConfig {
-            TaskConfig::minimal().with_circuit_breaker(Arc::clone(&self.breaker))
+            TaskConfig::new().with_circuit_breaker(self.breaker.clone())
         }
         fn name(&self) -> Cow<'static, str> {
             "CircuitTask".into()
@@ -401,13 +401,7 @@ mod tests {
             .add_exit_state(S::Done)
             .with_observer(Arc::new(obs));
 
-        assert_eq!(
-            workflow
-                .orchestrate(S::Start, CancellationToken::disabled())
-                .await
-                .unwrap(),
-            S::Done
-        );
+        assert_eq!(workflow.orchestrate(S::Start).await.unwrap(), S::Done);
 
         let events = rec.labels();
         assert!(
@@ -440,12 +434,7 @@ mod tests {
             .add_exit_state(S::Done)
             .with_observer(Arc::new(obs));
 
-        assert!(
-            workflow
-                .orchestrate(S::Start, CancellationToken::disabled())
-                .await
-                .is_err()
-        );
+        assert!(workflow.orchestrate(S::Start).await.is_err());
 
         let events = rec.labels();
         assert!(
@@ -474,11 +463,11 @@ mod tests {
     #[tokio::test]
     async fn observer_fires_on_circuit_open() {
         // Trip the breaker before the workflow runs: one failure at threshold 1.
-        let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+        let breaker = CircuitBreaker::new(CircuitPolicy {
             failure_threshold: 1,
             reset_timeout: Duration::from_secs(60),
             ..CircuitPolicy::default()
-        }));
+        });
         let permit = breaker.try_acquire().expect("closed breaker admits");
         breaker.record_failure(permit);
 
@@ -487,16 +476,13 @@ mod tests {
             .register(
                 S::Start,
                 CircuitTask {
-                    breaker: Arc::clone(&breaker),
+                    breaker: breaker.clone(),
                 },
             )
             .add_exit_state(S::Done)
             .with_observer(Arc::new(obs));
 
-        let err = workflow
-            .orchestrate(S::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(S::Start).await.unwrap_err();
         // The FSM wraps the failure with state context; the inner is CircuitOpen.
         assert!(matches!(err.inner(), CanoError::CircuitOpen(_)), "{err}");
 
@@ -517,13 +503,7 @@ mod tests {
         let workflow = Workflow::bare()
             .register(S::Start, OkTask)
             .add_exit_state(S::Done);
-        assert_eq!(
-            workflow
-                .orchestrate(S::Start, CancellationToken::disabled())
-                .await
-                .unwrap(),
-            S::Done
-        );
+        assert_eq!(workflow.orchestrate(S::Start).await.unwrap(), S::Done);
     }
 
     #[test]
@@ -532,8 +512,8 @@ mod tests {
         struct Anon;
         #[task]
         impl Task<S> for Anon {
-            async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-                Ok(TaskResult::Single(S::Done))
+            async fn run(&self) -> Result<S, CanoError> {
+                Ok(S::Done)
             }
         }
         assert!(Anon.name().contains("Anon"), "{}", Anon.name());
@@ -606,8 +586,8 @@ mod metrics_observer_tests {
         fn name(&self) -> std::borrow::Cow<'static, str> {
             std::borrow::Cow::Borrowed("GoTo")
         }
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(self.0.clone()))
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(self.0.clone())
         }
     }
 
@@ -619,7 +599,7 @@ mod metrics_observer_tests {
                 .register(S::Start, GoTo(S::Mid))
                 .register(S::Mid, GoTo(S::Done))
                 .add_exit_state(S::Done)
-                .orchestrate(S::Start, CancellationToken::disabled())
+                .orchestrate(S::Start)
                 .await
         });
         assert_eq!(res.unwrap(), S::Done);
@@ -658,12 +638,10 @@ mod metrics_observer_tests {
             fn name(&self) -> std::borrow::Cow<'static, str> {
                 std::borrow::Cow::Borrowed("SlowTask")
             }
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
-            async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+
+            async fn run(&self) -> Result<S, CanoError> {
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                Ok(TaskResult::Single(S::Done))
+                Ok(S::Done)
             }
         }
         let (res, rows) = run_with_recorder(|| async {
@@ -672,7 +650,7 @@ mod metrics_observer_tests {
                 .with_total_timeout(std::time::Duration::from_millis(20))
                 .register(S::Start, SlowTask)
                 .add_exit_state(S::Done)
-                .orchestrate(S::Start, CancellationToken::disabled())
+                .orchestrate(S::Start)
                 .await
         });
         assert!(res.is_err());
@@ -707,11 +685,11 @@ mod metrics_observer_tests {
             fn config(&self) -> TaskConfig {
                 TaskConfig::new().with_fixed_retry(3, std::time::Duration::from_millis(1))
             }
-            async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+            async fn run(&self) -> Result<S, CanoError> {
                 if self.0.fetch_add(1, Ordering::SeqCst) < 2 {
                     Err(CanoError::task_execution("transient"))
                 } else {
-                    Ok(TaskResult::Single(S::Done))
+                    Ok(S::Done)
                 }
             }
         }
@@ -720,7 +698,7 @@ mod metrics_observer_tests {
                 .with_observer(Arc::new(MetricsObserver::new()))
                 .register(S::Start, Flaky(n2))
                 .add_exit_state(S::Done)
-                .orchestrate(S::Start, CancellationToken::disabled())
+                .orchestrate(S::Start)
                 .await
         });
         assert_eq!(res.unwrap(), S::Done);

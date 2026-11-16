@@ -35,9 +35,9 @@ struct AwaitJob;
 #[task::poll(state = Stage)]
 impl AwaitJob {
     async fn poll(&self, res: &Resources) -> Result<PollOutcome<Stage>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
         match store.get::<bool>("job_done") {
-            Ok(true) => Ok(PollOutcome::Ready(TaskResult::Single(Stage::Done))),
+            Ok(true) => Ok(PollOutcome::Ready(Stage::Done)),
             _        => Ok(PollOutcome::Pending { delay_ms: 250 }), // async sleep, then poll again
         }
     }
@@ -48,8 +48,8 @@ impl AwaitJob {
 <div class="callout callout-info">
 <div class="callout-label">Key concept</div>
 <p>
-The poll loop <em>is</em> the resilience mechanism. That's why <code>config()</code> defaults to
-<code>TaskConfig::minimal()</code> — <strong>no retries</strong>: wrapping a poll loop in an outer
+The poll loop <em>is</em> the resilience mechanism. Like every model, a poll task defaults to
+<code>TaskConfig::new()</code> — <strong>no retries</strong> — and wrapping a poll loop in an outer
 retry rarely makes sense, since the loop already keeps trying. For tolerating transient errors
 <em>inside</em> the loop, use the per-poll <code>on_poll_error</code> policy instead.
 </p>
@@ -65,7 +65,6 @@ retry rarely makes sense, since the loop already keeps trying. For tolerating tr
 <li><a href="#error-policy">The Poll Error Policy</a></li>
 <li><a href="#caps">Bounding the Loop</a></li>
 <li><a href="#explicit">Explicit Trait-Impl Form</a></li>
-<li><a href="#object-safe">Type-Erased Aliases</a></li>
 <li><a href="#when-to-use">When to Use PollTask</a></li>
 </ol>
 </nav>
@@ -78,10 +77,10 @@ retry rarely makes sense, since the loop already keeps trying. For tolerating tr
 <p class="diagram-label">The poll loop: poll &rarr; sleep &rarr; poll &hellip; until Ready</p>
 <div class="cd-wrap">
 <svg class="cd" viewBox="0 0 720 196" role="img">
-<title>The poll loop: poll returns Pending with a delay, the engine sleeps that long and polls again; Ready(result) moves the workflow to the next state.</title>
+<title>The poll loop: poll returns Pending with a delay, the engine sleeps that long and polls again; Ready(state) moves the workflow to the next state.</title>
 <defs><marker id="poll-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
 <path class="e e-hot" d="M100,58 V32 Q100,24 108,24 H617 Q625,24 625,32 V53" marker-end="url(#poll-ah)"/>
-<text class="t-code t-hot" x="362" y="41">Ready(result)</text>
+<text class="t-code t-hot" x="362" y="41">Ready(state)</text>
 <rect class="n-hot" x="40" y="58" width="120" height="46" rx="10"/>
 <text class="t-strong" x="100" y="82">poll</text>
 <rect class="n" x="330" y="58" width="170" height="46" rx="10"/>
@@ -109,8 +108,8 @@ Its return value drives the loop:
 </thead>
 <tbody>
 <tr>
-<td><code>Ready(result)</code></td>
-<td>ends the loop and forwards <code>result</code> (a <code>TaskResult&lt;TState&gt;</code>) to the FSM</td>
+<td><code>Ready(state)</code></td>
+<td>ends the loop and forwards <code>state</code> (the next <code>TState</code>) to the FSM</td>
 </tr>
 <tr>
 <td><code>Pending { delay_ms }</code></td>
@@ -124,12 +123,14 @@ Its return value drives the loop:
 <h2 id="quick-start"><a href="#quick-start" class="anchor-link" aria-hidden="true">#</a>Quick Start with <code>#[task::poll]</code></h2>
 <p>
 Attach <code>#[task::poll(state = MyState)]</code> to an inherent <code>impl</code> block. You write
-<code>poll</code>; the macro injects default bodies for any of <code>config</code>, <code>name</code>,
-or <code>on_poll_error</code> you don't write, synthesises the
-<code>impl PollTask&lt;MyState&gt; for MyPoller</code> header, and emits a companion
-<code>impl Task&lt;MyState&gt; for MyPoller</code> whose <code>run</code> drives the loop (via
+<code>poll</code>; <code>config</code>, <code>name</code> and <code>on_poll_error</code> fall back to the
+trait defaults if you don't write them. The macro synthesises the
+<code>impl PollTask&lt;MyState&gt; for MyPoller</code> header, implements
+<code>cano::workflow::Registrable</code> so the struct can go straight into <code>register</code>, and emits a
+companion <code>impl Task&lt;MyState&gt; for MyPoller</code> whose <code>run</code> drives the loop (via
 <code>cano::task::poll::run_poll_loop</code>) — so a poll task is just an ordinary single-task state
-whose <code>run</code> happens to loop. No engine changes.
+whose <code>run</code> happens to loop. <code>poll</code> may also be written without the <code>res</code>
+parameter when it needs no resources.
 </p>
 
 <div class="code-block">
@@ -154,14 +155,14 @@ struct AwaitJob;
 impl AwaitJob {
     fn config(&self) -> TaskConfig {
         // cap the whole wait at 30s
-        TaskConfig::minimal().with_attempt_timeout(Duration::from_secs(30))
+        TaskConfig::new().with_attempt_timeout(Duration::from_secs(30))
     }
 
     async fn poll(&self, res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
-        let job = res.get::<Job, _>("job")?;
+        let job = res.get::<Job>()?;
         let done = job.ticks.load(Ordering::Relaxed);
         if done >= job.total {
-            Ok(PollOutcome::Ready(TaskResult::Single(Step::Process)))
+            Ok(PollOutcome::Ready(Step::Process))
         } else {
             Ok(PollOutcome::Pending { delay_ms: 200 })
         }
@@ -174,9 +175,9 @@ impl AwaitJob {
 <hr class="section-divider">
 <h2 id="registering"><a href="#registering" class="anchor-link" aria-hidden="true">#</a>Registering a Poll Task</h2>
 <p>
-Register a poll task with plain <code>Workflow::register</code> — there is no special builder method,
-because to the FSM it's an ordinary <code>Single</code> state. The companion
-<code>impl Task</code> the macro generated runs the loop internally.
+Register a poll task with <code>Workflow::register</code>, the same call every other model uses. To the
+FSM it's an ordinary single-task state: the companion <code>impl Task</code> the macro generated
+runs the loop internally.
 </p>
 
 <div class="code-block">
@@ -227,10 +228,10 @@ impl AwaitJob {
     }
 
     async fn poll(&self, res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
-        let job = res.get::<Job, _>("job")?;
+        let job = res.get::<Job>()?;
         let status = job.probe().await?;     // a flaky probe — may Err
         Ok(match status {
-            JobStatus::Finished => PollOutcome::Ready(TaskResult::Single(Step::Process)),
+            JobStatus::Finished => PollOutcome::Ready(Step::Process),
             JobStatus::Running  => PollOutcome::Pending { delay_ms: 200 },
         })
     }
@@ -250,7 +251,7 @@ error streaks (and a <code>Pending</code> resets the counter), and fails once a 
 <p>
 A <code>PollTask</code> has <strong>no built-in iteration or time cap</strong>. With nothing set it
 polls forever — which is legitimate ("wait for shutdown"). For a wall-clock bound, return
-<code>TaskConfig::minimal().with_attempt_timeout(dur)</code> from <code>config()</code>: since a poll
+<code>TaskConfig::new().with_attempt_timeout(dur)</code> from <code>config()</code>: since a poll
 task runs as a single dispatch attempt, that timeout caps the <em>whole loop</em>. The workflow
 engine enforces it, producing <code>CanoError::Timeout</code> on expiry.
 </p>
@@ -288,9 +289,9 @@ struct AwaitJob;
 #[task::poll]
 impl PollTask<Step> for AwaitJob {
     async fn poll(&self, res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
-        let job = res.get::<Job, _>("job")?;
+        let job = res.get::<Job>()?;
         if job.is_done() {
-            Ok(PollOutcome::Ready(TaskResult::Single(Step::Process)))
+            Ok(PollOutcome::Ready(Step::Process))
         } else {
             Ok(PollOutcome::Pending { delay_ms: 250 })
         }
@@ -298,28 +299,6 @@ impl PollTask<Step> for AwaitJob {
 }
 ```
 </div>
-
-<!-- Section: object-safe aliases -->
-<hr class="section-divider">
-<h2 id="object-safe"><a href="#object-safe" class="anchor-link" aria-hidden="true">#</a>Type-Erased Aliases</h2>
-<table class="styled-table">
-<thead>
-<tr>
-<th>Alias</th>
-<th>Expands to</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>DynPollTask&lt;TState, TResourceKey&gt;</code></td>
-<td><code>dyn PollTask&lt;TState, TResourceKey&gt;</code></td>
-</tr>
-<tr>
-<td><code>PollTaskObject&lt;TState, TResourceKey&gt;</code></td>
-<td><code>Arc&lt;dyn PollTask&lt;TState, TResourceKey&gt;&gt;</code></td>
-</tr>
-</tbody>
-</table>
 
 <!-- Section: When to use -->
 <hr class="section-divider">

@@ -24,8 +24,8 @@ enum S {
 struct Go(S);
 #[task(state = S)]
 impl Go {
-    async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-        Ok(TaskResult::Single(self.0.clone()))
+    async fn run(&self) -> Result<S, CanoError> {
+        Ok(self.0.clone())
     }
 }
 
@@ -41,12 +41,7 @@ async fn recording_observer_captures_path_and_checkpoints() {
         .with_checkpoint_store(store.clone())
         .with_workflow_id("run-1");
 
-    assert_eq!(
-        wf.orchestrate(S::Start, CancellationToken::disabled())
-            .await
-            .unwrap(),
-        S::Done
-    );
+    assert_eq!(wf.orchestrate(S::Start).await.unwrap(), S::Done);
     observer.assert_path(&["Start", "Work", "Done"]);
     observer.assert_completed_with("Done");
 
@@ -65,13 +60,13 @@ struct FlakyWork(Arc<AtomicUsize>);
 #[task(state = S)]
 impl FlakyWork {
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal() // fail fast so the run stops and the log persists
+        TaskConfig::new() // fail fast so the run stops and the log persists
     }
-    async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+    async fn run(&self) -> Result<S, CanoError> {
         if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
             Err(CanoError::task_execution("crash before Done"))
         } else {
-            Ok(TaskResult::Single(S::Done))
+            Ok(S::Done)
         }
     }
 }
@@ -93,7 +88,7 @@ async fn in_memory_store_supports_resume_after_failure() {
 
     // Generation 1: crashes at Work. The log keeps Start + Work entries.
     build(runs.clone())
-        .orchestrate(S::Start, CancellationToken::disabled())
+        .orchestrate(S::Start)
         .await
         .expect_err("generation 1 must fail at Work");
     assert_eq!(store.load_run(wf_id).await.unwrap().len(), 2);
@@ -101,13 +96,7 @@ async fn in_memory_store_supports_resume_after_failure() {
     // Generation 2: resume re-enters at Work, re-runs it (now succeeds), reaches Done.
     let observer = Arc::new(RecordingObserver::new());
     let resumed = build(runs.clone()).with_observer(observer.clone());
-    assert_eq!(
-        resumed
-            .resume_from(wf_id, CancellationToken::disabled())
-            .await
-            .unwrap(),
-        S::Done
-    );
+    assert_eq!(resumed.resume_from(wf_id).await.unwrap(), S::Done);
     assert!(
         observer
             .events()
@@ -126,10 +115,7 @@ async fn panic_on_attempt_fails_fast_with_panic_error() {
         .register(S::Start, panic_on_attempt(1, S::Done))
         .add_exit_state(S::Done)
         .with_observer(observer.clone());
-    let err = wf
-        .orchestrate(S::Start, CancellationToken::disabled())
-        .await
-        .unwrap_err();
+    let err = wf.orchestrate(S::Start).await.unwrap_err();
     assert!(err.to_string().contains("panic"), "{err}");
     // Panics are not retried — no retry event recorded.
     assert!(
@@ -154,15 +140,11 @@ struct Step1;
 #[saga::task(state = S)]
 impl Step1 {
     type Output = Unit;
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<S>, Unit), CanoError> {
-        Ok((TaskResult::Single(S::Work), Unit))
+    async fn run(&self, _res: &Resources) -> Result<(S, Unit), CanoError> {
+        Ok((S::Work, Unit))
     }
     async fn compensate(&self, res: &Resources, _o: Unit) -> Result<(), CanoError> {
-        res.get::<Log, _>("log")?
-            .0
-            .lock()
-            .unwrap()
-            .push("step1".into());
+        res.get::<Log>()?.0.lock().unwrap().push("step1".into());
         Ok(())
     }
 }
@@ -171,15 +153,11 @@ struct Step2;
 #[saga::task(state = S)]
 impl Step2 {
     type Output = Unit;
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<S>, Unit), CanoError> {
-        Ok((TaskResult::Single(S::Finish), Unit))
+    async fn run(&self, _res: &Resources) -> Result<(S, Unit), CanoError> {
+        Ok((S::Finish, Unit))
     }
     async fn compensate(&self, res: &Resources, _o: Unit) -> Result<(), CanoError> {
-        res.get::<Log, _>("log")?
-            .0
-            .lock()
-            .unwrap()
-            .push("step2".into());
+        res.get::<Log>()?.0.lock().unwrap().push("step2".into());
         Ok(())
     }
 }
@@ -187,10 +165,7 @@ impl Step2 {
 struct Fail;
 #[task(state = S)]
 impl Fail {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-    async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+    async fn run(&self) -> Result<S, CanoError> {
         Err(CanoError::task_execution("boom"))
     }
 }
@@ -199,15 +174,13 @@ impl Fail {
 async fn assert_compensation_ran_matches_reverse_order() {
     let log = Log::default();
     let handle = log.clone();
-    let resources = Resources::new().insert("log", log);
+    let resources = Resources::new().insert(log);
     let saga = Workflow::new(resources)
-        .register_with_compensation(S::Start, Step1)
-        .register_with_compensation(S::Work, Step2)
+        .register(S::Start, Step1)
+        .register(S::Work, Step2)
         .register(S::Finish, Fail)
         .add_exit_state(S::Done);
-    let _ = saga
-        .orchestrate(S::Start, CancellationToken::disabled())
-        .await; // fails, rolls back
+    let _ = saga.orchestrate(S::Start).await; // fails, rolls back
 
     let ran = handle.0.lock().unwrap().clone();
     // Step2 completed last, so it compensates first; then Step1.

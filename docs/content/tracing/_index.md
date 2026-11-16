@@ -290,8 +290,8 @@ struct MyProcessor;
 
 #[task(state = MyState)]
 impl MyProcessor {
-    async fn run_bare(&self) -> Result<TaskResult<MyState>, CanoError> {
-        Ok(TaskResult::Single(MyState::Complete))
+    async fn run(&self) -> Result<MyState, CanoError> {
+        Ok(MyState::Complete)
     }
 }
 
@@ -304,7 +304,7 @@ fn build_workflow() -> Workflow<MyState> {
     );
 
     let store = MemoryStore::new();
-    Workflow::new(Resources::new().insert("store", store))
+    Workflow::new(Resources::new().insert(store))
         .with_tracing_span(workflow_span)
         .register(MyState::Start, MyProcessor)
         .add_exit_state(MyState::Complete)
@@ -335,16 +335,16 @@ struct PaymentTask;
 
 #[task(state = AppState)]
 impl PaymentTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<AppState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<AppState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let order_id: String = store.get("order_id")?;
         info!(order_id = %order_id, "Processing payment");
 
         match process_payment(&order_id).await {
             Ok(receipt) => {
                 info!(order_id = %order_id, receipt = %receipt, "Payment succeeded");
-                store.put("receipt", receipt)?;
-                Ok(TaskResult::Single(AppState::Confirm))
+                store.put("receipt", receipt);
+                Ok(AppState::Confirm)
             }
             Err(e) => {
                 warn!(order_id = %order_id, error = %e, "Payment failed");
@@ -385,7 +385,7 @@ To wrap a run in a span of your own, attach it to the <code>orchestrate()</code>
 use tracing::Instrument;
 
 workflow
-    .orchestrate(State::Start, CancellationToken::disabled())
+    .orchestrate(State::Start)
     .instrument(tracing::info_span!("api_request", request_id = "abc"))
     .await?;
 ```
@@ -434,9 +434,9 @@ struct ProcessOrder;
 
 #[task(state = State)]
 impl ProcessOrder {
-    async fn run(&self, _res: &Resources) -> Result<TaskResult<State>, CanoError> {
+    async fn run(&self) -> Result<State, CanoError> {
         info!("Processing order...");
-        Ok(TaskResult::Single(State::Complete))
+        Ok(State::Complete)
     }
 }
 
@@ -459,14 +459,14 @@ async fn main() -> Result<(), CanoError> {
         customer = "Acme Corp"
     );
 
-    let workflow = Workflow::new(Resources::new().insert("store", store))
+    let workflow = Workflow::new(Resources::new().insert(store))
         .register(State::Start, ProcessOrder)
         .add_exit_state(State::Complete)
         .with_tracing_span(workflow_span); // Attach span
 
     // 3. Run
     info!("Submitting order...");
-    workflow.orchestrate(State::Start, CancellationToken::disabled()).await?;
+    workflow.orchestrate(State::Start).await?;
 
     Ok(())
 }

@@ -73,6 +73,7 @@ impl MemoryStore {
     ///
     /// Returns a clone of the stored value if the key exists and the value can be
     /// downcast to `TState`.
+    #[inline]
     pub fn get<TState: 'static + Clone>(&self, key: &str) -> StoreResult<TState> {
         let data = self.data.read();
 
@@ -90,21 +91,16 @@ impl MemoryStore {
     ///
     /// Inserts or replaces the value at `key`. The stored value must be safe to
     /// share across async tasks, but it does not need to implement `Clone`.
-    pub fn put<TState: 'static + Send + Sync>(&self, key: &str, value: TState) -> StoreResult<()> {
-        let mut data = self.data.write();
-
-        data.insert(key.to_string(), Arc::new(value));
-        Ok(())
+    #[inline]
+    pub fn put<TState: 'static + Send + Sync>(&self, key: &str, value: TState) {
+        self.data.write().insert(key.to_string(), Arc::new(value));
     }
 
     /// Remove a value by key.
     ///
     /// Removing a missing key is a silent no-op.
-    pub fn remove(&self, key: &str) -> StoreResult<()> {
-        let mut data = self.data.write();
-
-        data.remove(key);
-        Ok(())
+    pub fn remove(&self, key: &str) {
+        self.data.write().remove(key);
     }
 
     /// Append an item to an existing `Vec<TState>` value.
@@ -152,33 +148,32 @@ impl MemoryStore {
     }
 
     /// Check whether the store contains the given key.
-    pub fn contains_key(&self, key: &str) -> StoreResult<bool> {
-        let data = self.data.read();
-        Ok(data.contains_key(key))
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.data.read().contains_key(key)
     }
 
     /// Get all keys currently stored.
-    pub fn keys(&self) -> StoreResult<Vec<Arc<str>>> {
-        let data = self.data.read();
-        Ok(data.keys().map(|k| Arc::from(k.as_str())).collect())
+    pub fn keys(&self) -> Vec<Arc<str>> {
+        self.data
+            .read()
+            .keys()
+            .map(|k| Arc::from(k.as_str()))
+            .collect()
     }
 
     /// Get the number of key-value pairs in the store.
-    pub fn len(&self) -> StoreResult<usize> {
-        let data = self.data.read();
-        Ok(data.len())
+    pub fn len(&self) -> usize {
+        self.data.read().len()
     }
 
     /// Check whether the store is empty.
-    pub fn is_empty(&self) -> StoreResult<bool> {
-        self.len().map(|len| len == 0)
+    pub fn is_empty(&self) -> bool {
+        self.data.read().is_empty()
     }
 
     /// Clear all data from the store.
-    pub fn clear(&self) -> StoreResult<()> {
-        let mut data = self.data.write();
-        data.clear();
-        Ok(())
+    pub fn clear(&self) {
+        self.data.write().clear();
     }
 }
 
@@ -202,15 +197,15 @@ mod tests {
     #[test]
     fn test_new_store() {
         let store = MemoryStore::new();
-        assert_eq!(store.len().unwrap(), 0);
-        assert!(store.is_empty().unwrap());
+        assert_eq!(store.len(), 0);
+        assert!(store.is_empty());
     }
 
     #[test]
     fn test_default_store() {
         let store = MemoryStore::default();
-        assert_eq!(store.len().unwrap(), 0);
-        assert!(store.is_empty().unwrap());
+        assert_eq!(store.len(), 0);
+        assert!(store.is_empty());
     }
 
     #[test]
@@ -220,7 +215,7 @@ mod tests {
         let value = "Hello, World!".to_string();
 
         // Put value
-        store.put(key, value.clone()).unwrap();
+        store.put(key, value.clone());
 
         // Get value
         let retrieved: String = store.get(key).unwrap();
@@ -233,7 +228,7 @@ mod tests {
         let key = "test_int";
         let value = 42i32;
 
-        store.put(key, value).unwrap();
+        store.put(key, value);
         let retrieved: i32 = store.get(key).unwrap();
         assert_eq!(retrieved, value);
     }
@@ -244,7 +239,7 @@ mod tests {
         let key = "test_vec";
         let value = vec![1, 2, 3, 4, 5];
 
-        store.put(key, value.clone()).unwrap();
+        store.put(key, value.clone());
         let retrieved: Vec<i32> = store.get(key).unwrap();
         assert_eq!(retrieved, value);
     }
@@ -264,7 +259,7 @@ mod tests {
             name: "Test".to_string(),
         };
 
-        store.put(key, value.clone()).unwrap();
+        store.put(key, value.clone());
         let retrieved: TestData = store.get(key).unwrap();
         assert_eq!(retrieved, value);
     }
@@ -289,7 +284,7 @@ mod tests {
         let key = "test_type";
 
         // Store as string
-        store.put(key, "hello".to_string()).unwrap();
+        store.put(key, "hello".to_string());
 
         // Try to retrieve as integer
         let result: Result<i32, StoreError> = store.get(key);
@@ -307,11 +302,11 @@ mod tests {
         let value = "to_be_removed".to_string();
 
         // Put and verify
-        store.put(key, value).unwrap();
+        store.put(key, value);
         assert!(store.get::<String>(key).is_ok());
 
         // Remove and verify
-        store.remove(key).unwrap();
+        store.remove(key);
         assert!(store.get::<String>(key).is_err());
     }
 
@@ -319,8 +314,8 @@ mod tests {
     fn test_remove_nonexistent_key() {
         let store = MemoryStore::new();
         // Removing a missing key is a silent no-op
-        let result = store.remove("nonexistent");
-        assert!(result.is_ok());
+        store.remove("nonexistent");
+        assert!(store.is_empty());
     }
 
     #[test]
@@ -343,7 +338,7 @@ mod tests {
         let initial_vec = vec!["first".to_string(), "second".to_string()];
 
         // Put initial vector
-        store.put(key, initial_vec.clone()).unwrap();
+        store.put(key, initial_vec.clone());
 
         // Append new item
         let new_item = "third".to_string();
@@ -365,7 +360,7 @@ mod tests {
         let key = "test_append_error";
 
         // Store a non-vector value
-        store.put(key, "not_a_vector".to_string()).unwrap();
+        store.put(key, "not_a_vector".to_string());
 
         // Try to append to it
         let result = store.append(key, "item".to_string());
@@ -386,7 +381,7 @@ mod tests {
         let original_value = "original".to_string();
 
         // Store a non-vector value
-        store.put(key, original_value.clone()).unwrap();
+        store.put(key, original_value.clone());
 
         // Try to append with wrong type — should fail
         let result = store.append::<String>(key, "item".to_string());
@@ -405,7 +400,7 @@ mod tests {
     #[test]
     fn test_keys_empty_store() {
         let store = MemoryStore::new();
-        let keys = store.keys().unwrap();
+        let keys = store.keys();
         assert!(keys.is_empty());
     }
 
@@ -414,11 +409,11 @@ mod tests {
         let store = MemoryStore::new();
 
         // Add some data
-        store.put("key1", "value1".to_string()).unwrap();
-        store.put("key2", 42i32).unwrap();
-        store.put("key3", vec![1, 2, 3]).unwrap();
+        store.put("key1", "value1".to_string());
+        store.put("key2", 42i32);
+        store.put("key3", vec![1, 2, 3]);
 
-        let keys = store.keys().unwrap();
+        let keys = store.keys();
         assert_eq!(keys.len(), 3);
 
         // Check that all keys are present (order might vary).
@@ -433,24 +428,24 @@ mod tests {
         let store = MemoryStore::new();
 
         // Initially empty
-        assert_eq!(store.len().unwrap(), 0);
-        assert!(store.is_empty().unwrap());
+        assert_eq!(store.len(), 0);
+        assert!(store.is_empty());
 
         // Add one item
-        store.put("key1", "value1".to_string()).unwrap();
-        assert_eq!(store.len().unwrap(), 1);
-        assert!(!store.is_empty().unwrap());
+        store.put("key1", "value1".to_string());
+        assert_eq!(store.len(), 1);
+        assert!(!store.is_empty());
 
         // Add more items
-        store.put("key2", 42i32).unwrap();
-        store.put("key3", vec![1, 2, 3]).unwrap();
-        assert_eq!(store.len().unwrap(), 3);
-        assert!(!store.is_empty().unwrap());
+        store.put("key2", 42i32);
+        store.put("key3", vec![1, 2, 3]);
+        assert_eq!(store.len(), 3);
+        assert!(!store.is_empty());
 
         // Remove one item
-        store.remove("key2").unwrap();
-        assert_eq!(store.len().unwrap(), 2);
-        assert!(!store.is_empty().unwrap());
+        store.remove("key2");
+        assert_eq!(store.len(), 2);
+        assert!(!store.is_empty());
     }
 
     #[test]
@@ -458,15 +453,15 @@ mod tests {
         let store = MemoryStore::new();
 
         // Add some data
-        store.put("key1", "value1".to_string()).unwrap();
-        store.put("key2", 42i32).unwrap();
-        store.put("key3", vec![1, 2, 3]).unwrap();
-        assert_eq!(store.len().unwrap(), 3);
+        store.put("key1", "value1".to_string());
+        store.put("key2", 42i32);
+        store.put("key3", vec![1, 2, 3]);
+        assert_eq!(store.len(), 3);
 
         // Clear the store
-        store.clear().unwrap();
-        assert_eq!(store.len().unwrap(), 0);
-        assert!(store.is_empty().unwrap());
+        store.clear();
+        assert_eq!(store.len(), 0);
+        assert!(store.is_empty());
 
         // Verify data is actually gone
         assert!(store.get::<String>("key1").is_err());
@@ -480,15 +475,15 @@ mod tests {
         let key = "test_overwrite";
 
         // Store initial value
-        store.put(key, "initial".to_string()).unwrap();
+        store.put(key, "initial".to_string());
         assert_eq!(store.get::<String>(key).unwrap(), "initial");
 
         // Overwrite with new value
-        store.put(key, "overwritten".to_string()).unwrap();
+        store.put(key, "overwritten".to_string());
         assert_eq!(store.get::<String>(key).unwrap(), "overwritten");
 
         // Verify length didn't change
-        assert_eq!(store.len().unwrap(), 1);
+        assert_eq!(store.len(), 1);
     }
 
     #[test]
@@ -497,22 +492,22 @@ mod tests {
         let key = "test_type_overwrite";
 
         // Store string value
-        store.put(key, "string_value".to_string()).unwrap();
+        store.put(key, "string_value".to_string());
         assert_eq!(store.get::<String>(key).unwrap(), "string_value");
 
         // Overwrite with integer value
-        store.put(key, 42i32).unwrap();
+        store.put(key, 42i32);
         assert_eq!(store.get::<i32>(key).unwrap(), 42);
 
         // Verify old type no longer accessible
         assert!(store.get::<String>(key).is_err());
-        assert_eq!(store.len().unwrap(), 1);
+        assert_eq!(store.len(), 1);
     }
 
     #[test]
     fn test_clone_store() {
         let store1 = MemoryStore::new();
-        store1.put("key1", "value1".to_string()).unwrap();
+        store1.put("key1", "value1".to_string());
 
         // Clone the store
         let store2 = store1.clone();
@@ -521,10 +516,10 @@ mod tests {
         assert_eq!(store2.get::<String>("key1").unwrap(), "value1");
 
         // Modifying one should affect the other (shared Arc)
-        store2.put("key2", "value2".to_string()).unwrap();
+        store2.put("key2", "value2".to_string());
         assert_eq!(store1.get::<String>("key2").unwrap(), "value2");
-        assert_eq!(store1.len().unwrap(), 2);
-        assert_eq!(store2.len().unwrap(), 2);
+        assert_eq!(store1.len(), 2);
+        assert_eq!(store2.len(), 2);
     }
 
     #[test]
@@ -532,7 +527,7 @@ mod tests {
         let store = Arc::new(MemoryStore::new());
 
         // Pre-populate store
-        store.put("shared_key", "shared_value".to_string()).unwrap();
+        store.put("shared_key", "shared_value".to_string());
 
         let mut handles = vec![];
 
@@ -545,7 +540,7 @@ mod tests {
                     assert_eq!(value, "shared_value");
 
                     // Also test len() for concurrent reads
-                    let len = store_clone.len().unwrap();
+                    let len = store_clone.len();
                     assert!(len > 0);
                 }
                 i
@@ -571,7 +566,7 @@ mod tests {
                 for j in 0..10 {
                     let key = format!("key_{i}_{j}");
                     let value = format!("value_{i}_{j}");
-                    store_clone.put(&key, value).unwrap();
+                    store_clone.put(&key, value);
                 }
                 i
             });
@@ -584,7 +579,7 @@ mod tests {
         }
 
         // Verify all values were written
-        assert_eq!(store.len().unwrap(), 100); // 10 threads * 10 writes each
+        assert_eq!(store.len(), 100); // 10 threads * 10 writes each
 
         // Verify some values
         assert_eq!(store.get::<String>("key_0_0").unwrap(), "value_0_0");
@@ -598,7 +593,7 @@ mod tests {
 
         // Pre-populate with some data
         for i in 0..50 {
-            store.put(&format!("initial_{i}"), i).unwrap();
+            store.put(&format!("initial_{i}"), i);
         }
 
         let mut handles = vec![];
@@ -624,7 +619,7 @@ mod tests {
                 for i in 0..20 {
                     let key = format!("new_{thread_id}_{i}");
                     let value = format!("new_value_{thread_id}_{i}");
-                    store_clone.put(&key, value).unwrap();
+                    store_clone.put(&key, value);
                     thread::sleep(Duration::from_millis(1));
                 }
             });
@@ -637,7 +632,7 @@ mod tests {
         }
 
         // Verify the store is in a consistent state
-        let final_len = store.len().unwrap();
+        let final_len = store.len();
         assert_eq!(final_len, 110); // 50 initial + 60 new (3 threads * 20 each)
     }
 
@@ -698,7 +693,7 @@ mod tests {
         };
 
         // Store and retrieve complex data
-        store.put("complex", complex_data.clone()).unwrap();
+        store.put("complex", complex_data.clone());
         let retrieved: ComplexData = store.get("complex").unwrap();
         assert_eq!(retrieved, complex_data);
     }
@@ -711,7 +706,7 @@ mod tests {
         let large_vec: Vec<i32> = (0..10000).collect();
 
         // Store and retrieve large data
-        store.put("large_data", large_vec.clone()).unwrap();
+        store.put("large_data", large_vec.clone());
         let retrieved: Vec<i32> = store.get("large_data").unwrap();
         assert_eq!(retrieved, large_vec);
         assert_eq!(retrieved.len(), 10000);
@@ -720,29 +715,29 @@ mod tests {
     #[test]
     fn test_contains_key_present() {
         let store = MemoryStore::new();
-        store.put("exists", 42i32).unwrap();
-        assert!(store.contains_key("exists").unwrap());
+        store.put("exists", 42i32);
+        assert!(store.contains_key("exists"));
     }
 
     #[test]
     fn test_contains_key_absent() {
         let store = MemoryStore::new();
-        assert!(!store.contains_key("missing").unwrap());
+        assert!(!store.contains_key("missing"));
     }
 
     #[test]
     fn test_contains_key_after_remove() {
         let store = MemoryStore::new();
-        store.put("key", "val".to_string()).unwrap();
-        assert!(store.contains_key("key").unwrap());
-        store.remove("key").unwrap();
-        assert!(!store.contains_key("key").unwrap());
+        store.put("key", "val".to_string());
+        assert!(store.contains_key("key"));
+        store.remove("key");
+        assert!(!store.contains_key("key"));
     }
 
     #[test]
     fn test_get_shared_returns_arc() {
         let store = MemoryStore::new();
-        store.put("msg", "hello".to_string()).unwrap();
+        store.put("msg", "hello".to_string());
 
         let arc1: Arc<String> = store.get_shared("msg").unwrap();
         let arc2: Arc<String> = store.get_shared("msg").unwrap();
@@ -769,14 +764,14 @@ mod tests {
     fn test_get_shared_and_put_do_not_require_clone() {
         // Positive path: store and retrieve a Clone type through the zero-copy API.
         let store = MemoryStore::new();
-        store.put("n", 42u32).unwrap();
+        store.put("n", 42u32);
         let got: Arc<u32> = store.get_shared("n").unwrap();
         assert_eq!(*got, 42);
 
         // Explicit non-`Clone` type: proves `put` and `get_shared` only require
         // values that can safely be shared across tasks.
         struct NotClone(#[allow(dead_code)] u32);
-        store.put("not_clone", NotClone(7)).unwrap();
+        store.put("not_clone", NotClone(7));
         let got: Arc<NotClone> = store.get_shared("not_clone").unwrap();
         assert_eq!(got.0, 7);
     }

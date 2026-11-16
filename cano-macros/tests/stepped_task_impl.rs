@@ -46,7 +46,7 @@ impl InherentInferred {
     ) -> Result<StepOutcome<u32, MyState>, CanoError> {
         let n = cursor.unwrap_or(0) + 1;
         if n >= self.total {
-            Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
+            Ok(StepOutcome::Done(MyState::Done))
         } else {
             Ok(StepOutcome::More(n))
         }
@@ -54,14 +54,14 @@ impl InherentInferred {
 }
 
 #[test]
-fn inherent_inferred_has_default_config_with_retries() {
-    // Default injected by macro: TaskConfig::default() has exponential backoff
-    assert!(
+fn inherent_inferred_has_default_config_without_retries() {
+    // The trait default is `TaskConfig::new()`: one attempt.
+    assert_eq!(
         SteppedTask::<MyState>::config(&InherentInferred { total: 3 })
             .retry_mode
-            .max_attempts()
-            > 1,
-        "default config must have retries"
+            .max_attempts(),
+        1,
+        "default config must not retry"
     );
 }
 
@@ -78,7 +78,7 @@ async fn inherent_inferred_step_loop_completes() {
     let stepper = InherentInferred { total: 3 };
     let res = Resources::new();
     let result = Task::run(&stepper, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(MyState::Done));
+    assert_eq!(result, MyState::Done);
 }
 
 // ---------------------------------------------------------------------------
@@ -102,7 +102,7 @@ impl InherentExplicitCursor {
     ) -> Result<StepOutcome<u32, MyState>, CanoError> {
         let n = cursor.unwrap_or(0) + 1;
         if n >= self.total {
-            Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
+            Ok(StepOutcome::Done(MyState::Done))
         } else {
             Ok(StepOutcome::More(n))
         }
@@ -114,7 +114,7 @@ async fn inherent_explicit_cursor_compiles_and_runs() {
     let stepper = InherentExplicitCursor { total: 2 };
     let res = Resources::new();
     let result = Task::run(&stepper, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(MyState::Done));
+    assert_eq!(result, MyState::Done);
 }
 
 // ---------------------------------------------------------------------------
@@ -123,24 +123,24 @@ async fn inherent_explicit_cursor_compiles_and_runs() {
 
 struct InherentWithKey;
 
-#[task::stepped(state = MyState, key = Key)]
+#[task::stepped(state = MyState)]
 impl InherentWithKey {
     async fn step(
         &self,
-        _res: &Resources<Key>,
+        _res: &Resources,
         cursor: Option<u32>,
     ) -> Result<StepOutcome<u32, MyState>, CanoError> {
         let _ = cursor;
-        Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
+        Ok(StepOutcome::Done(MyState::Done))
     }
 }
 
 #[tokio::test]
 async fn inherent_with_key_runs() {
     let stepper = InherentWithKey;
-    let res: Resources<Key> = Resources::new();
+    let res: Resources = Resources::new();
     let result = Task::run(&stepper, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(MyState::Done));
+    assert_eq!(result, MyState::Done);
 }
 
 // ---------------------------------------------------------------------------
@@ -151,10 +151,6 @@ struct InherentWithOverrides;
 
 #[task::stepped(state = MyState)]
 impl InherentWithOverrides {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-
     fn name(&self) -> Cow<'static, str> {
         Cow::Borrowed("my-stepped-task")
     }
@@ -165,7 +161,7 @@ impl InherentWithOverrides {
         cursor: Option<u32>,
     ) -> Result<StepOutcome<u32, MyState>, CanoError> {
         let _ = cursor;
-        Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
+        Ok(StepOutcome::Done(MyState::Done))
     }
 }
 
@@ -214,7 +210,7 @@ impl PagedProcessor {
     ) -> Result<StepOutcome<PageCursor, MyState>, CanoError> {
         let c = cursor.unwrap_or(PageCursor { page: 0, total: 3 });
         if c.page + 1 >= c.total {
-            Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
+            Ok(StepOutcome::Done(MyState::Done))
         } else {
             Ok(StepOutcome::More(PageCursor {
                 page: c.page + 1,
@@ -229,7 +225,7 @@ async fn struct_cursor_inferred_and_runs() {
     let stepper = PagedProcessor;
     let res = Resources::new();
     let result = Task::run(&stepper, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(MyState::Done));
+    assert_eq!(result, MyState::Done);
 }
 
 // ---------------------------------------------------------------------------
@@ -248,7 +244,7 @@ impl SteppedTask<MyState> for TraitStepper {
         cursor: Option<u32>,
     ) -> Result<StepOutcome<u32, MyState>, CanoError> {
         let _ = cursor;
-        Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
+        Ok(StepOutcome::Done(MyState::Done))
     }
 }
 
@@ -257,7 +253,7 @@ async fn trait_impl_form_runs() {
     let stepper = TraitStepper;
     let res = Resources::new();
     let result = Task::run(&stepper, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(MyState::Done));
+    assert_eq!(result, MyState::Done);
 }
 
 // ---------------------------------------------------------------------------
@@ -270,10 +266,6 @@ struct TraitStepperWithOverrides;
 impl SteppedTask<MyState> for TraitStepperWithOverrides {
     type Cursor = u32;
 
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-
     fn name(&self) -> Cow<'static, str> {
         Cow::Borrowed("trait-stepper-custom")
     }
@@ -284,7 +276,7 @@ impl SteppedTask<MyState> for TraitStepperWithOverrides {
         cursor: Option<u32>,
     ) -> Result<StepOutcome<u32, MyState>, CanoError> {
         let _ = cursor;
-        Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
+        Ok(StepOutcome::Done(MyState::Done))
     }
 }
 
@@ -317,7 +309,7 @@ async fn stepped_task_as_dyn_task() {
     let stepper: Arc<dyn Task<MyState>> = Arc::new(InherentInferred { total: 1 });
     let res = Resources::new();
     let result = Task::run(stepper.as_ref(), &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(MyState::Done));
+    assert_eq!(result, MyState::Done);
 }
 
 // ---------------------------------------------------------------------------
@@ -352,7 +344,7 @@ impl TrackedStepper {
         let n = self.calls.fetch_add(1, Ordering::Relaxed);
         let pos = cursor.unwrap_or(0) + 1;
         if n + 1 >= self.target {
-            Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
+            Ok(StepOutcome::Done(MyState::Done))
         } else {
             Ok(StepOutcome::More(pos))
         }
@@ -364,7 +356,7 @@ async fn step_count_matches_target() {
     let (stepper, calls) = TrackedStepper::new(5);
     let res = Resources::new();
     let result = Task::run(&stepper, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(MyState::Done));
+    assert_eq!(result, MyState::Done);
     assert_eq!(calls.load(Ordering::Relaxed), 5);
 }
 
@@ -380,10 +372,7 @@ async fn stepped_task_in_workflow() {
         .register(MyState::Work, stepper)
         .add_exit_state(MyState::Done);
 
-    let result = workflow
-        .orchestrate(MyState::Work, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(MyState::Work).await.unwrap();
     assert_eq!(result, MyState::Done);
 }
 
@@ -403,7 +392,7 @@ impl CursorThreader {
         let mut v = cursor.unwrap_or_default();
         v.push(v.len() as u32);
         if v.len() >= 3 {
-            Ok(StepOutcome::Done(TaskResult::Single(MyState::Done)))
+            Ok(StepOutcome::Done(MyState::Done))
         } else {
             Ok(StepOutcome::More(v))
         }
@@ -433,7 +422,7 @@ async fn cursor_accumulates_across_steps() {
     let r3 = SteppedTask::step(&stepper, &res, Some(c2)).await.unwrap();
     assert_eq!(
         r3,
-        StepOutcome::Done(TaskResult::Single(MyState::Done)),
+        StepOutcome::Done(MyState::Done),
         "third step should be Done"
     );
 }
@@ -461,44 +450,4 @@ async fn error_in_step_propagates() {
     let res = Resources::new();
     let err = Task::run(&stepper, &res).await.unwrap_err();
     assert!(matches!(err, CanoError::TaskExecution(_)));
-}
-
-// ---------------------------------------------------------------------------
-// 13. StepOutcome::Done with Split result
-// ---------------------------------------------------------------------------
-
-struct SplitStepper;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-#[allow(dead_code)]
-enum SplitState {
-    Work,
-    A,
-    B,
-    Done,
-}
-
-#[task::stepped(state = SplitState)]
-impl SplitStepper {
-    async fn step(
-        &self,
-        _res: &Resources,
-        _cursor: Option<u32>,
-    ) -> Result<StepOutcome<u32, SplitState>, CanoError> {
-        Ok(StepOutcome::Done(TaskResult::Split(vec![
-            SplitState::A,
-            SplitState::B,
-        ])))
-    }
-}
-
-#[tokio::test]
-async fn stepped_task_done_with_split() {
-    let stepper = SplitStepper;
-    let res = Resources::new();
-    let result = Task::run(&stepper, &res).await.unwrap();
-    assert_eq!(
-        result,
-        TaskResult::Split(vec![SplitState::A, SplitState::B])
-    );
 }

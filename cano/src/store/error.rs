@@ -15,9 +15,7 @@ use std::fmt;
 ///
 /// - `KeyNotFound`: The requested key doesn't exist in store
 /// - `TypeMismatch`: The stored value can't be cast to the requested type
-/// - `LockError`: Failed to acquire read/write lock on store
 /// - `AppendTypeMismatch`: Tried to append to a value that isn't a `Vec<TState>`
-/// - `Generic`: General store errors with custom messages
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StoreError {
     /// The requested key was not found in store
@@ -34,24 +32,11 @@ pub enum StoreError {
     /// or inconsistent type usage across tasks.
     TypeMismatch(String),
 
-    /// Failed to acquire lock on store
-    ///
-    /// This error occurs when the store lock is poisoned or unavailable.
-    /// Common causes: panic in another thread while holding the lock,
-    /// or deadlock situations.
-    LockError(String),
-
     /// Attempted to append to a value that isn't a `Vec<TState>`
     ///
     /// This error occurs when trying to append to an existing key that
     /// contains a value of a different type than `Vec<TState>`.
     AppendTypeMismatch(String),
-
-    /// General store error with custom message
-    ///
-    /// Use this for store errors that don't fit other categories.
-    /// Provide a descriptive message about what went wrong.
-    Generic(String),
 }
 
 impl StoreError {
@@ -64,23 +49,12 @@ impl StoreError {
     pub fn type_mismatch<S: Into<String>>(msg: S) -> Self {
         StoreError::TypeMismatch(msg.into())
     }
-
-    /// Create a new lock error
-    pub fn lock_error<S: Into<String>>(msg: S) -> Self {
-        StoreError::LockError(msg.into())
-    }
-
     /// Create a new append type mismatch error
     pub fn append_type_mismatch<S: Into<String>>(key: S) -> Self {
         StoreError::AppendTypeMismatch(format!(
             "Cannot append to key '{}': existing value is not a Vec<TState>",
             key.into()
         ))
-    }
-
-    /// Create a new generic store error
-    pub fn generic<S: Into<String>>(msg: S) -> Self {
-        StoreError::Generic(msg.into())
     }
 }
 
@@ -89,9 +63,7 @@ impl fmt::Display for StoreError {
         match self {
             StoreError::KeyNotFound(msg) => write!(f, "Key not found: {msg}"),
             StoreError::TypeMismatch(msg) => write!(f, "Type mismatch: {msg}"),
-            StoreError::LockError(msg) => write!(f, "Lock error: {msg}"),
             StoreError::AppendTypeMismatch(msg) => write!(f, "Append type mismatch: {msg}"),
-            StoreError::Generic(msg) => write!(f, "Store error: {msg}"),
         }
     }
 }

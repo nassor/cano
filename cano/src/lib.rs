@@ -26,23 +26,23 @@
 //!
 //! #[task]
 //! impl Task<Step> for FetchTask {
-//!     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-//!         let config = res.get::<FetchConfig, _>("config")?;
-//!         let store = res.get::<MemoryStore, _>("store")?;
+//!     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
+//!         let config = res.get::<FetchConfig>()?;
+//!         let store = res.get::<MemoryStore>()?;
 //!         // Produce `batch_size` items and store them for the next task.
 //!         let data: Vec<u32> = (1..=(config.batch_size as u32)).collect();
-//!         store.put("data", data)?;
-//!         Ok(TaskResult::Single(Step::Process))
+//!         store.put("data", data);
+//!         Ok(Step::Process)
 //!     }
 //! }
 //!
 //! #[task]
 //! impl Task<Step> for ProcessTask {
-//!     async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-//!         let store = res.get::<MemoryStore, _>("store")?;
+//!     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
+//!         let store = res.get::<MemoryStore>()?;
 //!         let data: Vec<u32> = store.get("data")?;
-//!         store.put("sum", data.iter().sum::<u32>())?;
-//!         Ok(TaskResult::Single(Step::Done))
+//!         store.put("sum", data.iter().sum::<u32>());
+//!         Ok(Step::Done)
 //!     }
 //! }
 //!
@@ -50,14 +50,14 @@
 //! # async fn main() -> Result<(), CanoError> {
 //! let store = MemoryStore::new();
 //! let resources = Resources::new()
-//!     .insert("config", FetchConfig { batch_size: 3 })
-//!     .insert("store", store.clone());
+//!     .insert(FetchConfig { batch_size: 3 })
+//!     .insert(store.clone());
 //! let workflow = Workflow::new(resources)
 //!     .register(Step::Fetch, FetchTask)
 //!     .register(Step::Process, ProcessTask)
 //!     .add_exit_state(Step::Done);
 //!
-//! let final_state = workflow.orchestrate(Step::Fetch, CancellationToken::disabled()).await?;
+//! let final_state = workflow.orchestrate(Step::Fetch).await?;
 //! assert_eq!(final_state, Step::Done);
 //!
 //! // The sum of 1..=3 is 6.
@@ -68,8 +68,8 @@
 //!
 //! ## Resource-Free Workflows
 //!
-//! When tasks do not need shared resources, use [`Workflow::bare`] and implement
-//! [`run_bare`](task::Task::run_bare) instead of `run`:
+//! When tasks do not need shared resources, use [`Workflow::bare`] and write
+//! `async fn run(&self)` — the `#[task]` macro adds the resources parameter:
 //!
 //! ```rust
 //! use cano::prelude::*;
@@ -81,11 +81,11 @@
 //!
 //! #[task]
 //! impl Task<Step> for ComputeTask {
-//!     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+//!     async fn run(&self) -> Result<Step, CanoError> {
 //!         // Pure computation — no resource lookup needed.
 //!         let result: u32 = (1..=100).sum();
 //!         assert_eq!(result, 5050);
-//!         Ok(TaskResult::Single(Step::Done))
+//!         Ok(Step::Done)
 //!     }
 //! }
 //!
@@ -95,7 +95,7 @@
 //!     .register(Step::Compute, ComputeTask)
 //!     .add_exit_state(Step::Done);
 //!
-//! let final_state = workflow.orchestrate(Step::Compute, CancellationToken::disabled()).await?;
+//! let final_state = workflow.orchestrate(Step::Compute).await?;
 //! assert_eq!(final_state, Step::Done);
 //! # Ok(())
 //! # }
@@ -110,14 +110,14 @@
 //!
 //! ### Tasks
 //!
-//! [`Task`] is the single interface for processing logic — implement one of `run` /
-//! `run_bare`. Several specialized task models build on it:
+//! [`Task`] is the single interface for processing logic — implement `run`. Several
+//! specialized task models build on it:
 //! - [`RouterTask`] trait: side-effect-free branching; reads resources, returns the next
-//!   state without writing anything. Registered with [`Workflow::register_router`] — the
+//!   state without writing anything. Registered with [`Workflow::register`] — the
 //!   engine dispatches it like a normal state but writes **no** `CheckpointRow`.
 //! - [`PollTask`] trait: "wait-until" loop; `poll()` returns [`PollOutcome::Ready`] or
 //!   [`PollOutcome::Pending { delay_ms }`](PollOutcome::Pending) on each call. Defaults to
-//!   [`TaskConfig::minimal()`](task::TaskConfig::minimal) (no retries). Registered with
+//!   [`TaskConfig::new()`](task::TaskConfig::new) (no retries). Registered with
 //!   [`Workflow::register`] — the engine applies `attempt_timeout` if set via `config()`.
 //! - [`TimerTask`] trait: wait-then-transition; `wait()` returns a [`TimerOutcome`] (a
 //!   [`Duration`](std::time::Duration) or monotonic [`Instant`](std::time::Instant)) and the
@@ -128,14 +128,16 @@
 //! - [`StreamTask`] trait: a genuine stream-processing model — consume an `impl Stream`
 //!   continuously via `open`/`process_item`/`flush_window`/`on_close`, flush per
 //!   [`StreamWindow`] window, run until the [`CancellationToken`] fires, and resume from a
-//!   persisted cursor. Registered with [`Workflow::register_stream`]; per-item errors are
-//!   governed by [`StreamErrorPolicy`]. (Plain [`Workflow::register`] runs an in-memory,
-//!   non-durable, non-cancellable companion loop.)
+//!   persisted cursor. Registered with [`Workflow::register`]; per-item errors are
+//!   governed by [`StreamErrorPolicy`].
 //!
-//! Every [`RouterTask`], [`PollTask`], [`TimerTask`], [`BatchTask`], [`SteppedTask`], and
-//! [`StreamTask`] automatically implements [`Task`] via companion impls emitted by the
-//! `#[task::router]`, `#[task::poll]`, `#[task::timer]`, `#[task::batch]`, `#[task::stepped]`,
-//! and `#[task::stream]` macros respectively.
+//! Every model registers with the same [`Workflow::register`] call: the model macros
+//! (`#[task::router]`, `#[task::poll]`, `#[task::timer]`, `#[task::batch]`,
+//! `#[task::stepped]`, `#[task::stream]`, `#[saga::task]`) implement
+//! [`Registrable`](workflow::Registrable), which picks the engine path for the model.
+//! They also emit a companion [`Task`] impl, so any model can be a
+//! [`Workflow::register_split`] branch (stepped and stream tasks then run in-memory loops
+//! without cursor persistence).
 //!
 //! ### Parallel Execution (Split/Join)
 //!
@@ -179,7 +181,7 @@
 //!
 //! For steps that mutate external systems, implement [`CompensatableTask`] (its `run`
 //! returns the next state *and* an `Output`; its `compensate` undoes the step given that
-//! `Output`) and register it with [`Workflow::register_with_compensation`]. The engine
+//! `Output`) and register it with [`Workflow::register`]. The engine
 //! keeps a per-run compensation stack; if a later state fails, it drains the stack in
 //! reverse and runs each `compensate`. A clean rollback returns the original error (and
 //! clears the checkpoint log if one is attached); a failed `compensate` produces
@@ -189,19 +191,19 @@
 //!
 //! ## Processing Lifecycle
 //!
-//! **Task**: Single `run()` / `run_bare()` method — full control over execution flow.
+//! **Task**: Single `run()` method — full control over execution flow.
 //!
 //! **RouterTask**: Single `route()` method — side-effect-free; reads resources, returns
 //! the next state. Dispatched like a normal state but leaves no checkpoint row.
 //!
-//! **PollTask**: Single `poll()` method — returns [`PollOutcome::Ready(TaskResult)`](PollOutcome::Ready)
+//! **PollTask**: Single `poll()` method — returns [`PollOutcome::Ready(state)`](PollOutcome::Ready)
 //! or [`PollOutcome::Pending { delay_ms }`](PollOutcome::Pending); the engine loops until `Ready`. Defaults
-//! to `TaskConfig::minimal()` (no retries). Use `config().with_attempt_timeout(dur)` to cap
+//! to `TaskConfig::new()` (no retries). Use `config().with_attempt_timeout(dur)` to cap
 //! total wall-clock time; registered with [`Workflow::register`] like any other task.
 //!
 //! **TimerTask**: `wait()` returns a [`TimerOutcome`] and `after_wait()` returns the next state —
 //! the engine schedules a single sleep between them (no polling loop). Defaults to
-//! `TaskConfig::minimal()`; an `attempt_timeout` caps the wait. Registered with
+//! `TaskConfig::new()`; an `attempt_timeout` caps the wait. Registered with
 //! [`Workflow::register`] like any other task.
 //!
 //! ### Timeouts
@@ -216,26 +218,26 @@
 //!
 //! ### Cooperative cancellation
 //!
-//! [`Workflow::orchestrate`] (and [`resume_from`](Workflow::resume_from))
-//! take a [`CancellationToken`] obtained from [`CancellationToken::new`]; firing the paired
-//! [`CancellationHandle`] aborts the in-flight cancellable task at its next `.await`, drains the
-//! saga compensation stack, and returns [`CanoError::Cancelled`]. Cancellation is *cooperative*
-//! (a task in tight synchronous work isn't interrupted until it yields) and *saga-safe* (a
-//! [`CompensatableTask`] always runs to completion so its rollback entry is recorded; the cancel
-//! is honoured at the next state boundary). The compensation drain itself is uncancellable.
-//! To opt a run out of cancellation, pass [`CancellationToken::disabled`] — it never fires and is
-//! zero-cost (the FSM skips the cancellation `select!`). See the [`cancel`] module.
+//! [`Workflow::orchestrate_with_token`] (and [`resume_from_with_token`](Workflow::resume_from_with_token))
+//! take a [`CancellationToken`] (re-exported from `tokio_util`); calling
+//! [`cancel`](CancellationToken::cancel) on it (or on any clone) aborts the in-flight cancellable
+//! task at its next `.await`, drains the saga compensation stack, and returns
+//! [`CanoError::Cancelled`]. Cancellation is *cooperative* (a task in tight synchronous work isn't
+//! interrupted until it yields) and *saga-safe* (a [`CompensatableTask`] always runs to completion
+//! so its rollback entry is recorded; the cancel is honoured at the next state boundary). The
+//! compensation drain itself is uncancellable. [`Workflow::orchestrate`] runs without a token and
+//! skips the cancellation `select!` entirely.
 //!
 //! ## Module Overview
 //!
-//! - [`mod@task`]: The [`Task`] trait — single `run()` / `run_bare()` method
-//! - [`task::router`]: The [`RouterTask`] trait — side-effect-free branching via `route()`; registered with [`Workflow::register_router`]
+//! - [`mod@task`]: The [`Task`] trait — single `run()` method
+//! - [`task::router`]: The [`RouterTask`] trait — side-effect-free branching via `route()`; registered with [`Workflow::register`]
 //! - [`task::poll`]: The [`PollTask`] trait — wait-until loop via `poll()`; registered with [`Workflow::register`]
 //! - [`task::timer`]: The [`TimerTask`] trait — wait-then-transition via `wait()`/`after_wait()`; registered with [`Workflow::register`]
 //! - [`task::batch`]: The [`BatchTask`] trait — fan-out over data items via `load`/`process_item`/`finish`; registered with [`Workflow::register`]
-//! - [`task::stepped`]: The [`SteppedTask`] trait — resumable iterative work via `step()` with a serializable cursor; registered with [`Workflow::register_stepped`] (persists the cursor when a checkpoint store is attached)
-//! - [`task::stream`]: The [`StreamTask`] trait — a genuine stream-processing model: consume an `impl Stream` continuously, flush per [`StreamWindow`] window, run until the [`CancellationToken`] fires, and resume from a persisted cursor; registered with [`Workflow::register_stream`]
-//! - [`cancel`]: [`CancellationToken`] / [`CancellationHandle`] — cooperative cancellation for [`orchestrate`](Workflow::orchestrate)
+//! - [`task::stepped`]: The [`SteppedTask`] trait — resumable iterative work via `step()` with a serializable cursor; registered with [`Workflow::register`] (persists the cursor when a checkpoint store is attached)
+//! - [`task::stream`]: The [`StreamTask`] trait — a genuine stream-processing model: consume an `impl Stream` continuously, flush per [`StreamWindow`] window, run until the [`CancellationToken`] fires, and resume from a persisted cursor; registered with [`Workflow::register`]
+//! - [`CancellationToken`] — cooperative cancellation for [`orchestrate_with_token`](Workflow::orchestrate_with_token)
 //! - [`workflow`]: [`Workflow`] — FSM orchestration with Split/Join support
 //! - `scheduler` (requires `scheduler` feature): `Scheduler` (builder) and `RunningScheduler` (live handle) — cron and interval scheduling
 //! - [`mod@resource`]: [`Resource`] trait, [`Resources`] dictionary, and [`HealthStatus`] — lifecycle-aware resource management and health probes
@@ -245,12 +247,11 @@
 //!   scheduler, processing-loop, recovery and saga internals — call `cano::metrics::describe()`
 //!   for the full list with help text and units
 //! - [`recovery`]: [`CheckpointStore`] / [`CheckpointRow`] — append-only checkpoint log for crash recovery (and `RedbCheckpointStore`, behind the `recovery` feature)
-//! - [`saga`]: [`CompensatableTask`] — pair a forward step with a compensating action; failures roll back via [`Workflow::register_with_compensation`]
+//! - [`saga`]: [`CompensatableTask`] — pair a forward step with a compensating action; failures roll back via [`Workflow::register`]
 //! - [`rate_limit`]: [`RateLimiter`] (token bucket) and [`WindowedRateLimiter`] (fixed window) throttles, both implementing [`Meter`] so they compose into a [`MultiRateLimiter`] that enforces several weighted tiers (e.g. a 5h + 7d + per-model limit) at once
 //! - [`store`]: [`MemoryStore`] — a typed in-memory store that implements [`Resource`]
 //! - `testing` (requires `testing` feature): batteries-included test fixtures —
-//!   a `RecordingObserver`, a public `InMemoryCheckpointStore`, a `TestResources`
-//!   builder, a `panic_on_attempt` task factory and an `assert_compensation_ran`
+//!   a `RecordingObserver`, a public `InMemoryCheckpointStore`, a `panic_on_attempt` task factory and an `assert_compensation_ran`
 //!   saga helper. Import explicitly with `use cano::testing::*;` — it is deliberately
 //!   **not** in the [`prelude`] so production code never picks it up by accident.
 //! - [`error`]: [`CanoError`] variants and the [`CanoResult`] alias
@@ -261,7 +262,9 @@
 //! 2. Read the module docs — each module has detailed documentation and examples
 //! 3. Run benchmarks: `cargo bench --bench workflow_performance`
 
-pub mod cancel;
+// Lets macro output use `::cano::…` paths inside this crate too.
+extern crate self as cano;
+
 pub mod circuit;
 pub mod error;
 pub mod observer;
@@ -279,11 +282,10 @@ pub mod metrics;
 #[cfg(feature = "scheduler")]
 pub mod scheduler;
 
-#[cfg(feature = "testing")]
+#[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
 // Core public API - simplified imports
-pub use cancel::{CancellationHandle, CancellationToken};
 pub use circuit::{CircuitBreaker, CircuitPolicy, CircuitState, Permit as CircuitPermit};
 pub use error::{CanoError, CanoResult};
 pub use observer::WorkflowObserver;
@@ -293,27 +295,20 @@ pub use rate_limit::{
 };
 pub use recovery::{CheckpointRow, CheckpointStore, RowKind};
 pub use resource::{HealthStatus, Resource, Resources};
-pub use saga::{CompensatableTask, ErasedCompensatable};
-pub use task::batch::{
-    BatchTask, BatchTaskObject, DefaultBatchItem, DefaultBatchItemOutput, DynBatchTask, run_batch,
-};
-pub use task::poll::{
-    DynPollTask, PollErrorPolicy, PollOutcome, PollTask, PollTaskObject, run_poll_loop,
-};
-pub use task::router::{DynRouterTask, RouterTask, RouterTaskObject};
-pub use task::stepped::{
-    DefaultStepCursor, DynSteppedTask, StepOutcome, SteppedTask, SteppedTaskObject, run_stepped,
-};
-pub use task::stream::{
-    CloseReason, StreamBatch, StreamErrorPolicy, StreamTask, StreamWindow, WindowSignal,
-};
-pub use task::timer::{DynTimerTask, TimerOutcome, TimerTask, TimerTaskObject, run_timer};
+pub use saga::CompensatableTask;
+pub use task::batch::BatchTask;
+pub use task::poll::{PollErrorPolicy, PollOutcome, PollTask};
+pub use task::router::RouterTask;
+pub use task::stepped::{StepOutcome, SteppedTask};
+pub use task::stream::{CloseReason, StreamErrorPolicy, StreamTask, StreamWindow, WindowSignal};
+pub use task::timer::{TimerOutcome, TimerTask};
+pub use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "recovery")]
 pub use recovery::RedbCheckpointStore;
 pub use store::MemoryStore;
-pub use task::{DynTask, RetryMode, Task, TaskConfig, TaskObject, TaskResult};
-pub use workflow::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult, StateEntry, Workflow};
+pub use task::{RetryMode, Task, TaskConfig};
+pub use workflow::{JoinConfig, JoinStrategy, Workflow};
 
 #[cfg(feature = "tracing")]
 pub use observer::TracingObserver;
@@ -322,7 +317,9 @@ pub use observer::TracingObserver;
 pub use observer::MetricsObserver;
 
 #[cfg(feature = "scheduler")]
-pub use scheduler::{BackoffPolicy, FlowInfo, RunningScheduler, Schedule, Scheduler, Status};
+pub use scheduler::{
+    BackoffPolicy, FlowInfo, RunningScheduler, Scheduler, Status, shutdown_signal,
+};
 
 /// Attribute macro applied to `Task` trait definitions and `impl Task` blocks
 /// to rewrite `async fn` methods into ones returning
@@ -359,8 +356,8 @@ pub use cano_macros::checkpoint_store;
 /// Derive macro that generates a `from_resources` associated function for a struct.
 ///
 /// See [`FromResources`] for the full specification. Each
-/// field must be `Arc<T>`; annotate it with `#[res("key")]` or
-/// `#[res(EnumKey::Variant)]`.
+/// field must be `Arc<T>`; a plain field is looked up by type, a
+/// `#[res("name")]` field by name.
 pub use cano_macros::FromResources;
 
 /// Derive macro that generates an empty `Resource` impl for a struct.
@@ -380,19 +377,20 @@ pub mod prelude {
     //! Use `use cano::prelude::*;` to import the most commonly used types and traits.
 
     pub use crate::{
-        BatchTask, CancellationHandle, CancellationToken, CanoError, CanoResult, CheckpointRow,
-        CheckpointStore, CircuitBreaker, CircuitPermit, CircuitPolicy, CircuitState, CloseReason,
-        CompensatableTask, HealthStatus, JoinConfig, JoinStrategy, MemoryStore, Meter, MeterStatus,
-        MultiPermit, MultiRateLimiter, PollErrorPolicy, PollOutcome, PollTask, RateLimiter,
-        RateLimiterPermit, RateLimiterPolicy, Reservation, Resource, Resources, RetryMode,
-        RouterTask, RowKind, SplitResult, SplitTaskResult, StateEntry, StepOutcome, SteppedTask,
-        StreamBatch, StreamErrorPolicy, StreamTask, StreamWindow, Task, TaskConfig, TaskObject,
-        TaskResult, Tier, TimerOutcome, TimerTask, WindowPermit, WindowPolicy, WindowSignal,
-        WindowedRateLimiter, Workflow, WorkflowObserver, run_stepped,
+        BatchTask, CancellationToken, CanoError, CanoResult, CheckpointRow, CheckpointStore,
+        CircuitBreaker, CircuitPermit, CircuitPolicy, CircuitState, CloseReason, CompensatableTask,
+        HealthStatus, JoinConfig, JoinStrategy, MemoryStore, Meter, MeterStatus, MultiPermit,
+        MultiRateLimiter, PollErrorPolicy, PollOutcome, PollTask, RateLimiter, RateLimiterPermit,
+        RateLimiterPolicy, Reservation, Resource, Resources, RetryMode, RouterTask, RowKind,
+        StepOutcome, SteppedTask, StreamErrorPolicy, StreamTask, StreamWindow, Task, TaskConfig,
+        Tier, TimerOutcome, TimerTask, WindowPermit, WindowPolicy, WindowSignal,
+        WindowedRateLimiter, Workflow, WorkflowObserver,
     };
 
     #[cfg(feature = "scheduler")]
-    pub use crate::{BackoffPolicy, FlowInfo, RunningScheduler, Schedule, Scheduler, Status};
+    pub use crate::{
+        BackoffPolicy, FlowInfo, RunningScheduler, Scheduler, Status, shutdown_signal,
+    };
 
     #[cfg(feature = "tracing")]
     pub use crate::TracingObserver;

@@ -32,16 +32,16 @@ struct DataLoader;
 
 #[task(state = DataProcessingState)]
 impl DataLoader {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<DataProcessingState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<DataProcessingState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         println!("Loading initial data...");
 
         // Simulate loading data
         let data = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        store.put("input_data", data)?;
+        store.put("input_data", data);
 
         println!("Data loaded: 10 numbers");
-        Ok(TaskResult::Single(DataProcessingState::ParallelProcessing))
+        Ok(DataProcessingState::ParallelProcessing)
     }
 }
 
@@ -59,8 +59,8 @@ impl ProcessorTask {
 
 #[task(state = DataProcessingState)]
 impl ProcessorTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<DataProcessingState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<DataProcessingState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         println!("Processor {} starting...", self.task_id);
 
         // Get input data
@@ -73,13 +73,13 @@ impl ProcessorTask {
         let result: i32 = data.iter().map(|&x| x * self.task_id as i32).sum();
 
         // Store individual result
-        store.put(&format!("result_{}", self.task_id), result)?;
+        store.put(&format!("result_{}", self.task_id), result);
 
         println!(
             "Processor {} completed with result: {}",
             self.task_id, result
         );
-        Ok(TaskResult::Single(DataProcessingState::Aggregate))
+        Ok(DataProcessingState::Aggregate)
     }
 }
 
@@ -89,8 +89,8 @@ struct Aggregator;
 
 #[task(state = DataProcessingState)]
 impl Aggregator {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<DataProcessingState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<DataProcessingState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         println!("Aggregating results...");
 
         // Collect all results
@@ -104,14 +104,14 @@ impl Aggregator {
             }
         }
 
-        store.put("final_result", total)?;
-        store.put("processor_count", count as usize)?;
+        store.put("final_result", total);
+        store.put("processor_count", count as usize);
 
         println!(
             "Aggregation complete: {} processors completed, total: {}",
             count, total
         );
-        Ok(TaskResult::Single(DataProcessingState::Complete))
+        Ok(DataProcessingState::Complete)
     }
 }
 
@@ -132,7 +132,7 @@ async fn main() -> Result<(), CanoError> {
 
         let join_config = JoinConfig::new(JoinStrategy::All, DataProcessingState::Aggregate);
 
-        let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+        let workflow = Workflow::new(Resources::new().insert(store.clone()))
             .register(DataProcessingState::Start, DataLoader)
             .register_split(
                 DataProcessingState::ParallelProcessing,
@@ -142,9 +142,7 @@ async fn main() -> Result<(), CanoError> {
             .register(DataProcessingState::Aggregate, Aggregator)
             .add_exit_state(DataProcessingState::Complete);
 
-        let result = workflow
-            .orchestrate(DataProcessingState::Start, CancellationToken::disabled())
-            .await?;
+        let result = workflow.orchestrate(DataProcessingState::Start).await?;
 
         let final_result: i32 = store.get("final_result")?;
         println!("Final result: {}", final_result);
@@ -164,7 +162,7 @@ async fn main() -> Result<(), CanoError> {
 
         let join_config = JoinConfig::new(JoinStrategy::Quorum(2), DataProcessingState::Aggregate);
 
-        let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+        let workflow = Workflow::new(Resources::new().insert(store.clone()))
             .register(DataProcessingState::Start, DataLoader)
             .register_split(
                 DataProcessingState::ParallelProcessing,
@@ -174,9 +172,7 @@ async fn main() -> Result<(), CanoError> {
             .register(DataProcessingState::Aggregate, Aggregator)
             .add_exit_state(DataProcessingState::Complete);
 
-        let result = workflow
-            .orchestrate(DataProcessingState::Start, CancellationToken::disabled())
-            .await?;
+        let result = workflow.orchestrate(DataProcessingState::Start).await?;
 
         let processor_count: usize = store.get("processor_count")?;
         println!(
@@ -199,7 +195,7 @@ async fn main() -> Result<(), CanoError> {
 
         let join_config = JoinConfig::new(JoinStrategy::Any, DataProcessingState::Aggregate);
 
-        let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+        let workflow = Workflow::new(Resources::new().insert(store.clone()))
             .register(DataProcessingState::Start, DataLoader)
             .register_split(
                 DataProcessingState::ParallelProcessing,
@@ -209,9 +205,7 @@ async fn main() -> Result<(), CanoError> {
             .register(DataProcessingState::Aggregate, Aggregator)
             .add_exit_state(DataProcessingState::Complete);
 
-        let result = workflow
-            .orchestrate(DataProcessingState::Start, CancellationToken::disabled())
-            .await?;
+        let result = workflow.orchestrate(DataProcessingState::Start).await?;
 
         println!("Workflow completed with Any strategy: {:?}\n", result);
     }
@@ -232,7 +226,7 @@ async fn main() -> Result<(), CanoError> {
             DataProcessingState::Aggregate,
         );
 
-        let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+        let workflow = Workflow::new(Resources::new().insert(store.clone()))
             .register(DataProcessingState::Start, DataLoader)
             .register_split(
                 DataProcessingState::ParallelProcessing,
@@ -242,9 +236,7 @@ async fn main() -> Result<(), CanoError> {
             .register(DataProcessingState::Aggregate, Aggregator)
             .add_exit_state(DataProcessingState::Complete);
 
-        let result = workflow
-            .orchestrate(DataProcessingState::Start, CancellationToken::disabled())
-            .await?;
+        let result = workflow.orchestrate(DataProcessingState::Start).await?;
 
         let processor_count: usize = store.get("processor_count")?;
         println!("Processors completed: {} (66% threshold)", processor_count);
@@ -265,7 +257,7 @@ async fn main() -> Result<(), CanoError> {
         let join_config = JoinConfig::new(JoinStrategy::All, DataProcessingState::Aggregate)
             .with_timeout(Duration::from_millis(250)); // Will complete 2 out of 3 tasks
 
-        let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+        let workflow = Workflow::new(Resources::new().insert(store.clone()))
             .register(DataProcessingState::Start, DataLoader)
             .register_split(
                 DataProcessingState::ParallelProcessing,
@@ -275,10 +267,7 @@ async fn main() -> Result<(), CanoError> {
             .register(DataProcessingState::Aggregate, Aggregator)
             .add_exit_state(DataProcessingState::Complete);
 
-        match workflow
-            .orchestrate(DataProcessingState::Start, CancellationToken::disabled())
-            .await
-        {
+        match workflow.orchestrate(DataProcessingState::Start).await {
             Ok(result) => println!("Workflow completed: {:?}", result),
             Err(e) => println!("Workflow failed (expected timeout): {}", e),
         }

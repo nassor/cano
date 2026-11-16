@@ -79,7 +79,7 @@ impl Cruncher {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         if n + 1 >= TARGET {
-            Ok(StepOutcome::Done(TaskResult::Single(State::Done)))
+            Ok(StepOutcome::Done(State::Done))
         } else {
             Ok(StepOutcome::More(n + 1))
         }
@@ -100,24 +100,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let is_resume = mode == "resume";
 
     let workflow = Workflow::bare()
-        .register_stepped(State::Crunch, Cruncher::new(is_resume))
+        .register(State::Crunch, Cruncher::new(is_resume))
         .add_exit_state(State::Done)
         .with_checkpoint_store(store)
         .with_workflow_id(WORKFLOW_ID);
 
     let final_state = match mode {
         "resume" => {
-            let result = workflow
-                .resume_from(WORKFLOW_ID, CancellationToken::disabled())
-                .await?;
+            let result = workflow.resume_from(WORKFLOW_ID).await?;
             println!("RESUME COMPLETE final={result:?}");
             let _ = std::io::stdout().flush();
             result
         }
         _ => {
-            let result = workflow
-                .orchestrate(State::Crunch, CancellationToken::disabled())
-                .await?;
+            let result = workflow.orchestrate(State::Crunch).await?;
             println!("RUN COMPLETE final={result:?}");
             let _ = std::io::stdout().flush();
             result

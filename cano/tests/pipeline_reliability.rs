@@ -35,7 +35,7 @@ impl PollTask<Pipe> for Waiter {
     async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Pipe>, CanoError> {
         let n = self.poll_calls.fetch_add(1, Ordering::SeqCst) + 1;
         if n >= 3 {
-            Ok(PollOutcome::Ready(TaskResult::Single(Pipe::Crunch)))
+            Ok(PollOutcome::Ready(Pipe::Crunch))
         } else {
             Ok(PollOutcome::Pending { delay_ms: 1 })
         }
@@ -53,10 +53,6 @@ impl BatchTask<Pipe> for Cruncher {
     type Item = u32;
     type ItemOutput = u32;
 
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-
     async fn load(&self, _res: &Resources) -> Result<Vec<u32>, CanoError> {
         self.load_calls.fetch_add(1, Ordering::SeqCst);
         Ok(vec![1, 2, 3, 4])
@@ -70,10 +66,10 @@ impl BatchTask<Pipe> for Cruncher {
         &self,
         _res: &Resources,
         outputs: Vec<Result<u32, CanoError>>,
-    ) -> Result<TaskResult<Pipe>, CanoError> {
+    ) -> Result<Pipe, CanoError> {
         let sum = outputs.into_iter().filter_map(|r| r.ok()).sum();
         self.sums.lock().push(sum);
-        Ok(TaskResult::Single(Pipe::Pump))
+        Ok(Pipe::Pump)
     }
 }
 
@@ -123,12 +119,8 @@ impl StreamTask<Pipe> for Pumper {
         Ok(WindowSignal::Continue)
     }
 
-    async fn on_close(
-        &self,
-        _res: &Resources,
-        _reason: CloseReason,
-    ) -> Result<TaskResult<Pipe>, CanoError> {
-        Ok(TaskResult::Single(Pipe::Done))
+    async fn on_close(&self, _res: &Resources, _reason: CloseReason) -> Result<Pipe, CanoError> {
+        Ok(Pipe::Done)
     }
 }
 
@@ -160,7 +152,7 @@ async fn pipeline_resume_reenters_only_the_crashed_state() {
                 sums: sums.clone(),
             },
         )
-        .register_stream(
+        .register(
             Pipe::Pump,
             Pumper {
                 fail_once_at: Arc::new(Mutex::new(Some(5))),
@@ -174,10 +166,7 @@ async fn pipeline_resume_reenters_only_the_crashed_state() {
 
     // Run 1: Wait and Crunch complete; Pump flushes [1,2] and [3,4], then crashes
     // on the corrupt item 5.
-    let err = workflow
-        .orchestrate(Pipe::Wait, CancellationToken::disabled())
-        .await
-        .unwrap_err();
+    let err = workflow.orchestrate(Pipe::Wait).await.unwrap_err();
     assert_eq!(err.category(), "task_execution", "got: {err}");
     assert_eq!(poll_calls.load(Ordering::SeqCst), 3);
     assert_eq!(load_calls.load(Ordering::SeqCst), 1);
@@ -186,10 +175,7 @@ async fn pipeline_resume_reenters_only_the_crashed_state() {
     assert_eq!(store.last_cursor("pipeline", "Pump"), Some(4));
 
     // Run 2: resume enters at Pump directly.
-    let result = workflow
-        .resume_from("pipeline", CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.resume_from("pipeline").await.unwrap();
     assert_eq!(result, Pipe::Done);
 
     // Completed stages did not re-execute…

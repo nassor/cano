@@ -67,26 +67,26 @@ enum TestState {
 
 #[task]
 impl Task<TestState> for SimpleTask {
-    async fn run(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<TestState, CanoError> {
         tokio::time::sleep(self.duration / 4).await;
         // simulate exec phase
         tokio::time::sleep(self.duration / 2).await;
         // simulate post phase
         tokio::time::sleep(self.duration / 4).await;
-        Ok(TaskResult::Single(self.next_state.clone()))
+        Ok(self.next_state.clone())
     }
 }
 
 #[task]
 impl Task<TestState> for IOBoundTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TestState, CanoError> {
         // Simulate database connection or file opening (prep phase)
         tokio::time::sleep(self.io_duration / 8).await;
 
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore>()?;
         // Store some metadata about the operation
         let metadata = format!("io_prep_{}", self.operation_type);
-        let _ = store.put("io_metadata", metadata);
+        store.put("io_metadata", metadata);
 
         // Simulate the main IO operation (exec phase)
         tokio::time::sleep(self.io_duration).await;
@@ -98,22 +98,22 @@ impl Task<TestState> for IOBoundTask {
         // Simulate cleanup and result storage (post phase)
         tokio::time::sleep(self.io_duration / 16).await;
         let result_key = format!("io_result_{}", self.operation_type);
-        let _ = store.put(&result_key, exec_res);
+        store.put(&result_key, exec_res);
 
-        Ok(TaskResult::Single(self.next_state.clone()))
+        Ok(self.next_state.clone())
     }
 }
 
 #[task]
 impl Task<TestState> for CPUBoundTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<TestState, CanoError> {
         // Prepare data for CPU-intensive computation (prep phase)
         let data: Vec<u64> = (0..self.iterations as u64).collect();
 
-        let store = res.get::<MemoryStore, str>("store")?;
+        let store = res.get::<MemoryStore>()?;
         // Store computation metadata
         let metadata = format!("cpu_prep_{}_{}", self.operation_type, self.iterations);
-        let _ = store.put("cpu_metadata", metadata);
+        store.put("cpu_metadata", metadata);
 
         // Perform CPU-intensive calculation (exec phase)
         let result: u64 = match self.operation_type.as_str() {
@@ -137,9 +137,9 @@ impl Task<TestState> for CPUBoundTask {
 
         // Store computation result (post phase)
         let result_key = format!("cpu_result_{}", self.operation_type);
-        let _ = store.put(&result_key, result);
+        store.put(&result_key, result);
 
-        Ok(TaskResult::Single(self.next_state.clone()))
+        Ok(self.next_state.clone())
     }
 }
 
@@ -180,7 +180,7 @@ fn bench_task_performance(c: &mut Criterion) {
             &duration,
             |b, &duration| {
                 let task = SimpleTask::new(TestState::Complete, duration);
-                let resources = Resources::new().insert("store", MemoryStore::new());
+                let resources = Resources::new().insert(MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -208,7 +208,7 @@ fn bench_concurrent_task_execution(c: &mut Criterion) {
                 let tasks: Vec<SimpleTask> = (0..count)
                     .map(|_| SimpleTask::new(TestState::Complete, duration))
                     .collect();
-                let resources = Resources::new().insert("store", MemoryStore::new());
+                let resources = Resources::new().insert(MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -232,7 +232,7 @@ fn bench_concurrent_task_execution(c: &mut Criterion) {
                 let tasks: Vec<SimpleTask> = (0..count)
                     .map(|_| SimpleTask::new(TestState::Complete, duration))
                     .collect();
-                let resources = Resources::new().insert("store", MemoryStore::new());
+                let resources = Resources::new().insert(MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -262,7 +262,7 @@ fn bench_store_operations(c: &mut Criterion) {
                     let store = MemoryStore::new();
                     for i in 0..count {
                         let key = format!("key_{i}");
-                        let _ = store.put(&key, i);
+                        store.put(&key, i);
                     }
                 });
             },
@@ -276,7 +276,7 @@ fn bench_store_operations(c: &mut Criterion) {
                 // Pre-populate the store
                 for i in 0..count {
                     let key = format!("key_{i}");
-                    let _ = store.put(&key, i);
+                    store.put(&key, i);
                 }
 
                 b.iter(|| {
@@ -355,7 +355,7 @@ fn bench_io_bound_workflows(c: &mut Criterion) {
                             )
                         })
                         .collect();
-                    let resources = Resources::new().insert("store", MemoryStore::new());
+                    let resources = Resources::new().insert(MemoryStore::new());
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
@@ -384,7 +384,7 @@ fn bench_io_bound_workflows(c: &mut Criterion) {
                             )
                         })
                         .collect();
-                    let resources = Resources::new().insert("store", MemoryStore::new());
+                    let resources = Resources::new().insert(MemoryStore::new());
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
@@ -437,7 +437,7 @@ fn bench_cpu_bound_workflows(c: &mut Criterion) {
                             )
                         })
                         .collect();
-                    let resources = Resources::new().insert("store", MemoryStore::new());
+                    let resources = Resources::new().insert(MemoryStore::new());
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
@@ -466,7 +466,7 @@ fn bench_cpu_bound_workflows(c: &mut Criterion) {
                             )
                         })
                         .collect();
-                    let resources = Resources::new().insert("store", MemoryStore::new());
+                    let resources = Resources::new().insert(MemoryStore::new());
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
@@ -505,7 +505,7 @@ fn bench_mixed_workload_workflows(c: &mut Criterion) {
             |b, &(io_duration, cpu_iterations)| {
                 let io_task = IOBoundTask::new(TestState::Step1, io_duration, "database");
                 let cpu_task = CPUBoundTask::new(TestState::Complete, cpu_iterations, "processing");
-                let resources = Resources::new().insert("store", MemoryStore::new());
+                let resources = Resources::new().insert(MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -525,7 +525,7 @@ fn bench_mixed_workload_workflows(c: &mut Criterion) {
             |b, &(io_duration, cpu_iterations)| {
                 let io_task = IOBoundTask::new(TestState::Complete, io_duration, "api_service");
                 let cpu_task = CPUBoundTask::new(TestState::Complete, cpu_iterations, "analytics");
-                let resources = Resources::new().insert("store", MemoryStore::new());
+                let resources = Resources::new().insert(MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -560,8 +560,8 @@ fn bench_orchestrate_overhead(c: &mut Criterion) {
 
     #[cano::task]
     impl Task<S> for Noop {
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(S::Done))
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(S::Done)
         }
     }
 
@@ -577,9 +577,7 @@ fn bench_orchestrate_overhead(c: &mut Criterion) {
         b.to_async(&runtime).iter(|| {
             let workflow = Arc::clone(&workflow);
             async move {
-                let _ = workflow
-                    .orchestrate(S::Done, CancellationToken::disabled())
-                    .await;
+                let _ = workflow.orchestrate(S::Done).await;
             }
         });
     });
@@ -605,8 +603,8 @@ fn bench_large_split_collect(c: &mut Criterion) {
 
             #[cano::task]
             impl Task<S> for Noop {
-                async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-                    Ok(TaskResult::Single(S::Done))
+                async fn run(&self) -> Result<S, CanoError> {
+                    Ok(S::Done)
                 }
             }
 
@@ -619,10 +617,101 @@ fn bench_large_split_collect(c: &mut Criterion) {
                 .add_exit_state(S::Done);
 
             b.to_async(&runtime).iter(|| async {
-                let _ = workflow
-                    .orchestrate(S::Start, CancellationToken::disabled())
-                    .await;
+                let _ = workflow.orchestrate(S::Start).await;
             });
+        });
+    }
+    group.finish();
+}
+
+/// Engine cost of a 3-hop FSM (A → B → C → Done): dispatch, transition
+/// bookkeeping and the observer fan-out. Unlike `orchestrate_overhead`, every
+/// iteration executes three tasks through the full engine loop.
+fn bench_fsm_transitions(c: &mut Criterion) {
+    use std::sync::Arc;
+
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    enum S {
+        A,
+        B,
+        C,
+        Done,
+    }
+
+    struct PlainA;
+    struct PlainB;
+    struct PlainC;
+
+    #[cano::task]
+    impl Task<S> for PlainA {
+        async fn run(&self, _res: &Resources) -> Result<S, CanoError> {
+            Ok(S::B)
+        }
+    }
+    #[cano::task]
+    impl Task<S> for PlainB {
+        async fn run(&self, _res: &Resources) -> Result<S, CanoError> {
+            Ok(S::C)
+        }
+    }
+    #[cano::task]
+    impl Task<S> for PlainC {
+        async fn run(&self, _res: &Resources) -> Result<S, CanoError> {
+            Ok(S::Done)
+        }
+    }
+
+    struct BareA;
+    struct BareB;
+    struct BareC;
+
+    #[cano::task]
+    impl Task<S> for BareA {
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(S::B)
+        }
+    }
+    #[cano::task]
+    impl Task<S> for BareB {
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(S::C)
+        }
+    }
+    #[cano::task]
+    impl Task<S> for BareC {
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(S::Done)
+        }
+    }
+
+    struct NoopObserver;
+    impl WorkflowObserver for NoopObserver {}
+
+    let plain = || {
+        Workflow::new(Resources::new())
+            .register(S::A, PlainA)
+            .register(S::B, PlainB)
+            .register(S::C, PlainC)
+            .add_exit_state(S::Done)
+    };
+    let bare = Workflow::bare()
+        .register(S::A, BareA)
+        .register(S::B, BareB)
+        .register(S::C, BareC)
+        .add_exit_state(S::Done);
+    let observed = plain().with_observer(Arc::new(NoopObserver));
+    let plain = plain();
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let mut group = c.benchmark_group("fsm_transitions");
+    for (id, wf) in [
+        ("plain_3_states", &plain),
+        ("bare_3_states", &bare),
+        ("observed_3_states", &observed),
+    ] {
+        group.bench_function(id, |b| {
+            b.to_async(&rt)
+                .iter(|| async { wf.orchestrate(S::A).await.unwrap() });
         });
     }
     group.finish();
@@ -645,8 +734,8 @@ fn bench_tracing_overhead(c: &mut Criterion) {
 
     #[cano::task]
     impl Task<S> for Noop {
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(S::Done))
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(S::Done)
         }
     }
 
@@ -663,9 +752,7 @@ fn bench_tracing_overhead(c: &mut Criterion) {
         b.to_async(&runtime).iter(|| {
             let workflow = Arc::clone(&workflow);
             async move {
-                let _ = workflow
-                    .orchestrate(S::Done, CancellationToken::disabled())
-                    .await;
+                let _ = workflow.orchestrate(S::Done).await;
             }
         });
     });
@@ -681,6 +768,7 @@ criterion_group!(
     bench_cpu_bound_workflows,
     bench_orchestrate_overhead,
     bench_large_split_collect,
+    bench_fsm_transitions,
     bench_mixed_workload_workflows,
 );
 

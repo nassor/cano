@@ -206,11 +206,11 @@ pub enum CanoError {
         limit: std::time::Duration,
     },
 
-    /// A run was cancelled via a [`CancellationToken`](crate::cancel::CancellationToken).
+    /// A run was cancelled via a [`CancellationToken`](crate::CancellationToken).
     ///
-    /// Emitted by [`orchestrate`](crate::workflow::Workflow::orchestrate)
-    /// and [`resume_from`](crate::workflow::Workflow::resume_from) when the paired
-    /// [`CancellationHandle`](crate::cancel::CancellationHandle) fires. The in-flight
+    /// Emitted by [`orchestrate_with_token`](crate::workflow::Workflow::orchestrate_with_token)
+    /// and [`resume_from_with_token`](crate::workflow::Workflow::resume_from_with_token) when
+    /// the token is cancelled. The in-flight
     /// cancellable task is dropped at its next await point and the compensation stack is drained
     /// before this error surfaces. Like every task error from the FSM it is wrapped in
     /// [`CanoError::WithStateContext`] (clean rollback); a dirty rollback yields
@@ -281,13 +281,14 @@ pub enum CanoError {
     /// Try to be specific in the error message.
     Generic(String),
 
-    /// A resource key was not found in the Resources map
+    /// No resource of the requested type (or under the requested name) is in the
+    /// Resources map
     ResourceNotFound(String),
 
-    /// A resource was found under the key but its stored type did not match the requested type
+    /// A named resource exists but holds a different type than the one requested
     ResourceTypeMismatch(String),
 
-    /// A resource key was inserted twice into the same Resources map
+    /// A resource type (or name) was inserted twice into the same Resources map
     ResourceDuplicateKey(String),
 
     /// A persisted checkpoint row's workflow version does not match the
@@ -360,7 +361,7 @@ pub enum CanoError {
         state: String,
         /// The 1-based attempt number that produced this failure.
         attempt: u32,
-        /// The states visited so far, in order, ending with `state`.
+        /// The most recent 64 states visited, in order, ending with `state`.
         transitions_so_far: Vec<String>,
         /// The underlying error that triggered this failure.
         source: Box<CanoError>,
@@ -613,6 +614,15 @@ impl CanoError {
         }
     }
 
+    /// Whether this error is a cooperative cancellation ([`CanoError::Cancelled`],
+    /// possibly wrapped in [`CanoError::WithStateContext`]).
+    ///
+    /// A cancelled run whose rollback failed is a
+    /// [`CompensationFailed`](CanoError::CompensationFailed), not a cancellation.
+    pub fn is_cancelled(&self) -> bool {
+        matches!(self.inner(), CanoError::Cancelled)
+    }
+
     /// Get the *outer* error category — the variant of `self` without
     /// unwrapping `WithStateContext`. Use when you need to distinguish a raw
     /// failure from one annotated with state context (the FSM wraps every
@@ -853,7 +863,7 @@ mod tests {
         assert_eq!(cano_error.category(), "store");
 
         // Test conversion via From trait
-        let store_error = StoreError::lock_error("lock failed");
+        let store_error = StoreError::append_type_mismatch("lock failed");
         let cano_error: CanoError = store_error.into();
         assert_eq!(cano_error.category(), "store");
         assert!(cano_error.message().contains("lock failed"));

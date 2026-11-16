@@ -45,8 +45,9 @@ probes — lives in <a href="../recovery/">Recovery</a>, <a href="../saga/">Saga
 <p>
 A task's <code>config()</code> returns a <a href="../task/configuration/"><code>TaskConfig</code></a>
 whose <code>retry_mode</code> drives the workflow dispatcher's retry loop. The default is
-exponential backoff with jitter (3 retries, 100ms base, 2.0× multiplier, 30s cap, 0.1 jitter);
-<code>RetryMode</code> also has <code>None</code> and <code>Fixed(count, delay)</code>. On exhaustion
+<strong>no retries</strong>: <code>TaskConfig::new()</code> runs a task once (<code>RetryMode::None</code>).
+Opt in with <code>.with_exponential_retry(n)</code> (exponential backoff with jitter: 100ms base,
+2.0× multiplier, 30s cap, 0.1 jitter) or <code>.with_fixed_retry(n, delay)</code>. On exhaustion
 the loop returns <code>CanoError::RetryExhausted</code> wrapping the last error.
 </p>
 
@@ -63,12 +64,12 @@ struct FetchTask;
 #[task(state = Step)]
 impl FetchTask {
     fn config(&self) -> TaskConfig {
-        // 5 attempts, 200ms apart; or `.with_exponential_retry(n)` / `TaskConfig::minimal()` for none.
+        // 5 attempts, 200ms apart; or `.with_exponential_retry(n)`. Without a `config()` override: 1 attempt.
         TaskConfig::new().with_fixed_retry(4, Duration::from_millis(200))
     }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         // ... call the flaky thing ...
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 ```
@@ -95,8 +96,8 @@ impl CallTask {
             .with_fixed_retry(2, Duration::from_millis(100))
             .with_attempt_timeout(Duration::from_secs(2)) // each attempt gets 2s
     }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    async fn run(&self) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 ```
@@ -123,8 +124,8 @@ let workflow = Workflow::bare()
     .with_total_timeout(Duration::from_millis(200))
     // Optional override; defaults to min(remaining_budget / 2, 30s).
     .with_compensation_timeout(Duration::from_millis(50))
-    .register_with_compensation(Step::Reserve, Reserve)
-    .register_with_compensation(Step::Charge, Charge)
+    .register(Step::Reserve, Reserve)
+    .register(Step::Charge, Charge)
     .register(Step::Ship, Ship)
     .add_exit_state(Step::Done);
 ```
@@ -232,8 +233,9 @@ and the final error is the wrapped <code>WorkflowTimeout</code>.</p>
 <p>
 Where a total timeout aborts a run on a <em>deadline</em>, cancellation aborts it on a <em>signal</em>
 you control — a shutdown handler, a user "stop" button, a parent task giving up.
-<code>Workflow::orchestrate(start, token)</code> (and <code>resume_from(id, token)</code>) always take
-a <code>CancellationToken</code>; firing the paired <code>CancellationHandle</code> aborts the
+<code>Workflow::orchestrate_with_token(start, &amp;token)</code> (and
+<code>resume_from_with_token(id, &amp;token)</code>) take a <code>CancellationToken</code> (a re-export of
+<code>tokio_util::sync::CancellationToken</code>); calling <code>token.cancel()</code> aborts the
 in-flight task at its next await point, drains the
 <a href="../saga/">saga compensation stack</a>, and returns <code>CanoError::Cancelled</code> wrapped
 in <code>CanoError::WithStateContext</code> (or <code>CanoError::CompensationFailed</code> if a
@@ -243,22 +245,25 @@ in <code>CanoError::WithStateContext</code> (or <code>CanoError::CompensationFai
 ```rust
 use cano::CancellationToken;
 
-let (handle, token) = CancellationToken::new();
+let token = CancellationToken::new();
 
 // Cancel from anywhere — a signal handler, a sibling task, a timer:
-let canceller = tokio::spawn(async move {
-    shutdown_signal().await;
-    handle.cancel(); // idempotent; the handle is Clone, so many owners can trigger it
+let canceller = tokio::spawn({
+    let token = token.clone();
+    async move {
+        shutdown_signal().await;
+        token.cancel(); // idempotent; tokens are Clone, so many owners can trigger it
+    }
 });
 
-let result = workflow.orchestrate(Step::Reserve, token).await;
-assert!(matches!(result, Err(e) if e.category() == "cancelled"));
+let result = workflow.orchestrate_with_token(Step::Reserve, &token).await;
+assert!(matches!(result, Err(e) if e.is_cancelled()));
 ```
 
 <p>
-To opt a run out of cancellation, pass <code>CancellationToken::disabled()</code> instead of a live
-token: <code>workflow.orchestrate(start, CancellationToken::disabled())</code>. A disabled token
-never fires and is zero-cost — the cancellation <code>select!</code> is skipped entirely.
+To run without cancellation, call plain <code>workflow.orchestrate(start)</code>: it takes no token,
+and the cancellation <code>select!</code> is skipped entirely, so it costs nothing.
+A <code>CanoError</code> reports a cancelled run through <code>is_cancelled()</code>.
 </p>
 
 <div class="callout callout-warning">
@@ -289,8 +294,8 @@ boundary and biased ahead of the per-state budget mid-task.
 
 <div class="callout callout-tip">
 <p>The scheduler builds on this: <a href="../scheduler/#cancellation"><code>RunningScheduler::cancel_flow(id)</code></a>
-cancels an in-flight scheduled run, and graceful <code>stop()</code> cancels every in-flight flow
-(rolling back their sagas) instead of waiting for them to finish.</p>
+cancels an in-flight scheduled run, and graceful <code>stop()</code> first lets in-flight flows
+finish (the drain timeout), then cancels the ones still running (rolling back their sagas).</p>
 </div>
 
 <div class="callout callout-tip">
@@ -315,7 +320,9 @@ A <a href="../split-join/">split/join</a> state runs its tasks in parallel — b
 gates the task bodies on a shared <code>Semaphore</code> so at most <code>n</code> run concurrently;
 the rest queue. Tasks still all get spawned and the join strategy is unchanged — only their
 <em>execution</em> is rate-limited. Full details on the
-<a href="../split-join/#bulkhead">Split &amp; Join</a> page.
+<a href="../split-join/#bulkhead">Split &amp; Join</a> page. A bulkhead of <code>0</code> (like a
+<code>PartialTimeout</code> strategy without a timeout, or an invalid <code>Percentage</code>) is a
+configuration error that <code>validate()</code> reports before any run starts.
 </p>
 
 ```rust
@@ -338,7 +345,8 @@ unwind through the workflow engine and abort the runtime worker. The dispatcher 
 <code>catch_unwind</code>; a panic becomes <code>CanoError::TaskExecution("panic: …")</code>, which
 then flows through the normal retry / error / (with a saga) compensation path. Split tasks do the
 same per spawned task, so a panic preserves its task index. There's nothing to configure — it's
-always on.
+always on. Observer hooks, including <code>on_retry</code> and <code>on_circuit_open</code>, are
+isolated the same way: a panicking observer never fails the task.
 </p>
 
 <div class="callout callout-tip">

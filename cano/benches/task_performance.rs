@@ -24,9 +24,9 @@ enum TestState {
 
 #[task]
 impl Task<TestState> for DoNothingTask {
-    async fn run(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<TestState, CanoError> {
         // Do nothing - minimal overhead
-        Ok(TaskResult::Single(self.next_state.clone()))
+        Ok(self.next_state.clone())
     }
 }
 
@@ -48,8 +48,8 @@ impl CpuIntensiveTask {
 
 #[task]
 impl Task<TestState> for CpuIntensiveTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+    async fn run(&self, res: &Resources) -> Result<TestState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
 
         // Generate some data to process
         let data: Vec<u64> = (0..self.iterations as u64).collect();
@@ -58,8 +58,8 @@ impl Task<TestState> for CpuIntensiveTask {
         let result: u64 = data.iter().map(|&x| x * x).sum();
 
         // Store the result
-        store.put("cpu_result", result)?;
-        Ok(TaskResult::Single(self.next_state.clone()))
+        store.put("cpu_result", result);
+        Ok(self.next_state.clone())
     }
 }
 
@@ -81,8 +81,8 @@ impl IoSimulationTask {
 
 #[task]
 impl Task<TestState> for IoSimulationTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
-        let store = res.get::<MemoryStore, str>("store")?;
+    async fn run(&self, res: &Resources) -> Result<TestState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
 
         // Simulate I/O preparation delay
         tokio::time::sleep(tokio::time::Duration::from_millis(self.delay_ms)).await;
@@ -94,9 +94,9 @@ impl Task<TestState> for IoSimulationTask {
 
         // Simulate final I/O delay
         tokio::time::sleep(tokio::time::Duration::from_millis(self.delay_ms)).await;
-        store.put("io_result", processed_data)?;
+        store.put("io_result", processed_data);
 
-        Ok(TaskResult::Single(self.next_state.clone()))
+        Ok(self.next_state.clone())
     }
 }
 
@@ -124,11 +124,11 @@ impl Task<TestState> for ConfigurableTask {
         self.config.clone()
     }
 
-    async fn run(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<TestState, CanoError> {
         if self.should_fail {
             Err(CanoError::TaskExecution("Intentional failure".to_string()))
         } else {
-            Ok(TaskResult::Single(self.next_state.clone()))
+            Ok(self.next_state.clone())
         }
     }
 }
@@ -195,7 +195,7 @@ fn bench_task_creation(c: &mut Criterion) {
                 b.iter(|| {
                     let _tasks: Vec<ConfigurableTask> = (0..task_count)
                         .map(|i| {
-                            ConfigurableTask::new(TestState::Task(i), TaskConfig::minimal(), false)
+                            ConfigurableTask::new(TestState::Task(i), TaskConfig::new(), false)
                         })
                         .collect();
                 });
@@ -222,7 +222,7 @@ fn bench_task_execution(c: &mut Criterion) {
                     .collect();
                 // Hoist Resources construction out of the hot loop so the
                 // measurement reflects task dispatch only, not setup overhead.
-                let res = Resources::new().insert("store", MemoryStore::new());
+                let res = Resources::new().insert(MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -238,7 +238,7 @@ fn bench_task_execution(c: &mut Criterion) {
             &task_count,
             |b, &task_count| {
                 let task = DoNothingTask::new(TestState::Complete);
-                let res = Resources::new().insert("store", MemoryStore::new());
+                let res = Resources::new().insert(MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -258,7 +258,7 @@ fn bench_task_execution(c: &mut Criterion) {
                     let tasks: Vec<CpuIntensiveTask> = (0..task_count)
                         .map(|i| CpuIntensiveTask::new(TestState::Task(i), 100))
                         .collect();
-                    let res = Resources::new().insert("store", MemoryStore::new());
+                    let res = Resources::new().insert(MemoryStore::new());
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
@@ -279,7 +279,7 @@ fn bench_task_execution(c: &mut Criterion) {
                     let tasks: Vec<IoSimulationTask> = (0..task_count)
                         .map(|i| IoSimulationTask::new(TestState::Task(i), 1))
                         .collect();
-                    let res = Resources::new().insert("store", MemoryStore::new());
+                    let res = Resources::new().insert(MemoryStore::new());
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
@@ -465,7 +465,7 @@ fn bench_concurrent_task_execution(c: &mut Criterion) {
                 let tasks: Vec<std::sync::Arc<DoNothingTask>> = (0..task_count)
                     .map(|i| std::sync::Arc::new(DoNothingTask::new(TestState::Task(i))))
                     .collect();
-                let res = std::sync::Arc::new(Resources::new().insert("store", MemoryStore::new()));
+                let res = std::sync::Arc::new(Resources::new().insert(MemoryStore::new()));
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -478,7 +478,7 @@ fn bench_concurrent_task_execution(c: &mut Criterion) {
                                 let res = res.clone();
                                 tokio::spawn(async move {
                                     for task in chunk {
-                                        let _result = task.run(&*res).await;
+                                        let _result = task.run(&res).await;
                                     }
                                 })
                             })
@@ -501,8 +501,7 @@ fn bench_concurrent_task_execution(c: &mut Criterion) {
                     let tasks: Vec<std::sync::Arc<CpuIntensiveTask>> = (0..small_count)
                         .map(|i| std::sync::Arc::new(CpuIntensiveTask::new(TestState::Task(i), 50)))
                         .collect();
-                    let res =
-                        std::sync::Arc::new(Resources::new().insert("store", MemoryStore::new()));
+                    let res = std::sync::Arc::new(Resources::new().insert(MemoryStore::new()));
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
@@ -515,7 +514,7 @@ fn bench_concurrent_task_execution(c: &mut Criterion) {
                                     let res = res.clone();
                                     tokio::spawn(async move {
                                         for task in chunk {
-                                            let _result = task.run(&*res).await;
+                                            let _result = task.run(&res).await;
                                         }
                                     })
                                 })
@@ -547,7 +546,7 @@ fn bench_task_dispatch(c: &mut Criterion) {
                 let tasks: Vec<DoNothingTask> = (0..size)
                     .map(|i| DoNothingTask::new(TestState::Task(i)))
                     .collect();
-                let res = Resources::new().insert("store", MemoryStore::new());
+                let res = Resources::new().insert(MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -567,7 +566,7 @@ fn bench_task_dispatch(c: &mut Criterion) {
                         Box::new(DoNothingTask::new(TestState::Task(i))) as Box<dyn Task<TestState>>
                     })
                     .collect();
-                let res = Resources::new().insert("store", MemoryStore::new());
+                let res = Resources::new().insert(MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -590,7 +589,7 @@ fn bench_task_dispatch(c: &mut Criterion) {
                         tasks.push(Box::new(CpuIntensiveTask::new(TestState::Task(i), 10)));
                     }
                 }
-                let res = Resources::new().insert("store", MemoryStore::new());
+                let res = Resources::new().insert(MemoryStore::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -613,9 +612,9 @@ fn bench_task_config_scenarios(c: &mut Criterion) {
 
     group.bench_function("minimal_config_tasks", |b| {
         let tasks: Vec<ConfigurableTask> = (0..task_count)
-            .map(|i| ConfigurableTask::new(TestState::Task(i), TaskConfig::minimal(), false))
+            .map(|i| ConfigurableTask::new(TestState::Task(i), TaskConfig::new(), false))
             .collect();
-        let res = Resources::new().insert("store", MemoryStore::new());
+        let res = Resources::new().insert(MemoryStore::new());
 
         b.to_async(tokio::runtime::Runtime::new().unwrap())
             .iter(|| async {
@@ -629,7 +628,7 @@ fn bench_task_config_scenarios(c: &mut Criterion) {
         let tasks: Vec<ConfigurableTask> = (0..task_count)
             .map(|i| ConfigurableTask::new(TestState::Task(i), TaskConfig::default(), false))
             .collect();
-        let res = Resources::new().insert("store", MemoryStore::new());
+        let res = Resources::new().insert(MemoryStore::new());
 
         b.to_async(tokio::runtime::Runtime::new().unwrap())
             .iter(|| async {
@@ -649,7 +648,7 @@ fn bench_task_config_scenarios(c: &mut Criterion) {
                 )
             })
             .collect();
-        let res = Resources::new().insert("store", MemoryStore::new());
+        let res = Resources::new().insert(MemoryStore::new());
 
         b.to_async(tokio::runtime::Runtime::new().unwrap())
             .iter(|| async {
@@ -669,7 +668,7 @@ fn bench_task_config_scenarios(c: &mut Criterion) {
                 )
             })
             .collect();
-        let res = Resources::new().insert("store", MemoryStore::new());
+        let res = Resources::new().insert(MemoryStore::new());
 
         b.to_async(tokio::runtime::Runtime::new().unwrap())
             .iter(|| async {
@@ -682,7 +681,7 @@ fn bench_task_config_scenarios(c: &mut Criterion) {
     group.finish();
 }
 
-/// States used exclusively by the run_bare delegation benchmark.
+/// States used exclusively by the resource-free `run` benchmark.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum BareState {
     Done,
@@ -693,25 +692,26 @@ struct DirectRunTask;
 
 #[task]
 impl Task<BareState> for DirectRunTask {
-    async fn run(&self, _res: &Resources) -> Result<TaskResult<BareState>, CanoError> {
-        Ok(TaskResult::Single(BareState::Done))
+    async fn run(&self, _res: &Resources) -> Result<BareState, CanoError> {
+        Ok(BareState::Done)
     }
 }
 
-/// Task that overrides only `run_bare()` — exercises the default `run()` delegation path.
+/// Task written as `run(&self)` — the macro inserts the resources parameter. (The id
+/// `via_run_bare` predates the removal of `run_bare` and is kept for baseline comparison.)
 struct ViaRunBareTask;
 
 #[task]
 impl Task<BareState> for ViaRunBareTask {
-    async fn run_bare(&self) -> Result<TaskResult<BareState>, CanoError> {
-        Ok(TaskResult::Single(BareState::Done))
+    async fn run(&self) -> Result<BareState, CanoError> {
+        Ok(BareState::Done)
     }
 }
 
-/// Benchmark comparing `run()` called directly versus via the `run_bare()` delegation default.
+/// Benchmark comparing a `run(&self, res)` task with a resource-free `run(&self)` task.
 ///
-/// Both tasks perform identical trivial work so any timing difference reflects only the
-/// extra async call hop introduced by the default `run()` → `run_bare()` delegation.
+/// Both tasks perform identical trivial work; the resource-free form must cost the same
+/// (one boxed future): the macro rewrites it to the full signature, no delegation hop.
 fn bench_task_run_bare(c: &mut Criterion) {
     let mut group = c.benchmark_group("task_run_bare");
 

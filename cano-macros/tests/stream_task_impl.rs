@@ -1,7 +1,7 @@
 //! Integration tests for `#[cano::task::stream]` — the inherent form (which emits
 //! `::cano::` paths, so it only resolves *outside* the `cano` crate), the `key =` form,
 //! and the explicit trait-impl form. Exercises the companion `impl Task` and the
-//! engine-driven `register_stream` path.
+//! engine-driven `register` path.
 
 use cano::prelude::*;
 use futures_util::{Stream, stream};
@@ -12,11 +12,6 @@ use std::sync::Arc;
 enum Step {
     Consume,
     Done,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum Key {
-    Store,
 }
 
 // 1. Inherent form with inferred Item / Output / Cursor and default window / config / name.
@@ -46,13 +41,9 @@ impl InherentInferred {
         Ok(WindowSignal::Continue)
     }
 
-    async fn on_close(
-        &self,
-        _res: &Resources,
-        reason: CloseReason,
-    ) -> Result<TaskResult<Step>, CanoError> {
+    async fn on_close(&self, _res: &Resources, reason: CloseReason) -> Result<Step, CanoError> {
         assert_eq!(reason, CloseReason::Exhausted);
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -74,7 +65,7 @@ fn inherent_default_error_policy_is_fail_fast() {
 
 #[test]
 fn inherent_default_config_is_minimal() {
-    // TaskConfig::minimal() → 1 attempt (no retries).
+    // TaskConfig::new() → 1 attempt (no retries).
     assert_eq!(Task::config(&InherentInferred).retry_mode.max_attempts(), 1);
 }
 
@@ -84,14 +75,11 @@ fn inherent_default_name_contains_type_name() {
 }
 
 #[tokio::test]
-async fn inherent_runs_via_register_stream() {
+async fn inherent_runs_via_register() {
     let workflow = Workflow::bare()
-        .register_stream(Step::Consume, InherentInferred)
+        .register(Step::Consume, InherentInferred)
         .add_exit_state(Step::Done);
-    let result = workflow
-        .orchestrate(Step::Consume, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Step::Consume).await.unwrap();
     assert_eq!(result, Step::Done);
 }
 
@@ -99,13 +87,13 @@ async fn inherent_runs_via_register_stream() {
 async fn inherent_runs_via_register_in_memory() {
     let res = Resources::new();
     let result = Task::run(&InherentInferred, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::Done));
+    assert_eq!(result, Step::Done);
 }
 
-// 2. Inherent form with `key = Key` and an overridden window.
+// 2. Inherent form with an overridden window.
 struct InherentWithKey;
 
-#[task::stream(state = Step, key = Key)]
+#[task::stream(state = Step)]
 impl InherentWithKey {
     fn window(&self) -> StreamWindow {
         StreamWindow::Count(2)
@@ -113,46 +101,37 @@ impl InherentWithKey {
 
     async fn open(
         &self,
-        res: &Resources<Key>,
+        res: &Resources,
         _cursor: Option<u64>,
     ) -> Result<Pin<Box<dyn Stream<Item = u32> + Send>>, CanoError> {
-        // Exercise the enum-keyed resource lookup (constructs `Key::Store`).
-        let _ = res.get::<MemoryStore, _>(&Key::Store);
+        let _ = res.get::<MemoryStore>();
         Ok(Box::pin(stream::iter(vec![10u32, 20, 30, 40]))
             as Pin<Box<dyn Stream<Item = u32> + Send>>)
     }
 
-    async fn process_item(
-        &self,
-        _res: &Resources<Key>,
-        item: u32,
-    ) -> Result<(u32, u64), CanoError> {
+    async fn process_item(&self, _res: &Resources, item: u32) -> Result<(u32, u64), CanoError> {
         Ok((item * 10, item as u64))
     }
 
     async fn flush_window(
         &self,
-        _res: &Resources<Key>,
+        _res: &Resources,
         outputs: Vec<u32>,
     ) -> Result<WindowSignal<Step>, CanoError> {
         assert_eq!(outputs.len(), 2);
         Ok(WindowSignal::Continue)
     }
 
-    async fn on_close(
-        &self,
-        _res: &Resources<Key>,
-        _reason: CloseReason,
-    ) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    async fn on_close(&self, _res: &Resources, _reason: CloseReason) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 
 #[tokio::test]
 async fn inherent_with_key_runs() {
-    let resources = Resources::<Key>::new();
+    let resources = Resources::new();
     let result = Task::run(&InherentWithKey, &resources).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::Done));
+    assert_eq!(result, Step::Done);
 }
 
 // 3. Trait-impl form with explicit associated types + an explicit `on_item_error`.
@@ -193,12 +172,8 @@ impl StreamTask<Step> for TraitStream {
         Ok(WindowSignal::Continue)
     }
 
-    async fn on_close(
-        &self,
-        _res: &Resources,
-        _reason: CloseReason,
-    ) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    async fn on_close(&self, _res: &Resources, _reason: CloseReason) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 
@@ -215,5 +190,5 @@ async fn trait_form_runs_and_is_dyn_task() {
     let task: Arc<dyn Task<Step>> = Arc::new(TraitStream);
     let res = Resources::new();
     let result = Task::run(task.as_ref(), &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::Done));
+    assert_eq!(result, Step::Done);
 }

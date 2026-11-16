@@ -20,8 +20,8 @@ struct Reserve(Arc<AtomicBool>);
 #[saga::task(state = Step)]
 impl Reserve {
     type Output = u32;
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, u32), CanoError> {
-        Ok((TaskResult::Single(Step::Boom), 42))
+    async fn run(&self, _res: &Resources) -> Result<(Step, u32), CanoError> {
+        Ok((Step::Boom, 42))
     }
     async fn compensate(&self, _res: &Resources, output: u32) -> Result<(), CanoError> {
         assert_eq!(output, 42);
@@ -37,14 +37,12 @@ struct ReserveNamed;
 #[saga::task(state = Step)]
 impl ReserveNamed {
     type Output = ();
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
+
     fn name(&self) -> Cow<'static, str> {
         "reserve-named".into()
     }
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, ()), CanoError> {
-        Ok((TaskResult::Single(Step::Done), ()))
+    async fn run(&self, _res: &Resources) -> Result<(Step, ()), CanoError> {
+        Ok((Step::Done, ()))
     }
     async fn compensate(&self, _res: &Resources, _output: ()) -> Result<(), CanoError> {
         Ok(())
@@ -57,9 +55,9 @@ struct Boom;
 #[task(state = Step)]
 impl Boom {
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal() // fail-fast so the original error surfaces directly
+        TaskConfig::new() // fail-fast so the original error surfaces directly
     }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         Err(CanoError::task_execution("boom"))
     }
 }
@@ -68,14 +66,11 @@ impl Boom {
 async fn inherent_compensatable_impl_registers_and_compensates() {
     let compensated = Arc::new(AtomicBool::new(false));
     let workflow = Workflow::bare()
-        .register_with_compensation(Step::Reserve, Reserve(compensated.clone()))
+        .register(Step::Reserve, Reserve(compensated.clone()))
         .register(Step::Boom, Boom)
         .add_exit_state(Step::Done);
 
-    let err = workflow
-        .orchestrate(Step::Reserve, CancellationToken::disabled())
-        .await
-        .unwrap_err();
+    let err = workflow.orchestrate(Step::Reserve).await.unwrap_err();
     assert_eq!(err.message(), "boom"); // clean rollback -> the original failure is surfaced
     assert!(
         compensated.load(Ordering::SeqCst),
@@ -85,13 +80,10 @@ async fn inherent_compensatable_impl_registers_and_compensates() {
     // ReserveNamed exercises the config/name overrides + `Output = ()` in the inherent
     // form; it runs straight through to the exit state with nothing to compensate.
     let workflow = Workflow::bare()
-        .register_with_compensation(Step::Reserve, ReserveNamed)
+        .register(Step::Reserve, ReserveNamed)
         .add_exit_state(Step::Done);
     assert_eq!(
-        workflow
-            .orchestrate(Step::Reserve, CancellationToken::disabled())
-            .await
-            .unwrap(),
+        workflow.orchestrate(Step::Reserve).await.unwrap(),
         Step::Done
     );
 }

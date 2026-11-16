@@ -13,7 +13,7 @@ use std::time::Duration;
 /// just failed and when to stop dispatching it altogether.
 ///
 /// Every flow has one: [`BackoffPolicy::default`] unless overridden for that
-/// flow via [`Scheduler::set_backoff`](super::Scheduler::set_backoff). After a
+/// flow via [`Scheduler::with_backoff`](super::Scheduler::with_backoff). After a
 /// failure the scheduler parks the flow in [`Status::Backoff`](super::Status::Backoff)
 /// for `compute_delay(streak)` (or [`Status::Tripped`](super::Status::Tripped)
 /// once `streak_limit` is hit).

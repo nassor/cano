@@ -30,17 +30,17 @@ A flow that fails repeatedly shouldn't keep re-firing on its base schedule, so <
 <code>BackoffPolicy</code></strong>. After a failure the scheduler parks the flow in <code>Status::Backoff</code>
 for a growing delay; with a <code>streak_limit</code> set it eventually <code>Tripped</code>s and stops
 dispatching until you intervene. Each flow starts with <code>BackoffPolicy::default()</code> — call
-<code>set_backoff</code> to use a different one.
+<code>Scheduler::with_backoff</code> to use a different one.
 </p>
 
 <div class="callout callout-info">
-<div class="callout-label">Heads-up: failure delays are at least 1s by default</div>
+<div class="callout-label">Heads-up: failure delays are about 1s by default</div>
 <p>
 Because <code>BackoffPolicy::default()</code> has a <strong>1s</strong> initial delay and is applied to
 <em>every</em> flow, a flow that fails waits ~1s before its next attempt (the <code>Every</code> loop sleeps
 <code>max(interval, next_eligible - now)</code>) — even if its base interval is shorter. If you run a flow
-on a sub-second interval and want fast retries after a failure, lower
-<code>BackoffPolicy { initial: … }</code> via <code>set_backoff</code>.
+on a sub-second interval and want a faster next attempt after a failure, lower
+<code>BackoffPolicy { initial: … }</code> via <code>with_backoff</code>.
 </p>
 </div>
 
@@ -56,9 +56,11 @@ an entire flow.
 
 <h3 id="backoff-policy"><a href="#backoff-policy" class="anchor-link" aria-hidden="true">#</a>Overriding the Default Policy</h3>
 <p>
-Register the workflow normally, then call <code>set_backoff</code> <strong>before</strong> <code>start()</code>.
-The policy controls the initial delay after the first failure, the multiplier applied per
-additional consecutive failure, a hard cap on the computed delay, jitter, and an optional streak limit.
+Register the workflow, then call <code>with_backoff</code> with the flow's id later in the same chain,
+<strong>before</strong> <code>start()</code>. The flow must already be registered; an unknown id makes
+<code>start()</code> return a configuration error. The policy controls the initial delay after the first
+failure, the multiplier applied per additional consecutive failure, a hard cap on the computed delay,
+jitter, and an optional streak limit.
 </p>
 
 ```rust
@@ -73,39 +75,35 @@ struct NoopTask;
 
 #[task(state = FlowState)]
 impl NoopTask {
-    async fn run_bare(&self) -> Result<TaskResult<FlowState>, CanoError> {
-        Ok(TaskResult::Single(FlowState::Done))
+    async fn run(&self) -> Result<FlowState, CanoError> {
+        Ok(FlowState::Done)
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let mut scheduler: Scheduler<FlowState> = Scheduler::new();
-
-    let workflow = Workflow::new(Resources::new())
+    let workflow = Workflow::bare()
         .register(FlowState::Start, NoopTask)
         .add_exit_state(FlowState::Done);
 
-    scheduler.every(
-        "flaky",
-        workflow,
-        FlowState::Start,
-        Duration::from_millis(200),
-    )?;
+    let running = Scheduler::new()
+        .every("flaky", workflow, FlowState::Start, Duration::from_millis(200))
+        .with_backoff(
+            "flaky",
+            BackoffPolicy {
+                initial: Duration::from_millis(300),
+                multiplier: 2.0,
+                max_delay: Duration::from_secs(2),
+                jitter: 0.1,
+                streak_limit: Some(3),
+            },
+        )
+        .start()
+        .await?;
 
-    scheduler.set_backoff(
-        "flaky",
-        BackoffPolicy {
-            initial: Duration::from_millis(300),
-            multiplier: 2.0,
-            max_delay: Duration::from_secs(2),
-            jitter: 0.1,
-            streak_limit: Some(3),
-        },
-    )?;
-
-    let running = scheduler.start().await?;
-    running.wait().await?;
+    // Block until Ctrl-C (or SIGTERM on Unix), then shut down.
+    cano::scheduler::shutdown_signal().await?;
+    running.stop().await?;
     Ok(())
 }
 
@@ -113,7 +111,8 @@ async fn main() -> Result<(), CanoError> {
 
 <p>
 Computed delay is <code>initial * multiplier^(streak-1)</code>, capped at <code>max_delay</code>, then
-multiplied by a random factor in <code>1 ± jitter</code>. The <code>Every</code> loop's sleep extends to
+multiplied by a random factor in <code>1 ± jitter</code> (and never longer than <code>max_delay</code>).
+The <code>Every</code> loop's sleep extends to
 <code>max(interval, next_eligible - now)</code>, and the <code>Cron</code> loop suppresses ticks inside the
 backoff window. <code>BackoffPolicy::default()</code> gives 1s initial, 2.0× multiplier, 5min cap,
 0.1 jitter, and <strong>no trip limit</strong>. Use <code>BackoffPolicy::with_trip(n)</code> to ask for a
@@ -188,7 +187,7 @@ trip after <code>n</code> consecutive failures.
 a wildcard. The variants are:
 </p>
 <ul>
-<li><code>Idle</code> — registered, never run or finished cleanly.</li>
+<li><code>Idle</code> — registered but not run yet, the last run was cancelled, or the flow was reset.</li>
 <li><code>Running</code> — currently executing.</li>
 <li><code>Completed</code> — last run reached an exit state.</li>
 <li><code>Backoff { until, streak, last_error }</code> — last run errored; the flow is waiting until
@@ -245,22 +244,25 @@ will not dispatch this flow again until <code>reset_flow</code> is called.</li>
 <p>
 Outcome writes are atomic: a single write decides this run's terminal status (<code>Completed</code> on
 success, otherwise <code>Backoff</code> or <code>Tripped</code>), so observers never see a transient
-intermediate state. <code>FlowInfo</code> exposes <code>failure_streak</code> and
-<code>next_eligible</code> for observability.
+intermediate state. A run that ends because it was cancelled (<code>cancel_flow</code> or a scheduler
+shutdown) returns the flow to <code>Idle</code> and leaves the streak untouched. <code>FlowInfo</code>
+exposes <code>failure_streak</code> and <code>next_eligible</code> for observability.
 </p>
 
 <h3 id="recovery"><a href="#recovery" class="anchor-link" aria-hidden="true">#</a>Recovery via <code>reset_flow</code></h3>
 <p>
-A <code>Tripped</code> flow stays parked until you clear it. <code>RunningScheduler::reset_flow(id)</code>
-clears the failure streak and <code>next_eligible</code>, and (when the flow is not currently running) sets
-the status back to <code>Idle</code>. Manual <code>trigger()</code> is rejected on a tripped flow — call
-<code>reset_flow</code> first.
+A <code>Tripped</code> flow stays parked until you clear it. <code>RunningScheduler::reset_flow(id)</code> clears the
+failure streak and <code>next_eligible</code>, and
+(when the flow is not currently running) sets the status back to <code>Idle</code>. It is synchronous; call
+it inside a Tokio runtime. A manual <code>trigger()</code> bypasses an active <code>Backoff</code> window but
+is rejected on a tripped flow — call <code>reset_flow</code> first. If the flow is mid-run and that run
+fails, the streak restarts at 1, so reset after you observe <code>Tripped</code> or <code>Idle</code>.
 </p>
 
 ```rust
-let snap = running.status("flaky").await.expect("flow exists");
+let snap = running.status("flaky").expect("flow exists");
 if matches!(snap.status, Status::Tripped { .. }) {
-    running.reset_flow("flaky").await?;
+    running.reset_flow("flaky")?;
 }
 
 ```

@@ -51,8 +51,8 @@
 //! # struct MyTask;
 //! # #[task]
 //! # impl Task<State> for MyTask {
-//! #     async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> {
-//! #         Ok(TaskResult::Single(State::Complete))
+//! #     async fn run(&self) -> Result<State, CanoError> {
+//! #         Ok(State::Complete)
 //! #     }
 //! # }
 //! # async fn example() -> Result<(), CanoError> {
@@ -73,19 +73,16 @@
 
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::hash::Hash;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use crate::cancel::CancellationToken;
+use crate::CancellationToken;
 use crate::error::CanoError;
 use crate::observer::WorkflowObserver;
 use crate::recovery::CheckpointStore;
 use crate::resource::Resources;
-use crate::saga::{CompensatableTask, ErasedCompensatable};
-use crate::task::stepped::{ErasedSteppedTask, SteppedAdapter, SteppedTask};
-use crate::task::stream::{ErasedStreamTask, StreamAdapter, StreamTask};
-use crate::task::{RouterTask, Task};
+use crate::saga::ErasedCompensatable;
+use crate::task::{Task, TaskConfig};
 
 #[cfg(feature = "tracing")]
 use tracing::{Instrument, Span, info_span};
@@ -96,8 +93,21 @@ mod join;
 #[cfg(test)]
 pub(crate) mod test_support;
 
+use execution::Entry;
 pub use execution::StateEntry;
-pub use join::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult};
+pub use join::{JoinConfig, JoinStrategy};
+
+/// A task that [`Workflow::register`] accepts.
+///
+/// The task macros implement it for every model (`#[task]`, `#[task::router]`,
+/// `#[task::poll]`, `#[task::timer]`, `#[task::batch]`, `#[task::stepped]`,
+/// `#[task::stream]`, `#[saga::task]`), choosing the engine path for the model. A
+/// hand-written [`Task`] impl (no macro) adds
+/// `impl Registrable<S> for T { fn into_entry(self) -> StateEntry<S> { StateEntry::single(self) } }`.
+pub trait Registrable<TState> {
+    /// The state entry this task registers as.
+    fn into_entry(self) -> StateEntry<TState>;
+}
 
 /// Invoke `f` for each observer in `observers`. Used at every workflow event site;
 /// a no-op when the list is empty (the common case — observers are opt-in).
@@ -109,7 +119,10 @@ pub use join::{JoinConfig, JoinStrategy, SplitResult, SplitTaskResult};
 /// are expected to be infallible, and surfacing the bug to the operator without
 /// coupling it to the workflow's result requires *some* channel.
 #[inline]
-fn notify_observers(observers: &[Arc<dyn WorkflowObserver>], f: impl Fn(&dyn WorkflowObserver)) {
+pub(crate) fn notify_observers(
+    observers: &[Arc<dyn WorkflowObserver>],
+    f: impl Fn(&dyn WorkflowObserver),
+) {
     for observer in observers {
         let observer_ref = observer.as_ref();
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(observer_ref)));
@@ -193,34 +206,16 @@ where
     }
 }
 
-/// State machine workflow orchestration with split/join support
-///
-/// The resource key type defaults to [`Cow<'static, str>`](std::borrow::Cow), which
-/// accepts both `&'static str` literals (allocation-free) and owned `String` keys.
-/// To use a different key type — e.g. an enum for compile-time typo protection —
-/// specify it explicitly:
-///
-/// ```rust,ignore
-/// let workflow = Workflow::<MyState, MyKeyType>::new(resources);
-/// ```
-///
-/// Immutable observer snapshot: `None` = no observers attached (the zero-cost
-/// common case), `Some(slice)` = the workflow's observer list frozen into an
-/// `Arc` slice so `observer_slice()` allocates once and clones cheaply.
-type ObserverSlice = Arc<[Arc<dyn WorkflowObserver>]>;
-
+/// State machine workflow orchestration with split/join support.
 #[must_use]
-pub struct Workflow<TState, TResourceKey = Cow<'static, str>>
+pub struct Workflow<TState>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
-    /// State machine with support for split/join.
-    /// Arc-wrapped so the FSM loop clones the entry as a cheap refcount bump
-    /// rather than cloning the inner `Vec<Arc<dyn Task>>` on every iteration.
-    states: HashMap<TState, Arc<StateEntry<TState, TResourceKey>>>,
+    /// What each state runs. `Arc`-wrapped so cloning a workflow shares the entries.
+    states: HashMap<TState, Arc<Entry<TState>>>,
     /// Shared resources for all tasks
-    pub(crate) resources: Arc<Resources<TResourceKey>>,
+    pub(crate) resources: Arc<Resources>,
     /// Total wall-clock budget for the entire `orchestrate` / `resume_from` call.
     /// When set, the FSM aborts the in-flight task at its next await point as soon
     /// as the budget elapses and drains the compensation stack against
@@ -238,20 +233,15 @@ where
     validated: OnceLock<Result<(), CanoError>>,
     /// Observers notified of lifecycle and failure events. Empty by default;
     /// each event is delivered to every observer in registration order.
-    observers: Vec<Arc<dyn WorkflowObserver>>,
-    /// Cached `Arc` slice snapshot of [`observers`](Self::observers), built on
-    /// first use. `observer_slice()` allocates an `Arc<[...]>` on every call,
-    /// so without this cache each state transition / split task with observers
-    /// attached paid one heap allocation; the slice is immutable once
-    /// `orchestrate` starts (observers are only added via the builder), so a
-    /// `OnceLock` is sound. `None` inside means "no observers" (the common
-    /// case — zero overhead, no allocation).
-    observer_slice_cache: OnceLock<Option<ObserverSlice>>,
-    /// Compensators for every state registered via [`register_with_compensation`](Self::register_with_compensation),
+    observers: Arc<[Arc<dyn WorkflowObserver>]>,
+    /// Compensators for every state registered via [`register`](Self::register),
     /// keyed by the task's [`name`](crate::saga::CompensatableTask::name). Used to look a
     /// compensator up by id when draining the compensation stack — including a stack
     /// rehydrated from a checkpoint log, where only the `task_id` string is available.
-    compensators: HashMap<Arc<str>, Arc<dyn ErasedCompensatable<TState, TResourceKey>>>,
+    compensators: HashMap<Arc<str>, Arc<dyn ErasedCompensatable<TState>>>,
+    /// A registration mistake that can only be reported later: [`validate`](Self::validate)
+    /// returns it before its other checks (first one wins).
+    config_error: Option<CanoError>,
     /// Optional append-only checkpoint store. When set (alongside [`workflow_id`](Self::workflow_id)),
     /// every state entry writes a [`CheckpointRow`](crate::recovery::CheckpointRow) before the state's task runs, so a
     /// crashed run can be resumed via [`resume_from`](Self::resume_from). `None` by default —
@@ -272,13 +262,12 @@ where
     tracing_span: Option<Span>,
 }
 
-impl<TState, TResourceKey> Workflow<TState, TResourceKey>
+impl<TState> Workflow<TState>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// Create a new workflow with the given resources
-    pub fn new(resources: Resources<TResourceKey>) -> Self {
+    pub fn new(resources: Resources) -> Self {
         Self {
             states: HashMap::new(),
             resources: Arc::new(resources),
@@ -286,15 +275,52 @@ where
             compensation_timeout: None,
             exit_states: Vec::new(),
             validated: OnceLock::new(),
-            observers: Vec::new(),
-            observer_slice_cache: OnceLock::new(),
+            observers: Arc::new([]),
             compensators: HashMap::new(),
+            config_error: None,
             checkpoint_store: None,
             workflow_id: None,
             workflow_version: 0,
             #[cfg(feature = "tracing")]
             tracing_span: None,
         }
+    }
+
+    /// Construct a workflow with no resources.
+    ///
+    /// Use when the workflow needs no external dependencies.
+    /// Equivalent to `Workflow::new(Resources::new())`.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use cano::prelude::*;
+    ///
+    /// #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    /// enum Step { Start, Done }
+    ///
+    /// struct NoopTask;
+    ///
+    /// #[task]
+    /// impl Task<Step> for NoopTask {
+    ///     async fn run(&self) -> Result<Step, CanoError> {
+    ///         Ok(Step::Done)
+    ///     }
+    /// }
+    ///
+    /// # #[tokio::main]
+    /// # async fn main() -> Result<(), CanoError> {
+    /// let result = Workflow::bare()
+    ///     .register(Step::Start, NoopTask)
+    ///     .add_exit_state(Step::Done)
+    ///     .orchestrate(Step::Start)
+    ///     .await?;
+    /// assert_eq!(result, Step::Done);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn bare() -> Self {
+        Self::new(Resources::new())
     }
 
     /// Set a wall-clock budget for the entire `orchestrate` (or `resume_from`) call.
@@ -304,9 +330,7 @@ where
     /// [`with_compensation_timeout`](Self::with_compensation_timeout)), and the call
     /// returns [`CanoError::WorkflowTimeout`](crate::CanoError::WorkflowTimeout)
     /// — or [`CanoError::CompensationFailed`](crate::CanoError::CompensationFailed)
-    /// if rollback itself fails. Contrast with [`with_timeout`](Self::with_timeout),
-    /// which is a single `tokio::time::timeout` around the whole future and offers
-    /// no graceful compensation, and with
+    /// if rollback itself fails. Contrast with
     /// [`TaskConfig::with_attempt_timeout`](crate::task::TaskConfig::with_attempt_timeout),
     /// which bounds each individual task attempt.
     ///
@@ -322,9 +346,9 @@ where
     /// # struct Slow;
     /// # #[task]
     /// # impl Task<Step> for Slow {
-    /// #     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    /// #     async fn run(&self) -> Result<Step, CanoError> {
     /// #         tokio::time::sleep(Duration::from_millis(50)).await;
-    /// #         Ok(TaskResult::Single(Step::Done))
+    /// #         Ok(Step::Done)
     /// #     }
     /// # }
     /// #
@@ -336,7 +360,7 @@ where
     ///     .add_exit_state(Step::Done);
     ///
     /// let err = workflow
-    ///     .orchestrate(Step::Start, CancellationToken::disabled())
+    ///     .orchestrate(Step::Start)
     ///     .await
     ///     .expect_err("budget elapses before Done");
     /// // The engine wraps task errors with state context; `.inner()` peels one layer.
@@ -370,8 +394,8 @@ where
     /// # struct Noop;
     /// # #[task]
     /// # impl Task<Step> for Noop {
-    /// #     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-    /// #         Ok(TaskResult::Single(Step::Done))
+    /// #     async fn run(&self) -> Result<Step, CanoError> {
+    /// #         Ok(Step::Done)
     /// #     }
     /// # }
     /// let workflow = Workflow::bare()
@@ -386,66 +410,61 @@ where
         self
     }
 
-    /// Register a single task for a state.
+    /// Register the task that runs when the workflow enters `state`.
     ///
-    /// Associates `task` with `state`. If a handler was already registered for `state`,
-    /// it is replaced. This method is infallible.
-    pub fn register<T>(mut self, state: TState, task: T) -> Self
-    where
-        T: Task<TState, TResourceKey> + Send + Sync + 'static,
-    {
+    /// Accepts any [`Registrable`] task; the task macros (`#[task]`, `#[task::router]`,
+    /// `#[task::poll]`, `#[task::timer]`, `#[task::batch]`, `#[task::stepped]`,
+    /// `#[task::stream]`, `#[saga::task]`) implement it and pick the engine path for
+    /// the model:
+    ///
+    /// - **Router** tasks are dispatched like any task but **skipped by the checkpoint
+    ///   writer**: no [`CheckpointRow`](crate::recovery::CheckpointRow) is appended and
+    ///   no sequence number is consumed (`on_state_enter` still fires). If the *initial*
+    ///   state is a router and the run crashes before any other state is checkpointed,
+    ///   `resume_from` finds zero rows and errors; restarting is safe, routers have no
+    ///   side effects.
+    /// - **Stepped** tasks run each `step` under the task's retry policy and, with a
+    ///   [checkpoint store](Self::with_checkpoint_store) and
+    ///   [workflow id](Self::with_workflow_id), persist every cursor as a
+    ///   [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row;
+    ///   [`resume_from`](Self::resume_from) continues from the last one.
+    /// - **Stream** tasks are windowed by the engine, observe the run's
+    ///   [`CancellationToken`](crate::CancellationToken) (flushing the in-flight window)
+    ///   and, with a store and workflow id, persist each flushed window's cursor.
+    /// - **Compensatable** (saga) tasks push `(task name, serialized output)` onto the
+    ///   run's compensation stack on success; if a later state fails, the stack drains
+    ///   in reverse and each [`compensate`](crate::saga::CompensatableTask::compensate) runs. With a
+    ///   store the output is persisted too, so a resumed run can still compensate it.
+    ///   Compensation covers single-task states only.
+    ///
+    /// Replaces any handler previously registered for `state`. Infallible.
+    pub fn register<T: Registrable<TState>>(mut self, state: TState, task: T) -> Self {
         self.forget_compensator_for(&state);
-        let config = Arc::new(task.config());
-        self.states.insert(
-            state,
-            Arc::new(StateEntry::Single {
-                task: Arc::new(task),
-                config,
-            }),
-        );
-        self
-    }
-
-    /// Register a side-effect-free routing task for a state.
-    ///
-    /// A router only reads resources and returns the next state — it never writes.
-    /// Use this for conditional branching without side effects. Router states are
-    /// dispatched like [`StateEntry::Single`] but **skipped by the checkpoint writer**:
-    /// no [`CheckpointRow`](crate::recovery::CheckpointRow) is appended and no sequence
-    /// number is consumed when a router state is entered. The `on_state_enter` observer
-    /// is still fired.
-    ///
-    /// **Recovery note:** if the *initial* state is a router and the workflow crashes
-    /// before any non-router state has been checkpointed, `resume_from` will find zero
-    /// rows and return an error. Restarting from the initial state is safe because
-    /// routers have no side effects.
-    ///
-    /// `T` must implement both [`RouterTask`] (signals read-only intent) and [`Task`]
-    /// (provides the `run` method the engine calls). Use the `#[task::router]` macro to
-    /// derive the companion [`Task`] impl from your [`RouterTask`] implementation.
-    ///
-    /// Associates `task` with `state`. If a handler was already registered for `state`,
-    /// it is replaced. This method is infallible.
-    pub fn register_router<T>(mut self, state: TState, task: T) -> Self
-    where
-        T: RouterTask<TState, TResourceKey> + Task<TState, TResourceKey> + 'static,
-    {
-        self.forget_compensator_for(&state);
-        let config = Arc::new(Task::config(&task));
-        self.states.insert(
-            state,
-            Arc::new(StateEntry::Router {
-                task: Arc::new(task),
-                config,
-            }),
-        );
+        let entry = task.into_entry().0;
+        if let Entry::Compensatable { task, name, .. } = &entry {
+            // The compensation stack refers to compensators by name: a second state
+            // with the same name would roll back through the wrong instance.
+            if self.compensators.contains_key(name) {
+                self.config_error.get_or_insert_with(|| {
+                    CanoError::configuration(format!(
+                        "two compensatable states share the task name {name:?}; \
+                         override `name()` on one of them"
+                    ))
+                });
+            } else {
+                self.compensators.insert(Arc::clone(name), Arc::clone(task));
+            }
+        }
+        self.states.insert(state, Arc::new(entry));
         self
     }
 
     /// Register multiple tasks that execute in parallel with a join configuration.
     ///
     /// `tasks` accepts any [`IntoIterator`] (a `Vec`, an array, a `(0..n).map(…)` chain,
-    /// etc.); the tasks are collected eagerly at registration time.
+    /// etc.); the tasks are collected eagerly at registration time. Every task model's
+    /// macro emits a [`Task`] impl, so stepped, stream and other model tasks run their
+    /// in-memory loops here (no cursor persistence).
     pub fn register_split<T>(
         mut self,
         state: TState,
@@ -453,139 +472,38 @@ where
         join_config: JoinConfig<TState>,
     ) -> Self
     where
-        T: Task<TState, TResourceKey> + Send + Sync + 'static,
+        T: Task<TState> + 'static,
     {
         self.forget_compensator_for(&state);
-        let mut configs: Vec<Arc<crate::task::TaskConfig>> = Vec::new();
-        let mut arc_tasks: Vec<Arc<dyn Task<TState, TResourceKey> + Send + Sync>> = Vec::new();
+        let mut configs: Vec<Arc<TaskConfig>> = Vec::new();
+        let mut names: Vec<Cow<'static, str>> = Vec::new();
+        let mut arc_tasks: Vec<Arc<dyn Task<TState>>> = Vec::new();
         for t in tasks {
             configs.push(Arc::new(t.config()));
-            arc_tasks.push(Arc::new(t) as Arc<_>);
+            names.push(t.name());
+            arc_tasks.push(Arc::new(t));
         }
 
         self.states.insert(
             state,
-            Arc::new(StateEntry::Split {
+            Arc::new(Entry::Split {
                 tasks: arc_tasks,
-                configs: Arc::new(configs),
-                join_config: Arc::new(join_config),
+                configs,
+                names,
+                join_config,
             }),
         );
         self
     }
 
-    /// If `state` currently holds a [`StateEntry::CompensatableSingle`], drop that task's
-    /// (now-stale) entry from the [`compensators`](Self::compensators) registry, so a later
+    /// If `state` currently holds a compensatable task, drop that task's (now-stale)
+    /// entry from the [`compensators`](Self::compensators) registry, so a later
     /// `register*` for the same state doesn't leave a dangling compensator reachable by id.
     fn forget_compensator_for(&mut self, state: &TState) {
-        let stale_name: Option<Arc<str>> =
-            if let Some(StateEntry::CompensatableSingle { task, .. }) =
-                self.states.get(state).map(|e| e.as_ref())
-            {
-                Some(Arc::from(task.name()))
-            } else {
-                None
-            };
-        if let Some(name) = stale_name {
+        if let Some(Entry::Compensatable { name, .. }) = self.states.get(state).map(|e| &**e) {
+            let name = Arc::clone(name);
             self.compensators.remove(&*name);
         }
-    }
-
-    /// Register a [`CompensatableTask`] for a state.
-    ///
-    /// Like [`register`](Self::register), but the engine captures the task's
-    /// [`Output`](CompensatableTask::Output) when it succeeds and pushes
-    /// `(task name, serialized output)` onto the run's compensation stack. If a *later*
-    /// state's task then fails, the stack is drained in reverse and each
-    /// [`compensate`](CompensatableTask::compensate) runs. With a
-    /// [`checkpoint store`](Self::with_checkpoint_store) attached, the serialized output
-    /// is also persisted, so a [resumed](Self::resume_from) run can still compensate it.
-    ///
-    /// Replaces any handler previously registered for `state`. Infallible.
-    ///
-    /// **Compensation is supported for single-task states only** — there is no
-    /// `register_split_with_compensation` in this version.
-    pub fn register_with_compensation<T>(mut self, state: TState, task: T) -> Self
-    where
-        T: CompensatableTask<TState, TResourceKey> + 'static,
-    {
-        self.forget_compensator_for(&state);
-        let config = Arc::new(task.config());
-        let name: Arc<str> = Arc::from(task.name());
-        let erased: Arc<dyn ErasedCompensatable<TState, TResourceKey>> =
-            Arc::new(crate::saga::CompensatableAdapter(Arc::new(task)));
-        self.compensators.insert(name, Arc::clone(&erased));
-        self.states.insert(
-            state,
-            Arc::new(StateEntry::CompensatableSingle {
-                task: erased,
-                config,
-            }),
-        );
-        self
-    }
-
-    /// Register a [`SteppedTask`] for a state with cursor-level checkpoint persistence.
-    ///
-    /// Unlike [`register`](Self::register), which runs the step loop in-memory via the
-    /// macro-synthesised `Task::run`, this method hands the step loop to the engine so
-    /// it can persist each cursor as a
-    /// [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row after every
-    /// `StepOutcome::More`. A subsequent [`resume_from`](Self::resume_from) rehydrates the
-    /// latest cursor for this state and passes it to the first `step` call, so
-    /// processing resumes from exactly where it left off rather than from `None`.
-    ///
-    /// When no [`checkpoint store`](Self::with_checkpoint_store) is attached the
-    /// behavior is identical to `register` — the step loop runs in-memory with no
-    /// cursor persistence.
-    ///
-    /// Replaces any handler previously registered for `state`. Infallible.
-    pub fn register_stepped<T>(mut self, state: TState, task: T) -> Self
-    where
-        T: SteppedTask<TState, TResourceKey> + 'static,
-    {
-        self.forget_compensator_for(&state);
-        let config = Arc::new(SteppedTask::config(&task));
-        let erased: Arc<dyn ErasedSteppedTask<TState, TResourceKey>> =
-            Arc::new(SteppedAdapter(Arc::new(task)));
-        self.states.insert(
-            state,
-            Arc::new(StateEntry::Stepped {
-                task: erased,
-                config,
-            }),
-        );
-        self
-    }
-
-    /// Register a [`StreamTask`](crate::task::stream::StreamTask) for `state`, with
-    /// engine-driven windowing, cooperative cancellation, and cursor persistence.
-    ///
-    /// Unlike `register` (which runs a `StreamTask`'s in-memory companion loop with no
-    /// persistence and no cancellation), this drives the stream through the FSM engine: it
-    /// observes the run's [`CancellationToken`](crate::cancel::CancellationToken), and —
-    /// when a [`checkpoint store`](Self::with_checkpoint_store) + a
-    /// [`workflow id`](Self::with_workflow_id) are attached — persists the cursor of each
-    /// flushed window so a crashed or cancelled run resumes from the last committed
-    /// position via [`resume_from`](Self::resume_from).
-    ///
-    /// Replaces any handler previously registered for `state`. Infallible.
-    pub fn register_stream<T>(mut self, state: TState, task: T) -> Self
-    where
-        T: StreamTask<TState, TResourceKey> + 'static,
-    {
-        self.forget_compensator_for(&state);
-        let config = Arc::new(StreamTask::config(&task));
-        let erased: Arc<dyn ErasedStreamTask<TState, TResourceKey>> =
-            Arc::new(StreamAdapter(Arc::new(task)));
-        self.states.insert(
-            state,
-            Arc::new(StateEntry::Stream {
-                task: erased,
-                config,
-            }),
-        );
-        self
     }
 
     /// Add exit state
@@ -610,11 +528,8 @@ where
     }
 
     /// Iterate over every state that has a registered handler — every key in the
-    /// internal state map populated by [`register`](Self::register),
-    /// [`register_router`](Self::register_router),
-    /// [`register_split`](Self::register_split),
-    /// [`register_with_compensation`](Self::register_with_compensation), and
-    /// [`register_stepped`](Self::register_stepped). **Exit-only states** added via
+    /// internal state map populated by [`register`](Self::register) and
+    /// [`register_split`](Self::register_split). **Exit-only states** added via
     /// [`add_exit_state`](Self::add_exit_state) without a handler are *not* yielded.
     ///
     /// Iteration order is unspecified (backing storage is a `HashMap`).
@@ -641,8 +556,8 @@ where
     /// struct NoopTask;
     /// #[task]
     /// impl Task<Step> for NoopTask {
-    ///     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-    ///         Ok(TaskResult::Single(Step::Done))
+    ///     async fn run(&self) -> Result<Step, CanoError> {
+    ///         Ok(Step::Done)
     ///     }
     /// }
     ///
@@ -661,13 +576,13 @@ where
     ///     .register(Step::Start, NoopTask)
     ///     .add_exit_state(Step::Done)
     ///     .with_observer(counter.clone());
-    /// workflow.orchestrate(Step::Start, CancellationToken::disabled()).await?;
+    /// workflow.orchestrate(Step::Start).await?;
     /// assert_eq!(counter.0.load(Ordering::Relaxed), 1);
     /// # Ok(())
     /// # }
     /// ```
     pub fn with_observer(mut self, observer: Arc<dyn WorkflowObserver>) -> Self {
-        self.observers.push(observer);
+        self.observers = self.observers.iter().cloned().chain([observer]).collect();
         self
     }
 
@@ -730,8 +645,8 @@ where
     /// # struct MyTask;
     /// # #[task]
     /// # impl Task<State> for MyTask {
-    /// #     async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> {
-    /// #         Ok(TaskResult::Single(State::Done))
+    /// #     async fn run(&self) -> Result<State, CanoError> {
+    /// #         Ok(State::Done)
     /// #     }
     /// # }
     /// let workflow = Workflow::bare()
@@ -753,54 +668,7 @@ where
         self
     }
 
-    /// A shareable snapshot of the registered observers, or `None` when none are
-    /// attached. The `None` fast path keeps observer-free workflows allocation-free
-    /// per dispatch. The snapshot is cached in a `OnceLock` so observer-attached
-    /// workflows pay the `Arc<[...]>` allocation exactly once instead of once per
-    /// state transition / split task.
-    fn observer_slice(&self) -> Option<ObserverSlice> {
-        self.observer_slice_cache
-            .get_or_init(|| {
-                if self.observers.is_empty() {
-                    None
-                } else {
-                    Some(Arc::from(self.observers.as_slice()))
-                }
-            })
-            .clone()
-    }
-
-    /// Return `base` unchanged when no observers are attached; otherwise a cloned
-    /// config carrying the observer slice and task name so [`run_with_retries`]
-    /// can emit `on_retry` / `on_circuit_open`.
-    ///
-    /// [`run_with_retries`]: crate::task::run_with_retries
-    // `&Cow<'static, str>` is deliberate here: cloning a borrowed type-name
-    // stays zero-alloc on the per-dispatch hot path, which `&str` + `to_owned`
-    // would forfeit.
-    #[allow(clippy::ptr_arg)]
-    fn config_with_observers(
-        base: &Arc<crate::task::TaskConfig>,
-        observers: &Option<ObserverSlice>,
-        task_name: &Cow<'static, str>,
-    ) -> Arc<crate::task::TaskConfig> {
-        match observers {
-            None => Arc::clone(base),
-            Some(slice) => {
-                let mut cfg = (**base).clone();
-                cfg.observers = Some(Arc::clone(slice));
-                // Reuse the caller's `Cow` directly: borrowed type-names clone
-                // without allocating, and owned overrides are already owned.
-                cfg.task_name = Some(task_name.clone());
-                Arc::new(cfg)
-            }
-        }
-    }
-
-    fn validate_join_config(
-        join_config: &JoinConfig<TState>,
-        _total_tasks: usize,
-    ) -> Result<(), CanoError> {
+    fn validate_join_config(join_config: &JoinConfig<TState>) -> Result<(), CanoError> {
         if matches!(join_config.strategy, JoinStrategy::PartialTimeout)
             && join_config.timeout.is_none()
         {
@@ -849,8 +717,8 @@ where
     /// # struct MyTask;
     /// # #[task]
     /// # impl Task<State> for MyTask {
-    /// #     async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> {
-    /// #         Ok(TaskResult::Single(State::Done))
+    /// #     async fn run(&self) -> Result<State, CanoError> {
+    /// #         Ok(State::Done)
     /// #     }
     /// # }
     /// let workflow = Workflow::bare()
@@ -860,6 +728,9 @@ where
     /// assert!(workflow.validate().is_ok());
     /// ```
     pub fn validate(&self) -> Result<(), CanoError> {
+        if let Some(err) = &self.config_error {
+            return Err(err.clone());
+        }
         if self.states.is_empty() {
             return Err(CanoError::configuration(
                 "Workflow has no registered state handlers",
@@ -873,11 +744,8 @@ where
         // Each join_state in a Split entry must either be registered or an exit state;
         // otherwise orchestration will always error at runtime after the split completes.
         for entry in self.states.values() {
-            if let StateEntry::Split {
-                tasks, join_config, ..
-            } = entry.as_ref()
-            {
-                Self::validate_join_config(join_config, tasks.len())?;
+            if let Entry::Split { join_config, .. } = &**entry {
+                Self::validate_join_config(join_config)?;
                 let js = &join_config.join_state;
                 if !self.states.contains_key(js) && !self.exit_states.contains(js) {
                     return Err(CanoError::configuration(format!(
@@ -910,8 +778,8 @@ where
     /// # struct MyTask;
     /// # #[task]
     /// # impl Task<State> for MyTask {
-    /// #     async fn run_bare(&self) -> Result<TaskResult<State>, CanoError> {
-    /// #         Ok(TaskResult::Single(State::Done))
+    /// #     async fn run(&self) -> Result<State, CanoError> {
+    /// #         Ok(State::Done)
     /// #     }
     /// # }
     /// let workflow = Workflow::bare()
@@ -934,35 +802,56 @@ where
     /// Drive the workflow FSM from `initial_state` until an exit state is reached.
     ///
     /// Runs lifecycle setup before execution and teardown after, regardless of outcome.
-    ///
-    /// `token` controls cooperative cancellation. Drive the run with a [`CancellationToken`]
-    /// obtained from [`CancellationToken::new`](crate::cancel::CancellationToken::new) and keep the
-    /// paired [`CancellationHandle`](crate::cancel::CancellationHandle); when the handle's
-    /// [`cancel`](crate::cancel::CancellationHandle::cancel) fires, the in-flight cancellable task
-    /// is dropped at its next await point, the saga compensation stack is drained, and the call
-    /// returns [`CanoError::Cancelled`] (wrapped in [`CanoError::WithStateContext`]; a dirty
-    /// rollback yields [`CanoError::CompensationFailed`] whose `errors[0]` is the wrapped cancel).
-    /// To opt a run out of cancellation, pass [`CancellationToken::disabled`] — it never fires and
-    /// is zero-cost (the FSM skips the cancellation `select!` entirely).
-    ///
-    /// Cancellation is cooperative and saga-safe: a task is only interrupted at an `.await`, and a
-    /// [`CompensatableTask`](crate::saga::CompensatableTask) is never interrupted mid-run (it
-    /// completes so its rollback entry is recorded, and the cancel is honoured at the next state
-    /// boundary). The compensation drain itself is uncancellable. See the
-    /// [`cancel`](crate::cancel) module for the full semantics and precedence rules against
-    /// [`with_total_timeout`](Self::with_total_timeout).
+    /// The run cannot be cancelled from outside (it still honours
+    /// [`with_total_timeout`](Self::with_total_timeout)); use
+    /// [`orchestrate_with_token`](Self::orchestrate_with_token) to stop it on a signal.
     ///
     /// # Errors
     ///
-    /// - [`CanoError::Workflow`] -- no handler is registered for the current state, a single
-    ///   task returned a `TaskResult::Split` (use [`Workflow::register_split`] instead), the
-    ///   global workflow timeout was exceeded, or a split strategy was misconfigured
-    /// - [`CanoError::Cancelled`] -- the run was cancelled via `token` (see above)
+    /// - [`CanoError::Configuration`] -- [`validate`](Self::validate) failed
+    /// - [`CanoError::Workflow`] -- no handler is registered for the current state, or the
+    ///   global workflow timeout was exceeded
     /// - Any [`CanoError`] variant propagated from a task during execution
-    pub async fn orchestrate(
+    /// - The error from a failed resource `setup`, or from a failed `teardown` after a
+    ///   *successful* run (the run's own error always takes precedence)
+    pub async fn orchestrate(&self, initial_state: TState) -> Result<TState, CanoError> {
+        self.orchestrate_inner(initial_state, None).await
+    }
+
+    /// [`orchestrate`](Self::orchestrate), cancellable through `token`.
+    ///
+    /// When `token` (or any clone of it) is cancelled, the in-flight cancellable task is
+    /// dropped, the saga compensation stack is drained, and the call returns
+    /// [`CanoError::Cancelled`] wrapped in [`CanoError::WithStateContext`] (check with
+    /// [`CanoError::is_cancelled`]); a dirty rollback yields [`CanoError::CompensationFailed`]
+    /// whose `errors[0]` is the wrapped cancel. Three rules govern it:
+    ///
+    /// - **Cooperative**: the running task is dropped at its next `.await`, so a task doing
+    ///   uninterrupted synchronous work is not interrupted until it next yields.
+    /// - **Saga-safe**: a [`CompensatableTask`](crate::saga::CompensatableTask) is never
+    ///   interrupted mid-run (that would orphan a committed side effect with no entry to roll
+    ///   back); it completes and the cancel is honoured at the next state boundary.
+    /// - **Uncancellable drain**: the compensation drain itself always runs to completion.
+    ///
+    /// If the [`with_total_timeout`](Self::with_total_timeout) budget and the token fire
+    /// together, the cancellation wins.
+    ///
+    /// # Errors
+    ///
+    /// As [`orchestrate`](Self::orchestrate), plus [`CanoError::Cancelled`] when the run was
+    /// cancelled via `token`.
+    pub async fn orchestrate_with_token(
         &self,
         initial_state: TState,
-        token: CancellationToken,
+        token: &CancellationToken,
+    ) -> Result<TState, CanoError> {
+        self.orchestrate_inner(initial_state, Some(token)).await
+    }
+
+    async fn orchestrate_inner(
+        &self,
+        initial_state: TState,
+        token: Option<&CancellationToken>,
     ) -> Result<TState, CanoError> {
         #[cfg(feature = "tracing")]
         let workflow_span = self.tracing_span.clone().unwrap_or_else(|| {
@@ -993,37 +882,74 @@ where
     async fn orchestrate_body(
         &self,
         initial_state: TState,
-        token: CancellationToken,
+        token: Option<&CancellationToken>,
     ) -> Result<TState, CanoError> {
-        // Validate once and cache. Subsequent calls return the cached result without
-        // re-walking the states + splits tree — workflow shape is immutable post-build.
-        let cached_validation = self.validated.get_or_init(|| self.validate());
-        if let Err(e) = cached_validation {
-            return Err(e.clone());
-        }
-
+        self.validate_cached()?;
         // initial_state varies per call; this still runs every time, but it's O(1).
         self.validate_initial_state(&initial_state)?;
 
+        self.with_lifecycle(|| self.run_workflow(initial_state, token))
+            .await
+    }
+
+    /// Set up resources, run `run`, then tear resources down on every exit path.
+    /// The run's error wins; a teardown error is returned only when the run
+    /// succeeded, so a half-torn-down world is never reported as clean.
+    ///
+    /// Takes a closure, not a future, so the (large) FSM future is built in place
+    /// after setup instead of being moved into this one.
+    async fn with_lifecycle<F, Fut>(&self, run: F) -> Result<TState, CanoError>
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = Result<TState, CanoError>>,
+    {
         self.resources.setup_all().await?;
-        let result = self.run_workflow(initial_state, token).await;
-        self.resources
-            .teardown_range(0..self.resources.lifecycle_len())
-            .await;
-        result
+        let result = run().await;
+        let teardown = self.resources.teardown_all_result().await;
+        match (result, teardown) {
+            (Err(e), _) | (Ok(_), Err(e)) => Err(e),
+            (Ok(state), Ok(())) => Ok(state),
+        }
+    }
+
+    /// Validate (cached) + validate the initial state + run the FSM. No resource
+    /// setup/teardown: the scheduler owns its flows' resource lifecycle.
+    #[cfg(feature = "scheduler")]
+    pub(crate) async fn run_once(
+        &self,
+        initial_state: TState,
+        token: Option<&CancellationToken>,
+    ) -> Result<TState, CanoError> {
+        self.validate_cached()?;
+        self.validate_initial_state(&initial_state)?;
+        self.run_workflow(initial_state, token).await
+    }
+
+    /// `validate()`, computed once and cached: the workflow shape is immutable post-build.
+    pub(crate) fn validate_cached(&self) -> Result<(), CanoError> {
+        self.validated.get_or_init(|| self.validate()).clone()
     }
 
     async fn run_workflow(
         &self,
         initial_state: TState,
-        token: CancellationToken,
+        token: Option<&CancellationToken>,
     ) -> Result<TState, CanoError> {
         #[cfg(feature = "metrics")]
         let _active = crate::metrics::WorkflowActiveGuard::new();
         let started = std::time::Instant::now();
         let total_budget = self.resolve_total_budget(started);
         let result = self
-            .execute_workflow(initial_state, total_budget, token)
+            .execute_workflow_from(
+                initial_state,
+                0,
+                self.workflow_id.clone(),
+                Vec::new(),
+                HashMap::new(),
+                Vec::new(),
+                total_budget,
+                token,
+            )
             .await;
         Self::record_run_outcome(&result, started);
         result
@@ -1060,10 +986,9 @@ where
     }
 }
 
-impl<TState, TResourceKey> Clone for Workflow<TState, TResourceKey>
+impl<TState> Clone for Workflow<TState>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     fn clone(&self) -> Self {
         Self {
@@ -1074,11 +999,9 @@ where
             exit_states: self.exit_states.clone(),
             // Fresh OnceLock: cloned workflows re-validate on first orchestrate.
             validated: OnceLock::new(),
-            observers: self.observers.clone(),
-            // Fresh OnceLock: the observer slice is rebuilt on first use (the
-            // observers Vec is copied above, so the cache can't be shared).
-            observer_slice_cache: OnceLock::new(),
+            observers: Arc::clone(&self.observers),
             compensators: self.compensators.clone(),
+            config_error: self.config_error.clone(),
             checkpoint_store: self.checkpoint_store.clone(),
             workflow_id: self.workflow_id.clone(),
             workflow_version: self.workflow_version,
@@ -1088,52 +1011,9 @@ where
     }
 }
 
-impl<TState> Workflow<TState, Cow<'static, str>>
+impl<TState> std::fmt::Debug for Workflow<TState>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-{
-    /// Construct a workflow with no resources.
-    ///
-    /// Use when the workflow needs no external dependencies.
-    /// Equivalent to `Workflow::new(Resources::new())`.
-    ///
-    /// # Example
-    ///
-    /// ```rust
-    /// use cano::prelude::*;
-    ///
-    /// #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-    /// enum Step { Start, Done }
-    ///
-    /// struct NoopTask;
-    ///
-    /// #[task]
-    /// impl Task<Step> for NoopTask {
-    ///     async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-    ///         Ok(TaskResult::Single(Step::Done))
-    ///     }
-    /// }
-    ///
-    /// # #[tokio::main]
-    /// # async fn main() -> Result<(), CanoError> {
-    /// let result = Workflow::bare()
-    ///     .register(Step::Start, NoopTask)
-    ///     .add_exit_state(Step::Done)
-    ///     .orchestrate(Step::Start, CancellationToken::disabled())
-    ///     .await?;
-    /// assert_eq!(result, Step::Done);
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub fn bare() -> Self {
-        Self::new(Resources::new())
-    }
-}
-
-impl<TState, TResourceKey> std::fmt::Debug for Workflow<TState, TResourceKey>
-where
-    TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Workflow")
@@ -1166,17 +1046,14 @@ mod metrics_tests {
     struct GoTo(S);
     #[crate::task]
     impl Task<S> for GoTo {
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(self.0.clone()))
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(self.0.clone())
         }
     }
     struct Boom;
     #[crate::task]
     impl Task<S> for Boom {
-        fn config(&self) -> TaskConfig {
-            TaskConfig::minimal()
-        }
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+        async fn run(&self) -> Result<S, CanoError> {
             Err(CanoError::task_execution("boom"))
         }
     }
@@ -1189,11 +1066,7 @@ mod metrics_tests {
 
     #[test]
     fn successful_run_records_outcome_duration_and_clears_active_gauge() {
-        let (res, rows) = run_with_recorder(|| async {
-            ok_workflow()
-                .orchestrate(S::Start, CancellationToken::disabled())
-                .await
-        });
+        let (res, rows) = run_with_recorder(|| async { ok_workflow().orchestrate(S::Start).await });
         assert_eq!(res.unwrap(), S::Done);
         assert_eq!(
             counter(
@@ -1220,7 +1093,7 @@ mod metrics_tests {
             Workflow::bare()
                 .register(S::Start, Boom)
                 .add_exit_state(S::Done)
-                .orchestrate(S::Start, CancellationToken::disabled())
+                .orchestrate(S::Start)
                 .await
         });
         assert!(res.is_err());
@@ -1233,11 +1106,7 @@ mod metrics_tests {
 
     #[test]
     fn per_state_task_durations_are_recorded_single_and_split() {
-        let (res, rows) = run_with_recorder(|| async {
-            ok_workflow()
-                .orchestrate(S::Start, CancellationToken::disabled())
-                .await
-        });
+        let (res, rows) = run_with_recorder(|| async { ok_workflow().orchestrate(S::Start).await });
         assert_eq!(res.unwrap(), S::Done);
         assert_eq!(
             histogram_count(
@@ -1263,14 +1132,11 @@ mod metrics_tests {
     }
     #[crate::task]
     impl Task<S> for Branch {
-        fn config(&self) -> TaskConfig {
-            TaskConfig::minimal()
-        }
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
+        async fn run(&self) -> Result<S, CanoError> {
             if self.fail {
                 Err(CanoError::task_execution("nope"))
             } else {
-                Ok(TaskResult::Single(S::Done))
+                Ok(S::Done)
             }
         }
     }
@@ -1289,7 +1155,7 @@ mod metrics_tests {
                     JoinConfig::new(JoinStrategy::PartialResults(2), S::Done),
                 )
                 .add_exit_state(S::Done)
-                .orchestrate(S::Start, CancellationToken::disabled())
+                .orchestrate(S::Start)
                 .await
         });
         assert_eq!(res.unwrap(), S::Done);
@@ -1334,7 +1200,7 @@ mod tests {
     use super::*;
     use crate::resource::Resources;
     use crate::task;
-    use crate::task::{Task, TaskResult};
+    use crate::task::Task;
     use cano_macros::task as task_macro;
     use tokio;
 
@@ -1352,10 +1218,7 @@ mod tests {
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete);
 
-        let result = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1366,17 +1229,14 @@ mod tests {
             .register(TestState::Process, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete);
 
-        let result = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
     #[tokio::test]
     async fn test_workflow_with_data() {
         let store = crate::store::MemoryStore::new();
-        let resources = Resources::new().insert("store", store.clone());
+        let resources = Resources::new().insert(store.clone());
         let workflow = Workflow::new(resources)
             .register(
                 TestState::Start,
@@ -1384,10 +1244,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let result = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
 
         let data: String = store.get("test_key").unwrap();
@@ -1400,9 +1257,7 @@ mod tests {
         // upfront rather than reaching the FSM loop.
         let workflow = Workflow::<TestState>::bare().add_exit_state(TestState::Complete);
 
-        let result = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await;
+        let result = workflow.orchestrate(TestState::Start).await;
         let err = result.unwrap_err();
         assert_eq!(err.category(), "configuration");
         assert!(err.to_string().contains("no registered state handlers"));
@@ -1488,10 +1343,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let result = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1507,10 +1359,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let result = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1520,10 +1369,7 @@ mod tests {
         let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_states([TestState::Complete, TestState::Error]);
-        let result = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1533,10 +1379,7 @@ mod tests {
         let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_states([TestState::Complete, TestState::Complete].into_iter());
-        let result = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
@@ -1623,58 +1466,55 @@ mod tests {
     // Edge case coverage tests
 
     // ------------------------------------------------------------------
-    // Workflow::bare() + Task::run_bare() integration
+    // Workflow::bare() + resource-free `run(&self)` integration
     // ------------------------------------------------------------------
 
     struct BareWorkflowTask;
 
     #[task_macro]
     impl Task<TestState> for BareWorkflowTask {
-        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
-            Ok(TaskResult::Single(TestState::Complete))
+        async fn run(&self) -> Result<TestState, CanoError> {
+            Ok(TestState::Complete)
         }
     }
 
     #[tokio::test]
-    async fn test_workflow_bare_runs_task_with_run_bare() {
+    async fn test_workflow_bare_runs_resource_free_task() {
         let result = Workflow::bare()
             .register(TestState::Start, BareWorkflowTask)
             .add_exit_state(TestState::Complete)
-            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .orchestrate(TestState::Start)
             .await
             .unwrap();
         assert_eq!(result, TestState::Complete);
     }
 
     // ------------------------------------------------------------------
-    // register_router tests
+    // router tests
     // ------------------------------------------------------------------
 
     // Note: inside the `cano` crate the inherent `#[task::router(state = S)]` form emits
     // `::cano::RouterTask<...>` paths that don't resolve. Use the trait-impl form instead.
 
     #[tokio::test]
-    async fn test_register_router_orchestration_round_trip() {
-        use crate::task::{RouterTask, TaskConfig};
+    async fn test_router_orchestration_round_trip() {
+        use crate::task::RouterTask;
 
         // A router that unconditionally routes Start → Process → Complete.
         struct RouteToProcess;
 
         #[task::router]
         impl RouterTask<TestState> for RouteToProcess {
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
-            async fn route(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
-                Ok(TaskResult::Single(TestState::Process))
+            async fn route(&self, _res: &Resources) -> Result<TestState, CanoError> {
+                Ok(TestState::Process)
             }
         }
 
         let result = Workflow::bare()
-            .register_router(TestState::Start, RouteToProcess)
+            .register(TestState::Start, RouteToProcess)
             .register(TestState::Process, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
-            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .orchestrate(TestState::Start)
             .await
             .unwrap();
 
@@ -1683,22 +1523,19 @@ mod tests {
 
     #[test]
     fn registered_states_returns_all_registered_keys() {
-        use crate::task::{RouterTask, TaskConfig};
+        use crate::task::RouterTask;
 
         struct GoRoute;
         #[task::router]
         impl RouterTask<TestState> for GoRoute {
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
-            async fn route(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
-                Ok(TaskResult::Single(TestState::Process))
+            async fn route(&self, _res: &Resources) -> Result<TestState, CanoError> {
+                Ok(TestState::Process)
             }
         }
 
         let wf = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Process))
-            .register_router(TestState::Process, GoRoute)
+            .register(TestState::Process, GoRoute)
             .register_split(
                 TestState::Split,
                 vec![SimpleTask::new(TestState::Join)],
@@ -1716,22 +1553,19 @@ mod tests {
 
     #[test]
     fn test_validate_passes_with_router_state() {
-        use crate::task::{RouterTask, TaskConfig};
+        use crate::task::RouterTask;
 
         struct RouteToComplete;
 
         #[task::router]
         impl RouterTask<TestState> for RouteToComplete {
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
-            async fn route(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
-                Ok(TaskResult::Single(TestState::Complete))
+            async fn route(&self, _res: &Resources) -> Result<TestState, CanoError> {
+                Ok(TestState::Complete)
             }
         }
 
         let workflow = Workflow::bare()
-            .register_router(TestState::Start, RouteToComplete)
+            .register(TestState::Start, RouteToComplete)
             .add_exit_state(TestState::Complete);
 
         assert!(workflow.validate().is_ok());
@@ -1800,7 +1634,7 @@ mod tests {
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
             .with_observer(Arc::new(PanickyObserver))
-            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .orchestrate(TestState::Start)
             .await
             .expect("orchestrate must complete despite observer panic");
         assert_eq!(result, TestState::Complete);
@@ -1830,7 +1664,7 @@ mod tests {
             .register(TestState::Process, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
             .with_observer(Arc::new(CountThenPanic(Arc::clone(&count))))
-            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .orchestrate(TestState::Start)
             .await
             .expect("orchestrate must complete despite repeated observer panics");
         assert_eq!(result, TestState::Complete);
@@ -1851,10 +1685,7 @@ mod tests {
         let wf = Workflow::bare()
             .register(TestState::Start, start.clone())
             .add_exit_state(TestState::Complete);
-        let result = wf
-            .orchestrate(TestState::Complete, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = wf.orchestrate(TestState::Complete).await.unwrap();
         assert_eq!(result, TestState::Complete);
         assert_eq!(
             start.count(),
@@ -1872,10 +1703,7 @@ mod tests {
             .register(TestState::Start, SimpleTask::new(TestState::Process))
             .register(TestState::Process, process.clone())
             .add_exit_state(TestState::Process);
-        let result = wf
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = wf.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Process);
         assert_eq!(
             process.count(),
@@ -1891,10 +1719,7 @@ mod tests {
         let wf = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Process))
             .add_exit_state(TestState::Complete);
-        let err = wf
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = wf.orchestrate(TestState::Start).await.unwrap_err();
         assert!(err.to_string().contains("No task registered"), "got: {err}");
     }
 
@@ -1905,37 +1730,13 @@ mod tests {
         let wf = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete);
-        let err = wf
-            .orchestrate(TestState::Process, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = wf.orchestrate(TestState::Process).await.unwrap_err();
         assert_eq!(err.category(), "configuration");
         assert!(
             err.to_string()
                 .contains("neither registered nor an exit state"),
             "got: {err}"
         );
-    }
-
-    struct ReturnsSplit;
-    #[task_macro]
-    impl Task<TestState> for ReturnsSplit {
-        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
-            Ok(TaskResult::Split(vec![TestState::Complete]))
-        }
-    }
-
-    #[tokio::test]
-    async fn single_task_returning_split_errors() {
-        // A non-split state whose task returns TaskResult::Split is a misuse -> clear error.
-        let wf = Workflow::bare()
-            .register(TestState::Start, ReturnsSplit)
-            .add_exit_state(TestState::Complete);
-        let err = wf
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("use register_split"), "got: {err}");
     }
 
     #[tokio::test]
@@ -1945,10 +1746,7 @@ mod tests {
             .register(TestState::Start, first.clone())
             .register(TestState::Start, SimpleTask::new(TestState::Complete)) // replaces `first`
             .add_exit_state(TestState::Complete);
-        let result = wf
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = wf.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete); // the second handler ran
         assert_eq!(first.count(), 0, "the replaced handler must not run");
     }
@@ -1959,13 +1757,13 @@ mod tests {
     }
     #[task_macro]
     impl Task<TestState> for LoopUntil {
-        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+        async fn run(&self) -> Result<TestState, CanoError> {
             use std::sync::atomic::Ordering;
             let n = self.count.fetch_add(1, Ordering::SeqCst) + 1;
             if n >= self.limit {
-                Ok(TaskResult::Single(TestState::Complete))
+                Ok(TestState::Complete)
             } else {
-                Ok(TaskResult::Single(TestState::Start)) // self-loop
+                Ok(TestState::Start) // self-loop
             }
         }
     }
@@ -1984,10 +1782,7 @@ mod tests {
                 },
             )
             .add_exit_state(TestState::Complete);
-        let result = wf
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = wf.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 5);
     }
@@ -2006,7 +1801,7 @@ mod tests {
             .add_exit_state(TestState::Complete);
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            wf.orchestrate(TestState::Start, CancellationToken::disabled()),
+            wf.orchestrate(TestState::Start),
         )
         .await
         .expect("orchestrate of an empty split must not hang");

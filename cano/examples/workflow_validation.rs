@@ -40,9 +40,9 @@ struct PrepareTask;
 
 #[task(state = Step)]
 impl PrepareTask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         println!("  prepare: loading work items");
-        Ok(TaskResult::Single(Step::Process))
+        Ok(Step::Process)
     }
 }
 
@@ -52,9 +52,9 @@ struct WorkerTask {
 
 #[task(state = Step)]
 impl WorkerTask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         println!("  worker {}: done", self.id);
-        Ok(TaskResult::Single(Step::Aggregate))
+        Ok(Step::Aggregate)
     }
 }
 
@@ -62,9 +62,9 @@ struct AggregateTask;
 
 #[task(state = Step)]
 impl AggregateTask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         println!("  aggregate: collecting results");
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -102,9 +102,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Err(e) => println!("  validate_initial_state(Prepare) -> Err: {e}"),
         }
 
-        let result = workflow
-            .orchestrate(Step::Prepare, CancellationToken::disabled())
-            .await?;
+        let result = workflow.orchestrate(Step::Prepare).await?;
         println!("  orchestrate -> {result:?}\n");
     }
 

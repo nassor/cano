@@ -9,7 +9,6 @@ use std::borrow::Cow;
 enum Step {
     Route,
     PathA,
-    PathB,
     Done,
 }
 
@@ -21,8 +20,8 @@ struct InherentRouter;
 
 #[task::router(state = Step)]
 impl InherentRouter {
-    async fn route(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::PathA))
+    async fn route(&self, _res: &Resources) -> Result<Step, CanoError> {
+        Ok(Step::PathA)
     }
 }
 
@@ -32,7 +31,7 @@ fn inherent_router_has_default_config() {
         RouterTask::<Step>::config(&InherentRouter)
             .retry_mode
             .max_attempts(),
-        4
+        1
     );
 }
 
@@ -48,14 +47,14 @@ fn inherent_router_has_default_name() {
 async fn inherent_router_route_works() {
     let res = Resources::new();
     let result = RouterTask::route(&InherentRouter, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::PathA));
+    assert_eq!(result, Step::PathA);
 }
 
 #[tokio::test]
 async fn inherent_router_task_run_works() {
     let res = Resources::new();
     let result = Task::run(&InherentRouter, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::PathA));
+    assert_eq!(result, Step::PathA);
 }
 
 // ---------------------------------------------------------------------------
@@ -66,16 +65,12 @@ struct InherentCustomRouter;
 
 #[task::router(state = Step)]
 impl InherentCustomRouter {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-
     fn name(&self) -> Cow<'static, str> {
         Cow::Borrowed("my-inherent-router")
     }
 
-    async fn route(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    async fn route(&self, _res: &Resources) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 
@@ -113,26 +108,6 @@ fn inherent_companion_task_forwards_name() {
 }
 
 // ---------------------------------------------------------------------------
-// Inherent form returning Split
-// ---------------------------------------------------------------------------
-
-struct InherentSplitRouter;
-
-#[task::router(state = Step)]
-impl InherentSplitRouter {
-    async fn route(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Split(vec![Step::PathA, Step::PathB]))
-    }
-}
-
-#[tokio::test]
-async fn inherent_router_can_return_split() {
-    let res = Resources::new();
-    let result = Task::run(&InherentSplitRouter, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Split(vec![Step::PathA, Step::PathB]));
-}
-
-// ---------------------------------------------------------------------------
 // Trait-impl form: `#[task::router] impl RouterTask<S> for T { ... }`
 // ---------------------------------------------------------------------------
 
@@ -140,8 +115,8 @@ struct TraitRouter;
 
 #[task::router]
 impl RouterTask<Step> for TraitRouter {
-    async fn route(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::PathA))
+    async fn route(&self, _res: &Resources) -> Result<Step, CanoError> {
+        Ok(Step::PathA)
     }
 }
 
@@ -149,14 +124,14 @@ impl RouterTask<Step> for TraitRouter {
 async fn trait_form_route_works() {
     let res = Resources::new();
     let result = RouterTask::route(&TraitRouter, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::PathA));
+    assert_eq!(result, Step::PathA);
 }
 
 #[tokio::test]
 async fn trait_form_companion_task_run_works() {
     let res = Resources::new();
     let result = Task::run(&TraitRouter, &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::PathA));
+    assert_eq!(result, Step::PathA);
 }
 
 // ---------------------------------------------------------------------------
@@ -169,7 +144,7 @@ async fn inherent_router_as_dyn_task() {
     let router: Arc<dyn Task<Step>> = Arc::new(InherentRouter);
     let res = Resources::new();
     let result = Task::run(router.as_ref(), &res).await.unwrap();
-    assert_eq!(result, TaskResult::Single(Step::PathA));
+    assert_eq!(result, Step::PathA);
 }
 
 // ---------------------------------------------------------------------------
@@ -180,8 +155,8 @@ struct PathATask;
 
 #[task(state = Step)]
 impl PathATask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    async fn run(&self) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 
@@ -192,10 +167,7 @@ async fn inherent_router_integrates_with_workflow() {
         .register(Step::PathA, PathATask)
         .add_exit_state(Step::Done);
 
-    let result = workflow
-        .orchestrate(Step::Route, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Step::Route).await.unwrap();
     assert_eq!(result, Step::Done);
 }
 
@@ -206,9 +178,6 @@ async fn trait_router_integrates_with_workflow() {
         .register(Step::PathA, PathATask)
         .add_exit_state(Step::Done);
 
-    let result = workflow
-        .orchestrate(Step::Route, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Step::Route).await.unwrap();
     assert_eq!(result, Step::Done);
 }

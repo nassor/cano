@@ -7,17 +7,16 @@
 //! last recorded state, rehydrating the compensation stack from the log.
 
 use std::collections::HashMap;
-use std::hash::Hash;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use futures_util::FutureExt;
 
-use crate::cancel::CancellationToken;
 use crate::error::CanoError;
 use crate::recovery::RowKind;
 use crate::saga::{CompensationEntry, ErasedCompensatable};
-use crate::task::{TaskResult, run_with_retries};
+use crate::task::{ObserverCtx, TaskConfig, run_with_retries_observed};
+use tokio_util::sync::CancellationToken;
 
 use super::{Workflow, notify_observers, panic_payload_message};
 
@@ -70,12 +69,6 @@ pub(super) struct RehydratedRun<TState> {
     pub(super) compensation_stack: Vec<CompensationEntry>,
     pub(super) resume_cursors: HashMap<String, Vec<u8>>,
     pub(super) prior_transitions: Vec<TState>,
-    /// Highest-sequence `StateEntry` row whose `state == resume_label`, or
-    /// `resume_sequence + 1` when no such row exists (F4 fallback). Exposed
-    /// for tests; the caller doesn't need it for `execute_workflow_from`
-    /// since it's only used internally to filter `prior_transitions`.
-    #[allow(dead_code)]
-    pub(super) resume_state_entry_cutoff: u64,
 }
 
 impl<TState> RehydratedRun<TState>
@@ -193,15 +186,13 @@ where
             compensation_stack,
             resume_cursors,
             prior_transitions,
-            resume_state_entry_cutoff: cutoff,
         }
     }
 }
 
-impl<TState, TResourceKey> Workflow<TState, TResourceKey>
+impl<TState> Workflow<TState>
 where
     TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// Drain the compensation stack (LIFO) after a terminal workflow failure.
     ///
@@ -404,35 +395,18 @@ where
         let _ = clear_result;
     }
 
+    /// Run a compensatable task under `config`. The entry's config has
+    /// `attempt_timeout` stripped at registration (see `StateEntry::compensatable`):
+    /// the adapter bounds only the forward call, so a timeout never drops the inline
+    /// compensate path with the typed output lost.
     pub(super) async fn execute_compensatable_task(
         &self,
-        task: Arc<dyn ErasedCompensatable<TState, TResourceKey>>,
-        config: Arc<crate::task::TaskConfig>,
+        task: &dyn ErasedCompensatable<TState>,
+        config: &TaskConfig,
+        task_name: &str,
     ) -> Result<(TState, Vec<u8>), CanoError> {
-        let observers = self.observer_slice();
-        let task_name = task.name();
-        if let Some(ref slice) = observers {
-            notify_observers(slice, |o| o.on_task_start(task_name.as_ref()));
-        }
-        let config = Self::config_with_observers(&config, &observers, &task_name);
-        // Strip `attempt_timeout` before handing the config to
-        // `run_with_retries`. The compensatable adapter applies the original
-        // attempt_timeout *only* to the forward call (see
-        // `CompensatableAdapter::run`); leaving it on the retry-loop config
-        // would also wrap the inline-compensate path in `tokio::time::timeout`
-        // — dropping that future mid-await destroys the typed `output` value
-        // with no recovery path (the compensation entry was never persisted),
-        // leaving partial side effects with no automated rollback. Stripping
-        // here keeps the per-attempt bound on the forward call while letting
-        // inline compensate run to completion.
-        let config = if config.attempt_timeout.is_some() {
-            Arc::new(crate::task::TaskConfig {
-                attempt_timeout: None,
-                ..(*config).clone()
-            })
-        } else {
-            config
-        };
+        let obs = ObserverCtx::new(&self.observers, task_name);
+        notify_observers(&self.observers, |o| o.on_task_start(task_name));
 
         #[cfg(feature = "tracing")]
         let task_span = if tracing::enabled!(tracing::Level::INFO) {
@@ -441,14 +415,8 @@ where
             tracing::Span::none()
         };
 
-        let run_future = async {
-            run_with_retries(&config, || {
-                let task_clone = task.clone();
-                let resources_clone = Arc::clone(&self.resources);
-                async move { task_clone.run(&*resources_clone).await }
-            })
-            .await
-        };
+        let resources = &*self.resources;
+        let run_future = run_with_retries_observed(config, obs.as_ref(), || task.run(resources));
 
         let run = super::catch_panic_to_error(run_future, "Compensatable task");
         // Attach with `Instrument`, never `Span::enter()`: a guard held across `.await` stays
@@ -456,21 +424,11 @@ where
         // a migration), corrupting every trace on the runtime.
         #[cfg(feature = "tracing")]
         let run = run.instrument(task_span);
-        let result: Result<(TaskResult<TState>, Vec<u8>), CanoError> = run.await;
+        let outcome: Result<(TState, Vec<u8>), CanoError> = run.await;
 
-        let outcome: Result<(TState, Vec<u8>), CanoError> = match result {
-            Ok((TaskResult::Single(next_state), blob)) => Ok((next_state, blob)),
-            Ok((TaskResult::Split(_), _)) => Err(CanoError::workflow(
-                "Compensatable task returned a split result — split states cannot be compensatable",
-            )),
-            Err(e) => Err(e),
-        };
-
-        if let Some(ref slice) = observers {
-            match &outcome {
-                Ok(_) => notify_observers(slice, |o| o.on_task_success(task_name.as_ref())),
-                Err(e) => notify_observers(slice, |o| o.on_task_failure(task_name.as_ref(), e)),
-            }
+        match &outcome {
+            Ok(_) => notify_observers(&self.observers, |o| o.on_task_success(task_name)),
+            Err(e) => notify_observers(&self.observers, |o| o.on_task_failure(task_name, e)),
         }
         outcome
     }
@@ -516,12 +474,8 @@ where
     /// Rows with other kinds — ordinary [`RowKind::StateEntry`] rows and
     /// [`RowKind::StepCursor`] rows — are ignored by the rehydration.
     ///
-    /// `token` controls cooperative cancellation exactly as in
-    /// [`orchestrate`](Self::orchestrate): firing the paired
-    /// [`CancellationHandle`](crate::cancel::CancellationHandle) aborts the resumed run at the next
-    /// await point and drains the rehydrated compensation stack, returning
-    /// [`CanoError::Cancelled`]. Pass [`CancellationToken::disabled`] to opt out. See the
-    /// [`cancel`](crate::cancel) module for the full cancellation semantics.
+    /// The resumed run cannot be cancelled from outside; use
+    /// [`resume_from_with_token`](Self::resume_from_with_token) for that.
     ///
     /// # Errors
     ///
@@ -531,18 +485,36 @@ where
     ///   rows for `workflow_id`.
     /// - [`CanoError::Workflow`] — the recorded state label doesn't match any state of
     ///   this workflow (e.g. resuming against a different workflow definition).
-    /// - [`CanoError::Cancelled`] — the resumed run was cancelled via `token`.
     /// - Any [`CanoError`] propagated from a task during the resumed execution.
     /// - The error from a failed resource `teardown` after a *successful* run —
     ///   the run's own error (if any) always takes precedence, and teardown
     ///   errors on a failed run are logged but not surfaced.
-    pub async fn resume_from(
+    pub async fn resume_from(&self, workflow_id: impl Into<Arc<str>>) -> Result<TState, CanoError> {
+        self.resume_from_inner(workflow_id.into(), None).await
+    }
+
+    /// [`resume_from`](Self::resume_from), cancellable through `token` with the same
+    /// semantics as [`orchestrate_with_token`](Self::orchestrate_with_token): the resumed run
+    /// stops at the next await point and drains the rehydrated compensation stack.
+    ///
+    /// # Errors
+    ///
+    /// As [`resume_from`](Self::resume_from), plus [`CanoError::Cancelled`] when the resumed
+    /// run was cancelled via `token`.
+    pub async fn resume_from_with_token(
         &self,
         workflow_id: impl Into<Arc<str>>,
-        token: CancellationToken,
+        token: &CancellationToken,
     ) -> Result<TState, CanoError> {
-        let workflow_id: Arc<str> = workflow_id.into();
+        self.resume_from_inner(workflow_id.into(), Some(token))
+            .await
+    }
 
+    async fn resume_from_inner(
+        &self,
+        workflow_id: Arc<str>,
+        token: Option<&CancellationToken>,
+    ) -> Result<TState, CanoError> {
         #[cfg(feature = "tracing")]
         let workflow_span = self.tracing_span.clone().unwrap_or_else(|| {
             if tracing::enabled!(tracing::Level::INFO) {
@@ -568,7 +540,7 @@ where
     async fn resume_from_body(
         &self,
         workflow_id: Arc<str>,
-        token: CancellationToken,
+        token: Option<&CancellationToken>,
     ) -> Result<TState, CanoError> {
         let store = self.checkpoint_store.clone().ok_or_else(|| {
             CanoError::configuration(
@@ -576,40 +548,13 @@ where
             )
         })?;
 
-        let cached_validation = self.validated.get_or_init(|| self.validate());
-        if let Err(e) = cached_validation {
-            return Err(e.clone());
-        }
+        self.validate_cached()?;
 
-        // Set up resources before any rehydration work. If `setup_all` fails
-        // we'd otherwise have a fully-rebuilt compensation stack and a fired
-        // `on_resume` event with no way to use them — the rehydrated entries
-        // would be silently dropped. Doing setup first means a failure leaves
-        // the on-disk log unchanged, the observer pipeline un-notified, and
-        // the caller can retry `resume_from` after fixing their resources.
-        self.resources.setup_all().await?;
-
-        // Once setup_all succeeds, EVERY exit path from this function must
-        // run teardown — even the rehydration `?`/`return Err` early-returns
-        // between here and `execute_workflow_from`. Wrap the body so a single
-        // `teardown_range` call at the bottom handles every path uniformly.
-        let result: Result<TState, CanoError> =
-            self.execute_resume_inner(workflow_id, store, token).await;
-        let teardown_result = self
-            .resources
-            .teardown_range_result(0..self.resources.lifecycle_len())
-            .await;
-        match (result, teardown_result) {
-            // The run itself failed — that error is the primary signal; the
-            // teardown error was already logged by `teardown_range_result`.
-            (Err(e), _) => Err(e),
-            // The run succeeded but resources could not be torn down. Surface
-            // the teardown error so the caller knows the cleanup was incomplete
-            // (leaked connections, locks, files, ...) instead of silently
-            // treating a half-torn-down world as clean.
-            (Ok(_), Err(e)) => Err(e),
-            (Ok(state), Ok(())) => Ok(state),
-        }
+        // Resources are set up before any rehydration work, so a setup failure leaves
+        // the on-disk log unchanged and `on_resume` unfired; `with_lifecycle` tears them
+        // down on every exit path of the rehydration + run.
+        self.with_lifecycle(|| self.execute_resume_inner(workflow_id, store, token))
+            .await
     }
 
     /// The body of `resume_from` between `setup_all` and the unconditional
@@ -622,7 +567,7 @@ where
         &self,
         workflow_id: Arc<str>,
         store: Arc<dyn crate::recovery::CheckpointStore>,
-        token: CancellationToken,
+        token: Option<&CancellationToken>,
     ) -> Result<TState, CanoError> {
         let mut rows = store.load_run(&workflow_id).await.map_err(|e| {
             CanoError::checkpoint_store(format!("load checkpoint run {workflow_id:?}: {e}"))
@@ -681,7 +626,6 @@ where
             compensation_stack,
             resume_cursors,
             prior_transitions,
-            resume_state_entry_cutoff: _,
         } = RehydratedRun::<TState>::from_rows(
             &rows,
             &resume_label,
@@ -728,7 +672,6 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PollErrorPolicy;
     use crate::resource::Resources;
     use crate::saga;
     use crate::saga::CompensatableTask;
@@ -760,7 +703,7 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_row_written_for_each_state_entered() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Process))
             .register(TestState::Process, SimpleTask::new(TestState::Complete))
@@ -769,23 +712,20 @@ mod tests {
             .with_workflow_id("run-1");
 
         assert_eq!(
-            workflow
-                .orchestrate(TestState::Start, CancellationToken::disabled())
-                .await
-                .unwrap(),
+            workflow.orchestrate(TestState::Start).await.unwrap(),
             TestState::Complete
         );
 
         // One row per state entered, in order — including the terminal exit state.
         assert_eq!(
-            store.audit_states("run-1"),
+            audit_states(&store, "run-1"),
             vec![
                 (0, "Start".to_string()),
                 (1, "Process".to_string()),
                 (2, "Complete".to_string()),
             ]
         );
-        let rows = store.audit_rows("run-1");
+        let rows = audit_rows(&store, "run-1");
         assert!(
             !rows[0].task_id.is_empty() && !rows[1].task_id.is_empty(),
             "rows for registered states carry the task name"
@@ -806,23 +746,17 @@ mod tests {
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete);
         assert_eq!(
-            workflow
-                .orchestrate(TestState::Start, CancellationToken::disabled())
-                .await
-                .unwrap(),
+            workflow.orchestrate(TestState::Start).await.unwrap(),
             TestState::Complete
         );
-        let err = workflow
-            .resume_from("whatever", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("whatever").await.unwrap_err();
         assert_eq!(err.category(), "configuration");
         assert!(err.message().contains("checkpoint store"));
     }
 
     #[tokio::test]
     async fn resume_continues_from_last_checkpointed_state() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // Seed: the run got as far as entering `Process` before "crashing".
         store
             .append("run-2", CheckpointRow::new(0, "Start", ""))
@@ -844,10 +778,7 @@ mod tests {
             .with_observer(Arc::new(observer));
 
         assert_eq!(
-            workflow
-                .resume_from("run-2", CancellationToken::disabled())
-                .await
-                .unwrap(),
+            workflow.resume_from("run-2").await.unwrap(),
             TestState::Complete
         );
         assert_eq!(
@@ -863,7 +794,7 @@ mod tests {
 
         // Continuation appended rows from sequence 2 onward (re-entering `Process`, then `Complete`).
         assert_eq!(
-            store.audit_states("run-2"),
+            audit_states(&store, "run-2"),
             vec![
                 (0, "Start".to_string()),
                 (1, "Process".to_string()),
@@ -880,7 +811,7 @@ mod tests {
 
     #[tokio::test]
     async fn resume_from_exit_state_returns_immediately() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         store
             .append("done-run", CheckpointRow::new(0, "Start", ""))
             .await
@@ -896,10 +827,7 @@ mod tests {
             .with_checkpoint_store(store.clone());
 
         assert_eq!(
-            workflow
-                .resume_from("done-run", CancellationToken::disabled())
-                .await
-                .unwrap(),
+            workflow.resume_from("done-run").await.unwrap(),
             TestState::Complete
         );
         assert_eq!(
@@ -911,7 +839,7 @@ mod tests {
 
     #[tokio::test]
     async fn split_state_writes_a_single_checkpoint_row() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let tasks: Vec<SimpleTask> = (0..5)
             .map(|_| SimpleTask::new(TestState::Complete))
             .collect();
@@ -923,22 +851,19 @@ mod tests {
             .with_workflow_id("split-run");
 
         assert_eq!(
-            workflow
-                .orchestrate(TestState::Start, CancellationToken::disabled())
-                .await
-                .unwrap(),
+            workflow.orchestrate(TestState::Start).await.unwrap(),
             TestState::Complete
         );
 
         // The 5-way split is one state ⇒ one entry row, not five.
-        let rows = store.audit_rows("split-run");
+        let rows = audit_rows(&store, "split-run");
         assert_eq!(
             rows.iter().filter(|r| r.state == "Start").count(),
             1,
             "the split state is checkpointed exactly once"
         );
         assert_eq!(
-            store.audit_states("split-run"),
+            audit_states(&store, "split-run"),
             vec![(0, "Start".to_string()), (1, "Complete".to_string())]
         );
         assert!(
@@ -949,16 +874,13 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_requires_workflow_id_on_orchestrate() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // Store attached but no workflow id — orchestrate must error at the first checkpoint write.
         let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         // Errors raised inside `execute_workflow_from` are wrapped with state context;
         // `.inner()` peels one layer back to the underlying checkpoint_store error.
         assert_eq!(err.inner().category(), "checkpoint_store");
@@ -967,22 +889,19 @@ mod tests {
 
     #[tokio::test]
     async fn resume_unknown_workflow_id_errors() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
-        let err = workflow
-            .resume_from("never-ran", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("never-ran").await.unwrap_err();
         assert_eq!(err.category(), "checkpoint_store");
         assert!(err.message().contains("no checkpoint rows"));
     }
 
     #[tokio::test]
     async fn resume_with_unrecognized_state_label_errors() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         store
             .append(
                 "wrong-defn",
@@ -994,10 +913,7 @@ mod tests {
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
-        let err = workflow
-            .resume_from("wrong-defn", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("wrong-defn").await.unwrap_err();
         assert_eq!(err.category(), "workflow");
         assert!(err.message().contains("is not a registered or exit state"));
     }
@@ -1008,28 +924,25 @@ mod tests {
     async fn router_state_produces_no_checkpoint_row_and_sequences_are_dense() {
         // Note: inside the `cano` crate the inherent `#[task::router(state = S)]` form emits
         // `::cano::RouterTask<...>` paths that don't resolve. Use the trait-impl form instead.
-        use crate::task::{RouterTask, TaskConfig};
+        use crate::task::RouterTask;
 
         struct RouteToWork;
 
         #[task_mod::router]
         impl RouterTask<TestState> for RouteToWork {
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
-            async fn route(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
-                Ok(TaskResult::Single(TestState::Process))
+            async fn route(&self, _res: &Resources) -> Result<TestState, CanoError> {
+                Ok(TestState::Process)
             }
         }
 
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // One `EventLog` observes both on_state_enter and on_checkpoint, to verify the
         // router fires the former but NOT the latter.
         let (obs, rec) = EventLog::new();
 
         // Route (router) → Process (single) → Complete (exit)
         let workflow = Workflow::bare()
-            .register_router(TestState::Start, RouteToWork)
+            .register(TestState::Start, RouteToWork)
             .register(TestState::Process, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone())
@@ -1037,10 +950,7 @@ mod tests {
             .with_observer(Arc::new(obs));
 
         assert_eq!(
-            workflow
-                .orchestrate(TestState::Start, CancellationToken::disabled())
-                .await
-                .unwrap(),
+            workflow.orchestrate(TestState::Start).await.unwrap(),
             TestState::Complete
         );
 
@@ -1053,7 +963,7 @@ mod tests {
 
         // No router row: only Process (seq 0) and Complete (seq 1).
         assert_eq!(
-            store.audit_states("router-run"),
+            audit_states(&store, "router-run"),
             vec![(0, "Process".to_string()), (1, "Complete".to_string())],
             "router state leaves no checkpoint row; sequences are dense from 0"
         );
@@ -1071,21 +981,18 @@ mod tests {
         // Seed a run that was interrupted after `Process` (sequence 0). No Route row exists
         // because `Start` was a router state (skipped). `resume_from` should re-enter at
         // `Process` and finish normally.
-        use crate::task::{RouterTask, TaskConfig};
+        use crate::task::RouterTask;
 
         struct RouteToWork;
 
         #[task_mod::router]
         impl RouterTask<TestState> for RouteToWork {
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
-            async fn route(&self, _res: &Resources) -> Result<TaskResult<TestState>, CanoError> {
-                Ok(TaskResult::Single(TestState::Process))
+            async fn route(&self, _res: &Resources) -> Result<TestState, CanoError> {
+                Ok(TestState::Process)
             }
         }
 
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // Only the Process row exists — as if the run crashed right after entering Process
         // (the Start router left no row).
         store
@@ -1095,16 +1002,13 @@ mod tests {
 
         let process_task = SimpleTask::new(TestState::Complete);
         let workflow = Workflow::bare()
-            .register_router(TestState::Start, RouteToWork)
+            .register(TestState::Start, RouteToWork)
             .register(TestState::Process, process_task.clone())
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
         assert_eq!(
-            workflow
-                .resume_from("router-resume", CancellationToken::disabled())
-                .await
-                .unwrap(),
+            workflow.resume_from("router-resume").await.unwrap(),
             TestState::Complete
         );
         assert_eq!(
@@ -1114,7 +1018,7 @@ mod tests {
         );
         // Continuation wrote Process (seq 1) and Complete (seq 2).
         assert_eq!(
-            store.audit_states("router-resume"),
+            audit_states(&store, "router-resume"),
             vec![
                 (0, "Process".to_string()),
                 (1, "Process".to_string()),
@@ -1133,19 +1037,19 @@ mod tests {
     async fn compensations_run_in_reverse_on_terminal_failure() {
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 1, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask::ok("B", 2, TestState::Split, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Split,
                 CompTask::ok("C", 3, TestState::Join, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Join,
                 CompTask {
                     name: "D",
@@ -1158,10 +1062,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         // Clean rollback → the original failure is surfaced, wrapped with state context.
         assert_eq!(err.inner().category(), "task_execution");
         assert_eq!(err.message(), "D forward failed");
@@ -1181,17 +1082,17 @@ mod tests {
     async fn only_compensatable_tasks_are_compensated() {
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 10, TestState::Process, &log),
             )
             // Plain task — produces no compensation-stack entry.
             .register(TestState::Process, SimpleTask::new(TestState::Split))
-            .register_with_compensation(
+            .register(
                 TestState::Split,
                 CompTask::ok("C", 30, TestState::Join, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Join,
                 CompTask {
                     name: "D",
@@ -1204,10 +1105,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         assert_eq!(err.message(), "D forward failed");
         // Only the two compensatable tasks rolled back — the plain `Process` task didn't.
         assert_eq!(
@@ -1220,11 +1118,11 @@ mod tests {
     async fn compensation_failure_aggregates_errors_and_keeps_going() {
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 1, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask {
                     name: "B",
@@ -1235,11 +1133,11 @@ mod tests {
                     fail_compensate: true, // B's compensate errors
                 },
             )
-            .register_with_compensation(
+            .register(
                 TestState::Split,
                 CompTask::ok("C", 3, TestState::Join, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Join,
                 CompTask {
                     name: "D",
@@ -1252,10 +1150,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         match err {
             CanoError::CompensationFailed { errors } => {
                 // [original (D forward failed, wrapped with state context), B's compensate failure].
@@ -1284,7 +1179,7 @@ mod tests {
         // and errors[1] = A's compensate failure.
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask {
                     name: "A",
@@ -1295,7 +1190,7 @@ mod tests {
                     fail_compensate: true,
                 },
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask {
                     name: "B",
@@ -1308,10 +1203,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         match err {
             CanoError::CompensationFailed { errors } => {
                 assert!(
@@ -1346,7 +1238,7 @@ mod tests {
 
     #[tokio::test]
     async fn resume_rehydrates_compensation_stack_and_rolls_back() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
 
         // Seed a log as if a previous process: entered Start, ran compensatable A (output 7),
@@ -1381,15 +1273,15 @@ mod tests {
             .unwrap();
 
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 7, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask::ok("B", 8, TestState::Split, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Split,
                 CompTask {
                     name: "C",
@@ -1403,10 +1295,7 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
-        let err = workflow
-            .resume_from("saga-run", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("saga-run").await.unwrap_err();
         assert_eq!(err.message(), "C forward failed");
         // The rehydrated stack [A=7, B=8] drains in reverse, using the outputs persisted
         // before the crash. C never produced an output (it failed forward).
@@ -1424,7 +1313,7 @@ mod tests {
     async fn resume_step_cursor_row_is_not_added_to_compensation_stack() {
         use crate::recovery::RowKind;
 
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
 
         // Seed a mixed log:
@@ -1478,15 +1367,15 @@ mod tests {
         // C (Split state) is the resume point; configure it to fail forward so the compensation
         // stack drains and we can inspect which entries were rehydrated.
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 101, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask::ok("B", 202, TestState::Split, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Split,
                 CompTask {
                     name: "C",
@@ -1500,10 +1389,7 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
-        let err = workflow
-            .resume_from("mixed-run", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("mixed-run").await.unwrap_err();
         // C failed forward (original error is "C forward failed").
         assert_eq!(err.message(), "C forward failed");
 
@@ -1522,11 +1408,11 @@ mod tests {
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
         // Replacing a compensatable state with a different compensatable task.
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 1, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A2", 2, TestState::Process, &log),
             );
@@ -1538,7 +1424,7 @@ mod tests {
 
         // Replacing a compensatable state with a plain `register` also drops it.
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("B", 1, TestState::Process, &log),
             )
@@ -1549,7 +1435,7 @@ mod tests {
     // ---- hardening: concurrency & high-error scenarios ----
 
     fn three_state_checkpointed(
-        store: Arc<MemCheckpoints>,
+        store: Arc<InMemoryCheckpointStore>,
         id: impl Into<Arc<str>>,
     ) -> Workflow<TestState> {
         Workflow::bare()
@@ -1562,7 +1448,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn many_workflows_share_one_store_without_cross_talk() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         const RUNS: usize = 16;
 
         let mut handles = Vec::new();
@@ -1570,7 +1456,7 @@ mod tests {
             let s = Arc::clone(&store);
             handles.push(tokio::spawn(async move {
                 three_state_checkpointed(s, format!("run-{i}"))
-                    .orchestrate(TestState::Start, CancellationToken::disabled())
+                    .orchestrate(TestState::Start)
                     .await
             }));
         }
@@ -1581,7 +1467,7 @@ mod tests {
         for i in 0..RUNS {
             let id = format!("run-{i}");
             assert_eq!(
-                store.audit_states(&id),
+                audit_states(&store, &id),
                 vec![
                     (0, "Start".to_string()),
                     (1, "Process".to_string()),
@@ -1598,13 +1484,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn racing_runs_of_one_id_never_corrupt_and_at_least_one_completes() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let mut handles = Vec::new();
         for _ in 0..2 {
             let s = Arc::clone(&store);
             handles.push(tokio::spawn(async move {
                 three_state_checkpointed(s, "dup")
-                    .orchestrate(TestState::Start, CancellationToken::disabled())
+                    .orchestrate(TestState::Start)
                     .await
             }));
         }
@@ -1631,7 +1517,7 @@ mod tests {
 
     #[tokio::test]
     async fn fresh_run_over_an_uncleared_log_is_rejected() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // A previous run that failed left rows behind (no `clear`).
         store
             .append("run", CheckpointRow::new(0, "Start", "SimpleTask"))
@@ -1643,7 +1529,7 @@ mod tests {
             .unwrap();
 
         let err = three_state_checkpointed(store.clone(), "run")
-            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .orchestrate(TestState::Start)
             .await
             .unwrap_err();
         assert_eq!(err.inner().category(), "checkpoint_store");
@@ -1656,7 +1542,7 @@ mod tests {
     async fn append_failure_mid_run_rolls_back_and_keeps_the_log() {
         // A store that errors on the n-th `append` — a stand-in for a disk-full crash.
         struct FailAfter {
-            inner: MemCheckpoints,
+            inner: InMemoryCheckpointStore,
             ok_appends: std::sync::atomic::AtomicUsize,
         }
         #[cano_macros::checkpoint_store]
@@ -1677,12 +1563,12 @@ mod tests {
 
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
         let store = Arc::new(FailAfter {
-            inner: MemCheckpoints::default(),
+            inner: InMemoryCheckpointStore::new(),
             // Allow: Start entry (1), Start completion (2). Fail on the 3rd append (Process entry).
             ok_appends: std::sync::atomic::AtomicUsize::new(2),
         });
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 // A's compensate *also* fails → dirty rollback → log left for manual recovery.
                 CompTask {
@@ -1694,7 +1580,7 @@ mod tests {
                     fail_compensate: true,
                 },
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask::ok("B", 2, TestState::Complete, &log),
             )
@@ -1702,10 +1588,7 @@ mod tests {
             .with_checkpoint_store(store.clone())
             .with_workflow_id("disk");
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         match err {
             CanoError::CompensationFailed { errors } => {
                 // [the append failure that ended the run (now wrapped with state context),
@@ -1745,7 +1628,7 @@ mod tests {
     impl CompensatableTask<TestState> for CompFault {
         type Output = u32;
         fn config(&self) -> TaskConfig {
-            let cfg = TaskConfig::minimal();
+            let cfg = TaskConfig::new();
             match self.attempt_timeout {
                 Some(d) => cfg.with_attempt_timeout(d),
                 None => cfg,
@@ -1754,8 +1637,8 @@ mod tests {
         fn name(&self) -> Cow<'static, str> {
             Cow::Borrowed(self.name)
         }
-        async fn run(&self, _res: &Resources) -> Result<(TaskResult<TestState>, u32), CanoError> {
-            Ok((TaskResult::Single(self.next.clone()), self.value))
+        async fn run(&self, _res: &Resources) -> Result<(TestState, u32), CanoError> {
+            Ok((self.next.clone(), self.value))
         }
         async fn compensate(&self, _res: &Resources, _output: u32) -> Result<(), CanoError> {
             match self.on_compensate {
@@ -1776,11 +1659,11 @@ mod tests {
     async fn panicking_compensator_is_caught_and_the_drain_continues() {
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 1, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompFault {
                     name: "B",
@@ -1790,7 +1673,7 @@ mod tests {
                     attempt_timeout: None,
                 },
             )
-            .register_with_compensation(
+            .register(
                 TestState::Split,
                 CompTask {
                     name: "C",
@@ -1803,10 +1686,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         match err {
             CanoError::CompensationFailed { errors } => {
                 assert_eq!(errors[0].message(), "C forward failed");
@@ -1825,11 +1705,11 @@ mod tests {
     async fn hanging_compensator_is_bounded_by_attempt_timeout() {
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 1, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompFault {
                     name: "H",
@@ -1839,7 +1719,7 @@ mod tests {
                     attempt_timeout: Some(Duration::from_millis(50)),
                 },
             )
-            .register_with_compensation(
+            .register(
                 TestState::Split,
                 CompTask {
                     name: "C",
@@ -1853,10 +1733,7 @@ mod tests {
             .add_exit_state(TestState::Complete);
 
         let started = std::time::Instant::now();
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "a hanging compensator must be bounded, not block the drain forever"
@@ -1886,11 +1763,11 @@ mod tests {
         // deadline. The drain must NOT block on Slow for the full second.
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("Fast", 1, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompFault {
                     name: "Slow",
@@ -1973,17 +1850,12 @@ mod tests {
         #[saga::task]
         impl CompensatableTask<TestState> for SlowCompensate {
             type Output = u32;
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
+
             fn name(&self) -> Cow<'static, str> {
                 Cow::Borrowed(self.name)
             }
-            async fn run(
-                &self,
-                _res: &Resources,
-            ) -> Result<(TaskResult<TestState>, u32), CanoError> {
-                Ok((TaskResult::Single(self.next_state.clone()), self.value))
+            async fn run(&self, _res: &Resources) -> Result<(TestState, u32), CanoError> {
+                Ok((self.next_state.clone(), self.value))
             }
             async fn compensate(&self, _res: &Resources, output: u32) -> Result<(), CanoError> {
                 tokio::time::sleep(Duration::from_secs(1)).await;
@@ -2003,7 +1875,7 @@ mod tests {
         let workflow = Workflow::bare()
             .with_total_timeout(Duration::from_secs(10))
             .with_compensation_timeout(Duration::from_millis(50))
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 SlowCompensate {
                     log: log.clone(),
@@ -2017,10 +1889,7 @@ mod tests {
             .add_exit_state(TestState::Complete);
 
         let started = std::time::Instant::now();
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         let elapsed = started.elapsed();
 
         // With the bounded drain (50ms cap) the test finishes well under
@@ -2063,11 +1932,11 @@ mod tests {
         // `OrphanedCompensation` errors carrying the blob.
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 1, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask::ok("B", 2, TestState::Complete, &log),
             )
@@ -2164,7 +2033,7 @@ mod tests {
 
     #[tokio::test]
     async fn double_compensate_on_resume_is_avoided() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
 
         // Seed a log that crashed *after* B's completion row but *before* the next state's
@@ -2194,15 +2063,15 @@ mod tests {
             .unwrap();
 
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 1, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask::ok("B", 2, TestState::Split, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Split,
                 CompTask {
                     name: "C",
@@ -2216,10 +2085,7 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
-        let err = workflow
-            .resume_from("crash-after-b", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("crash-after-b").await.unwrap_err();
         assert_eq!(err.message(), "C forward failed");
         // B re-ran on resume and re-pushed its entry; the persisted B-completion row at the
         // resume point must NOT be replayed too, or B would compensate twice. Expect exactly
@@ -2236,7 +2102,7 @@ mod tests {
         // `resume_from` must thread `total_timeout` into the FSM loop the same way the
         // forward `run`/`orchestrate` path does. Without it, a slow resumed task would
         // run to completion regardless of the configured budget.
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // Seed: run got as far as entering `Process` before crashing — resume re-runs Process.
         store
             .append("resume-budget", CheckpointRow::new(0, "Process", ""))
@@ -2249,9 +2115,9 @@ mod tests {
         struct SlowProcess;
         #[task]
         impl Task<TestState> for SlowProcess {
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run(&self) -> Result<TestState, CanoError> {
                 tokio::time::sleep(Duration::from_millis(500)).await;
-                Ok(TaskResult::Single(TestState::Complete))
+                Ok(TestState::Complete)
             }
         }
 
@@ -2266,10 +2132,7 @@ mod tests {
             .with_checkpoint_store(store.clone());
 
         let started = std::time::Instant::now();
-        let err = workflow
-            .resume_from("resume-budget", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("resume-budget").await.unwrap_err();
         let elapsed = started.elapsed();
 
         assert!(
@@ -2303,7 +2166,7 @@ mod tests {
     async fn cross_model_chain_router_poll_batch_stepped_interop() {
         use crate::PollOutcome;
         use crate::recovery::RowKind;
-        use crate::task::{BatchTask, PollTask, RouterTask, StepOutcome, SteppedTask, TaskConfig};
+        use crate::task::{BatchTask, PollTask, RouterTask, StepOutcome, SteppedTask};
         use serde::{Deserialize, Serialize};
         use std::sync::atomic::AtomicU32;
 
@@ -2323,11 +2186,8 @@ mod tests {
 
         #[task_mod::router]
         impl RouterTask<TourStage> for TourRouter {
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
-            async fn route(&self, _res: &Resources) -> Result<TaskResult<TourStage>, CanoError> {
-                Ok(TaskResult::Single(TourStage::Wait))
+            async fn route(&self, _res: &Resources) -> Result<TourStage, CanoError> {
+                Ok(TourStage::Wait)
             }
         }
 
@@ -2339,13 +2199,10 @@ mod tests {
 
         #[task_mod::poll]
         impl PollTask<TourStage> for TourPoller {
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
             async fn poll(&self, _res: &Resources) -> Result<PollOutcome<TourStage>, CanoError> {
                 let n = self.counter.fetch_add(1, Ordering::Relaxed) + 1;
                 if n >= 2 {
-                    Ok(PollOutcome::Ready(TaskResult::Single(TourStage::Crunch)))
+                    Ok(PollOutcome::Ready(TourStage::Crunch))
                 } else {
                     Ok(PollOutcome::Pending { delay_ms: 0 })
                 }
@@ -2361,9 +2218,6 @@ mod tests {
             type Item = u32;
             type ItemOutput = u32;
 
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
             fn concurrency(&self) -> usize {
                 4
             }
@@ -2377,10 +2231,10 @@ mod tests {
                 &self,
                 _res: &Resources,
                 outputs: Vec<Result<u32, CanoError>>,
-            ) -> Result<TaskResult<TourStage>, CanoError> {
+            ) -> Result<TourStage, CanoError> {
                 let sum: u32 = outputs.into_iter().filter_map(|r| r.ok()).sum();
                 assert_eq!(sum, 1 + 4 + 9, "1²+2²+3² = 14");
-                Ok(TaskResult::Single(TourStage::Grind))
+                Ok(TourStage::Grind)
             }
         }
 
@@ -2388,16 +2242,13 @@ mod tests {
         // Counts 0 → 3 (3 steps total: More(1), More(2), More(3), Done).
         struct TourStepper;
 
-        #[derive(Serialize, Deserialize)]
+        #[derive(Clone, Serialize, Deserialize)]
         struct GrindCursor(u32);
 
         #[task_mod::stepped]
         impl SteppedTask<TourStage> for TourStepper {
             type Cursor = GrindCursor;
 
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
             async fn step(
                 &self,
                 _res: &Resources,
@@ -2405,7 +2256,7 @@ mod tests {
             ) -> Result<StepOutcome<GrindCursor, TourStage>, CanoError> {
                 let n = cursor.map(|c| c.0).unwrap_or(0);
                 if n >= 3 {
-                    Ok(StepOutcome::Done(TaskResult::Single(TourStage::Done)))
+                    Ok(StepOutcome::Done(TourStage::Done))
                 } else {
                     Ok(StepOutcome::More(GrindCursor(n + 1)))
                 }
@@ -2413,11 +2264,11 @@ mod tests {
         }
 
         // --- build workflow ---
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let poll_counter = Arc::new(AtomicU32::new(0));
 
         let workflow = Workflow::bare()
-            .register_router(TourStage::Route, TourRouter)
+            .register(TourStage::Route, TourRouter)
             .register(
                 TourStage::Wait,
                 TourPoller {
@@ -2425,19 +2276,16 @@ mod tests {
                 },
             )
             .register(TourStage::Crunch, TourBatch)
-            .register_stepped(TourStage::Grind, TourStepper)
+            .register(TourStage::Grind, TourStepper)
             .add_exit_state(TourStage::Done)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("tour-interop");
 
-        let result = workflow
-            .orchestrate(TourStage::Route, CancellationToken::disabled())
-            .await
-            .unwrap();
+        let result = workflow.orchestrate(TourStage::Route).await.unwrap();
         assert_eq!(result, TourStage::Done);
 
         // --- assertions on the audit log ---
-        let audit = store.audit_rows("tour-interop");
+        let audit = audit_rows(&store, "tour-interop");
 
         // (1) No row whose state label is "Route" (the router skips the checkpoint).
         assert!(
@@ -2477,7 +2325,7 @@ mod tests {
 
     #[tokio::test]
     async fn resume_then_advance_then_fail_rolls_back_mixed_outputs_and_clears() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
 
         // Crash mid-A (entry written, no completion) — A is the resume point and re-runs.
@@ -2487,15 +2335,15 @@ mod tests {
             .unwrap();
 
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 11, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask::ok("B", 22, TestState::Split, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Split,
                 CompTask {
                     name: "C",
@@ -2509,10 +2357,7 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
-        let err = workflow
-            .resume_from("mid-a", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("mid-a").await.unwrap_err();
         assert_eq!(err.message(), "C forward failed");
         // A re-ran (fresh output 11), B ran (22), C failed → drain B then A.
         assert_eq!(
@@ -2530,24 +2375,18 @@ mod tests {
         struct FailFast;
         #[task]
         impl Task<TestState> for FailFast {
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run(&self) -> Result<TestState, CanoError> {
                 Err(CanoError::task_execution("boom"))
             }
         }
 
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let workflow = Workflow::bare()
             .register(TestState::Start, FailFast)
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("nope");
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         assert_eq!(err.inner().category(), "task_execution");
         // The Start checkpoint row is kept (empty stack ⇒ original error, no `clear`) —
         // so the run can still be resumed.
@@ -2568,17 +2407,15 @@ mod tests {
         #[saga::task]
         impl CompensatableTask<u32> for NumComp {
             type Output = u32;
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
+
             fn name(&self) -> Cow<'static, str> {
                 Cow::Owned(format!("n{}", self.idx))
             }
-            async fn run(&self, _res: &Resources) -> Result<(TaskResult<u32>, u32), CanoError> {
+            async fn run(&self, _res: &Resources) -> Result<(u32, u32), CanoError> {
                 if self.fail {
                     return Err(CanoError::task_execution(format!("n{} failed", self.idx)));
                 }
-                Ok((TaskResult::Single(self.idx + 1), self.idx))
+                Ok((self.idx + 1, self.idx))
             }
             async fn compensate(&self, _res: &Resources, output: u32) -> Result<(), CanoError> {
                 self.log.lock().unwrap().push(output);
@@ -2588,7 +2425,7 @@ mod tests {
 
         let mut workflow = Workflow::<u32>::bare().add_exit_state(N);
         for i in 0..N {
-            workflow = workflow.register_with_compensation(
+            workflow = workflow.register(
                 i,
                 NumComp {
                     idx: i,
@@ -2598,10 +2435,7 @@ mod tests {
             );
         }
 
-        let err = workflow
-            .orchestrate(0, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(0).await.unwrap_err();
         assert_eq!(err.message(), format!("n{} failed", N - 1));
         // States 0..N-1 succeeded forward (the last one failed), so 0..N-1 compensate in reverse.
         let expected: Vec<u32> = (0..N - 1).rev().collect();
@@ -2623,17 +2457,15 @@ mod tests {
         #[saga::task]
         impl CompensatableTask<u32> for Step {
             type Output = u32;
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
+
             fn name(&self) -> Cow<'static, str> {
                 Cow::Owned(format!("s{}", self.idx))
             }
-            async fn run(&self, _res: &Resources) -> Result<(TaskResult<u32>, u32), CanoError> {
+            async fn run(&self, _res: &Resources) -> Result<(u32, u32), CanoError> {
                 if self.idx == self.fail_at {
                     return Err(CanoError::task_execution(format!("s{} failed", self.idx)));
                 }
-                Ok((TaskResult::Single(self.idx + 1), self.idx))
+                Ok((self.idx + 1, self.idx))
             }
             async fn compensate(&self, _res: &Resources, output: u32) -> Result<(), CanoError> {
                 self.log.lock().unwrap().push(output);
@@ -2645,7 +2477,7 @@ mod tests {
             let log = Arc::new(Mutex::new(Vec::<u32>::new()));
             let mut workflow = Workflow::<u32>::bare().add_exit_state(N);
             for i in 0..N {
-                workflow = workflow.register_with_compensation(
+                workflow = workflow.register(
                     i,
                     Step {
                         idx: i,
@@ -2654,7 +2486,7 @@ mod tests {
                     },
                 );
             }
-            let result = workflow.orchestrate(0, CancellationToken::disabled()).await;
+            let result = workflow.orchestrate(0).await;
             if fail_at == N {
                 assert_eq!(result.unwrap(), N, "no failure ⇒ run completes");
                 assert!(
@@ -2703,9 +2535,7 @@ mod tests {
     #[task_mod::stepped]
     impl SteppedTask<TestState> for CountStepper {
         type Cursor = u32;
-        fn config(&self) -> TaskConfig {
-            TaskConfig::minimal()
-        }
+
         async fn step(
             &self,
             _res: &Resources,
@@ -2714,7 +2544,7 @@ mod tests {
             self.calls.fetch_add(1, AtomicOrdering::Relaxed);
             let n = cursor.unwrap_or(0) + 1;
             if n >= self.target {
-                Ok(StepOutcome::Done(TaskResult::Single(TestState::Complete)))
+                Ok(StepOutcome::Done(TestState::Complete))
             } else {
                 Ok(StepOutcome::More(n))
             }
@@ -2723,27 +2553,24 @@ mod tests {
 
     #[tokio::test]
     async fn stepped_forward_run_writes_cursor_rows_and_clears_on_success() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let (stepper, calls) = CountStepper::new(4); // steps: None→1, 1→2, 2→3, 3→Done
 
         let workflow = Workflow::bare()
-            .register_stepped(TestState::Start, stepper)
+            .register(TestState::Start, stepper)
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("step-fwd");
 
         assert_eq!(
-            workflow
-                .orchestrate(TestState::Start, CancellationToken::disabled())
-                .await
-                .unwrap(),
+            workflow.orchestrate(TestState::Start).await.unwrap(),
             TestState::Complete
         );
         assert_eq!(calls.load(AtomicOrdering::Relaxed), 4);
 
         // Audit: Start (seq 0), cursor 1 (seq 1), cursor 2 (seq 2), cursor 3 (seq 3),
         // Complete (seq 4). Live rows must be empty on success.
-        let audit = store.audit_rows("step-fwd");
+        let audit = audit_rows(&store, "step-fwd");
         assert_eq!(audit.len(), 5, "start + 3 cursors + exit = 5 rows");
         assert_eq!(audit[0].kind, RowKind::StateEntry);
         assert_eq!(audit[0].state, "Start");
@@ -2769,7 +2596,7 @@ mod tests {
 
     #[tokio::test]
     async fn stepped_resume_continues_from_last_cursor() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
 
         // Seed: the run had entered Start (seq 0), written cursor=1 (seq 1), cursor=2 (seq 2),
         // then crashed. Resume should start from cursor=2, not from None.
@@ -2801,15 +2628,12 @@ mod tests {
         let (stepper, calls) = CountStepper::new(4);
 
         let workflow = Workflow::bare()
-            .register_stepped(TestState::Start, stepper)
+            .register(TestState::Start, stepper)
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
         assert_eq!(
-            workflow
-                .resume_from("step-resume", CancellationToken::disabled())
-                .await
-                .unwrap(),
+            workflow.resume_from("step-resume").await.unwrap(),
             TestState::Complete
         );
         // Only 2 step calls: cursor=2→More(3), cursor=3→Done.
@@ -2824,21 +2648,18 @@ mod tests {
     async fn stepped_sequences_are_dense_after_cursors() {
         // Verify that cursor rows consume sequence numbers and subsequent state rows
         // (e.g. the exit state) continue at the right sequence.
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let (stepper, _) = CountStepper::new(3); // 2 cursor rows (1 and 2), then Done
 
         let workflow = Workflow::bare()
-            .register_stepped(TestState::Start, stepper)
+            .register(TestState::Start, stepper)
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone())
             .with_workflow_id("dense");
 
-        workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        workflow.orchestrate(TestState::Start).await.unwrap();
 
-        let audit = store.audit_rows("dense");
+        let audit = audit_rows(&store, "dense");
         // seq 0: Start (StateEntry), seq 1: cursor=1, seq 2: cursor=2, seq 3: Complete (exit)
         assert_eq!(audit[0].sequence, 0);
         assert_eq!(audit[1].sequence, 1);
@@ -2856,7 +2677,7 @@ mod tests {
     async fn stepped_resume_without_cursor_rows_restarts_from_none() {
         // If the run crashed before any cursor was persisted (only the StateEntry row exists),
         // resume should start from None (same as a fresh run).
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         store
             .append(
                 "step-fresh-resume",
@@ -2868,15 +2689,12 @@ mod tests {
         let (stepper, calls) = CountStepper::new(3); // needs 2 successful steps
 
         let workflow = Workflow::bare()
-            .register_stepped(TestState::Start, stepper)
+            .register(TestState::Start, stepper)
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
         assert_eq!(
-            workflow
-                .resume_from("step-fresh-resume", CancellationToken::disabled())
-                .await
-                .unwrap(),
+            workflow.resume_from("step-fresh-resume").await.unwrap(),
             TestState::Complete
         );
         // Full 2 steps: None→1, 1→2, 2→Done = 3 calls
@@ -2885,13 +2703,13 @@ mod tests {
 
     #[tokio::test]
     async fn stepped_no_store_path_unchanged() {
-        // Without a checkpoint store, register_stepped behaves like register (no rows written).
+        // Without a checkpoint store a stepped task writes no rows.
         let (stepper, calls) = CountStepper::new(3);
 
         let result = Workflow::bare()
-            .register_stepped(TestState::Start, stepper)
+            .register(TestState::Start, stepper)
             .add_exit_state(TestState::Complete)
-            .orchestrate(TestState::Start, CancellationToken::disabled())
+            .orchestrate(TestState::Start)
             .await
             .unwrap();
         assert_eq!(result, TestState::Complete);
@@ -2901,8 +2719,8 @@ mod tests {
     #[tokio::test]
     async fn stepped_cursor_rows_do_not_become_compensation_entries() {
         // Verifies the existing regression test still passes with the full engine path
-        // (StepCursor rows from register_stepped must not pollute the compensation stack).
-        let store = Arc::new(MemCheckpoints::default());
+        // (StepCursor rows from a stepped task must not pollute the compensation stack).
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
 
         // Seed: A (compensatable, seq 0+1), Process StateEntry (seq 2 — the engine
@@ -2942,9 +2760,7 @@ mod tests {
         #[task_mod::stepped]
         impl SteppedTask<TestState> for FailingStepper {
             type Cursor = u32;
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
+
             async fn step(
                 &self,
                 _res: &Resources,
@@ -2955,18 +2771,15 @@ mod tests {
         }
 
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 42, TestState::Process, &log),
             )
-            .register_stepped(TestState::Process, FailingStepper)
+            .register(TestState::Process, FailingStepper)
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
-        let err = workflow
-            .resume_from("mixed-stepped", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("mixed-stepped").await.unwrap_err();
         assert_eq!(err.message(), "stepper failed");
         // A must have been compensated with value 42 from the rehydrated stack.
         assert_eq!(
@@ -2978,7 +2791,7 @@ mod tests {
 
     #[tokio::test]
     async fn workflow_version_is_stamped_on_every_appended_row() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let workflow = Workflow::bare()
             .register(TestState::Start, SimpleTask::new(TestState::Process))
             .register(TestState::Process, SimpleTask::new(TestState::Complete))
@@ -2986,18 +2799,15 @@ mod tests {
             .with_checkpoint_store(store.clone())
             .with_workflow_id("ver-run")
             .with_workflow_version(7);
-        workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
-        let rows = store.audit_rows("ver-run");
+        workflow.orchestrate(TestState::Start).await.unwrap();
+        let rows = audit_rows(&store, "ver-run");
         assert!(rows.iter().all(|r| r.workflow_version == 7));
         assert!(!rows.is_empty(), "expected at least one appended row");
     }
 
     #[tokio::test]
     async fn resume_from_rejects_workflow_version_mismatch() {
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         store
             .append(
                 "ver-mismatch",
@@ -3010,10 +2820,7 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone())
             .with_workflow_version(2);
-        let err = workflow
-            .resume_from("ver-mismatch", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("ver-mismatch").await.unwrap_err();
         assert_eq!(err, CanoError::workflow_version_mismatch(1, 2));
     }
 
@@ -3025,7 +2832,7 @@ mod tests {
         // writes, older schema). The resume should still succeed when there
         // are still rehydrate-able earlier rows; the rehydrated path is
         // best-effort, so missing it is not a fatal corruption.
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // Only a single `StepCursor` row exists for the resume state — no
         // leading `StateEntry`. Previously this configuration was rejected.
         store
@@ -3042,7 +2849,7 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
         let out = workflow
-            .resume_from("wf-no-se", CancellationToken::disabled())
+            .resume_from("wf-no-se")
             .await
             .expect("resume should fall back instead of refusing on missing StateEntry");
         assert_eq!(out, TestState::Complete);
@@ -3056,7 +2863,7 @@ mod tests {
         // at the tail must now resume cleanly; the only authoritative version
         // is the latest one, since that determines which workflow definition
         // continues. Older rows just inform the rehydrated path.
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // Older rows under workflow_version=0.
         store
             .append(
@@ -3081,7 +2888,7 @@ mod tests {
             .with_checkpoint_store(store.clone())
             .with_workflow_version(1);
         let out = workflow
-            .resume_from("mixed-ver", CancellationToken::disabled())
+            .resume_from("mixed-ver")
             .await
             .expect("mixed-version log with matching tail must resume cleanly");
         assert_eq!(out, TestState::Complete);
@@ -3090,7 +2897,7 @@ mod tests {
     // A backend that violates the `load_run` ascending-by-sequence contract.
     // Used only to verify the engine's defensive sort.
     #[derive(Default)]
-    struct UnsortedStore(MemCheckpoints);
+    struct UnsortedStore(InMemoryCheckpointStore);
 
     #[cano_macros::checkpoint_store]
     impl CheckpointStore for UnsortedStore {
@@ -3159,11 +2966,11 @@ mod tests {
             .unwrap();
 
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 1, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask::ok("B", 2, TestState::Error, &log),
             )
@@ -3171,10 +2978,7 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
-        let _ = workflow
-            .resume_from("unsorted", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let _ = workflow.resume_from("unsorted").await.unwrap_err();
         // LIFO drain: B compensates first (output 2), then A (output 1).
         // Without the engine-side sort, the rehydrated stack would have been
         // built in reverse and `A` would have compensated before `B`.
@@ -3203,16 +3007,13 @@ mod tests {
         impl CompensatableTask<TestState> for HangingCompensator {
             type Output = u32;
             fn config(&self) -> TaskConfig {
-                TaskConfig::minimal().with_attempt_timeout(Duration::from_millis(30))
+                TaskConfig::new().with_attempt_timeout(Duration::from_millis(30))
             }
             fn name(&self) -> Cow<'static, str> {
                 Cow::Borrowed("HangingCompensator")
             }
-            async fn run(
-                &self,
-                _res: &Resources,
-            ) -> Result<(TaskResult<TestState>, u32), CanoError> {
-                Ok((TaskResult::Single(TestState::Process), 1))
+            async fn run(&self, _res: &Resources) -> Result<(TestState, u32), CanoError> {
+                Ok((TestState::Process, 1))
             }
             async fn compensate(&self, _res: &Resources, _o: u32) -> Result<(), CanoError> {
                 self.began.store(true, Ordering::SeqCst);
@@ -3225,7 +3026,7 @@ mod tests {
         let began = Arc::new(AtomicBool::new(false));
         let finished = Arc::new(AtomicBool::new(false));
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 HangingCompensator {
                     began: began.clone(),
@@ -3236,10 +3037,7 @@ mod tests {
             .register(TestState::Process, FailTask::new(true))
             .add_exit_state(TestState::Complete);
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         // The drain ran compensate (it started) but timed out before finishing.
         assert!(began.load(Ordering::SeqCst), "compensate must have started");
         assert!(
@@ -3277,15 +3075,15 @@ mod tests {
         #[crate::task]
         impl Task<TestState> for YieldingTask {
             fn config(&self) -> TaskConfig {
-                TaskConfig::minimal().with_attempt_timeout(Duration::from_millis(30))
+                TaskConfig::new().with_attempt_timeout(Duration::from_millis(30))
             }
-            async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+            async fn run(&self) -> Result<TestState, CanoError> {
                 self.started.store(true, Ordering::SeqCst);
                 // Yield well past the attempt_timeout — the future is dropped
                 // here and the `finished` flip below never executes.
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 self.finished.store(true, Ordering::SeqCst);
-                Ok(TaskResult::Single(TestState::Complete))
+                Ok(TestState::Complete)
             }
         }
 
@@ -3301,10 +3099,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         assert!(
             started.load(Ordering::SeqCst),
             "task body must have started"
@@ -3334,16 +3129,11 @@ mod tests {
         #[saga::task]
         impl CompensatableTask<TestState> for LeakyTask {
             type Output = u32;
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
+
             fn name(&self) -> Cow<'static, str> {
                 Cow::Borrowed("LeakyTask")
             }
-            async fn run(
-                &self,
-                _res: &Resources,
-            ) -> Result<(TaskResult<TestState>, u32), CanoError> {
+            async fn run(&self, _res: &Resources) -> Result<(TestState, u32), CanoError> {
                 // Simulate the contract violation: commit FIRST, panic SECOND.
                 self.committed.store(true, Ordering::SeqCst);
                 panic!("commit happened, never reached Ok");
@@ -3357,7 +3147,7 @@ mod tests {
         let committed = Arc::new(AtomicBool::new(false));
         let compensated = Arc::new(AtomicBool::new(false));
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 LeakyTask {
                     committed: committed.clone(),
@@ -3366,10 +3156,7 @@ mod tests {
             )
             .add_exit_state(TestState::Complete);
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         assert!(
             committed.load(Ordering::SeqCst),
             "commit must have happened"
@@ -3395,7 +3182,7 @@ mod tests {
         // observer pipeline.
 
         // A store that succeeds on append but always errors on clear.
-        struct ClearFailsStore(MemCheckpoints);
+        struct ClearFailsStore(InMemoryCheckpointStore);
         #[cano_macros::checkpoint_store]
         impl CheckpointStore for ClearFailsStore {
             async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
@@ -3409,7 +3196,7 @@ mod tests {
             }
         }
 
-        let store = Arc::new(ClearFailsStore(MemCheckpoints::default()));
+        let store = Arc::new(ClearFailsStore(InMemoryCheckpointStore::new()));
         let (obs, rec) = EventLog::new();
 
         let workflow = Workflow::bare()
@@ -3420,10 +3207,7 @@ mod tests {
             .with_observer(Arc::new(obs));
 
         // Successful run that triggers the clear-on-success path.
-        workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        workflow.orchestrate(TestState::Start).await.unwrap();
 
         let calls = rec.clear_failures();
         assert_eq!(calls.len(), 1, "expected one clear-failure event");
@@ -3456,13 +3240,13 @@ mod tests {
             fn config(&self) -> TaskConfig {
                 // Configure a per-attempt timeout that USED to cancel inline
                 // compensate. The fix is that compensate ignores it.
-                TaskConfig::minimal().with_attempt_timeout(Duration::from_millis(30))
+                TaskConfig::new().with_attempt_timeout(Duration::from_millis(30))
             }
             async fn run(
                 &self,
                 _res: &Resources,
-            ) -> Result<(TaskResult<TestState>, NeverSerialize), CanoError> {
-                Ok((TaskResult::Single(TestState::Complete), NeverSerialize))
+            ) -> Result<(TestState, NeverSerialize), CanoError> {
+                Ok((TestState::Complete, NeverSerialize))
             }
             async fn compensate(
                 &self,
@@ -3480,14 +3264,11 @@ mod tests {
 
         let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let workflow = Workflow::bare()
-            .register_with_compensation(TestState::Start, CountingCompensate { ran: ran.clone() })
+            .register(TestState::Start, CountingCompensate { ran: ran.clone() })
             .add_exit_state(TestState::Complete);
 
         let started = std::time::Instant::now();
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         let elapsed = started.elapsed();
         assert!(
             ran.load(std::sync::atomic::Ordering::SeqCst),
@@ -3516,14 +3297,12 @@ mod tests {
         #[saga::task]
         impl CompensatableTask<TestState> for PanickyCompensate {
             type Output = NeverSerialize;
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
+
             async fn run(
                 &self,
                 _res: &Resources,
-            ) -> Result<(TaskResult<TestState>, NeverSerialize), CanoError> {
-                Ok((TaskResult::Single(TestState::Complete), NeverSerialize))
+            ) -> Result<(TestState, NeverSerialize), CanoError> {
+                Ok((TestState::Complete, NeverSerialize))
             }
             async fn compensate(
                 &self,
@@ -3535,13 +3314,10 @@ mod tests {
         }
 
         let workflow = Workflow::bare()
-            .register_with_compensation(TestState::Start, PanickyCompensate)
+            .register(TestState::Start, PanickyCompensate)
             .add_exit_state(TestState::Complete);
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         match err.inner() {
             CanoError::CompensationFailed { errors } => {
                 assert!(
@@ -3573,14 +3349,12 @@ mod tests {
         #[saga::task]
         impl CompensatableTask<TestState> for InlineFailingCompensate {
             type Output = NeverSerialize;
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
+
             async fn run(
                 &self,
                 _res: &Resources,
-            ) -> Result<(TaskResult<TestState>, NeverSerialize), CanoError> {
-                Ok((TaskResult::Single(TestState::Complete), NeverSerialize))
+            ) -> Result<(TestState, NeverSerialize), CanoError> {
+                Ok((TestState::Complete, NeverSerialize))
             }
             async fn compensate(
                 &self,
@@ -3592,12 +3366,9 @@ mod tests {
         }
 
         let workflow = Workflow::bare()
-            .register_with_compensation(TestState::Start, InlineFailingCompensate)
+            .register(TestState::Start, InlineFailingCompensate)
             .add_exit_state(TestState::Complete);
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         let errors = match err {
             CanoError::CompensationFailed { errors } => errors,
             other => panic!("expected CompensationFailed, got: {other:?}"),
@@ -3651,71 +3422,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn compensatable_split_return_triggers_inline_compensate() {
-        // A CompensatableTask returning Split is rejected by the adapter BEFORE
-        // serialize, and the side effect committed in `run` is rolled back via
-        // the inline-compensate path — mirroring the serialize-failure case.
-        use std::sync::atomic::{AtomicBool, Ordering};
-
-        type Effect = Arc<Mutex<Vec<&'static str>>>;
-
-        #[derive(Clone)]
-        struct LeakySplit {
-            log: Effect,
-            charged: Arc<AtomicBool>,
-        }
-        #[saga::task]
-        impl CompensatableTask<TestState> for LeakySplit {
-            type Output = u32;
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
-            async fn run(
-                &self,
-                _res: &Resources,
-            ) -> Result<(TaskResult<TestState>, u32), CanoError> {
-                self.log.lock().unwrap().push("charged");
-                self.charged.store(true, Ordering::SeqCst);
-                // Misuse: a saga task must never return Split. Pre-fix the
-                // FSM rejected this *after* the run already committed, leaking
-                // the side effect. Now the adapter rejects it AND calls
-                // compensate inline.
-                Ok((TaskResult::Split(vec![TestState::Process]), 7))
-            }
-            async fn compensate(&self, _res: &Resources, _o: u32) -> Result<(), CanoError> {
-                self.log.lock().unwrap().push("refunded");
-                Ok(())
-            }
-        }
-
-        let log: Effect = Arc::new(Mutex::new(Vec::new()));
-        let charged = Arc::new(AtomicBool::new(false));
-        let workflow = Workflow::bare()
-            .register_with_compensation(
-                TestState::Start,
-                LeakySplit {
-                    log: log.clone(),
-                    charged: charged.clone(),
-                },
-            )
-            .add_exit_state(TestState::Complete);
-
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
-        assert!(charged.load(Ordering::SeqCst));
-        // The error mentions the split rejection.
-        assert!(err.message().contains("split"), "got: {err}");
-        // Crucially: compensate ran inline → side effect undone.
-        assert_eq!(
-            *log.lock().unwrap(),
-            vec!["charged", "refunded"],
-            "Split-return must trigger inline compensate, not leak the side effect"
-        );
-    }
-
-    #[tokio::test]
     async fn compensatable_serialize_failure_runs_inline_compensate() {
         // When the adapter cannot serialize `Output` into a checkpoint blob,
         // the forward `run` has already executed and any committed side effect
@@ -3731,19 +3437,17 @@ mod tests {
         #[saga::task]
         impl CompensatableTask<TestState> for LeakyCharge {
             type Output = NeverSerialize;
-            fn config(&self) -> TaskConfig {
-                TaskConfig::minimal()
-            }
+
             fn name(&self) -> Cow<'static, str> {
                 Cow::Borrowed("LeakyCharge")
             }
             async fn run(
                 &self,
                 _res: &Resources,
-            ) -> Result<(TaskResult<TestState>, NeverSerialize), CanoError> {
+            ) -> Result<(TestState, NeverSerialize), CanoError> {
                 // Simulated commit of an external side effect.
                 self.log.lock().unwrap().push("charged");
-                Ok((TaskResult::Single(TestState::Complete), NeverSerialize))
+                Ok((TestState::Complete, NeverSerialize))
             }
             async fn compensate(
                 &self,
@@ -3757,13 +3461,10 @@ mod tests {
 
         let log: SideEffect = Arc::new(Mutex::new(Vec::new()));
         let workflow = Workflow::bare()
-            .register_with_compensation(TestState::Start, LeakyCharge { log: log.clone() })
+            .register(TestState::Start, LeakyCharge { log: log.clone() })
             .add_exit_state(TestState::Complete);
 
-        let err = workflow
-            .orchestrate(TestState::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.orchestrate(TestState::Start).await.unwrap_err();
         // The serialize error is what surfaces (wrapped with state context).
         assert!(err.message().contains("serialize"), "got: {err}");
 
@@ -3796,7 +3497,7 @@ mod tests {
         }
 
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // Pre-existing CompCompletion row so there's something to rehydrate.
         store
             .append(
@@ -3821,21 +3522,18 @@ mod tests {
             )
             .await
             .unwrap();
-        let rows_before = store.audit_rows("f3").len();
+        let rows_before = audit_rows(&store, "f3").len();
 
         let triggered = Arc::new(AtomicBool::new(false));
-        let resources = Resources::new().insert(
-            "db",
-            FailingResource {
-                triggered: triggered.clone(),
-            },
-        );
+        let resources = Resources::new().insert(FailingResource {
+            triggered: triggered.clone(),
+        });
 
         // Observer that records every on_resume call.
         let (obs, rec) = EventLog::new();
 
         let workflow = Workflow::new(resources)
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 1, TestState::Process, &log),
             )
@@ -3844,10 +3542,7 @@ mod tests {
             .with_checkpoint_store(store.clone())
             .with_observer(Arc::new(obs));
 
-        let err = workflow
-            .resume_from("f3", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("f3").await.unwrap_err();
         // Setup ran and failed.
         assert!(triggered.load(Ordering::SeqCst));
         // The resource error surfaces (not wrapped in WithStateContext, not
@@ -3855,7 +3550,7 @@ mod tests {
         assert!(err.message().contains("db unavailable"), "got: {err}");
         // The checkpoint log is unchanged — no new rows appended.
         assert_eq!(
-            store.audit_rows("f3").len(),
+            audit_rows(&store, "f3").len(),
             rows_before,
             "checkpoint log must be untouched on setup failure"
         );
@@ -3872,7 +3567,7 @@ mod tests {
         // `OrphanedCompensation { task_id, output_blob }` variant so operators
         // can match on it and decode the blob for manual recovery — a bare
         // string error would lose the data needed to undo the side effect.
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // Build a log: CompCompletion for a renamed task `ghost_v1`, then a
         // StateEntry for the resume point whose task fails forward.
         let blob = serde_json::to_vec(&99u32).unwrap();
@@ -3908,10 +3603,7 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
-        let err = workflow
-            .resume_from("orphan", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("orphan").await.unwrap_err();
         // The drain produced two errors (original + orphan) → CompensationFailed.
         let inner = match &err {
             CanoError::CompensationFailed { errors } => errors.clone(),
@@ -3943,7 +3635,7 @@ mod tests {
         // than the crash row, so a naive `sequence != resume_sequence` filter
         // would keep it AND the FSM would re-push it when the state re-runs.
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         store
             .append(
                 "f9",
@@ -3980,11 +3672,11 @@ mod tests {
             .unwrap();
 
         let workflow = Workflow::bare()
-            .register_with_compensation(
+            .register(
                 TestState::Start,
                 CompTask::ok("A", 1, TestState::Process, &log),
             )
-            .register_with_compensation(
+            .register(
                 TestState::Process,
                 CompTask::ok("B", 2, TestState::Error, &log),
             )
@@ -3992,10 +3684,7 @@ mod tests {
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
-        let err = workflow
-            .resume_from("f9", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("f9").await.unwrap_err();
         // The drain ran two compensators (clean rollback) so the surfaced
         // error is just the original wrapped failure.
         let ctx = match &err {
@@ -4029,7 +3718,7 @@ mod tests {
         // rename without a `with_workflow_version` bump). Operators couldn't
         // see the gap. Now the engine fires `on_unknown_resume_state` per
         // unrecognized row so observers/metrics can surface the drift.
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         // Pre-populate the log with a StateEntry referencing a state ("Charge")
         // the current workflow no longer registers, plus a registered state
         // ("Start") whose label IS valid. The resume must drop the Charge row
@@ -4067,9 +3756,7 @@ mod tests {
             .with_observer(Arc::new(obs));
 
         // Resume succeeds (label dropped from path; gap surfaced via observer).
-        let _ = workflow
-            .resume_from("f-rename", CancellationToken::disabled())
-            .await;
+        let _ = workflow.resume_from("f-rename").await;
         let recorded = rec.unknown_states();
         assert_eq!(
             recorded.len(),
@@ -4112,24 +3799,18 @@ mod tests {
         // empty-rows check fails post-setup.
         let setups = Arc::new(AtomicU32::new(0));
         let teardowns = Arc::new(AtomicU32::new(0));
-        let resources = Resources::new().insert(
-            "counter",
-            CountingResource {
-                setups: setups.clone(),
-                teardowns: teardowns.clone(),
-            },
-        );
-        let store = Arc::new(MemCheckpoints::default());
+        let resources = Resources::new().insert(CountingResource {
+            setups: setups.clone(),
+            teardowns: teardowns.clone(),
+        });
+        let store = Arc::new(InMemoryCheckpointStore::new());
         let workflow = Workflow::new(resources)
             .register(TestState::Start, SimpleTask::new(TestState::Complete))
             .add_exit_state(TestState::Complete)
             .with_checkpoint_store(store.clone());
 
         // Case 1: no rows for the id — `load_run` returns empty.
-        let err = workflow
-            .resume_from("never-existed", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("never-existed").await.unwrap_err();
         assert!(err.message().contains("no checkpoint rows"), "got: {err}");
         assert_eq!(setups.load(Ordering::SeqCst), 1, "setup must have run");
         assert_eq!(
@@ -4146,10 +3827,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let err = workflow
-            .resume_from("ver-mismatch", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("ver-mismatch").await.unwrap_err();
         assert!(matches!(err, CanoError::WorkflowVersionMismatch { .. }));
         assert_eq!(setups.load(Ordering::SeqCst), 2);
         assert_eq!(
@@ -4166,10 +3844,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let err = workflow
-            .resume_from("bad-label", CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = workflow.resume_from("bad-label").await.unwrap_err();
         assert!(err.message().contains("is not a registered or exit state"));
         assert_eq!(setups.load(Ordering::SeqCst), 3);
         assert_eq!(
@@ -4189,7 +3864,7 @@ mod tests {
         // back to `last.sequence + 1` as cutoff and lets the resume succeed
         // — losing the prior_transitions row is acceptable; refusing to
         // resume recoverable work is not.
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         store
             .append(
                 "missing-entry",
@@ -4218,7 +3893,7 @@ mod tests {
             .with_checkpoint_store(store.clone());
 
         let out = workflow
-            .resume_from("missing-entry", CancellationToken::disabled())
+            .resume_from("missing-entry")
             .await
             .expect("resume should fall back rather than refuse on missing StateEntry");
         assert_eq!(out, TestState::Complete);
@@ -4232,7 +3907,7 @@ mod tests {
         // kept (with a tracing warning) so a mid-run version bump can resume
         // cleanly. Rejecting on a per-row scan refused exactly the migration
         // path `workflow_version` was meant to support.
-        let store = Arc::new(MemCheckpoints::default());
+        let store = Arc::new(InMemoryCheckpointStore::new());
         store
             .append(
                 "mixed-ver",
@@ -4256,7 +3931,7 @@ mod tests {
             .with_workflow_version(2);
 
         let out = workflow
-            .resume_from("mixed-ver", CancellationToken::disabled())
+            .resume_from("mixed-ver")
             .await
             .expect("post-F3, mixed-version log with matching tail must resume");
         assert_eq!(out, TestState::Complete);
@@ -4314,7 +3989,6 @@ mod rehydrated_run_tests {
         assert!(rh.resume_cursors.is_empty());
         assert!(rh.prior_transitions.is_empty());
         // F4 fallback: resume_sequence + 1 when no StateEntry rows exist.
-        assert_eq!(rh.resume_state_entry_cutoff, 1);
     }
 
     #[test]
@@ -4331,7 +4005,6 @@ mod rehydrated_run_tests {
             "wf",
             resolve_test_state,
         );
-        assert_eq!(rh.resume_state_entry_cutoff, 5);
         assert!(rh.prior_transitions.is_empty());
         assert!(rh.compensation_stack.is_empty());
         assert!(rh.resume_cursors.is_empty());
@@ -4358,7 +4031,6 @@ mod rehydrated_run_tests {
             "wf",
             resolve_test_state,
         );
-        assert_eq!(rh.resume_state_entry_cutoff, 2);
         // The Start StateEntry survives (sequence 0 < cutoff 2).
         assert_eq!(rh.prior_transitions, vec![TestState::Start]);
         // The Process step cursor was rehydrated.
@@ -4383,7 +4055,6 @@ mod rehydrated_run_tests {
             "wf",
             resolve_test_state,
         );
-        assert_eq!(rh.resume_state_entry_cutoff, 1);
         assert_eq!(rh.prior_transitions, vec![TestState::Start]);
     }
 
@@ -4409,7 +4080,6 @@ mod rehydrated_run_tests {
             "wf-rename",
             resolve_test_state,
         );
-        assert_eq!(rh.resume_state_entry_cutoff, 2);
         // Only Start made it (Charge dropped, Process is the resume state).
         assert_eq!(rh.prior_transitions, vec![TestState::Start]);
         let events = recorder.unknown_states();
@@ -4481,7 +4151,6 @@ mod rehydrated_run_tests {
         // Path cutoff = highest Process StateEntry = sequence 2; prior
         // transitions are Start (sequence 0). Sequence 2 itself (the
         // Process StateEntry) sits AT the cutoff so is excluded too.
-        assert_eq!(rh.resume_state_entry_cutoff, 2);
         assert_eq!(rh.prior_transitions, vec![TestState::Start]);
     }
 
@@ -4505,8 +4174,6 @@ mod rehydrated_run_tests {
             resolve_test_state,
         );
         let elapsed = started.elapsed();
-        // Cutoff = the highest Process StateEntry = sequence 9999.
-        assert_eq!(rh.resume_state_entry_cutoff, 9_999);
         // prior_transitions = every row at seq < 9999 → 9999 entries.
         assert_eq!(rh.prior_transitions.len(), 9_999);
         // Smoke check, not a benchmark: the assert exists to catch accidental
@@ -4524,8 +4191,10 @@ mod rehydrated_run_tests {
 mod metrics_tests {
     use crate::metrics::test_support::*;
     use crate::prelude::*;
-    use crate::task::TaskConfig;
-    use crate::workflow::test_support::{CompLog, CompTask, MemCheckpoints, SimpleTask, TestState};
+
+    use crate::workflow::test_support::{
+        CompLog, CompTask, InMemoryCheckpointStore, SimpleTask, TestState,
+    };
     use std::sync::{Arc, Mutex};
 
     // ---- Recovery: checkpoint append + clear counters ----
@@ -4533,16 +4202,14 @@ mod metrics_tests {
     #[test]
     fn checkpoint_append_and_clear_counters_on_successful_run() {
         let (res, rows) = run_with_recorder(|| async {
-            let store = Arc::new(MemCheckpoints::default());
+            let store = Arc::new(InMemoryCheckpointStore::new());
             let workflow = Workflow::bare()
                 .with_checkpoint_store(store.clone())
                 .with_workflow_id("metrics-wf")
                 .register(TestState::Start, SimpleTask::new(TestState::Process))
                 .register(TestState::Process, SimpleTask::new(TestState::Complete))
                 .add_exit_state(TestState::Complete);
-            workflow
-                .orchestrate(TestState::Start, CancellationToken::disabled())
-                .await
+            workflow.orchestrate(TestState::Start).await
         });
         assert_eq!(res.unwrap(), TestState::Complete);
         // At minimum one append per state entered (Start, Process, Complete = 3 rows)
@@ -4569,10 +4236,7 @@ mod metrics_tests {
 
     #[crate::task]
     impl Task<TestState> for AlwaysFailTask {
-        fn config(&self) -> TaskConfig {
-            TaskConfig::minimal()
-        }
-        async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+        async fn run(&self) -> Result<TestState, CanoError> {
             Err(CanoError::task_execution(
                 "intentional failure for saga test",
             ))
@@ -4586,15 +4250,13 @@ mod metrics_tests {
             // CompensatableTask succeeds (Start→Process), then AlwaysFailTask fails.
             // This triggers a LIFO drain with one compensate() call which succeeds.
             let workflow = Workflow::bare()
-                .register_with_compensation(
+                .register(
                     TestState::Start,
                     CompTask::ok("comp", 42, TestState::Process, &log),
                 )
                 .register(TestState::Process, AlwaysFailTask)
                 .add_exit_state(TestState::Complete);
-            workflow
-                .orchestrate(TestState::Start, CancellationToken::disabled())
-                .await
+            workflow.orchestrate(TestState::Start).await
         });
         // Clean rollback: the original error is returned (not CompensationFailed)
         assert!(res.is_err(), "expected workflow to fail");

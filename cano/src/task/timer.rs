@@ -52,8 +52,8 @@
 //!         Ok(TimerOutcome::Duration(Duration::from_millis(50)))
 //!     }
 //!
-//!     async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-//!         Ok(TaskResult::Single(Step::Done))
+//!     async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+//!         Ok(Step::Done)
 //!     }
 //! }
 //!
@@ -63,7 +63,7 @@
 //!     .register(Step::Wait, CoolDown)
 //!     .add_exit_state(Step::Done);
 //!
-//! let result = workflow.orchestrate(Step::Wait, CancellationToken::disabled()).await?;
+//! let result = workflow.orchestrate(Step::Wait).await?;
 //! assert_eq!(result, Step::Done);
 //! # Ok(())
 //! # }
@@ -87,15 +87,15 @@
 //! #[task::timer(state = Step)]
 //! impl BoundedTimer {
 //!     fn config(&self) -> TaskConfig {
-//!         TaskConfig::minimal().with_attempt_timeout(Duration::from_secs(5))
+//!         TaskConfig::new().with_attempt_timeout(Duration::from_secs(5))
 //!     }
 //!
 //!     async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
 //!         Ok(TimerOutcome::Duration(Duration::from_millis(10)))
 //!     }
 //!
-//!     async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-//!         Ok(TaskResult::Single(Step::Done))
+//!     async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+//!         Ok(Step::Done)
 //!     }
 //! }
 //! ```
@@ -118,18 +118,17 @@
 //!     async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
 //!         Ok(TimerOutcome::Duration(Duration::from_millis(10)))
 //!     }
-//!     async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-//!         Ok(TaskResult::Single(Step::Done))
+//!     async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+//!         Ok(Step::Done)
 //!     }
 //! }
 //! ```
 
 use crate::error::CanoError;
 use crate::resource::Resources;
-use crate::task::{TaskConfig, TaskResult};
+use crate::task::TaskConfig;
 use std::borrow::Cow;
 use std::fmt;
-use std::hash::Hash;
 use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------------------
@@ -165,13 +164,11 @@ pub enum TimerOutcome {
 /// # Generic Types
 ///
 /// - **`TState`**: The state enum used by the workflow (`Clone + Debug + Send + Sync`).
-/// - **`TResourceKey`**: The key type used to look up resources (defaults to
-///   [`Cow<'static, str>`]).
 ///
 /// # Default config
 ///
 /// Like [`PollTask`](crate::task::PollTask), `TimerTask` defaults to
-/// [`TaskConfig::minimal()`] (no retries). A single scheduled sleep does not benefit from outer
+/// [`TaskConfig::new()`] (no retries). A single scheduled sleep does not benefit from outer
 /// retry wrapping; to bound the wait, attach an `attempt_timeout` instead.
 ///
 /// # Implementing TimerTask
@@ -192,23 +189,22 @@ pub enum TimerOutcome {
 ///     async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
 ///         Ok(TimerOutcome::Duration(Duration::from_millis(10)))
 ///     }
-///     async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-///         Ok(TaskResult::Single(Step::Done))
+///     async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+///         Ok(Step::Done)
 ///     }
 /// }
 /// ```
 #[crate::task::timer]
-pub trait TimerTask<TState, TResourceKey = Cow<'static, str>>: Send + Sync
+pub trait TimerTask<TState>: Send + Sync
 where
     TState: Clone + fmt::Debug + Send + Sync + 'static,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
 {
     /// Get the task configuration that controls execution behaviour.
     ///
-    /// Defaults to [`TaskConfig::minimal()`] (no retries, no timeout). Override to attach a
+    /// Defaults to [`TaskConfig::new()`] (no retries, no timeout). Override to attach a
     /// per-attempt timeout that bounds the wait.
     fn config(&self) -> TaskConfig {
-        crate::task::minimal_task_config()
+        TaskConfig::new()
     }
 
     /// Human-readable identifier for this timer, reported to [`WorkflowObserver`] hooks.
@@ -218,7 +214,7 @@ where
     ///
     /// [`WorkflowObserver`]: crate::observer::WorkflowObserver
     fn name(&self) -> Cow<'static, str> {
-        crate::task::default_task_name::<Self>()
+        Cow::Borrowed(std::any::type_name::<Self>())
     }
 
     /// Decide how long to wait. Called once, before the engine sleeps.
@@ -229,17 +225,14 @@ where
     /// # Errors
     ///
     /// Returns [`CanoError`] to abort before sleeping (no [`after_wait`](Self::after_wait) call).
-    async fn wait(&self, res: &Resources<TResourceKey>) -> Result<TimerOutcome, CanoError>;
+    async fn wait(&self, res: &Resources) -> Result<TimerOutcome, CanoError>;
 
     /// Decide the next state. Called once, after the sleep has elapsed.
     ///
     /// # Errors
     ///
     /// Returns [`CanoError`] propagated from the task logic.
-    async fn after_wait(
-        &self,
-        res: &Resources<TResourceKey>,
-    ) -> Result<TaskResult<TState>, CanoError>;
+    async fn after_wait(&self, res: &Resources) -> Result<TState, CanoError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,14 +246,14 @@ where
 /// for the returned [`TimerOutcome`] (a `Duration::ZERO` or a past `Until` instant resolves
 /// immediately), then returns `t.after_wait(res)`.
 ///
-/// To cap the whole wait, return `TaskConfig::minimal().with_attempt_timeout(dur)` from
+/// To cap the whole wait, return `TaskConfig::new().with_attempt_timeout(dur)` from
 /// [`TimerTask::config`] and dispatch the task via
 /// [`Workflow::orchestrate`](crate::workflow::Workflow::orchestrate).
-pub async fn run_timer<T, S, K>(t: &T, res: &Resources<K>) -> Result<TaskResult<S>, CanoError>
+#[doc(hidden)]
+pub async fn run_timer<T, S>(t: &T, res: &Resources) -> Result<S, CanoError>
 where
-    T: TimerTask<S, K> + ?Sized,
+    T: TimerTask<S> + ?Sized,
     S: Clone + fmt::Debug + Send + Sync + 'static,
-    K: Hash + Eq + Send + Sync + 'static,
 {
     match t.wait(res).await? {
         TimerOutcome::Duration(d) => tokio::time::sleep(d).await,
@@ -273,14 +266,6 @@ where
 // ---------------------------------------------------------------------------
 // Type aliases
 // ---------------------------------------------------------------------------
-
-/// Type alias for a dynamic [`TimerTask`] trait object.
-pub type DynTimerTask<TState, TResourceKey = Cow<'static, str>> =
-    dyn TimerTask<TState, TResourceKey> + Send + Sync;
-
-/// Type alias for an `Arc`-wrapped dynamic [`TimerTask`] trait object.
-pub type TimerTaskObject<TState, TResourceKey = Cow<'static, str>> =
-    std::sync::Arc<DynTimerTask<TState, TResourceKey>>;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -301,9 +286,7 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     enum Step {
-        Wait,
         Done,
-        Next,
     }
 
     // (a) Duration timer drives the wait-then-transition sequence.
@@ -314,8 +297,8 @@ mod tests {
         async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
             Ok(TimerOutcome::Duration(Duration::ZERO))
         }
-        async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -324,7 +307,7 @@ mod tests {
         let timer = DurationTimer;
         let res = Resources::new();
         let result = run_timer(&timer, &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::Done));
+        assert_eq!(result, Step::Done);
     }
 
     #[tokio::test]
@@ -332,7 +315,7 @@ mod tests {
         let timer = DurationTimer;
         let res = Resources::new();
         let result = Task::run(&timer, &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::Done));
+        assert_eq!(result, Step::Done);
     }
 
     // (b) Until a past instant — fires immediately (no sleep).
@@ -344,8 +327,8 @@ mod tests {
             let past = Instant::now() - Duration::from_secs(60);
             Ok(TimerOutcome::Until(past))
         }
-        async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -355,32 +338,11 @@ mod tests {
         let res = Resources::new();
         let start = Instant::now();
         let result = run_timer(&timer, &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::Done));
+        assert_eq!(result, Step::Done);
         assert!(
             start.elapsed() < Duration::from_millis(500),
             "past Until should not sleep"
         );
-    }
-
-    // (c) after_wait may return Split.
-    struct SplitTimer;
-
-    #[task::timer]
-    impl TimerTask<Step> for SplitTimer {
-        async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
-            Ok(TimerOutcome::Duration(Duration::ZERO))
-        }
-        async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Split(vec![Step::Wait, Step::Next]))
-        }
-    }
-
-    #[tokio::test]
-    async fn test_timer_task_split() {
-        let timer = SplitTimer;
-        let res = Resources::new();
-        let result = Task::run(&timer, &res).await.unwrap();
-        assert_eq!(result, TaskResult::Split(vec![Step::Wait, Step::Next]));
     }
 
     // (d) Config + name defaults / overrides.
@@ -394,8 +356,8 @@ mod tests {
         async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
             Ok(TimerOutcome::Duration(Duration::ZERO))
         }
-        async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -432,7 +394,7 @@ mod tests {
         let timer: Arc<dyn Task<Step>> = Arc::new(DurationTimer);
         let res = Resources::new();
         let result = Task::run(timer.as_ref(), &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::Done));
+        assert_eq!(result, Step::Done);
     }
 
     // (f) Errors from wait / after_wait propagate.
@@ -443,8 +405,8 @@ mod tests {
         async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
             Err(CanoError::task_execution("wait failed"))
         }
-        async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-            Ok(TaskResult::Single(Step::Done))
+        async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+            Ok(Step::Done)
         }
     }
 
@@ -463,7 +425,7 @@ mod tests {
         async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
             Ok(TimerOutcome::Duration(Duration::ZERO))
         }
-        async fn after_wait(&self, _res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+        async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
             Err(CanoError::task_execution("after_wait failed"))
         }
     }
@@ -482,6 +444,6 @@ mod tests {
         let timer: &dyn TimerTask<Step> = &DurationTimer;
         let res = Resources::new();
         let result = run_timer(timer, &res).await.unwrap();
-        assert_eq!(result, TaskResult::Single(Step::Done));
+        assert_eq!(result, Step::Done);
     }
 }

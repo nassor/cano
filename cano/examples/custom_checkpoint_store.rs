@@ -114,9 +114,9 @@ struct InitTask;
 
 #[task(state = Step)]
 impl InitTask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         println!("  init: preparing workflow");
-        Ok(TaskResult::Single(Step::Process))
+        Ok(Step::Process)
     }
 }
 
@@ -126,12 +126,12 @@ struct ProcessTask;
 impl ProcessTask {
     fn config(&self) -> TaskConfig {
         // No retries — the simulated crash should bubble straight out of `orchestrate`.
-        TaskConfig::minimal()
+        TaskConfig::new()
     }
 
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
         let n = res
-            .get::<CrashOnce, _>("crash")?
+            .get::<CrashOnce>()?
             .attempts
             .fetch_add(1, Ordering::SeqCst)
             + 1;
@@ -140,7 +140,7 @@ impl ProcessTask {
             return Err(CanoError::task_execution("ProcessTask: simulated crash"));
         }
         println!("  process: attempt {n} — ok");
-        Ok(TaskResult::Single(Step::Finalize))
+        Ok(Step::Finalize)
     }
 }
 
@@ -148,9 +148,9 @@ struct FinalizeTask;
 
 #[task(state = Step)]
 impl FinalizeTask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         println!("  finalize: wrapping up");
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -163,7 +163,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let checkpoint_store = Arc::new(MapStore::default());
     let run_id = "demo-custom-store";
 
-    let workflow = Workflow::new(Resources::new().insert("crash", CrashOnce::default()))
+    let workflow = Workflow::new(Resources::new().insert(CrashOnce::default()))
         .register(Step::Init, InitTask)
         .register(Step::Process, ProcessTask)
         .register(Step::Finalize, FinalizeTask)
@@ -173,10 +173,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- First run: Process crashes; the checkpoint log is kept. -------
     println!("=== run 1: Process will crash ===");
-    match workflow
-        .orchestrate(Step::Init, CancellationToken::disabled())
-        .await
-    {
+    match workflow.orchestrate(Step::Init).await {
         Ok(s) => println!("  completed at {s:?} (unexpected)"),
         Err(e) => println!("  stopped with error: {e}"),
     }
@@ -204,9 +201,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- Second run: resume from last checkpoint (Process, attempt 2). ---
     println!("\n=== run 2: resume_from ===");
-    let final_state = workflow
-        .resume_from(run_id, CancellationToken::disabled())
-        .await?;
+    let final_state = workflow.resume_from(run_id).await?;
     println!("  reached {final_state:?}");
     assert_eq!(final_state, Step::Done);
 

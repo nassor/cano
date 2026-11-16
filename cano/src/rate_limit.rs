@@ -36,8 +36,8 @@
 //!
 //! ## Sharing
 //!
-//! A limiter is cheap to clone (`Arc` inside). **Share one `Arc<RateLimiter>` across every
-//! task that hits the same quota** so the budget is enforced globally, including across tasks
+//! A limiter is cheap to clone (`Arc` inside; clones share one bucket). **Share clones of one
+//! `RateLimiter` across every task that hits the same quota** so the budget is enforced globally, including across tasks
 //! running in parallel inside a [split/join](crate::workflow) state. Internally it's a
 //! synchronous [`parking_lot::Mutex`] with no awaits held across the critical section.
 //!
@@ -45,11 +45,10 @@
 //! [`Resources`](crate::resource::Resources) and looked up by key inside a task body.
 //!
 //! ```rust
-//! use std::sync::Arc;
 //! use cano::prelude::*;
 //!
 //! // 5 tokens/sec; the bucket starts full.
-//! let limiter = Arc::new(RateLimiter::new(RateLimiterPolicy::per_second(5)));
+//! let limiter = RateLimiter::new(RateLimiterPolicy::per_second(5));
 //! let permit = limiter.try_acquire().expect("a fresh bucket has tokens");
 //! drop(permit); // dropping a token-bucket permit is a no-op
 //! ```
@@ -212,7 +211,7 @@ impl RateLimiter {
 
     /// Try to consume one token without blocking. Equivalent to
     /// [`try_acquire_n(1)`](Self::try_acquire_n).
-    pub fn try_acquire(self: &Arc<Self>) -> Option<Permit> {
+    pub fn try_acquire(&self) -> Option<Permit> {
         self.try_acquire_n(1)
     }
 
@@ -222,7 +221,7 @@ impl RateLimiter {
     /// `None` otherwise. Lazily refills the bucket from the clock before deciding. `cost == 0`
     /// always succeeds without consuming; a `cost` larger than the bucket's capacity can never
     /// be satisfied and returns `None`.
-    pub fn try_acquire_n(self: &Arc<Self>, cost: u64) -> Option<Permit> {
+    pub fn try_acquire_n(&self, cost: u64) -> Option<Permit> {
         let acquired = self.debit(cost);
         // Emit metrics after releasing the lock so the recorder lookup never
         // lengthens the critical section (mirrors `CircuitBreaker::try_acquire`).
@@ -233,9 +232,7 @@ impl RateLimiter {
         } else {
             crate::metrics::rate_limiter_throttled("rejected");
         }
-        acquired.then(|| Permit {
-            _limiter: Arc::clone(self),
-        })
+        acquired.then_some(Permit { _private: () })
     }
 
     /// Reserve `cost` tokens, returning a refundable [`Reservation`].
@@ -262,7 +259,7 @@ impl RateLimiter {
 
     /// Consume one token, parking until it is available. Equivalent to
     /// [`acquire_n(1)`](Self::acquire_n).
-    pub async fn acquire(self: &Arc<Self>) -> Permit {
+    pub async fn acquire(&self) -> Permit {
         self.acquire_n(1).await
     }
 
@@ -281,7 +278,7 @@ impl RateLimiter {
     /// (no over-admission), but under heavy contention this trades some wasted wakeups for a
     /// lock-free, allocation-free wait path. Reach for [`try_acquire_n`](Self::try_acquire_n)
     /// plus your own backoff if you need strict ordering.
-    pub async fn acquire_n(self: &Arc<Self>, cost: u64) -> Permit {
+    pub async fn acquire_n(&self, cost: u64) -> Permit {
         let cost_f = cost as f64;
         let capacity = self.policy.capacity() as f64;
         // Shared park-until-admitted loop (also used by `FixedWindow::acquire_n`);
@@ -291,9 +288,7 @@ impl RateLimiter {
             self.refill_locked(&mut st);
             if st.tokens >= cost_f {
                 st.tokens -= cost_f;
-                Ok(Permit {
-                    _limiter: Arc::clone(self),
-                })
+                Ok(Permit { _private: () })
             } else if cost_f > capacity {
                 // Never satisfiable — park on a single MAX sleep rather than busy-looping
                 // on a finite deficit that the cap never lets the bucket reach.
@@ -491,13 +486,12 @@ impl std::fmt::Debug for Reservation {
 
 /// A token consumed from a [`RateLimiter`], marking the scope of one rate-limited call.
 ///
-/// Holding the permit keeps the `RateLimiter` alive for the call's duration. Dropping it is a
-/// **no-op** — a token bucket spends the token at acquisition and refills on the clock, so
-/// there is nothing to return on release. (Contrast a semaphore, where the permit *is* the
-/// reserved capacity.)
+/// Dropping it is a **no-op** — a token bucket spends the token at acquisition and refills
+/// on the clock, so there is nothing to return on release. (Contrast a semaphore, where the
+/// permit *is* the reserved capacity.)
 #[must_use = "the permit marks the rate-limited call's scope"]
 pub struct Permit {
-    _limiter: Arc<RateLimiter>,
+    _private: (),
 }
 
 impl std::fmt::Debug for Permit {
@@ -585,13 +579,13 @@ impl WindowedRateLimiter {
     }
 
     /// Try to consume one unit without blocking. Equivalent to `try_acquire_n(1)`.
-    pub fn try_acquire(self: &Arc<Self>) -> Option<WindowPermit> {
+    pub fn try_acquire(&self) -> Option<WindowPermit> {
         self.try_acquire_n(1)
     }
 
     /// Try to consume `cost` units without blocking. `cost == 0` always succeeds without
     /// consuming; a `cost` larger than `limit` can never be satisfied and returns `None`.
-    pub fn try_acquire_n(self: &Arc<Self>, cost: u64) -> Option<WindowPermit> {
+    pub fn try_acquire_n(&self, cost: u64) -> Option<WindowPermit> {
         let acquired = self.debit(cost).is_some();
         #[cfg(feature = "metrics")]
         if acquired {
@@ -600,9 +594,7 @@ impl WindowedRateLimiter {
         } else {
             crate::metrics::rate_limiter_throttled("rejected");
         }
-        acquired.then(|| WindowPermit {
-            _limiter: Arc::clone(self),
-        })
+        acquired.then_some(WindowPermit { _private: () })
     }
 
     /// Reserve `cost` units, returning a refundable [`Reservation`] (see
@@ -623,13 +615,13 @@ impl WindowedRateLimiter {
     }
 
     /// Consume one unit, parking until the window has room. Equivalent to `acquire_n(1)`.
-    pub async fn acquire(self: &Arc<Self>) -> WindowPermit {
+    pub async fn acquire(&self) -> WindowPermit {
         self.acquire_n(1).await
     }
 
     /// Consume `cost` units, parking until the window has room (until the next reset if the
     /// window is currently full). A `cost` larger than `limit` parks indefinitely.
-    pub async fn acquire_n(self: &Arc<Self>, cost: u64) -> WindowPermit {
+    pub async fn acquire_n(&self, cost: u64) -> WindowPermit {
         // Shared park-until-admitted loop (also used by `RateLimiter::acquire_n`);
         // the closure owns the fixed-window-specific admit/roll decision.
         park_until_admitted(cost, || {
@@ -637,9 +629,7 @@ impl WindowedRateLimiter {
             self.roll_locked(&mut st);
             if st.used.saturating_add(cost) <= self.policy.limit {
                 st.used += cost;
-                Ok(WindowPermit {
-                    _limiter: Arc::clone(self),
-                })
+                Ok(WindowPermit { _private: () })
             } else if cost > self.policy.limit {
                 Err(Duration::MAX)
             } else {
@@ -780,7 +770,7 @@ impl Meter for WindowedRateLimiter {
 /// Dropping it is a **no-op** — the window holds the count until it resets.
 #[must_use = "the permit marks the rate-limited call's scope"]
 pub struct WindowPermit {
-    _limiter: Arc<WindowedRateLimiter>,
+    _private: (),
 }
 
 impl std::fmt::Debug for WindowPermit {

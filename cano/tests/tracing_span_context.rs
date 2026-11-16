@@ -186,7 +186,7 @@ struct Probe {
     config: TaskConfig,
     /// What attempt `n` does: `script[n - 1]`, `Act::Ok` past the end.
     script: &'static [Act],
-    cancel: Option<CancellationHandle>,
+    cancel: Option<CancellationToken>,
     /// Calls so far (shared by clones): the 1-based attempt ordinal the events carry.
     calls: Arc<AtomicU32>,
     /// All parties have started (and emitted twice) before any of them goes on.
@@ -217,7 +217,7 @@ impl Probe {
             branch,
             next,
             fail_once: None,
-            config: TaskConfig::minimal(),
+            config: TaskConfig::new(),
             script: &[],
             cancel: None,
             calls: Arc::new(AtomicU32::new(0)),
@@ -240,7 +240,7 @@ impl Probe {
         self
     }
 
-    fn cancelling(mut self, handle: CancellationHandle) -> Self {
+    fn cancelling(mut self, handle: CancellationToken) -> Self {
         self.cancel = Some(handle);
         self
     }
@@ -330,8 +330,8 @@ impl Task<S> for Probe {
     fn config(&self) -> TaskConfig {
         self.config.clone()
     }
-    async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-        self.body().await.map(TaskResult::Single)
+    async fn run(&self) -> Result<S, CanoError> {
+        self.body().await
     }
 }
 
@@ -343,11 +343,14 @@ struct CompProbe(Probe);
 #[saga::task(state = S)]
 impl CompProbe {
     type Output = ();
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
+
+    // Two states run a `CompProbe`; compensators are looked up by name, so each
+    // instance needs its own.
+    fn name(&self) -> std::borrow::Cow<'static, str> {
+        format!("CompProbe->{:?}", self.0.next).into()
     }
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<S>, ()), CanoError> {
-        Ok((TaskResult::Single(self.0.body().await?), ()))
+    async fn run(&self, _res: &Resources) -> Result<(S, ()), CanoError> {
+        Ok((self.0.body().await?, ()))
     }
     async fn compensate(&self, _res: &Resources, _output: ()) -> Result<(), CanoError> {
         self.0.emit_compensation("start");
@@ -373,7 +376,7 @@ fn single(id: String) -> Run {
             .register(S::Mid, Probe::new(&id, "single", -1, S::Done))
             .add_exit_state(S::Done)
             .with_workflow_id(id.as_str())
-            .orchestrate(S::Start, CancellationToken::disabled())
+            .orchestrate(S::Start)
             .await
     })
 }
@@ -396,28 +399,24 @@ fn split_workflow(id: &str) -> Workflow<S> {
 
 /// split_task (two parallel branches, then a single state)
 fn split(id: String) -> Run {
-    Box::pin(async move {
-        split_workflow(&id)
-            .orchestrate(S::Start, CancellationToken::disabled())
-            .await
-    })
+    Box::pin(async move { split_workflow(&id).orchestrate(S::Start).await })
 }
 
 /// compensatable_task_execution
 fn compensatable(id: String) -> Run {
     Box::pin(async move {
         Workflow::bare()
-            .register_with_compensation(
+            .register(
                 S::Start,
                 CompProbe(Probe::new(&id, "compensatable", -1, S::Mid)),
             )
-            .register_with_compensation(
+            .register(
                 S::Mid,
                 CompProbe(Probe::new(&id, "compensatable", -1, S::Done)),
             )
             .add_exit_state(S::Done)
             .with_workflow_id(id.as_str())
-            .orchestrate(S::Start, CancellationToken::disabled())
+            .orchestrate(S::Start)
             .await
     })
 }
@@ -441,7 +440,7 @@ fn resumed(id: String, user_span: Option<tracing::Span>) -> Run {
                 .with_workflow_id(id.as_str())
         };
         build("")
-            .orchestrate(S::Start, CancellationToken::disabled())
+            .orchestrate(S::Start)
             .await
             .expect_err("Mid fails its first call and leaves a checkpoint to resume from");
         let resumed = build(&id);
@@ -449,9 +448,7 @@ fn resumed(id: String, user_span: Option<tracing::Span>) -> Run {
             Some(span) => resumed.with_tracing_span(span),
             None => resumed,
         };
-        resumed
-            .resume_from(id.as_str(), CancellationToken::disabled())
-            .await
+        resumed.resume_from(id.as_str()).await
     })
 }
 
@@ -471,7 +468,7 @@ fn resume_user_span(id: String) -> Run {
 /// shifts which attempt is the last).
 fn retry(id: String) -> Run {
     Box::pin(async move {
-        let config = TaskConfig::minimal()
+        let config = TaskConfig::new()
             .with_fixed_retry(5, Duration::from_millis(1))
             .with_attempt_timeout(Duration::from_millis(100));
         Workflow::bare()
@@ -483,7 +480,7 @@ fn retry(id: String) -> Run {
             )
             .add_exit_state(S::Done)
             .with_workflow_id(id.as_str())
-            .orchestrate(S::Start, CancellationToken::disabled())
+            .orchestrate(S::Start)
             .await
     })
 }
@@ -508,7 +505,7 @@ fn split_any(id: String) -> Run {
             .register(S::Mid, Probe::new(&id, "single", -1, S::Done))
             .add_exit_state(S::Done)
             .with_workflow_id(id.as_str())
-            .orchestrate(S::Start, CancellationToken::disabled())
+            .orchestrate(S::Start)
             .await
     })
 }
@@ -517,9 +514,10 @@ fn split_any(id: String) -> Run {
 /// is then rolled back, the drain awaiting `compensate` under no task span.
 fn cancelled(id: String) -> Run {
     Box::pin(async move {
-        let (handle, token) = CancellationToken::new();
+        let token = CancellationToken::new();
+        let handle = token.clone();
         Workflow::bare()
-            .register_with_compensation(
+            .register(
                 S::Start,
                 CompProbe(Probe::new(&id, "compensatable", -1, S::Mid)),
             )
@@ -531,7 +529,7 @@ fn cancelled(id: String) -> Run {
             )
             .add_exit_state(S::Done)
             .with_workflow_id(id.as_str())
-            .orchestrate(S::Start, token)
+            .orchestrate_with_token(S::Start, &token)
             .await
     })
 }
@@ -546,12 +544,12 @@ fn scheduled(id: String) -> Run {
             .register(S::Start, Probe::new(&id, "single", -1, S::Mid))
             .register(S::Mid, Probe::new(&id, "single", -1, S::Done))
             .add_exit_state(S::Done);
-        let mut scheduler = Scheduler::new();
-        scheduler.manual(&id, workflow, S::Start)?;
+        let scheduler = Scheduler::new();
+        let scheduler = scheduler.manual(&id, workflow, S::Start);
         let running = scheduler.start().await?;
-        running.trigger(&id).await?;
+        running.trigger(&id)?;
         let deadline = Instant::now() + Duration::from_secs(30);
-        while running.status(&id).await.map(|info| info.status) != Some(Status::Completed) {
+        while running.status(&id).map(|info| info.status) != Some(Status::Completed) {
             assert!(
                 Instant::now() < deadline,
                 "{id}: scheduled run never completed"
@@ -568,7 +566,7 @@ fn user_span(id: String) -> Run {
     Box::pin(async move {
         split_workflow(&id)
             .with_tracing_span(tracing::info_span!("user_root", workflow_id = id.as_str()))
-            .orchestrate(S::Start, CancellationToken::disabled())
+            .orchestrate(S::Start)
             .await
     })
 }
@@ -577,14 +575,7 @@ fn user_span(id: String) -> Run {
 /// pattern) stays the ancestor of cano's spans, including inside the spawned split branches.
 fn ambient_span(id: String) -> Run {
     let span = tracing::info_span!("api_request", workflow_id = id.as_str());
-    Box::pin(
-        async move {
-            split_workflow(&id)
-                .orchestrate(S::Start, CancellationToken::disabled())
-                .await
-        }
-        .instrument(span),
-    )
+    Box::pin(async move { split_workflow(&id).orchestrate(S::Start).await }.instrument(span))
 }
 
 #[derive(Clone, Copy)]

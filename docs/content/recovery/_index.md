@@ -63,14 +63,14 @@ enum Step { Start, Work, Done }
 
 #[task(state = Step)]
 impl StartTask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Work))
+    async fn run(&self) -> Result<Step, CanoError> {
+        Ok(Step::Work)
     }
 }
 #[task(state = Step)]
 impl WorkTask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    async fn run(&self) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 
@@ -85,7 +85,7 @@ async fn main() -> Result<(), CanoError> {
         .with_checkpoint_store(checkpoint_store)
         .with_workflow_id("run-42");
 
-    workflow.orchestrate(Step::Start, CancellationToken::disabled()).await?;
+    workflow.orchestrate(Step::Start).await?;
     Ok(())
 }
 ```
@@ -125,9 +125,11 @@ no sequence number) — a pure router has no side effects, so there's nothing to
 <li>A <strong><a href="../saga/">compensatable</a> state that succeeds</strong> writes a second
 <code>CompensationCompletion</code> row whose <code>output_blob</code> is the serialized output (so
 its entry row and completion row consume two sequence numbers).</li>
-<li>A <strong><a href="../stepped-task/">SteppedTask</a> registered with <code>register_stepped</code></strong>
-writes a <code>StepCursor</code> row after each step, carrying the <code>serde_json</code>-encoded
-cursor.</li>
+<li>A <strong><a href="../stepped-task/">SteppedTask</a></strong> (registered with the same
+<code>register</code> call as every other task) writes a <code>StepCursor</code> row after each step,
+carrying the <code>serde_json</code>-encoded cursor. The rows are written only when a checkpoint store
+<em>and</em> a workflow id are both set; without them the task runs its steps in memory.
+A <a href="../stream-task/">StreamTask</a> does the same once per window.</li>
 <li><code>state</code> is <code>format!("{state:?}")</code>; resume maps it back to the matching
 registered or exit state, so each state must have a distinct <code>Debug</code> form (true for any
 <code>#[derive(Debug)]</code> enum).</li>
@@ -139,7 +141,8 @@ sequence order" — which is exactly what <code>CheckpointStore::load_run</code>
 
 <h2 id="resuming"><a href="#resuming" class="anchor-link" aria-hidden="true">#</a>Resuming a Run</h2>
 <p>
-<code>Workflow::resume_from(workflow_id)</code> loads the run via <code>load_run</code> and routes by
+<code>Workflow::resume_from(workflow_id)</code> (or <code>resume_from_with_token(workflow_id, &amp;token)</code>
+to make the resumed run cancellable) loads the run via <code>load_run</code> and routes by
 each row's <code>kind</code>:
 </p>
 
@@ -201,9 +204,10 @@ latest cursor for the resumed state is decoded and handed to the first <code>ste
 of <code>None</code>.</li>
 </ul>
 <p>
-Resources' <code>setup</code> / <code>teardown</code> wrap it exactly as in <code>orchestrate</code>.
-If the last recorded row is an exit state, the run had already finished, so <code>resume_from</code>
-returns it immediately.
+Resources' <code>setup</code> / <code>teardown</code> wrap it exactly as in <code>orchestrate</code>:
+setup, then the run, then teardown. The run's own error wins; a teardown error is returned only when
+the run itself succeeded. If the last recorded row is an exit state, the run had already finished, so
+<code>resume_from</code> returns it immediately.
 </p>
 
 ```rust
@@ -221,7 +225,7 @@ async fn main() -> Result<(), CanoError> {
         .with_checkpoint_store(checkpoint_store);
 
     // Some earlier process crashed mid-run; pick up where it left off.
-    let final_state = workflow.resume_from("run-42", CancellationToken::disabled()).await?;
+    let final_state = workflow.resume_from("run-42").await?;
     assert_eq!(final_state, Step::Done);
     Ok(())
 }
@@ -460,10 +464,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 enum Step { Start, Process, Finalize, Done }
 
 // Shared across runs via Resources: the first Process attempt errors; later ones succeed.
-#[derive(Default)]
+#[derive(Resource)]
 struct CrashOnce { attempts: AtomicU32 }
-#[resource]
-impl Resource for CrashOnce {}
 
 #[derive(Clone)] struct StartTask;
 #[derive(Clone)] struct ProcessTask;
@@ -471,35 +473,34 @@ impl Resource for CrashOnce {}
 
 #[task(state = Step)]
 impl StartTask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Process))
+    async fn run(&self) -> Result<Step, CanoError> {
+        Ok(Step::Process)
     }
 }
 
 #[task(state = Step)]
 impl ProcessTask {
-    // No retries — let the first failure bubble out of `orchestrate`, like a real crash.
-    fn config(&self) -> TaskConfig { TaskConfig::minimal() }
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        let crash = res.get::<CrashOnce, _>("crash")?;
+    // No retries by default — the first failure bubbles out of `orchestrate`, like a real crash.
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
+        let crash = res.get::<CrashOnce>()?;
         if crash.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
             return Err(CanoError::task_execution("simulated crash"));
         }
-        Ok(TaskResult::Single(Step::Finalize))
+        Ok(Step::Finalize)
     }
 }
 
 #[task(state = Step)]
 impl FinalizeTask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    async fn run(&self) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     let checkpoint_store = Arc::new(RedbCheckpointStore::new("recovery.redb")?);
-    let resources = Resources::new().insert("crash", CrashOnce::default());
+    let resources = Resources::new().insert(CrashOnce { attempts: AtomicU32::new(0) });
     let workflow = Workflow::new(resources)
         .register(Step::Start, StartTask)
         .register(Step::Process, ProcessTask)
@@ -509,10 +510,10 @@ async fn main() -> Result<(), CanoError> {
         .with_workflow_id("demo-run");
 
     // Run 1: crashes inside ProcessTask. The Start and Process rows are already durable.
-    let _ = workflow.orchestrate(Step::Start, CancellationToken::disabled()).await;
+    let _ = workflow.orchestrate(Step::Start).await;
 
     // Run 2: resume — re-runs ProcessTask (now it succeeds) and finishes at Done.
-    let final_state = workflow.resume_from("demo-run", CancellationToken::disabled()).await?;
+    let final_state = workflow.resume_from("demo-run").await?;
     assert_eq!(final_state, Step::Done);
 
     // The append-only log: Start, Process (crash), Process (re-run), Finalize, Done —

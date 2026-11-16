@@ -62,8 +62,8 @@ struct DoWork;
 
 #[task(state = Step)]
 impl DoWork {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    async fn run(&self) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 
@@ -86,7 +86,7 @@ async fn main() -> Result<(), CanoError> {
         .add_exit_state(Step::Done)
         .with_observer(counter.clone());
 
-    workflow.orchestrate(Step::Start, CancellationToken::disabled()).await?;
+    workflow.orchestrate(Step::Start).await?;
     assert_eq!(counter.0.load(Ordering::Relaxed), 1);
     Ok(())
 }
@@ -127,7 +127,7 @@ ones you care about.
 <path class="e" d="M120,250 H386" marker-end="url(#obs-ah)"/>
 <text class="t-mut ta-s" x="136" y="238">attempt 2</text>
 <path class="e e-dash" d="M390,284 H124" marker-end="url(#obs-ah)"/>
-<text class="t-code t-ok ta-e" x="374" y="272">Ok(TaskResult)</text>
+<text class="t-code t-ok ta-e" x="374" y="272">Ok(next state)</text>
 <path class="e" d="M120,318 H646" marker-end="url(#obs-ah)"/>
 <text class="t-code t-ok ta-s" x="136" y="306">on_task_success("load")</text>
 <path class="e e-dash" d="M120,368 H646" marker-end="url(#obs-ah)"/>
@@ -251,8 +251,8 @@ impl FetchOrders {
     fn name(&self) -> Cow<'static, str> {
         "fetch-orders".into()
     }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    async fn run(&self) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 ```
@@ -261,7 +261,10 @@ impl FetchOrders {
 <h2 id="sync"><a href="#sync" class="anchor-link" aria-hidden="true">#</a>Synchronous by Design</h2>
 <p>
 Observer methods are <strong>synchronous</strong> and run inline on the workflow's task. Keep
-them cheap and non-blocking. When an event needs async work — writing to a database, pushing
+them cheap and non-blocking. They are also <strong>isolated</strong>: every hook, including
+<code>on_retry</code> and <code>on_circuit_open</code>, runs under <code>catch_unwind</code>, so a
+panicking observer is reported (as a <code>tracing</code> error event, or a one-line stderr notice
+without the feature) and never fails the task or the workflow. When an event needs async work — writing to a database, pushing
 to a metrics backend — hand it off to a channel and process it elsewhere:
 </p>
 
@@ -311,8 +314,8 @@ struct DoWork;
 
 #[task(state = Step)]
 impl DoWork {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    async fn run(&self) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 
@@ -323,7 +326,7 @@ async fn main() -> Result<(), CanoError> {
         .add_exit_state(Step::Done)
         .with_observer(Arc::new(TracingObserver::new()));
 
-    workflow.orchestrate(Step::Start, CancellationToken::disabled()).await?;
+    workflow.orchestrate(Step::Start).await?;
     Ok(())
 }
 ```
@@ -389,7 +392,8 @@ always include a wildcard arm when matching it.
 
 <p>
 Aggregate the whole dictionary with <code>Resources::check_all_health()</code> (a
-<code>HashMap&lt;TResourceKey, HealthStatus&gt;</code> — needs <code>TResourceKey: Clone</code>)
+<code>Vec&lt;(Cow&lt;str&gt;, HealthStatus)&gt;</code> in insertion order, each entry labelled by its name,
+or by its type name when it was inserted without one)
 or fold straight to the worst status with <code>aggregate_health()</code>
 (<code>Healthy</code> &lt; <code>Degraded</code> &lt; <code>Unhealthy</code>). Both run the
 checks sequentially.
@@ -401,12 +405,12 @@ use cano::prelude::*;
 // PrimaryDb and ReadReplica are Resource impls (see ReadReplica above).
 #[tokio::main]
 async fn main() {
-    let resources: Resources = Resources::new()
-        .insert("db", PrimaryDb)
-        .insert("replica", ReadReplica);
+    let resources = Resources::new()
+        .insert(PrimaryDb)
+        .insert(ReadReplica);
 
-    for (key, status) in resources.check_all_health().await {
-        println!("{key}: {status:?}");
+    for (label, status) in resources.check_all_health().await {
+        println!("{label}: {status:?}");
     }
 
     match resources.aggregate_health().await {
@@ -467,11 +471,11 @@ impl FlakyLoad {
         TaskConfig::new().with_fixed_retry(3, Duration::from_millis(20))
     }
     fn name(&self) -> Cow<'static, str> { "load".into() }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         if self.remaining_failures.fetch_sub(1, Ordering::SeqCst) > 0 {
             return Err(CanoError::task_execution("upstream not ready yet"));
         }
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -484,7 +488,7 @@ async fn main() -> Result<(), CanoError> {
         .add_exit_state(Step::Done)
         .with_observer(observer.clone());
 
-    workflow.orchestrate(Step::Load, CancellationToken::disabled()).await?;
+    workflow.orchestrate(Step::Load).await?;
     assert_eq!(observer.failures.load(Ordering::Relaxed), 0);
     Ok(())
 }

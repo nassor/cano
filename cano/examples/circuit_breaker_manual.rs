@@ -4,7 +4,7 @@
 //!
 //! Demonstrates driving a [`CircuitBreaker`] **by hand** inside a task body, without
 //! the `TaskConfig::with_circuit_breaker` integration. The task retrieves an
-//! `Arc<CircuitBreaker>` from [`Resources`] and calls:
+//! `CircuitBreaker` from [`Resources`] and calls:
 //!
 //! - [`CircuitBreaker::try_acquire`] — obtain a [`CircuitPermit`] or receive
 //!   [`CanoError::CircuitOpen`] when the breaker is open/saturated.
@@ -91,12 +91,12 @@ struct ManualTask;
 impl Task<Step> for ManualTask {
     fn config(&self) -> TaskConfig {
         // No automatic retry or circuit-breaker wiring — we do it ourselves.
-        TaskConfig::minimal()
+        TaskConfig::new()
     }
 
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        let breaker = res.get::<CircuitBreaker, _>("breaker")?;
-        let client = res.get::<FlakyClient, _>("client")?;
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
+        let breaker = res.get_arc::<CircuitBreaker>()?;
+        let client = res.get::<FlakyClient>()?;
 
         // Step 1: request a permit. Returns Err(CircuitOpen) if the breaker is open.
         let permit = breaker.try_acquire()?;
@@ -108,7 +108,7 @@ impl Task<Step> for ManualTask {
                 // counter in Closed, or advances the success counter in HalfOpen.
                 breaker.record_success(permit);
                 println!("    -> got: {payload}");
-                Ok(TaskResult::Single(Step::Done))
+                Ok(Step::Done)
             }
             Err(e) => {
                 // Step 3b: failure — tell the breaker; this increments the failure
@@ -128,19 +128,19 @@ impl Task<Step> for ManualTask {
 async fn main() -> Result<(), CanoError> {
     println!("=== Circuit Breaker Manual API Demo ===\n");
 
-    let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+    let breaker = CircuitBreaker::new(CircuitPolicy {
         failure_threshold: 3,
         reset_timeout: Duration::from_millis(150),
         half_open_max_calls: 1,
-    }));
+    });
 
     let client = FlakyClient::new();
     let healthy = Arc::clone(&client.healthy);
     let call_count = Arc::clone(&client.calls);
 
     let resources = Resources::new()
-        .insert("breaker", (*breaker).clone()) // store the breaker as a Resource
-        .insert("client", client);
+        .insert(breaker.clone()) // store the breaker as a Resource
+        .insert(client);
 
     let workflow = Workflow::new(resources)
         .register(Step::Call, ManualTask)
@@ -151,9 +151,7 @@ async fn main() -> Result<(), CanoError> {
     // ------------------------------------------------------------------
     println!("Phase 1: dependency unhealthy (threshold = 3 consecutive failures)");
     for attempt in 1..=5 {
-        let outcome = workflow
-            .orchestrate(Step::Call, CancellationToken::disabled())
-            .await;
+        let outcome = workflow.orchestrate(Step::Call).await;
         // `orchestrate` wraps task failures in `WithStateContext`; unwrap one layer
         // before pattern-matching on the underlying variant.
         let label = match &outcome {
@@ -187,10 +185,7 @@ async fn main() -> Result<(), CanoError> {
     // ------------------------------------------------------------------
     println!("\nPhase 3: half-open trial — one probe closes the breaker");
     for attempt in 1..=3 {
-        match workflow
-            .orchestrate(Step::Call, CancellationToken::disabled())
-            .await
-        {
+        match workflow.orchestrate(Step::Call).await {
             Ok(_) => println!("  call {attempt}: ok | breaker={:?}", breaker.state()),
             Err(e) => println!("  call {attempt}: err: {e} | breaker={:?}", breaker.state()),
         }

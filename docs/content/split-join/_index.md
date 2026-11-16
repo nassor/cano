@@ -33,9 +33,12 @@ many of those tasks run at once.
 Use <code>register_split(state, tasks, join_config)</code> in place of <code>register()</code> to map a
 state to a set of tasks that run in parallel. <code>JoinConfig::new(strategy, next_state)</code> defines
 the termination condition and the state the workflow transitions to once the strategy is satisfied;
-<code>.with_timeout(duration)</code> caps how long the join waits, and <code>.with_bulkhead(n)</code>
-caps how many split tasks run concurrently. Like every other builder method, <code>register_split()</code>
-consumes <code>self</code> and returns a new <code>Workflow</code> — capture the return value.
+<code>.with_timeout(duration)</code> caps how long the join waits (for every strategy except
+<code>PartialTimeout</code> an expired timeout is a <code>CanoError::Workflow</code> error), and
+<code>.with_bulkhead(n)</code> caps how many split tasks run concurrently. Like every other builder
+method, <code>register_split()</code> consumes <code>self</code> and returns a new <code>Workflow</code>;
+capture the return value. <code>tasks</code> accepts any iterator, so a <code>Vec</code> or a mapped range
+both work, and <code>validate()</code> checks that the join state is registered or an exit state.
 </p>
 
 <div class="diagram-frame">
@@ -80,7 +83,7 @@ consumes <code>self</code> and returns a new <code>Workflow</code> — capture t
 let join_config = JoinConfig::new(JoinStrategy::All, State::Aggregate)
     .with_timeout(Duration::from_secs(5));
 
-Workflow::new(Resources::new().insert("store", store))
+Workflow::new(Resources::new().insert(store))
     .register(State::Start, Loader)
     .register_split(State::Fanout, vec![Worker { id: 1 }, Worker { id: 2 }, Worker { id: 3 }], join_config)
     .register(State::Aggregate, Aggregator)
@@ -88,20 +91,12 @@ Workflow::new(Resources::new().insert("store", store))
 ```
 </div>
 
-<div class="callout callout-info">
-<span class="callout-label">Two ways to fan out</span>
-<p>
-A state can be a split because you <em>registered</em> it with <code>register_split()</code> (the tasks
-and join strategy are fixed at build time), or because a single task <em>returned</em>
-<code>TaskResult::Split(...)</code> at runtime to spawn a dynamic set of follow-on states. A single task
-that returns <code>TaskResult::Split</code> for a state registered with plain <code>register()</code>
-fails with <code>CanoError::Workflow</code> — use <code>register_split()</code> for that state.
-</p>
-</div>
 <hr class="section-divider">
 
 <h2 id="join-strategies"><a href="#join-strategies" class="anchor-link" aria-hidden="true">#</a>Join Strategies</h2>
-<p>The <code>JoinStrategy</code> enum controls when a split is considered done and the workflow may advance.</p>
+<p>The <code>JoinStrategy</code> enum controls when a split is considered done and the workflow may advance.
+Only <code>Any</code> and <code>PartialResults</code> stop early and cancel the tasks still running; the
+other strategies wait for every task to finish (or the timeout to expire) and then check the outcome.</p>
 
 <div class="strategy-grid">
 <div class="strategy-card">
@@ -122,7 +117,7 @@ JoinStrategy::Any
 </div>
 <div class="strategy-card">
 <p class="strategy-name">Quorum(n)</p>
-<p>Wait for <strong>n</strong> tasks to complete successfully.</p>
+<p>Succeed when at least <strong>n</strong> tasks succeeded; every task still runs to completion.</p>
 
 ```rust
 JoinStrategy::Quorum(2)
@@ -130,7 +125,7 @@ JoinStrategy::Quorum(2)
 </div>
 <div class="strategy-card">
 <p class="strategy-name">Percentage(p)</p>
-<p>Wait for <strong>p%</strong> of tasks to complete successfully (value in <code>(0.0, 1.0]</code>).</p>
+<p>Succeed when at least <strong>p%</strong> of tasks succeeded (value in <code>(0.0, 1.0]</code>); every task still runs to completion.</p>
 
 ```rust
 JoinStrategy::Percentage(0.5)
@@ -138,7 +133,7 @@ JoinStrategy::Percentage(0.5)
 </div>
 <div class="strategy-card">
 <p class="strategy-name">PartialResults(n)</p>
-<p>Proceed once <strong>n</strong> tasks complete (successes <em>or</em> failures).</p>
+<p>Proceed once <strong>n</strong> tasks have <em>succeeded</em>; the rest are cancelled and failures are tolerated.</p>
 
 ```rust
 JoinStrategy::PartialResults(3)
@@ -146,7 +141,7 @@ JoinStrategy::PartialResults(3)
 </div>
 <div class="strategy-card">
 <p class="strategy-name">PartialTimeout</p>
-<p>Accept whatever completes before <strong>timeout</strong> expires. Requires <code>.with_timeout()</code>.</p>
+<p>Accept whatever completes (successes <em>or</em> failures) before the <strong>timeout</strong> expires. Requires <code>.with_timeout()</code>.</p>
 
 ```rust
 JoinStrategy::PartialTimeout
@@ -157,8 +152,8 @@ JoinStrategy::PartialTimeout
 <div class="callout callout-warning">
 <span class="callout-label">PartialTimeout needs a timeout</span>
 <p>
-A <code>JoinConfig</code> using <code>PartialTimeout</code> without a configured timeout fails at execution
-time with <code>CanoError::Configuration</code>. Always pair it with <code>.with_timeout(duration)</code>.
+A <code>JoinConfig</code> using <code>PartialTimeout</code> without a configured timeout is rejected by
+<code>validate()</code> with <code>CanoError::Configuration</code>, before the workflow runs. Always pair it with <code>.with_timeout(duration)</code>.
 </p>
 </div>
 <hr class="section-divider">
@@ -184,8 +179,10 @@ let join_config = JoinConfig::new(JoinStrategy::All, State::Aggregate)
 <div class="callout callout-warning">
 <span class="callout-label">Validation</span>
 <p>
-<code>with_bulkhead(0)</code> is rejected at execution time with <code>CanoError::Configuration</code>.
-Leave the bulkhead unset (<code>None</code>) for unbounded concurrency. Bulkheads compose with
+<code>with_bulkhead(0)</code> is rejected by <code>validate()</code> with <code>CanoError::Configuration</code>,
+as is a <code>Percentage</code> outside <code>(0.0, 1.0]</code>. <code>validate()</code> runs before every
+<code>orchestrate</code> / <code>resume_from</code>, so these never surface mid-run. Leave the bulkhead unset
+(<code>None</code>) for unbounded concurrency. Bulkheads compose with
 <code>PartialTimeout</code> and any other join strategy.
 </p>
 </div>
@@ -215,10 +212,10 @@ struct DataLoader;
 
 #[task(state = DataState)]
 impl DataLoader {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<DataState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
-        store.put("input_data", vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10])?;
-        Ok(TaskResult::Single(DataState::ParallelProcessing))
+    async fn run(&self, res: &Resources) -> Result<DataState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
+        store.put("input_data", vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        Ok(DataState::ParallelProcessing)
     }
 }
 
@@ -228,13 +225,13 @@ impl ProcessorTask { fn new(task_id: usize) -> Self { Self { task_id } } }
 
 #[task(state = DataState)]
 impl ProcessorTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<DataState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<DataState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let data: Vec<i32> = store.get("input_data")?;
         tokio::time::sleep(Duration::from_millis(100 * self.task_id as u64)).await;
         let result: i32 = data.iter().map(|&x| x * self.task_id as i32).sum();
-        store.put(&format!("result_{}", self.task_id), result)?;
-        Ok(TaskResult::Single(DataState::Aggregate))
+        store.put(&format!("result_{}", self.task_id), result);
+        Ok(DataState::Aggregate)
     }
 }
 
@@ -243,13 +240,13 @@ struct Aggregator;
 
 #[task(state = DataState)]
 impl Aggregator {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<DataState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<DataState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let total: i32 = (1..=3)
             .filter_map(|i| store.get::<i32>(&format!("result_{}", i)).ok())
             .sum();
-        store.put("final_result", total)?;
-        Ok(TaskResult::Single(DataState::Complete))
+        store.put("final_result", total);
+        Ok(DataState::Complete)
     }
 }
 
@@ -267,13 +264,13 @@ async fn main() -> Result<(), CanoError> {
     let join_config = JoinConfig::new(JoinStrategy::All, DataState::Aggregate)
         .with_timeout(Duration::from_secs(5));
 
-    let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let workflow = Workflow::new(Resources::new().insert(store.clone()))
         .register(DataState::Start, DataLoader)
         .register_split(DataState::ParallelProcessing, processors, join_config)
         .register(DataState::Aggregate, Aggregator)
         .add_exit_state(DataState::Complete);
 
-    let result = workflow.orchestrate(DataState::Start, CancellationToken::disabled()).await?;
+    let result = workflow.orchestrate(DataState::Start).await?;
     let final_result: i32 = store.get("final_result")?;
     println!("Workflow completed: {:?} — total {}", result, final_result);
     Ok(())

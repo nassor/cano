@@ -105,11 +105,11 @@ struct Router;
 
 #[task::router(state = Stage)]
 impl Router {
-    async fn route(&self, res: &Resources) -> Result<TaskResult<Stage>, CanoError> {
-        let config = res.get::<Config, _>("config")?;
+    async fn route(&self, res: &Resources) -> Result<Stage, CanoError> {
+        let config = res.get::<Config>()?;
         if config.proceed {
             println!("route      : config.proceed=true → Wait");
-            Ok(TaskResult::Single(Stage::Wait))
+            Ok(Stage::Wait)
         } else {
             // In this example the flag is always true, but branching is possible.
             Err(CanoError::configuration(
@@ -129,10 +129,10 @@ struct Waiter;
 #[task::poll(state = Stage)]
 impl Waiter {
     async fn poll(&self, res: &Resources) -> Result<PollOutcome<Stage>, CanoError> {
-        let counter = res.get::<Counter, _>("counter")?;
+        let counter = res.get::<Counter>()?;
         if counter.is_done() {
             println!("wait       : counter reached threshold → Crunch");
-            Ok(PollOutcome::Ready(TaskResult::Single(Stage::Crunch)))
+            Ok(PollOutcome::Ready(Stage::Crunch))
         } else {
             Ok(PollOutcome::Pending { delay_ms: 5 })
         }
@@ -166,10 +166,10 @@ impl Cruncher {
         &self,
         _res: &Resources,
         outputs: Vec<Result<u32, CanoError>>,
-    ) -> Result<TaskResult<Stage>, CanoError> {
+    ) -> Result<Stage, CanoError> {
         let sum: u32 = outputs.into_iter().filter_map(|r| r.ok()).sum();
         println!("crunch     : sum of squares 1²+…+8² = {sum} → Grind");
-        Ok(TaskResult::Single(Stage::Grind))
+        Ok(Stage::Grind)
     }
 }
 
@@ -194,7 +194,7 @@ impl Grinder {
         println!("grind      : step {}", n + 1);
         if n >= 6 {
             println!("grind      : complete → Done");
-            Ok(StepOutcome::Done(TaskResult::Single(Stage::Done)))
+            Ok(StepOutcome::Done(Stage::Done))
         } else {
             Ok(StepOutcome::More(n + 1))
         }
@@ -227,24 +227,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- build resources ---
     let resources = Resources::new()
-        .insert("config", Config { proceed: true })
-        .insert("counter", counter);
+        .insert(Config { proceed: true })
+        .insert(counter);
 
     // --- build workflow ---
     println!("=== processing models tour ===\n");
 
     let workflow = Workflow::new(resources)
-        .register_router(Stage::Route, Router)
+        .register(Stage::Route, Router)
         .register(Stage::Wait, Waiter)
         .register(Stage::Crunch, Cruncher)
-        .register_stepped(Stage::Grind, Grinder)
+        .register(Stage::Grind, Grinder)
         .add_exit_state(Stage::Done)
         .with_checkpoint_store(checkpoint_store.clone())
         .with_workflow_id(run_id);
 
-    let result = workflow
-        .orchestrate(Stage::Route, CancellationToken::disabled())
-        .await?;
+    let result = workflow.orchestrate(Stage::Route).await?;
     assert_eq!(result, Stage::Done);
 
     println!("\ncompleted at {result:?}");

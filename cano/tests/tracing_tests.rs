@@ -32,11 +32,11 @@ impl TestTask {
 
 #[cano::task]
 impl Task<TestState> for TestTask {
-    async fn run_bare(&self) -> Result<TaskResult<TestState>, CanoError> {
+    async fn run(&self) -> Result<TestState, CanoError> {
         if self.id.contains("processing") {
-            Ok(TaskResult::Single(TestState::Complete))
+            Ok(TestState::Complete)
         } else {
-            Ok(TaskResult::Single(TestState::Processing))
+            Ok(TestState::Processing)
         }
     }
 }
@@ -51,10 +51,7 @@ async fn test_workflow_with_tracing_span() {
         .register(TestState::Processing, TestTask::new("processing"))
         .add_exit_state(TestState::Complete);
 
-    let result = workflow
-        .orchestrate(TestState::Start, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(TestState::Start).await.unwrap();
 
     assert_eq!(result, TestState::Complete);
 }
@@ -74,10 +71,7 @@ async fn test_concurrent_workflow_with_tracing_span() {
         .register(TestState::Processing, TestTask::new("processing"))
         .add_exit_state(TestState::Complete);
 
-    let result = workflow
-        .orchestrate(TestState::Start, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(TestState::Start).await.unwrap();
 
     assert_eq!(result, TestState::Complete);
 }
@@ -95,16 +89,14 @@ async fn test_scheduler_with_tracing() {
             .register(TestState::Processing, TestTask::new("processing"))
             .add_exit_state(TestState::Complete);
 
-        let mut scheduler = Scheduler::new();
-        scheduler
-            .manual("test_workflow", workflow, TestState::Start)
-            .unwrap();
+        let scheduler = Scheduler::new();
+        let scheduler = scheduler.manual("test_workflow", workflow, TestState::Start);
 
         // Start consumes the builder and returns a clone-able handle.
         let running = scheduler.start().await.unwrap();
 
         // Inspect status before stopping.
-        let status = running.status("test_workflow").await;
+        let status = running.status("test_workflow");
         assert!(status.is_some());
         assert_eq!(status.unwrap().status, cano::scheduler::Status::Idle);
 
@@ -123,10 +115,7 @@ async fn test_workflow_tracing_without_custom_span() {
         .register(TestState::Processing, TestTask::new("processing"))
         .add_exit_state(TestState::Complete);
 
-    let result = workflow
-        .orchestrate(TestState::Start, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(TestState::Start).await.unwrap();
 
     assert_eq!(result, TestState::Complete);
 }
@@ -170,7 +159,7 @@ impl Task<Flow> for AlwaysFail {
     fn name(&self) -> Cow<'static, str> {
         "always-fail".into()
     }
-    async fn run_bare(&self) -> Result<TaskResult<Flow>, CanoError> {
+    async fn run(&self) -> Result<Flow, CanoError> {
         Err(CanoError::task_execution("nope"))
     }
 }
@@ -186,27 +175,27 @@ impl Task<Flow> for RecoverAfter {
     fn name(&self) -> Cow<'static, str> {
         "recover-after".into()
     }
-    async fn run_bare(&self) -> Result<TaskResult<Flow>, CanoError> {
+    async fn run(&self) -> Result<Flow, CanoError> {
         if self.remaining_failures.fetch_sub(1, Ordering::SeqCst) > 0 {
             return Err(CanoError::task_execution("not ready"));
         }
-        Ok(TaskResult::Single(Flow::Done))
+        Ok(Flow::Done)
     }
 }
 
 struct GuardedTask {
-    breaker: Arc<CircuitBreaker>,
+    breaker: CircuitBreaker,
 }
 #[cano::task]
 impl Task<Flow> for GuardedTask {
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal().with_circuit_breaker(Arc::clone(&self.breaker))
+        TaskConfig::new().with_circuit_breaker(self.breaker.clone())
     }
     fn name(&self) -> Cow<'static, str> {
         "guarded".into()
     }
-    async fn run_bare(&self) -> Result<TaskResult<Flow>, CanoError> {
-        Ok(TaskResult::Single(Flow::Done))
+    async fn run(&self) -> Result<Flow, CanoError> {
+        Ok(Flow::Done)
     }
 }
 
@@ -226,13 +215,7 @@ async fn test_tracing_observer_runs_workflow() {
         )
         .add_exit_state(Flow::Done)
         .with_observer(Arc::new(TracingObserver::new()));
-    assert_eq!(
-        workflow
-            .orchestrate(Flow::A, CancellationToken::disabled())
-            .await
-            .unwrap(),
-        Flow::Done
-    );
+    assert_eq!(workflow.orchestrate(Flow::A).await.unwrap(), Flow::Done);
 }
 
 #[derive(Clone)]
@@ -270,34 +253,26 @@ async fn test_tracing_observer_captures_events() {
         .register(Flow::A, AlwaysFail)
         .add_exit_state(Flow::Done)
         .with_observer(Arc::new(TracingObserver::new()));
-    assert!(
-        fail_wf
-            .orchestrate(Flow::A, CancellationToken::disabled())
-            .await
-            .is_err()
-    );
+    assert!(fail_wf.orchestrate(Flow::A).await.is_err());
 
     // Pre-tripped breaker → on_circuit_open + on_task_failure.
-    let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+    let breaker = CircuitBreaker::new(CircuitPolicy {
         failure_threshold: 1,
         reset_timeout: Duration::from_secs(60),
         half_open_max_calls: 1,
-    }));
+    });
     let permit = breaker.try_acquire().unwrap();
     breaker.record_failure(permit);
     let cb_wf = Workflow::bare()
         .register(
             Flow::B,
             GuardedTask {
-                breaker: Arc::clone(&breaker),
+                breaker: breaker.clone(),
             },
         )
         .add_exit_state(Flow::Done)
         .with_observer(Arc::new(TracingObserver::new()));
-    let cb_err = cb_wf
-        .orchestrate(Flow::B, CancellationToken::disabled())
-        .await
-        .unwrap_err();
+    let cb_err = cb_wf.orchestrate(Flow::B).await.unwrap_err();
     // The FSM wraps task failures with state context; `.inner()` peels one layer.
     assert!(matches!(cb_err.inner(), CanoError::CircuitOpen(_)));
 

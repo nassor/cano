@@ -19,10 +19,10 @@ as typed <code>Resource</code> values and retrieved by concrete type.
 <p>
 <code>MemoryStore</code> is registered inside a <a href="../resources/"><code>Resources</code></a>
 dictionary and retrieved in tasks with
-<code>res.get::&lt;MemoryStore, _&gt;("store")?</code>. This makes the store one
-of many named dependencies a workflow can carry, alongside database pools, HTTP clients,
+<code>res.get::&lt;MemoryStore&gt;()?</code>. This makes the store one
+of many typed dependencies a workflow can carry, alongside database pools, HTTP clients,
 configuration, or any other type that implements the <code>Resource</code> trait. See
-<a href="../resources/">Resources</a> for lifecycle semantics, key-type options, and
+<a href="../resources/">Resources</a> for lifecycle semantics, named instances, and
 the full <code>insert</code> / <code>get</code> API.
 </p>
 
@@ -86,7 +86,7 @@ produces a second handle to the <em>same</em> underlying data -- not a copy.
 let store = MemoryStore::new();
 let store2 = store.clone(); // same backing map — not a copy
 
-store.put("key", 42i32)?;
+store.put("key", 42i32);
 let val: i32 = store2.get("key")?; // returns 42
 
 ```
@@ -117,13 +117,13 @@ let val: i32 = store2.get("key")?; // returns 42
 </tr>
 <tr>
 <td><code>put</code></td>
-<td><code>put&lt;T: Send + Sync&gt;(&amp;self, key: &amp;str, value: T) -&gt; StoreResult&lt;()&gt;</code></td>
-<td>Inserts or replaces. Values do not need to implement <code>Clone</code>.</td>
+<td><code>put&lt;T: Send + Sync&gt;(&amp;self, key: &amp;str, value: T)</code></td>
+<td>Inserts or replaces. Infallible. Values do not need to implement <code>Clone</code>.</td>
 </tr>
 <tr>
 <td><code>remove</code></td>
-<td><code>remove(&amp;self, key: &amp;str) -&gt; StoreResult&lt;()&gt;</code></td>
-<td>Silent no-op on missing keys. Errors only on lock failure.</td>
+<td><code>remove(&amp;self, key: &amp;str)</code></td>
+<td>Infallible. Silent no-op on missing keys.</td>
 </tr>
 <tr>
 <td><code>append</code></td>
@@ -132,28 +132,28 @@ let val: i32 = store2.get("key")?; // returns 42
 </tr>
 <tr>
 <td><code>contains_key</code></td>
-<td><code>contains_key(&amp;self, key: &amp;str) -&gt; StoreResult&lt;bool&gt;</code></td>
-<td>Returns <code>Ok(true)</code> if the key exists.</td>
+<td><code>contains_key(&amp;self, key: &amp;str) -&gt; bool</code></td>
+<td>Returns <code>true</code> if the key exists.</td>
 </tr>
 <tr>
 <td><code>keys</code></td>
-<td><code>keys(&amp;self) -&gt; StoreResult&lt;Vec&lt;Arc&lt;str&gt;&gt;&gt;</code></td>
+<td><code>keys(&amp;self) -&gt; Vec&lt;Arc&lt;str&gt;&gt;</code></td>
 <td>Returns all keys. Order is unspecified (HashMap).</td>
 </tr>
 <tr>
 <td><code>len</code></td>
-<td><code>len(&amp;self) -&gt; StoreResult&lt;usize&gt;</code></td>
+<td><code>len(&amp;self) -&gt; usize</code></td>
 <td>Number of key-value pairs currently stored.</td>
 </tr>
 <tr>
 <td><code>is_empty</code></td>
-<td><code>is_empty(&amp;self) -&gt; StoreResult&lt;bool&gt;</code></td>
-<td>Default impl delegates to <code>len()</code>.</td>
+<td><code>is_empty(&amp;self) -&gt; bool</code></td>
+<td><code>true</code> when the store holds no entries.</td>
 </tr>
 <tr>
 <td><code>clear</code></td>
-<td><code>clear(&amp;self) -&gt; StoreResult&lt;()&gt;</code></td>
-<td>Removes all entries.</td>
+<td><code>clear(&amp;self)</code></td>
+<td>Infallible. Removes all entries.</td>
 </tr>
 </tbody>
 </table>
@@ -172,8 +172,8 @@ fn main() -> Result<(), CanoError> {
     let store = MemoryStore::new();
 
     // Store primitive and composite types
-    store.put("count", 42u32)?;
-    store.put("labels", vec!["a".to_string(), "b".to_string()])?;
+    store.put("count", 42u32);
+    store.put("labels", vec!["a".to_string(), "b".to_string()]);
 
     // Retrieve with explicit type annotation
     let count: u32 = store.get("count")?;
@@ -185,12 +185,12 @@ fn main() -> Result<(), CanoError> {
     let log: Vec<String> = store.get("log")?;
 
     // Check existence before reading optional keys
-    if store.contains_key("result")? {
+    if store.contains_key("result") {
         let result: String = store.get("result")?;
     }
 
     // Remove a key — silent no-op if absent
-    store.remove("scratch")?;
+    store.remove("scratch");
     Ok(())
 }
 
@@ -227,7 +227,7 @@ use std::sync::Arc;
 
 fn main() -> Result<(), CanoError> {
     let store = MemoryStore::new();
-    store.put("dataset", vec![0u8; 1_000_000])?; // 1 MB
+    store.put("dataset", vec![0u8; 1_000_000]); // 1 MB
 
     // Both handles point to the same allocation — no copy
     let handle_a: Arc<Vec<u8>> = store.get_shared("dataset")?;
@@ -265,7 +265,7 @@ Prefer <code>get_shared()</code> for large or frequently-read values.
 <p>
 Register the store inside a <code>Resources</code> dictionary and pass it to
 <code>Workflow::new()</code>. Each task retrieves the store via
-<code>res.get::&lt;MemoryStore, _&gt;("store")?</code>, so the same handle is shared
+<code>res.get::&lt;MemoryStore&gt;()?</code>, so the same handle is shared
 across all registered tasks for the duration of a single <code>orchestrate()</code> call.
 </p>
 
@@ -282,12 +282,12 @@ struct IngestTask;
 
 #[task(state = Stage)]
 impl IngestTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Stage>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<Stage, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let batch: usize = store.get("batch_size")?;
         let records: Vec<u32> = (0..batch as u32).collect();
-        store.put("records", records)?;
-        Ok(TaskResult::Single(Stage::Transform))
+        store.put("records", records);
+        Ok(Stage::Transform)
     }
 }
 
@@ -295,12 +295,12 @@ struct TransformTask;
 
 #[task(state = Stage)]
 impl TransformTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Stage>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<Stage, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let records: Vec<u32> = store.get("records")?;
         let transformed: Vec<u32> = records.into_iter().map(|x| x * 2).collect();
-        store.put("result", transformed)?;
-        Ok(TaskResult::Single(Stage::Complete))
+        store.put("result", transformed);
+        Ok(Stage::Complete)
     }
 }
 
@@ -309,14 +309,14 @@ async fn main() -> Result<(), CanoError> {
     let store = MemoryStore::new();
 
     // Pre-populate before the workflow starts
-    store.put("batch_size", 256usize)?;
+    store.put("batch_size", 256usize);
 
-    let workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let workflow = Workflow::new(Resources::new().insert(store.clone()))
         .register(Stage::Ingest, IngestTask)
         .register(Stage::Transform, TransformTask)
         .add_exit_state(Stage::Complete);
 
-    workflow.orchestrate(Stage::Ingest, CancellationToken::disabled()).await?;
+    workflow.orchestrate(Stage::Ingest).await?;
 
     // Read results after the workflow completes
     let result: Vec<u32> = store.get("result")?;
@@ -340,7 +340,8 @@ as a shared stack passed between workflow stages.</p>
 <p>
 For custom storage, define a concrete type with the API your workflow needs and
 implement <code>Resource</code> for it. Register that type in <code>Resources</code>, then retrieve it by
-concrete type inside tasks. This keeps storage dependencies explicit and avoids
+concrete type inside tasks. A second instance of the same type is registered with
+<code>insert_named</code> and retrieved with <code>get_named</code>. This keeps storage dependencies explicit and avoids
 an unnecessary storage trait layer now that <code>Resources</code> provides typed dependency lookup.
 </p>
 
@@ -375,43 +376,42 @@ impl NamespacedStore {
         self.inner.get(&self.ns_key(key))
     }
 
-    pub fn put<T: 'static + Send + Sync>(&self, key: &str, value: T) -> StoreResult<()> {
-        self.inner.put(&self.ns_key(key), value)
+    pub fn put<T: 'static + Send + Sync>(&self, key: &str, value: T) {
+        self.inner.put(&self.ns_key(key), value);
     }
 
-    pub fn remove(&self, key: &str) -> StoreResult<()> {
-        self.inner.remove(&self.ns_key(key))
+    pub fn remove(&self, key: &str) {
+        self.inner.remove(&self.ns_key(key));
     }
 
     pub fn append<T: 'static + Send + Sync + Clone>(&self, key: &str, item: T) -> StoreResult<()> {
         self.inner.append(&self.ns_key(key), item)
     }
 
-    pub fn contains_key(&self, key: &str) -> StoreResult<bool> {
+    pub fn contains_key(&self, key: &str) -> bool {
         self.inner.contains_key(&self.ns_key(key))
     }
 
-    pub fn keys(&self) -> StoreResult<Vec<String>> {
+    pub fn keys(&self) -> Vec<String> {
         // Strip the namespace prefix before returning keys to callers
         let prefix = format!("{}::", self.namespace);
-        let raw_keys = self.inner.keys()?;
-        Ok(raw_keys
+        self.inner
+            .keys()
             .into_iter()
             .filter_map(|k| k.strip_prefix(&prefix).map(str::to_string))
-            .collect())
+            .collect()
     }
 
-    pub fn len(&self) -> StoreResult<usize> {
+    pub fn len(&self) -> usize {
         // Count only keys in this namespace
-        Ok(self.keys()?.len())
+        self.keys().len()
     }
 
-    pub fn clear(&self) -> StoreResult<()> {
+    pub fn clear(&self) {
         // Remove only keys in this namespace
-        for key in self.keys()? {
-            self.remove(&key)?;
+        for key in self.keys() {
+            self.remove(&key);
         }
-        Ok(())
     }
 }
 
@@ -421,15 +421,15 @@ impl Resource for NamespacedStore {}
 enum State { Start, Done }
 
 fn main() -> Result<(), CanoError> {
-    // Use it like any other store — register it in Resources with your own key
+    // Use it like any other store: register it in Resources by type
     let store = NamespacedStore::new("pipeline_v2");
-    store.put("status", "running".to_string())?;
+    store.put("status", "running".to_string());
 
     let _workflow: Workflow<State> = Workflow::new(
-        Resources::new().insert("namespaced_store", store.clone()),
+        Resources::new().insert(store.clone()),
     )
     // ... register tasks that retrieve it via
-    //     res.get::<NamespacedStore, _>("namespaced_store")? ...
+    //     res.get::<NamespacedStore>()? ...
     .add_exit_state(State::Done);
     Ok(())
 }
@@ -458,10 +458,13 @@ proves the zero-copy share of a large value between tasks).</p>
 <h2 id="error-handling"><a href="#error-handling" class="anchor-link" aria-hidden="true">#</a>Error Handling</h2>
 
 <p>
-Store operations return <code>StoreResult&lt;T&gt;</code>, which is
+Fallible store operations (<code>get</code>, <code>get_shared</code>, <code>append</code>) return
+<code>StoreResult&lt;T&gt;</code>, which is
 <code>Result&lt;T, StoreError&gt;</code>. <code>StoreError</code> converts automatically
 to <code>CanoError::Store</code> via the <code>From</code> impl, so the <code>?</code>
-operator works transparently in task methods.
+operator works transparently in task methods. <code>put</code>, <code>remove</code>,
+<code>clear</code>, <code>contains_key</code>, <code>keys</code>, <code>len</code> and
+<code>is_empty</code> cannot fail and return plain values.
 </p>
 
 <div class="card-grid error-cards">
@@ -472,10 +475,6 @@ operator works transparently in task methods.
 <div class="card">
 <h3>TypeMismatch</h3>
 <p>The stored value cannot be downcast to the requested type. Ensure consistent type usage per key across all pipeline stages.</p>
-</div>
-<div class="card">
-<h3>LockError</h3>
-<p>The internal <code>RwLock</code> is poisoned -- a thread panicked while holding the lock. Typically fatal; log and restart.</p>
 </div>
 <div class="card">
 <h3>AppendTypeMismatch</h3>

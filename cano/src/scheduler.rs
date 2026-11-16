@@ -1,22 +1,35 @@
 //! # Scheduler API
 //!
-//! Time-driven dispatch for [`Workflow`](crate::workflow::Workflow) instances —
-//! intervals, cron expressions, and manual triggers, plus per-flow backoff and
-//! trip semantics.
+//! Time-driven dispatch for [`Workflow`] instances — intervals, cron
+//! expressions, and manual triggers, plus per-flow backoff and trip semantics.
 //!
-//! Two-stage lifecycle:
-//!
-//! - [`Scheduler`] is the **builder**. Register workflows with [`every`](Scheduler::every) /
-//!   [`cron`](Scheduler::cron) / [`manual`](Scheduler::manual), optionally override the
-//!   default [`BackoffPolicy`] via [`set_backoff`](Scheduler::set_backoff), then call
-//!   [`start`](Scheduler::start) to consume the builder. `Scheduler` is **not** `Clone`.
-//! - [`RunningScheduler`] is the **live handle** returned by `start`. It owns the
-//!   spawned driver and per-flow loop tasks. It is cheap to clone — call
+//! - [`Scheduler`] is the **builder**: chain [`every`](Scheduler::every) /
+//!   [`cron`](Scheduler::cron) / [`manual`](Scheduler::manual) (workflows may use
+//!   different state types), optional [`with_backoff`](Scheduler::with_backoff) and
+//!   shutdown timeouts, then [`start`](Scheduler::start).
+//! - [`RunningScheduler`] is the **live handle** `start` returns. Clone it freely;
 //!   [`trigger`](RunningScheduler::trigger), [`status`](RunningScheduler::status),
-//!   [`stop`](RunningScheduler::stop), etc. from any task.
+//!   [`cancel_flow`](RunningScheduler::cancel_flow) and friends work from any task,
+//!   and [`stop`](RunningScheduler::stop) shuts down in bounded time: drain, then
+//!   cancel, then abort.
 //!
-//! Because `start` consumes `self`, double-starting the same builder is rejected
-//! at the type level.
+//! ```rust,no_run
+//! # use cano::prelude::*;
+//! # use std::time::Duration;
+//! # #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+//! # enum Step { Start, Done }
+//! # fn workflow() -> Workflow<Step> { unimplemented!() }
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let running = Scheduler::new()
+//!     .every("fetch", workflow(), Step::Start, Duration::from_secs(60))
+//!     .start()
+//!     .await?;
+//! cano::scheduler::shutdown_signal().await?; // Ctrl-C, or SIGTERM on Unix
+//! running.stop().await?;
+//! # Ok(())
+//! # }
+//! ```
 //!
 //! > **Note:** The scheduler is an optional feature. Enable the `"scheduler"`
 //! > feature in your `Cargo.toml`.
@@ -27,51 +40,27 @@
 //! ```
 
 mod backoff;
+mod builder;
+mod loops;
+mod running;
+#[cfg(test)]
+mod test_support;
 
 pub use backoff::BackoffPolicy;
+pub use builder::Scheduler;
+pub use running::RunningScheduler;
 
-use crate::cancel::CancellationHandle;
-use crate::error::CanoResult;
-use crate::workflow::Workflow;
-use chrono::{DateTime, Utc};
-use cron::Schedule as CronSchedule;
 use std::hash::Hash;
 use std::sync::Arc;
-use tokio::sync::{RwLock, oneshot};
+
+use chrono::{DateTime, Utc};
+use cron::Schedule as CronSchedule;
+use futures_util::future::BoxFuture;
 use tokio::time::Duration;
+use tokio_util::sync::CancellationToken;
 
-/// Commands sent over the internal scheduler control channel.
-///
-/// Using a typed enum instead of magic strings eliminates a class of runtime
-/// errors and makes the protocol self-documenting.
-enum SchedulerCommand {
-    Stop,
-    Trigger {
-        id: Arc<str>,
-        response: oneshot::Sender<CanoResult<()>>,
-    },
-    Reset {
-        id: Arc<str>,
-        response: oneshot::Sender<CanoResult<()>>,
-    },
-    /// Request cooperative cancellation of a flow's in-flight run. A no-op when
-    /// the flow isn't currently running.
-    Cancel {
-        id: Arc<str>,
-        response: oneshot::Sender<CanoResult<()>>,
-    },
-}
-
-/// Simplified scheduling options
-#[derive(Debug, Clone)]
-pub enum Schedule {
-    /// Run every Duration interval
-    Every(Duration),
-    /// Cron expression (for advanced users)
-    Cron(String),
-    /// Manual trigger only
-    Manual,
-}
+use crate::error::CanoResult;
+use crate::workflow::Workflow;
 
 /// Simple workflow status.
 ///
@@ -91,7 +80,7 @@ pub enum Status {
         last_error: Arc<str>,
     },
     /// Flow has reached its [`BackoffPolicy::streak_limit`] and will not
-    /// dispatch again until [`Scheduler::reset_flow`] is called.
+    /// dispatch again until [`RunningScheduler::reset_flow`] is called.
     Tripped {
         streak: u32,
         last_error: Arc<str>,
@@ -99,10 +88,6 @@ pub enum Status {
 }
 
 /// Workflow information.
-///
-/// Adding fields here is an additive change; downstream code that constructs
-/// `FlowInfo` literally (rare — usually only this crate constructs it) needs
-/// `..` rest patterns or to use the public-fields-with-default convention.
 #[derive(Debug, Clone)]
 pub struct FlowInfo {
     pub id: Arc<str>,
@@ -116,9 +101,29 @@ pub struct FlowInfo {
     pub next_eligible: Option<DateTime<Utc>>,
 }
 
-/// Internal schedule representation. The public [`Schedule`] keeps the cron
-/// expression as a string for ergonomics; we parse it once at registration
-/// time and cache the result so the spawned scheduler loop never re-parses.
+/// Resolves on Ctrl-C, or on SIGTERM on Unix — the usual "shut down now" signals
+/// for a scheduler process.
+///
+/// # Errors
+///
+/// The I/O error from installing a signal handler.
+pub async fn shutdown_signal() -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut terminate = signal(SignalKind::terminate())?;
+        tokio::select! {
+            res = tokio::signal::ctrl_c() => res,
+            _ = terminate.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await
+    }
+}
+
+/// Parsed schedule; the cron expression is parsed once at registration.
 #[derive(Clone)]
 enum ParsedSchedule {
     Every(Duration),
@@ -127,52 +132,66 @@ enum ParsedSchedule {
     Manual,
 }
 
-/// Per-flow data stored in the scheduler. Carries the workflow, its initial
-/// state, the parsed schedule, the live `FlowInfo` shared with status readers,
-/// and the flow's [`BackoffPolicy`] ([`BackoffPolicy::default`] unless
-/// overridden via [`Scheduler::set_backoff`]).
-struct FlowData<TState, TResourceKey>
-where
-    TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
-{
-    workflow: Arc<Workflow<TState, TResourceKey>>,
-    initial_state: TState,
-    schedule: ParsedSchedule,
-    info: Arc<RwLock<FlowInfo>>,
-    policy: Arc<BackoffPolicy>,
-    /// Cancellation handle for the flow's *currently executing* run, published
-    /// by `execute_reserved_flow` while a run is in flight and cleared when it
-    /// finishes. `None` when the flow is idle. Lets `cancel_flow` and graceful
-    /// shutdown cooperatively cancel an in-flight run.
-    cancel: Arc<RwLock<Option<CancellationHandle>>>,
+/// A registered workflow with its state type erased, so one scheduler can host
+/// workflows with different state enums.
+trait Flow: Send + Sync + 'static {
+    /// `validate()` + `validate_initial_state`.
+    fn validate(&self) -> CanoResult<()>;
+    fn setup(&self) -> BoxFuture<'_, CanoResult<()>>;
+    fn teardown(&self) -> BoxFuture<'_, ()>;
+    /// One run from the initial state under `token` (no resource lifecycle).
+    fn run<'a>(&'a self, token: &'a CancellationToken) -> BoxFuture<'a, CanoResult<()>>;
 }
 
-impl<TState, TResourceKey> Clone for FlowData<TState, TResourceKey>
+struct WorkflowFlow<TState>
 where
-    TState: Clone + Send + Sync + 'static + std::fmt::Debug + std::hash::Hash + Eq,
-    TResourceKey: Hash + Eq + Send + Sync + 'static,
+    TState: Clone + std::fmt::Debug + Hash + Eq + Send + Sync + 'static,
 {
-    fn clone(&self) -> Self {
-        Self {
-            workflow: Arc::clone(&self.workflow),
-            initial_state: self.initial_state.clone(),
-            schedule: self.schedule.clone(),
-            info: Arc::clone(&self.info),
-            policy: self.policy.clone(),
-            cancel: Arc::clone(&self.cancel),
-        }
+    workflow: Workflow<TState>,
+    initial_state: TState,
+}
+
+impl<TState> Flow for WorkflowFlow<TState>
+where
+    TState: Clone + std::fmt::Debug + Hash + Eq + Send + Sync + 'static,
+{
+    fn validate(&self) -> CanoResult<()> {
+        self.workflow.validate()?;
+        self.workflow.validate_initial_state(&self.initial_state)
+    }
+
+    fn setup(&self) -> BoxFuture<'_, CanoResult<()>> {
+        Box::pin(self.workflow.resources.setup_all())
+    }
+
+    fn teardown(&self) -> BoxFuture<'_, ()> {
+        Box::pin(self.workflow.resources.teardown_all())
+    }
+
+    fn run<'a>(&'a self, token: &'a CancellationToken) -> BoxFuture<'a, CanoResult<()>> {
+        Box::pin(async move {
+            self.workflow
+                .run_once(self.initial_state.clone(), Some(token))
+                .await
+                .map(drop)
+        })
     }
 }
 
-mod builder;
-mod loops;
-mod running;
-#[cfg(test)]
-mod test_support;
+/// The live, watchable part of a flow: its public info plus the token of the run
+/// in flight (`None` while idle).
+struct FlowCell {
+    info: FlowInfo,
+    run_token: Option<CancellationToken>,
+}
 
-pub use builder::Scheduler;
-pub use running::RunningScheduler;
+/// Everything a running scheduler keeps per flow.
+struct FlowRuntime {
+    flow: Arc<dyn Flow>,
+    schedule: ParsedSchedule,
+    policy: BackoffPolicy,
+    cell: tokio::sync::watch::Sender<FlowCell>,
+}
 
 #[cfg(all(test, feature = "metrics"))]
 mod metrics_tests {
@@ -187,8 +206,8 @@ mod metrics_tests {
     struct Ok1;
     #[crate::task]
     impl Task<St> for Ok1 {
-        async fn run_bare(&self) -> Result<TaskResult<St>, CanoError> {
-            Ok(TaskResult::Single(St::Done))
+        async fn run(&self) -> Result<St, CanoError> {
+            Ok(St::Done)
         }
     }
 
@@ -198,12 +217,13 @@ mod metrics_tests {
             let wf = Workflow::bare()
                 .register(St::Start, Ok1)
                 .add_exit_state(St::Done);
-            let mut scheduler = Scheduler::<St>::new();
-            scheduler.manual("flow_a", wf, St::Start).unwrap();
-            let running = scheduler.start().await.unwrap();
-            running.trigger("flow_a").await.unwrap();
-            tokio::task::yield_now().await;
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let running = Scheduler::new()
+                .manual("flow_a", wf, St::Start)
+                .start()
+                .await
+                .unwrap();
+            running.trigger("flow_a").unwrap();
+            running.wait_idle("flow_a").await.unwrap();
             running.stop().await.unwrap();
         });
         assert_eq!(

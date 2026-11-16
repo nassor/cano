@@ -1,6 +1,6 @@
 //! UI test: `#[cano::task(state = S)]` on an inherent `impl T { ... }` block
 //! accepts a `name()` override (the friendly task id reported to observers),
-//! alongside `run` / `run_bare` / `config`.
+//! alongside `run` / `config`.
 
 use cano::prelude::*;
 use std::borrow::Cow;
@@ -20,12 +20,8 @@ impl NamedInherentTask {
         "named-inherent".into()
     }
 
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    async fn run(&self) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 
@@ -34,8 +30,8 @@ struct DefaultNameTask;
 
 #[task(state = Step)]
 impl DefaultNameTask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
-        Ok(TaskResult::Single(Step::Done))
+    async fn run(&self) -> Result<Step, CanoError> {
+        Ok(Step::Done)
     }
 }
 
@@ -55,11 +51,5 @@ async fn task_still_runs_in_a_workflow() {
     let workflow = Workflow::bare()
         .register(Step::Start, NamedInherentTask)
         .add_exit_state(Step::Done);
-    assert_eq!(
-        workflow
-            .orchestrate(Step::Start, CancellationToken::disabled())
-            .await
-            .unwrap(),
-        Step::Done
-    );
+    assert_eq!(workflow.orchestrate(Step::Start).await.unwrap(), Step::Done);
 }

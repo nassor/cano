@@ -8,8 +8,7 @@
 //! ```
 //!
 //! It wraps existing public surface ([`WorkflowObserver`],
-//! [`CheckpointStore`], [`Resources`],
-//! [`MemoryStore`], [`Task`]) — it adds **no** new
+//! [`CheckpointStore`], [`Task`]) — it adds **no** new
 //! traits and changes **no** existing public items, so a typical workflow test drops from a
 //! pile of bespoke fixtures to a handful of lines.
 //!
@@ -17,7 +16,6 @@
 //! |---|---|
 //! | [`RecordingObserver`] | a [`WorkflowObserver`] that captures every lifecycle event into an inspectable [`Vec<RecordedEvent>`] |
 //! | [`InMemoryCheckpointStore`] | a process-local [`CheckpointStore`] for resume/recovery tests, with no `recovery` feature or on-disk file needed |
-//! | [`TestResources`] | a tiny builder for the [`Resources`] dictionary a workflow needs |
 //! | [`panic_on_attempt`] | a [`PanicOnAttempt`] task factory that panics on its first *N* attempts — exercises the panic-safety path (panics fail fast, they are not retried) |
 //! | [`assert_compensation_ran`] | a saga assertion that compares the recorded compensation order against an expected sequence |
 //!
@@ -37,8 +35,8 @@
 //! struct OkTask;
 //! #[task]
 //! impl Task<S> for OkTask {
-//!     async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-//!         Ok(TaskResult::Single(S::Done))
+//!     async fn run(&self) -> Result<S, CanoError> {
+//!         Ok(S::Done)
 //!     }
 //! }
 //!
@@ -49,7 +47,7 @@
 //!     .register(S::Start, OkTask)
 //!     .add_exit_state(S::Done)
 //!     .with_observer(observer.clone());
-//! assert_eq!(wf.orchestrate(S::Start, CancellationToken::disabled()).await.unwrap(), S::Done);
+//! assert_eq!(wf.orchestrate(S::Start).await.unwrap(), S::Done);
 //! observer.assert_path(&["Start", "Done"]);
 //! # }
 //! ```
@@ -57,15 +55,14 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::time::Duration;
 
 use parking_lot::Mutex;
 
 use crate::error::CanoError;
 use crate::observer::WorkflowObserver;
 use crate::recovery::{CheckpointRow, CheckpointStore};
-use crate::resource::{Resource, Resources};
-use crate::store::MemoryStore;
-use crate::task::{Task, TaskConfig, TaskResult};
+use crate::task::{Task, TaskConfig};
 
 /// A single event captured by [`RecordingObserver`].
 ///
@@ -120,9 +117,33 @@ pub enum RecordedEvent {
         /// The sequence of the last persisted row.
         sequence: u64,
     },
-    /// A run was cancelled via a [`CancellationToken`](crate::cancel::CancellationToken).
+    /// A run was cancelled via a [`CancellationToken`](crate::CancellationToken).
     Cancelled {
         /// The `Debug` rendering of the state cancellation was observed at.
+        state: String,
+    },
+    /// The [`with_total_timeout`](crate::workflow::Workflow::with_total_timeout) budget
+    /// was exceeded.
+    WorkflowTimeout {
+        /// Wall-clock time elapsed when the budget tripped.
+        elapsed: Duration,
+        /// The configured budget.
+        limit: Duration,
+    },
+    /// Clearing the checkpoint log after a successful run failed.
+    CheckpointClearFailed {
+        /// The workflow id whose log could not be cleared.
+        workflow_id: String,
+        /// The store error's `Display` rendering.
+        error: String,
+    },
+    /// A resumed run met a checkpoint row whose state label it does not know.
+    UnknownResumeState {
+        /// The resumed workflow id.
+        workflow_id: String,
+        /// The row's sequence.
+        sequence: u64,
+        /// The unrecognised state label.
         state: String,
     },
 }
@@ -247,13 +268,12 @@ impl RecordingObserver {
     /// [`Workflow::registered_states`](crate::workflow::Workflow::registered_states)).
     /// Returns `Err` with the missing state labels, like
     /// [`assert_all_states_entered`](Self::assert_all_states_entered).
-    pub fn assert_registered_states_entered<TState, TResourceKey>(
+    pub fn assert_registered_states_entered<TState>(
         &self,
-        workflow: &crate::workflow::Workflow<TState, TResourceKey>,
+        workflow: &crate::workflow::Workflow<TState>,
     ) -> Result<(), Vec<String>>
     where
         TState: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
-        TResourceKey: std::hash::Hash + Eq + Send + Sync + 'static,
     {
         let registered: Vec<TState> = workflow.registered_states().cloned().collect();
         self.assert_all_states_entered(&registered)
@@ -310,6 +330,26 @@ impl WorkflowObserver for RecordingObserver {
             state: state.into(),
         });
     }
+    fn on_workflow_timeout(&self, elapsed: Duration, limit: Duration) {
+        self.events
+            .lock()
+            .push(RecordedEvent::WorkflowTimeout { elapsed, limit });
+    }
+    fn on_checkpoint_clear_failed(&self, workflow_id: &str, error: &CanoError) {
+        self.events
+            .lock()
+            .push(RecordedEvent::CheckpointClearFailed {
+                workflow_id: workflow_id.into(),
+                error: error.to_string(),
+            });
+    }
+    fn on_unknown_resume_state(&self, workflow_id: &str, sequence: u64, state: &str) {
+        self.events.lock().push(RecordedEvent::UnknownResumeState {
+            workflow_id: workflow_id.into(),
+            sequence,
+            state: state.into(),
+        });
+    }
 }
 
 /// A process-local [`CheckpointStore`] for resume /
@@ -321,10 +361,13 @@ impl WorkflowObserver for RecordingObserver {
 /// [`resume_from`](crate::workflow::Workflow::resume_from) to exercise the crash-recovery
 /// path entirely in memory. It honors the full trait contract: duplicate
 /// `(workflow_id, sequence)` is rejected, [`load_run`](Self::load_run) returns rows sorted by
-/// sequence, and [`clear`](Self::clear) is per-id.
+/// sequence, and [`clear`](Self::clear) is per-id. Every appended row is also kept in
+/// an append-order [`history`](Self::history) that `clear` never touches, so a test can
+/// inspect what a successful (log-clearing) run wrote.
 #[derive(Default, Debug)]
 pub struct InMemoryCheckpointStore {
     inner: Mutex<HashMap<String, Vec<CheckpointRow>>>,
+    history: Mutex<Vec<(String, CheckpointRow)>>,
 }
 
 impl InMemoryCheckpointStore {
@@ -332,6 +375,23 @@ impl InMemoryCheckpointStore {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The live rows for `workflow_id`, sorted by sequence (empty after a `clear`).
+    pub fn rows(&self, workflow_id: &str) -> Vec<CheckpointRow> {
+        let mut rows = self
+            .inner
+            .lock()
+            .get(workflow_id)
+            .cloned()
+            .unwrap_or_default();
+        rows.sort_by_key(|r| r.sequence);
+        rows
+    }
+
+    /// Every row ever appended, with its workflow id, in append order. Survives `clear`.
+    pub fn history(&self) -> Vec<(String, CheckpointRow)> {
+        self.history.lock().clone()
     }
 }
 
@@ -346,70 +406,20 @@ impl CheckpointStore for InMemoryCheckpointStore {
                 row.sequence
             )));
         }
+        self.history
+            .lock()
+            .push((workflow_id.to_string(), row.clone()));
         rows.push(row);
         Ok(())
     }
 
     async fn load_run(&self, workflow_id: &str) -> Result<Vec<CheckpointRow>, CanoError> {
-        let mut rows = self
-            .inner
-            .lock()
-            .get(workflow_id)
-            .cloned()
-            .unwrap_or_default();
-        rows.sort_by_key(|r| r.sequence);
-        Ok(rows)
+        Ok(self.rows(workflow_id))
     }
 
     async fn clear(&self, workflow_id: &str) -> Result<(), CanoError> {
         self.inner.lock().remove(workflow_id);
         Ok(())
-    }
-}
-
-/// A small builder for the [`Resources`] dictionary a workflow
-/// needs.
-///
-/// Saves the `Resources::new().insert(..).insert(..)` ceremony, and gives a one-call
-/// [`with_store`](Self::with_store) for the common case of "I just need a
-/// [`MemoryStore`] at some key".
-///
-/// ```rust
-/// use cano::testing::TestResources;
-///
-/// let resources = TestResources::new().with_store("store").build();
-/// assert!(resources.get::<cano::MemoryStore, _>("store").is_ok());
-/// ```
-#[derive(Default)]
-pub struct TestResources {
-    inner: Resources,
-}
-
-impl TestResources {
-    /// Start an empty builder.
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Insert a fresh [`MemoryStore`] at `key`.
-    #[must_use]
-    pub fn with_store(mut self, key: &'static str) -> Self {
-        self.inner = std::mem::take(&mut self.inner).insert(key, MemoryStore::new());
-        self
-    }
-
-    /// Insert an arbitrary [`Resource`] at `key`.
-    #[must_use]
-    pub fn with_resource<R: Resource + 'static>(mut self, key: &'static str, resource: R) -> Self {
-        self.inner = std::mem::take(&mut self.inner).insert(key, resource);
-        self
-    }
-
-    /// Finish building and hand back the [`Resources`].
-    #[must_use]
-    pub fn build(self) -> Resources {
-        self.inner
     }
 }
 
@@ -434,7 +444,7 @@ pub struct PanicOnAttempt<TState> {
 }
 
 impl<TState> PanicOnAttempt<TState> {
-    /// Override the retry configuration (default: [`TaskConfig::minimal`], no retries).
+    /// Override the retry configuration (default: [`TaskConfig::new`], no retries).
     ///
     /// Mostly useful to assert that panics are *not* retried — the engine fails a panicking
     /// task fast regardless of the policy set here.
@@ -472,7 +482,7 @@ pub fn panic_on_attempt<TState>(panics: u32, next_state: TState) -> PanicOnAttem
         panics,
         next_state,
         attempts: AtomicU32::new(0),
-        config: TaskConfig::minimal(),
+        config: TaskConfig::new(),
     }
 }
 
@@ -489,19 +499,19 @@ where
         "PanicOnAttempt".into()
     }
 
-    async fn run_bare(&self) -> Result<TaskResult<TState>, CanoError> {
+    async fn run(&self) -> Result<TState, CanoError> {
         let attempt = self.attempts.fetch_add(1, Ordering::SeqCst) + 1;
         if attempt <= self.panics {
             panic!("panic_on_attempt: forced panic on attempt {attempt}");
         }
-        Ok(TaskResult::Single(self.next_state.clone()))
+        Ok(self.next_state.clone())
     }
 }
 
 /// Assert that a saga's recorded compensation order matches `expected`.
 ///
 /// Collect the names (or labels) of the compensations that ran — typically by having each
-/// `compensate` push its identifier into a shared `Vec` in [`Resources`] —
+/// `compensate` push its identifier into a shared `Vec` in [`Resources`](crate::Resources) —
 /// and pass that slice as `actual`. Compensations drain in reverse of completion order, so
 /// `expected` should list them in the order you expect them to *undo*.
 ///
@@ -543,8 +553,8 @@ mod tests {
     struct OkTask;
     #[task]
     impl Task<S> for OkTask {
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(S::Done))
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(S::Done)
         }
         fn name(&self) -> Cow<'static, str> {
             "OkTask".into()
@@ -556,8 +566,8 @@ mod tests {
     struct Go(S);
     #[task]
     impl Task<S> for Go {
-        async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-            Ok(TaskResult::Single(self.0.clone()))
+        async fn run(&self) -> Result<S, CanoError> {
+            Ok(self.0.clone())
         }
     }
 
@@ -568,12 +578,7 @@ mod tests {
             .register(S::Start, OkTask)
             .add_exit_state(S::Done)
             .with_observer(observer.clone());
-        assert_eq!(
-            wf.orchestrate(S::Start, CancellationToken::disabled())
-                .await
-                .unwrap(),
-            S::Done
-        );
+        assert_eq!(wf.orchestrate(S::Start).await.unwrap(), S::Done);
         observer.assert_path(&["Start", "Done"]);
         observer.assert_completed_with("Done");
         assert!(observer.events().contains(&RecordedEvent::TaskSucceeded {
@@ -588,9 +593,7 @@ mod tests {
             .register(S::Start, OkTask)
             .add_exit_state(S::Done)
             .with_observer(observer.clone());
-        wf.orchestrate(S::Start, CancellationToken::disabled())
-            .await
-            .unwrap();
+        wf.orchestrate(S::Start).await.unwrap();
         assert!(!observer.events().is_empty());
         observer.clear();
         assert!(observer.events().is_empty());
@@ -662,29 +665,6 @@ mod tests {
         assert_eq!(store.load_run("b").await.unwrap().len(), 1);
     }
 
-    #[test]
-    fn test_resources_with_store_inserts_memory_store() {
-        let resources = TestResources::new().with_store("store").build();
-        assert!(resources.get::<MemoryStore, _>("store").is_ok());
-    }
-
-    #[test]
-    fn test_resources_with_resource_inserts_custom() {
-        #[derive(Clone)]
-        struct Cfg {
-            limit: usize,
-        }
-        #[resource]
-        impl Resource for Cfg {}
-
-        let resources = TestResources::new()
-            .with_store("store")
-            .with_resource("cfg", Cfg { limit: 7 })
-            .build();
-        assert_eq!(resources.get::<Cfg, _>("cfg").unwrap().limit, 7);
-        assert!(resources.get::<MemoryStore, _>("store").is_ok());
-    }
-
     #[tokio::test]
     async fn panic_on_attempt_first_attempt_surfaces_as_error() {
         // No retries: the first attempt panics. The engine converts a task panic into a
@@ -692,7 +672,7 @@ mod tests {
         // driving the task's future through the same `catch_panic_to_error` wrapper.
         let task = panic_on_attempt(1, S::Done);
         let err = crate::workflow::catch_panic_to_error(
-            <PanicOnAttempt<S> as Task<S>>::run_bare(&task),
+            <PanicOnAttempt<S> as Task<S>>::run(&task, &crate::Resources::new()),
             "Single task",
         )
         .await
@@ -713,10 +693,7 @@ mod tests {
             .register(S::Start, task)
             .add_exit_state(S::Done)
             .with_observer(observer.clone());
-        let err = wf
-            .orchestrate(S::Start, CancellationToken::disabled())
-            .await
-            .unwrap_err();
+        let err = wf.orchestrate(S::Start).await.unwrap_err();
         assert!(err.to_string().contains("panic"), "{err}");
         let retries = observer
             .events()
@@ -739,12 +716,7 @@ mod tests {
         let wf = Workflow::bare()
             .register(S::Start, panic_on_attempt(0, S::Done))
             .add_exit_state(S::Done);
-        assert_eq!(
-            wf.orchestrate(S::Start, CancellationToken::disabled())
-                .await
-                .unwrap(),
-            S::Done
-        );
+        assert_eq!(wf.orchestrate(S::Start).await.unwrap(), S::Done);
     }
 
     #[test]
@@ -768,9 +740,7 @@ mod tests {
             .register(S::B, Go(S::Done))
             .add_exit_state(S::Done)
             .with_observer(observer.clone());
-        wf.orchestrate(S::A, CancellationToken::disabled())
-            .await
-            .unwrap();
+        wf.orchestrate(S::A).await.unwrap();
         observer
             .assert_all_states_entered(&[S::A, S::B, S::Done])
             .expect("all states visited");
@@ -783,9 +753,7 @@ mod tests {
             .register(S::A, Go(S::Done))
             .add_exit_state(S::Done)
             .with_observer(observer.clone());
-        wf.orchestrate(S::A, CancellationToken::disabled())
-            .await
-            .unwrap();
+        wf.orchestrate(S::A).await.unwrap();
         let missing = observer
             .assert_all_states_entered(&[S::A, S::B, S::C, S::Done])
             .unwrap_err();
@@ -799,9 +767,7 @@ mod tests {
             .register(S::A, Go(S::Done))
             .add_exit_state(S::Done)
             .with_observer(observer.clone());
-        wf.orchestrate(S::A, CancellationToken::disabled())
-            .await
-            .unwrap();
+        wf.orchestrate(S::A).await.unwrap();
         let missing = observer
             .assert_all_states_entered(&[S::A, S::A, S::B])
             .unwrap_err();
@@ -816,9 +782,7 @@ mod tests {
             .register(S::B, Go(S::Done))
             .add_exit_state(S::Done)
             .with_observer(observer.clone());
-        wf.orchestrate(S::A, CancellationToken::disabled())
-            .await
-            .unwrap();
+        wf.orchestrate(S::A).await.unwrap();
         observer
             .assert_registered_states_entered(&wf)
             .expect("all registered states visited");
@@ -832,9 +796,7 @@ mod tests {
             .register(S::C, Go(S::Done)) // never routed to
             .add_exit_state(S::Done)
             .with_observer(observer.clone());
-        wf.orchestrate(S::A, CancellationToken::disabled())
-            .await
-            .unwrap();
+        wf.orchestrate(S::A).await.unwrap();
         let missing = observer.assert_registered_states_entered(&wf).unwrap_err();
         assert!(missing.contains(&"C".to_string()), "missing={missing:?}");
     }

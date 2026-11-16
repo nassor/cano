@@ -43,11 +43,9 @@ impl NamespacedStore {
     }
 
     /// Store `value` under `"{namespace}/{key}"`.
-    fn put<T: Send + Sync + 'static>(&self, key: &str, value: T) -> Result<(), CanoError> {
+    fn put<T: Send + Sync + 'static>(&self, key: &str, value: T) {
         let namespaced = format!("{}/{key}", self.namespace);
-        self.inner
-            .put(&namespaced, value)
-            .map_err(|e| CanoError::store(format!("{e}")))
+        self.inner.put(&namespaced, value);
     }
 
     /// Retrieve a value stored under `"{namespace}/{key}"`.
@@ -84,12 +82,12 @@ struct WriterA;
 
 #[task(state = Step)]
 impl WriterA {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        let store = res.get::<NamespacedStore, _>("ns_a")?;
-        store.put("result", 100u32)?;
-        store.put("label", "from-writer-a".to_string())?;
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
+        let store = res.get_named::<NamespacedStore>("ns_a")?;
+        store.put("result", 100u32);
+        store.put("label", "from-writer-a".to_string());
         println!("  WriterA: wrote result=100, label='from-writer-a' in namespace 'a'");
-        Ok(TaskResult::Single(Step::WriteB))
+        Ok(Step::WriteB)
     }
 }
 
@@ -97,13 +95,13 @@ struct WriterB;
 
 #[task(state = Step)]
 impl WriterB {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        let store = res.get::<NamespacedStore, _>("ns_b")?;
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
+        let store = res.get_named::<NamespacedStore>("ns_b")?;
         // Same key names as WriterA, but a different namespace — no collision.
-        store.put("result", 200u32)?;
-        store.put("label", "from-writer-b".to_string())?;
+        store.put("result", 200u32);
+        store.put("label", "from-writer-b".to_string());
         println!("  WriterB: wrote result=200, label='from-writer-b' in namespace 'b'");
-        Ok(TaskResult::Single(Step::ReadBack))
+        Ok(Step::ReadBack)
     }
 }
 
@@ -111,9 +109,9 @@ struct ReadBack;
 
 #[task(state = Step)]
 impl ReadBack {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        let ns_a = res.get::<NamespacedStore, _>("ns_a")?;
-        let ns_b = res.get::<NamespacedStore, _>("ns_b")?;
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
+        let ns_a = res.get_named::<NamespacedStore>("ns_a")?;
+        let ns_b = res.get_named::<NamespacedStore>("ns_b")?;
 
         let a_result: u32 = ns_a.get("result")?;
         let a_label: String = ns_a.get("label")?;
@@ -128,7 +126,7 @@ impl ReadBack {
         assert_ne!(a_result, b_result, "no cross-namespace collision");
         println!("  ReadBack: namespaces are isolated — no key collisions");
 
-        Ok(TaskResult::Single(Step::LoadLarge))
+        Ok(Step::LoadLarge)
     }
 }
 
@@ -155,12 +153,12 @@ struct LoadLarge;
 
 #[task(state = Step)]
 impl LoadLarge {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        let store = res.get::<MemoryStore, _>("mem")?;
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let payload = LargePayload::new(1_000_000); // 1 MiB
-        store.put("payload", payload)?;
+        store.put("payload", payload);
         println!("  LoadLarge: stored 1 MiB payload");
-        Ok(TaskResult::Single(Step::SharedArc))
+        Ok(Step::SharedArc)
     }
 }
 
@@ -170,8 +168,8 @@ struct SharedArc;
 
 #[task(state = Step)]
 impl SharedArc {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<Step>, CanoError> {
-        let store = res.get::<MemoryStore, _>("mem")?;
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
+        let store = res.get::<MemoryStore>()?;
 
         // First Arc — points at the stored allocation.
         let arc1: Arc<LargePayload> = store.get_shared("payload")?;
@@ -191,7 +189,7 @@ impl SharedArc {
         assert!(Arc::ptr_eq(&arc1, &arc3));
         println!("  SharedArc: Arc::clone is also O(1) and ptr_eq");
 
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -207,9 +205,10 @@ async fn main() -> Result<(), CanoError> {
     let shared_mem = MemoryStore::new();
 
     let resources = Resources::new()
-        .insert("mem", shared_mem.clone())
-        .insert("ns_a", NamespacedStore::new("a", shared_mem.clone()))
-        .insert("ns_b", NamespacedStore::new("b", shared_mem.clone()));
+        .insert(shared_mem.clone())
+        // Two `NamespacedStore`s of one type: each needs a name.
+        .insert_named("ns_a", NamespacedStore::new("a", shared_mem.clone()))
+        .insert_named("ns_b", NamespacedStore::new("b", shared_mem.clone()));
 
     println!("-- Part 1: NamespacedStore (key isolation) --");
     let workflow = Workflow::new(resources)
@@ -221,9 +220,7 @@ async fn main() -> Result<(), CanoError> {
         .add_exit_state(Step::Done);
 
     println!("\n-- Part 2: MemoryStore::get_shared (Arc zero-copy sharing) --");
-    let result = workflow
-        .orchestrate(Step::WriteA, CancellationToken::disabled())
-        .await?;
+    let result = workflow.orchestrate(Step::WriteA).await?;
     println!("\ncompleted at {result:?}");
 
     println!("\n=== Done ===");

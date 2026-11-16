@@ -26,9 +26,9 @@ struct FetchTask;
 
 #[task]
 impl Task<Step> for FetchTask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         tokio::time::sleep(Duration::from_millis(5)).await;
-        Ok(TaskResult::Single(Step::Process))
+        Ok(Step::Process)
     }
 }
 
@@ -36,9 +36,9 @@ struct ProcessTask;
 
 #[task]
 impl Task<Step> for ProcessTask {
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         tokio::time::sleep(Duration::from_millis(3)).await;
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -60,17 +60,17 @@ async fn main() {
     // Run the workflow 3 times directly.
     for _ in 0..3 {
         workflow()
-            .orchestrate(Step::Fetch, CancellationToken::disabled())
+            .orchestrate(Step::Fetch)
             .await
             .expect("workflow run");
     }
 
     // Run the same workflow under the scheduler for ~1.2s, firing every 1s.
-    let mut scheduler = Scheduler::new();
-    scheduler
-        .every_seconds("demo_flow", workflow(), Step::Fetch, 1)
-        .expect("register flow");
-    let running = scheduler.start().await.expect("start scheduler");
+    let running = Scheduler::new()
+        .every("demo_flow", workflow(), Step::Fetch, Duration::from_secs(1))
+        .start()
+        .await
+        .expect("start scheduler");
     tokio::time::sleep(Duration::from_millis(1200)).await;
     running.stop().await.expect("stop scheduler");
 

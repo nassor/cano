@@ -1,6 +1,6 @@
 //! Reliability contracts of [`SteppedTask`] under critical scenarios.
 //!
-//! Black-box integration tests (public API only, engine-driven `register_stepped`
+//! Black-box integration tests (public API only, engine-driven `register`
 //! path) documenting how the stepped processing model behaves when a step fails:
 //!
 //! | Critical scenario | Contract |
@@ -37,7 +37,7 @@ impl SteppedTask<Flow> for PagedMigration {
     type Cursor = u32;
 
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal().with_fixed_retry(2, Duration::from_millis(1)) // 3 attempts/step
+        TaskConfig::new().with_fixed_retry(2, Duration::from_millis(1)) // 3 attempts/step
     }
 
     async fn step(
@@ -52,7 +52,7 @@ impl SteppedTask<Flow> for PagedMigration {
         }
         let n = cursor.unwrap_or(0);
         if n >= 5 {
-            Ok(StepOutcome::Done(TaskResult::Single(Flow::Done)))
+            Ok(StepOutcome::Done(Flow::Done))
         } else {
             Ok(StepOutcome::More(n + 1))
         }
@@ -66,7 +66,7 @@ impl SteppedTask<Flow> for PagedMigration {
 async fn stepped_transient_error_retries_same_cursor_without_restarting() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let workflow = Workflow::bare()
-        .register_stepped(
+        .register(
             Flow::Work,
             PagedMigration {
                 flaky_cursor: 3,
@@ -76,10 +76,7 @@ async fn stepped_transient_error_retries_same_cursor_without_restarting() {
         )
         .add_exit_state(Flow::Done);
 
-    let result = workflow
-        .orchestrate(Flow::Work, CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.orchestrate(Flow::Work).await.unwrap();
     assert_eq!(result, Flow::Done);
     assert_eq!(
         *calls.lock(),
@@ -114,7 +111,7 @@ impl SteppedTask<Flow> for BlockingMigration {
     type Cursor = u32;
 
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal() // one attempt per step: fail fast to the workflow
+        TaskConfig::new() // one attempt per step: fail fast to the workflow
     }
 
     async fn step(
@@ -128,7 +125,7 @@ impl SteppedTask<Flow> for BlockingMigration {
         }
         let n = cursor.unwrap_or(0);
         if n >= 6 {
-            Ok(StepOutcome::Done(TaskResult::Single(Flow::Done)))
+            Ok(StepOutcome::Done(Flow::Done))
         } else {
             Ok(StepOutcome::More(n + 1))
         }
@@ -145,7 +142,7 @@ async fn stepped_hard_failure_resumes_from_last_persisted_cursor() {
     let store = Arc::new(MemStore::default());
 
     let workflow = Workflow::bare()
-        .register_stepped(
+        .register(
             Flow::Work,
             BlockingMigration {
                 blocked_at: 4,
@@ -158,10 +155,7 @@ async fn stepped_hard_failure_resumes_from_last_persisted_cursor() {
         .with_workflow_id("stepped-outage");
 
     // Run 1: advances through cursors 1..=4, then the step at 4 hits the outage.
-    let err = workflow
-        .orchestrate(Flow::Work, CancellationToken::disabled())
-        .await
-        .unwrap_err();
+    let err = workflow.orchestrate(Flow::Work).await.unwrap_err();
     assert_eq!(err.category(), "task_execution", "got: {err}");
     assert_eq!(
         *calls.lock(),
@@ -175,10 +169,7 @@ async fn stepped_hard_failure_resumes_from_last_persisted_cursor() {
 
     // Outage repaired; resume continues AT cursor 4 — not from None.
     unblocked.store(true, Ordering::SeqCst);
-    let result = workflow
-        .resume_from("stepped-outage", CancellationToken::disabled())
-        .await
-        .unwrap();
+    let result = workflow.resume_from("stepped-outage").await.unwrap();
     assert_eq!(result, Flow::Done);
 
     let all = calls.lock().clone();

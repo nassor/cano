@@ -34,10 +34,10 @@ impl FlakyJob {
         // Disable per-task retries so the scheduler-level backoff is the only
         // retry layer in play. Otherwise each scheduled dispatch would already
         // retry internally before reaching the scheduler.
-        TaskConfig::minimal()
+        TaskConfig::new()
     }
 
-    async fn run_bare(&self) -> Result<TaskResult<FlowState>, CanoError> {
+    async fn run(&self) -> Result<FlowState, CanoError> {
         let n = self.runs.fetch_add(1, Ordering::SeqCst) + 1;
         let succeeded = n > self.fail_count;
         println!(
@@ -46,7 +46,7 @@ impl FlakyJob {
             if succeeded { "OK" } else { "FAIL" }
         );
         if succeeded {
-            Ok(TaskResult::Single(FlowState::Done))
+            Ok(FlowState::Done)
         } else {
             Err(CanoError::task_execution("flaky job failure"))
         }
@@ -58,7 +58,7 @@ async fn main() -> CanoResult<()> {
     println!("Scheduler Backoff Example");
     println!("============================");
 
-    let mut scheduler: Scheduler<FlowState> = Scheduler::new();
+    let scheduler = Scheduler::new();
 
     // Will fail 4 times then succeed. With streak_limit=3 the flow trips after
     // the third failure and we need to call `reset_flow` to give it another
@@ -72,14 +72,14 @@ async fn main() -> CanoResult<()> {
         .register(FlowState::Start, flaky.clone())
         .add_exit_state(FlowState::Done);
 
-    scheduler.every(
+    let scheduler = scheduler.every(
         "flaky",
         workflow,
         FlowState::Start,
         Duration::from_millis(200),
-    )?;
+    );
 
-    scheduler.set_backoff(
+    let scheduler = scheduler.with_backoff(
         "flaky",
         BackoffPolicy {
             initial: Duration::from_millis(300),
@@ -88,13 +88,13 @@ async fn main() -> CanoResult<()> {
             jitter: 0.0,
             streak_limit: Some(3),
         },
-    )?;
+    );
 
     let running = scheduler.start().await?;
 
     // Watch the flow trip after 3 failures.
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    let snap = running.status("flaky").await.expect("flow exists");
+    let snap = running.status("flaky").expect("flow exists");
     println!("\nAfter ~1.5s — status: {:?}", snap.status);
     println!(
         "  run_count = {}, streak = {}",
@@ -103,13 +103,13 @@ async fn main() -> CanoResult<()> {
 
     if matches!(snap.status, Status::Tripped { .. }) {
         println!("\nFlow tripped — calling reset_flow to give it another chance...");
-        running.reset_flow("flaky").await?;
+        running.reset_flow("flaky")?;
     }
 
     // After reset the flow runs again, hits 1 more failure (run #4), then
     // succeeds on run #5.
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    let snap = running.status("flaky").await.expect("flow exists");
+    let snap = running.status("flaky").expect("flow exists");
     println!("\nAfter reset + ~1.5s — status: {:?}", snap.status);
     println!(
         "  run_count = {}, streak = {}",

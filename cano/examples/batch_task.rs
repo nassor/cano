@@ -45,15 +45,6 @@ enum Step {
 }
 
 // ---------------------------------------------------------------------------
-// Resource key enum
-// ---------------------------------------------------------------------------
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum Key {
-    Store,
-}
-
-// ---------------------------------------------------------------------------
 // Task 1: ParseUrls — validate URL strings
 // ---------------------------------------------------------------------------
 
@@ -63,14 +54,14 @@ enum Key {
 /// `outputs` that `finish` counts and either accepts or rejects.
 struct ParseUrls;
 
-#[task::batch(state = Step, key = Key)]
+#[task::batch(state = Step)]
 impl ParseUrls {
     fn concurrency(&self) -> usize {
         4
     }
 
-    async fn load(&self, res: &Resources<Key>) -> Result<Vec<String>, CanoError> {
-        let store = res.get::<MemoryStore, _>(&Key::Store)?;
+    async fn load(&self, res: &Resources) -> Result<Vec<String>, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let urls: Vec<String> = store.get("input_urls")?;
         println!("parse urls : loaded {} URLs", urls.len());
         Ok(urls)
@@ -96,9 +87,9 @@ impl ParseUrls {
 
     async fn finish(
         &self,
-        res: &Resources<Key>,
+        res: &Resources,
         outputs: Vec<Result<String, CanoError>>,
-    ) -> Result<TaskResult<Step>, CanoError> {
+    ) -> Result<Step, CanoError> {
         let valid: Vec<String> = outputs.into_iter().filter_map(|r| r.ok()).collect();
         println!("parse urls : {} valid URLs after validation", valid.len());
 
@@ -106,9 +97,9 @@ impl ParseUrls {
             return Err(CanoError::task_execution("no valid URLs to fetch"));
         }
 
-        let store = res.get::<MemoryStore, _>(&Key::Store)?;
-        store.put("valid_urls", valid)?;
-        Ok(TaskResult::Single(Step::FetchUrls))
+        let store = res.get::<MemoryStore>()?;
+        store.put("valid_urls", valid);
+        Ok(Step::FetchUrls)
     }
 }
 
@@ -120,7 +111,7 @@ impl ParseUrls {
 /// twice on failure so transient network blips don't abort the whole batch.
 struct FetchUrls;
 
-#[task::batch(state = Step, key = Key)]
+#[task::batch(state = Step)]
 impl FetchUrls {
     fn concurrency(&self) -> usize {
         3
@@ -130,8 +121,8 @@ impl FetchUrls {
         RetryMode::fixed(2, Duration::from_millis(5))
     }
 
-    async fn load(&self, res: &Resources<Key>) -> Result<Vec<String>, CanoError> {
-        let store = res.get::<MemoryStore, _>(&Key::Store)?;
+    async fn load(&self, res: &Resources) -> Result<Vec<String>, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let urls: Vec<String> = store.get("valid_urls")?;
         println!(
             "fetch urls : fetching {} URLs (concurrency=3, retry=2)",
@@ -150,15 +141,15 @@ impl FetchUrls {
 
     async fn finish(
         &self,
-        res: &Resources<Key>,
+        res: &Resources,
         outputs: Vec<Result<(String, usize), CanoError>>,
-    ) -> Result<TaskResult<Step>, CanoError> {
+    ) -> Result<Step, CanoError> {
         let results: Vec<(String, usize)> = outputs.into_iter().filter_map(|r| r.ok()).collect();
         println!("fetch urls : {} URLs fetched successfully", results.len());
 
-        let store = res.get::<MemoryStore, _>(&Key::Store)?;
-        store.put("fetch_results", results)?;
-        Ok(TaskResult::Single(Step::Summarise))
+        let store = res.get::<MemoryStore>()?;
+        store.put("fetch_results", results);
+        Ok(Step::Summarise)
     }
 }
 
@@ -172,10 +163,10 @@ struct Summarise {
     url_count: usize,
 }
 
-#[task::batch(state = Step, key = Key)]
+#[task::batch(state = Step)]
 impl Summarise {
-    async fn load(&self, res: &Resources<Key>) -> Result<Vec<(String, usize)>, CanoError> {
-        let store = res.get::<MemoryStore, _>(&Key::Store)?;
+    async fn load(&self, res: &Resources) -> Result<Vec<(String, usize)>, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let results: Vec<(String, usize)> = store.get("fetch_results")?;
         Ok(results)
     }
@@ -187,9 +178,9 @@ impl Summarise {
 
     async fn finish(
         &self,
-        _res: &Resources<Key>,
+        _res: &Resources,
         outputs: Vec<Result<usize, CanoError>>,
-    ) -> Result<TaskResult<Step>, CanoError> {
+    ) -> Result<Step, CanoError> {
         let total_bytes: usize = outputs.iter().filter_map(|r| r.as_ref().ok()).sum();
         let success_count = outputs.iter().filter(|r| r.is_ok()).count();
         let pct = (success_count * 100)
@@ -206,7 +197,7 @@ impl Summarise {
             )));
         }
 
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -229,9 +220,9 @@ async fn main() -> CanoResult<()> {
     println!("input: {} URL strings\n", input_urls.len());
 
     let store = MemoryStore::new();
-    store.put("input_urls", input_urls.clone())?;
+    store.put("input_urls", input_urls.clone());
 
-    let resources = Resources::<Key>::new().insert(Key::Store, store);
+    let resources = Resources::new().insert(store);
 
     let url_count = input_urls.len();
     let workflow = Workflow::new(resources)
@@ -240,9 +231,7 @@ async fn main() -> CanoResult<()> {
         .register(Step::Summarise, Summarise { url_count })
         .add_exit_state(Step::Done);
 
-    let result = workflow
-        .orchestrate(Step::ParseUrls, CancellationToken::disabled())
-        .await?;
+    let result = workflow.orchestrate(Step::ParseUrls).await?;
     assert_eq!(result, Step::Done);
     println!("\ncompleted at {result:?}");
 

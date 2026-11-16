@@ -241,18 +241,18 @@ struct InitBatchTask {
 
 #[task(state = BookAnalysisState)]
 impl InitBatchTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<BookAnalysisState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         println!(
             "\n🎯 [{0}] Initializing batch with {1} books",
             self.batch_name,
             self.books.len()
         );
 
-        store.put("batch_name", self.batch_name.clone())?;
-        store.put("book_metadata", self.books.clone())?;
+        store.put("batch_name", self.batch_name.clone());
+        store.put("book_metadata", self.books.clone());
 
-        Ok(TaskResult::Single(BookAnalysisState::DownloadBatch))
+        Ok(BookAnalysisState::DownloadBatch)
     }
 }
 
@@ -266,20 +266,20 @@ struct DownloadTask {
 
 #[task(state = BookAnalysisState)]
 impl DownloadTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<BookAnalysisState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         match download_book(self.book_id, self.title.clone(), self.batch_name.clone()).await {
             Ok(book) => {
                 // Store individual book
-                store.put(&format!("book_{}", self.book_id), book)?;
-                Ok(TaskResult::Single(BookAnalysisState::AnalyzeBatch))
+                store.put(&format!("book_{}", self.book_id), book);
+                Ok(BookAnalysisState::AnalyzeBatch)
             }
             // The bundled corpus deliberately omits one book. Skip it (rather than failing
             // the `All` download join) so the absent book surfaces at the analyze phase,
             // where the `Percentage(0.75)` join demonstrates partial-results tolerance.
             Err(e) => {
                 println!("  ⚠️  [{}] Skipping unavailable book: {e}", self.batch_name);
-                Ok(TaskResult::Single(BookAnalysisState::AnalyzeBatch))
+                Ok(BookAnalysisState::AnalyzeBatch)
             }
         }
     }
@@ -293,8 +293,8 @@ struct AnalyzeTask {
 
 #[task(state = BookAnalysisState)]
 impl AnalyzeTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<BookAnalysisState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let book: Book = store
             .get(&format!("book_{}", self.book_id))
             .map_err(|e| CanoError::task_execution(format!("Book not found: {e}")))?;
@@ -307,9 +307,9 @@ impl AnalyzeTask {
         );
 
         // Store analysis
-        store.put(&format!("analysis_{}", self.book_id), analysis)?;
+        store.put(&format!("analysis_{}", self.book_id), analysis);
 
-        Ok(TaskResult::Single(BookAnalysisState::SummarizeBatch))
+        Ok(BookAnalysisState::SummarizeBatch)
     }
 }
 
@@ -321,8 +321,8 @@ struct SummarizeBatchTask {
 
 #[task(state = BookAnalysisState)]
 impl SummarizeBatchTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<BookAnalysisState>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<BookAnalysisState, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let batch_name: String = store.get("batch_name")?;
         let books: Vec<BookMetadata> = store.get("book_metadata")?;
 
@@ -369,7 +369,7 @@ impl SummarizeBatchTask {
         // Add to global results
         self.global_results.add_batch(summary).await;
 
-        Ok(TaskResult::Single(BookAnalysisState::Complete))
+        Ok(BookAnalysisState::Complete)
     }
 }
 
@@ -380,7 +380,7 @@ fn create_batch_workflow(
     books: Vec<BookMetadata>,
     global_results: GlobalResults,
 ) -> Workflow<BookAnalysisState> {
-    Workflow::new(Resources::new().insert("store", store))
+    Workflow::new(Resources::new().insert(store))
         .register(
             BookAnalysisState::Start,
             InitBatchTask {
@@ -532,7 +532,7 @@ async fn main() -> Result<(), CanoError> {
             books.len()
         );
 
-        scheduler.manual(&batch_name, workflow, BookAnalysisState::Start)?;
+        scheduler = scheduler.manual(&batch_name, workflow, BookAnalysisState::Start);
     }
 
     println!("\n🎬 Starting scheduler...\n");
@@ -544,7 +544,7 @@ async fn main() -> Result<(), CanoError> {
     println!("🗺️  MAP PHASE: Triggering all batch workflows...\n");
     for (batch_name, _) in get_book_batches() {
         println!("  ⚡ Triggering: {}", batch_name);
-        running.trigger(&batch_name).await?;
+        running.trigger(&batch_name)?;
     }
 
     // Wait for all workflows to complete
@@ -556,7 +556,7 @@ async fn main() -> Result<(), CanoError> {
         // Wait up to 10 minutes total
         tokio::time::sleep(Duration::from_secs(5)).await;
 
-        let workflows = running.list().await;
+        let workflows = running.list();
         let completed_count = workflows
             .iter()
             .filter(|w| w.status == Status::Completed)

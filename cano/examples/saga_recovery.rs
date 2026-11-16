@@ -72,13 +72,13 @@ struct ChargePayment;
 impl ReserveItem {
     type Output = Reservation;
 
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Reservation), CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<(Step, Reservation), CanoError> {
         let r = Reservation {
             item_id: "SKU-42".into(),
             qty: 2,
         };
         println!("reserve    : holding {} x {}", r.qty, r.item_id);
-        Ok((TaskResult::Single(Step::Authorize), r))
+        Ok((Step::Authorize, r))
     }
 
     async fn compensate(&self, _res: &Resources, r: Reservation) -> Result<(), CanoError> {
@@ -98,7 +98,7 @@ impl ReserveItem {
 impl AuthorizePayment {
     type Output = Authorization;
 
-    async fn run(&self, _res: &Resources) -> Result<(TaskResult<Step>, Authorization), CanoError> {
+    async fn run(&self, _res: &Resources) -> Result<(Step, Authorization), CanoError> {
         let a = Authorization {
             auth_code: "AUTH-9988".into(),
             amount_cents: 5_000,
@@ -107,7 +107,7 @@ impl AuthorizePayment {
             "authorize  : pre-auth {} cents ({})",
             a.amount_cents, a.auth_code
         );
-        Ok((TaskResult::Single(Step::Charge), a))
+        Ok((Step::Charge, a))
     }
 
     async fn compensate(&self, _res: &Resources, a: Authorization) -> Result<(), CanoError> {
@@ -126,10 +126,10 @@ impl AuthorizePayment {
 #[task(state = Step)]
 impl ChargePayment {
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal() // no retries — let the error escape immediately
+        TaskConfig::new() // no retries — let the error escape immediately
     }
 
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         println!("charge     : payment gateway unreachable — failing");
         Err(CanoError::task_execution("payment gateway unreachable"))
     }
@@ -152,8 +152,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!();
 
     let workflow = Workflow::bare()
-        .register_with_compensation(Step::Reserve, ReserveItem)
-        .register_with_compensation(Step::Authorize, AuthorizePayment)
+        .register(Step::Reserve, ReserveItem)
+        .register(Step::Authorize, AuthorizePayment)
         .register(Step::Charge, ChargePayment) // plain — always fails
         .add_exit_state(Step::Done)
         .with_checkpoint_store(checkpoint_store.clone())
@@ -161,10 +161,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // --- (a) First run: Charge fails; compensations drain LIFO. ----------
     println!("--- run: Reserve → Authorize → Charge (fails) → compensate LIFO ---\n");
-    match workflow
-        .orchestrate(Step::Reserve, CancellationToken::disabled())
-        .await
-    {
+    match workflow.orchestrate(Step::Reserve).await {
         Ok(s) => println!("\ncompleted at {s:?} (unexpected)"),
         Err(e) => println!("\nfailed + rolled back: {e}"),
     }

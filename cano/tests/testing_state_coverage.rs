@@ -22,19 +22,16 @@ enum S {
 struct Go(S);
 #[task]
 impl Task<S> for Go {
-    async fn run_bare(&self) -> Result<TaskResult<S>, CanoError> {
-        Ok(TaskResult::Single(self.0.clone()))
+    async fn run(&self) -> Result<S, CanoError> {
+        Ok(self.0.clone())
     }
 }
 
 struct RouteTo(S);
 #[task::router]
 impl RouterTask<S> for RouteTo {
-    fn config(&self) -> TaskConfig {
-        TaskConfig::minimal()
-    }
-    async fn route(&self, _res: &Resources) -> Result<TaskResult<S>, CanoError> {
-        Ok(TaskResult::Single(self.0.clone()))
+    async fn route(&self, _res: &Resources) -> Result<S, CanoError> {
+        Ok(self.0.clone())
     }
 }
 
@@ -42,14 +39,12 @@ impl RouterTask<S> for RouteTo {
 async fn router_hop_is_counted() {
     let observer = Arc::new(RecordingObserver::new());
     let wf = Workflow::bare()
-        .register_router(S::Start, RouteTo(S::Route))
-        .register_router(S::Route, RouteTo(S::Worker))
+        .register(S::Start, RouteTo(S::Route))
+        .register(S::Route, RouteTo(S::Worker))
         .register(S::Worker, Go(S::Done))
         .add_exit_state(S::Done)
         .with_observer(observer.clone());
-    wf.orchestrate(S::Start, CancellationToken::disabled())
-        .await
-        .unwrap();
+    wf.orchestrate(S::Start).await.unwrap();
     observer
         .assert_registered_states_entered(&wf)
         .expect("router hops counted");
@@ -63,9 +58,7 @@ async fn unregistered_routed_state_returns_err_does_not_panic() {
         .register(S::Orphan, Go(S::Done))
         .add_exit_state(S::Done)
         .with_observer(observer.clone());
-    wf.orchestrate(S::Start, CancellationToken::disabled())
-        .await
-        .unwrap();
+    wf.orchestrate(S::Start).await.unwrap();
     let missing = observer.assert_registered_states_entered(&wf).unwrap_err();
     assert!(missing.contains(&"Orphan".to_string()), "got: {missing:?}");
 }
@@ -77,9 +70,7 @@ async fn multi_state_with_explicit_list() {
         .register(S::Start, Go(S::Done))
         .add_exit_state(S::Done)
         .with_observer(observer.clone());
-    wf.orchestrate(S::Start, CancellationToken::disabled())
-        .await
-        .unwrap();
+    wf.orchestrate(S::Start).await.unwrap();
     let missing = observer
         .assert_all_states_entered(&[S::Start, S::Route, S::Worker])
         .unwrap_err();

@@ -89,11 +89,11 @@ impl Task<Step> for FlakyLoad {
     fn name(&self) -> Cow<'static, str> {
         "load".into()
     }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         if self.remaining_failures.fetch_sub(1, Ordering::SeqCst) > 0 {
             return Err(CanoError::task_execution("upstream not ready yet"));
         }
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -103,20 +103,20 @@ impl Task<Step> for FlakyLoad {
 // ---------------------------------------------------------------------------
 
 struct GuardedProbe {
-    breaker: Arc<CircuitBreaker>,
+    breaker: CircuitBreaker,
 }
 
 #[task]
 impl Task<Step> for GuardedProbe {
     fn config(&self) -> TaskConfig {
-        TaskConfig::minimal().with_circuit_breaker(Arc::clone(&self.breaker))
+        TaskConfig::new().with_circuit_breaker(self.breaker.clone())
     }
     fn name(&self) -> Cow<'static, str> {
         "probe".into()
     }
-    async fn run_bare(&self) -> Result<TaskResult<Step>, CanoError> {
+    async fn run(&self) -> Result<Step, CanoError> {
         // Never reached while the breaker is open.
-        Ok(TaskResult::Single(Step::Done))
+        Ok(Step::Done)
     }
 }
 
@@ -158,18 +158,16 @@ async fn main() -> Result<(), CanoError> {
         )
         .add_exit_state(Step::Done)
         .with_observer(observer.clone());
-    let final_state = workflow
-        .orchestrate(Step::Load, CancellationToken::disabled())
-        .await?;
+    let final_state = workflow.orchestrate(Step::Load).await?;
     println!("  → workflow finished in state {final_state:?}\n");
 
     // -- Scenario B -------------------------------------------------------
     println!("Scenario B — circuit breaker is open, the task is rejected\n");
-    let breaker = Arc::new(CircuitBreaker::new(CircuitPolicy {
+    let breaker = CircuitBreaker::new(CircuitPolicy {
         failure_threshold: 1,
         reset_timeout: Duration::from_secs(60),
         half_open_max_calls: 1,
-    }));
+    });
     // Trip it: one recorded failure at threshold 1.
     let permit = breaker.try_acquire().expect("closed breaker admits");
     breaker.record_failure(permit);
@@ -178,15 +176,12 @@ async fn main() -> Result<(), CanoError> {
         .register(
             Step::Probe,
             GuardedProbe {
-                breaker: Arc::clone(&breaker),
+                breaker: breaker.clone(),
             },
         )
         .add_exit_state(Step::Done)
         .with_observer(observer.clone());
-    match guarded
-        .orchestrate(Step::Probe, CancellationToken::disabled())
-        .await
-    {
+    match guarded.orchestrate(Step::Probe).await {
         Ok(s) => println!("  → unexpectedly finished in {s:?}\n"),
         Err(e) => println!("  → workflow errored as expected: {e}\n"),
     }
@@ -200,9 +195,9 @@ async fn main() -> Result<(), CanoError> {
     // -- Scenario C -------------------------------------------------------
     println!("Scenario C — resource health probes\n");
     let resources: Resources = Resources::new()
-        .insert("db", PrimaryDb)
-        .insert("replica", ReadReplica)
-        .insert("payments", PaymentsApi);
+        .insert(PrimaryDb)
+        .insert(ReadReplica)
+        .insert(PaymentsApi);
 
     let mut report: Vec<_> = resources.check_all_health().await.into_iter().collect();
     report.sort_by(|a, b| a.0.cmp(&b.0));

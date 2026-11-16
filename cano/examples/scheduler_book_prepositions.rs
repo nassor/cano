@@ -115,7 +115,7 @@ impl BookDownloadTask {
         TaskConfig::new().with_fixed_retry(2, Duration::from_secs(1))
     }
 
-    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowPhase>, CanoError> {
+    async fn run(&self, res: &Resources) -> Result<WorkflowPhase, CanoError> {
         let book_opt = match self.download_book().await {
             Ok(book) => Some(book),
             Err(error) => {
@@ -124,14 +124,14 @@ impl BookDownloadTask {
             }
         };
 
-        let store = res.get::<MemoryStore, _>("store")?;
+        let store = res.get::<MemoryStore>()?;
         if let Some(book) = book_opt {
             let mut books: Vec<Book> = store.get("books").unwrap_or_else(|_| Vec::new());
             books.push(book);
-            store.put("books", books)?;
-            Ok(TaskResult::Single(WorkflowPhase::Analyze))
+            store.put("books", books);
+            Ok(WorkflowPhase::Analyze)
         } else {
-            Ok(TaskResult::Single(WorkflowPhase::Complete))
+            Ok(WorkflowPhase::Complete)
         }
     }
 }
@@ -185,8 +185,8 @@ impl PrepositionAnalysisTask {
 
 #[task(state = WorkflowPhase)]
 impl PrepositionAnalysisTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowPhase>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<WorkflowPhase, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let books: Vec<Book> = store
             .get("books")
             .map_err(|e| CanoError::task_execution(format!("Failed to load books: {}", e)))?;
@@ -201,9 +201,9 @@ impl PrepositionAnalysisTask {
         }
 
         let count = analyses.len();
-        store.put("book_analyses", analyses)?;
+        store.put("book_analyses", analyses);
         println!("Stored {} book analyses", count);
-        Ok(TaskResult::Single(WorkflowPhase::Rank))
+        Ok(WorkflowPhase::Rank)
     }
 }
 
@@ -213,8 +213,8 @@ struct BookRankingTask;
 
 #[task(state = WorkflowPhase)]
 impl BookRankingTask {
-    async fn run(&self, res: &Resources) -> Result<TaskResult<WorkflowPhase>, CanoError> {
-        let store = res.get::<MemoryStore, _>("store")?;
+    async fn run(&self, res: &Resources) -> Result<WorkflowPhase, CanoError> {
+        let store = res.get::<MemoryStore>()?;
         let analyses: Vec<BookAnalysis> = store
             .get("book_analyses")
             .map_err(|e| CanoError::task_execution(format!("Failed to load analyses: {}", e)))?;
@@ -233,7 +233,7 @@ impl BookRankingTask {
             })
             .collect();
 
-        store.put("book_rankings", rankings.clone())?;
+        store.put("book_rankings", rankings.clone());
 
         println!("\nBOOK RANKINGS BY PREPOSITION DIVERSITY");
         println!("==========================================");
@@ -251,7 +251,7 @@ impl BookRankingTask {
             );
         }
 
-        Ok(TaskResult::Single(WorkflowPhase::Complete))
+        Ok(WorkflowPhase::Complete)
     }
 }
 
@@ -266,51 +266,45 @@ async fn main() -> CanoResult<()> {
     println!("Fetching books from the bundled sample corpus...\n");
 
     // Book 1: Pride and Prejudice
-    let workflow1 = Workflow::new(Resources::new().insert("store", store.clone()))
+    let workflow1 = Workflow::new(Resources::new().insert(store.clone()))
         .register(
             WorkflowPhase::Download,
             BookDownloadTask::new(1342, "Pride and Prejudice by Jane Austen".to_string()),
         )
         .add_exit_states(vec![WorkflowPhase::Analyze, WorkflowPhase::Complete]);
 
-    let _ = workflow1
-        .orchestrate(WorkflowPhase::Download, CancellationToken::disabled())
-        .await?;
+    let _ = workflow1.orchestrate(WorkflowPhase::Download).await?;
 
     // Book 2: Alice's Adventures in Wonderland
-    let workflow2 = Workflow::new(Resources::new().insert("store", store.clone()))
+    let workflow2 = Workflow::new(Resources::new().insert(store.clone()))
         .register(
             WorkflowPhase::Download,
             BookDownloadTask::new(11, "Alice's Adventures in Wonderland".to_string()),
         )
         .add_exit_states(vec![WorkflowPhase::Analyze, WorkflowPhase::Complete]);
 
-    let _ = workflow2
-        .orchestrate(WorkflowPhase::Download, CancellationToken::disabled())
-        .await?;
+    let _ = workflow2.orchestrate(WorkflowPhase::Download).await?;
 
     // Book 3: A Christmas Carol
-    let workflow3 = Workflow::new(Resources::new().insert("store", store.clone()))
+    let workflow3 = Workflow::new(Resources::new().insert(store.clone()))
         .register(
             WorkflowPhase::Download,
             BookDownloadTask::new(46, "A Christmas Carol by Charles Dickens".to_string()),
         )
         .add_exit_states(vec![WorkflowPhase::Analyze, WorkflowPhase::Complete]);
 
-    let _ = workflow3
-        .orchestrate(WorkflowPhase::Download, CancellationToken::disabled())
-        .await?;
+    let _ = workflow3.orchestrate(WorkflowPhase::Download).await?;
 
     // Analyze and rank the downloaded books
     println!("\nAnalyzing and ranking books...\n");
 
-    let analysis_workflow = Workflow::new(Resources::new().insert("store", store.clone()))
+    let analysis_workflow = Workflow::new(Resources::new().insert(store.clone()))
         .register(WorkflowPhase::Analyze, PrepositionAnalysisTask)
         .register(WorkflowPhase::Rank, BookRankingTask)
         .add_exit_state(WorkflowPhase::Complete);
 
     analysis_workflow
-        .orchestrate(WorkflowPhase::Analyze, CancellationToken::disabled())
+        .orchestrate(WorkflowPhase::Analyze)
         .await?;
 
     println!("\nBook preposition analysis complete!");

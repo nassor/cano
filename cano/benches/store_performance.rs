@@ -14,9 +14,7 @@ fn bench_storage_operations(c: &mut Criterion) {
                 b.iter(|| {
                     let store = MemoryStore::new();
                     for i in 0..count {
-                        store
-                            .put(&format!("key_{i}"), format!("value_{i}"))
-                            .unwrap();
+                        store.put(&format!("key_{i}"), format!("value_{i}"));
                     }
                 });
             },
@@ -29,9 +27,7 @@ fn bench_storage_operations(c: &mut Criterion) {
                 let store = MemoryStore::new();
                 // Pre-populate store
                 for i in 0..count {
-                    store
-                        .put(&format!("key_{i}"), format!("value_{i}"))
-                        .unwrap();
+                    store.put(&format!("key_{i}"), format!("value_{i}"));
                 }
 
                 b.iter(|| {
@@ -52,7 +48,7 @@ fn bench_storage_operations(c: &mut Criterion) {
                     for i in 0..count {
                         list_items.push(format!("value_{i}"));
                     }
-                    store.put("list_key", list_items).unwrap();
+                    store.put("list_key", list_items);
                 });
             },
         );
@@ -70,7 +66,7 @@ fn bench_put_throughput(c: &mut Criterion) {
             let store = MemoryStore::new();
             b.iter(|| {
                 for i in 0..n {
-                    store.put("hot_key", i as u64).unwrap();
+                    store.put("hot_key", i as u64);
                 }
             });
         });
@@ -105,7 +101,7 @@ fn bench_get_clone_vs_owned(c: &mut Criterion) {
 
     group.bench_function("sole_owner", |b| {
         let store = MemoryStore::new();
-        store.put("k", vec![1u64; 1024]).unwrap();
+        store.put("k", vec![1u64; 1024]);
         b.iter(|| {
             let _v: Vec<u64> = store.get("k").unwrap();
         });
@@ -113,7 +109,7 @@ fn bench_get_clone_vs_owned(c: &mut Criterion) {
 
     group.bench_function("shared_owner", |b| {
         let store = MemoryStore::new();
-        store.put("k", vec![1u64; 1024]).unwrap();
+        store.put("k", vec![1u64; 1024]);
         // Hold a separate Arc to the value; this forces try_unwrap to fail and clone.
         let _holder = store.get_shared::<Vec<u64>>("k").unwrap();
         b.iter(|| {
