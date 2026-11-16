@@ -369,6 +369,56 @@
     }
 
     // ------------------------------------------------------------------------
+    // Animated diagrams
+    //
+    // An `svg.cd-anim` holds a SMIL timeline whose length is the `dur` of its
+    // `.cd-loop` group. It plays once, from the start, the first time it is on
+    // screen, pauses while scrolled away, and stops on the finished picture one
+    // second before the loop would fade out. With reduced motion it shows that
+    // finished picture straight away.
+    // ------------------------------------------------------------------------
+    const animated = document.querySelectorAll('svg.cd-anim');
+    if (animated.length > 0) {
+      const endTime = (svg) => {
+        const clock = svg.querySelector('.cd-loop > animate');
+        return Math.max((clock ? clock.getSimpleDuration() : 0) - 1, 0);
+      };
+      const freeze = (svg) => {
+        svg.pauseAnimations();
+        svg.setCurrentTime(endTime(svg));
+      };
+      if (reduceMotion || !('IntersectionObserver' in window)) {
+        animated.forEach(freeze);
+      } else {
+        const timers = new Map();
+        const play = new IntersectionObserver(
+          (entries) => {
+            entries.forEach((entry) => {
+              const svg = entry.target;
+              clearTimeout(timers.get(svg));
+              if (!entry.isIntersecting) {
+                svg.pauseAnimations();
+                return;
+              }
+              svg.unpauseAnimations();
+              const left = endTime(svg) - svg.getCurrentTime();
+              timers.set(svg, setTimeout(() => {
+                freeze(svg);
+                play.unobserve(svg);
+              }, Math.max(left, 0) * 1000));
+            });
+          },
+          { threshold: 0.4 }
+        );
+        animated.forEach((svg) => {
+          svg.pauseAnimations();
+          svg.setCurrentTime(0);
+          play.observe(svg);
+        });
+      }
+    }
+
+    // ------------------------------------------------------------------------
     // Diagram pan hint
     //
     // A diagram is authored at a fixed viewBox width and its labels are sized

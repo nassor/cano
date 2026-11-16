@@ -719,6 +719,9 @@ svg.cd {
 .cd .axis     { stroke: var(--dg-steel-dim); stroke-width: 1.4; }
 .cd .tick     { stroke: var(--border); stroke-width: 1; }
 
+/* A moving token in an animated diagram (`svg.cd-anim`): one unit of work. */
+.cd .token    { fill: var(--dg-crab); }
+
 /* --------------------------------------------------------------------------
    9. Code
    -------------------------------------------------------------------------- */
