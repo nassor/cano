@@ -7,3 +7,5 @@ docs/public/
 # Avoid agent files
 .claude/
 CLAUDE.md
+# Library crate: consumers resolve their own dependency versions
+Cargo.lock
