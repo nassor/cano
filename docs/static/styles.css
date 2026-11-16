@@ -58,6 +58,12 @@
     --err:         light-dark(hsl(0 72% 46%),      hsl(0 91% 74%));
     --err-dim:     light-dark(hsl(0 72% 46% / 0.10), hsl(0 91% 74% / 0.14));
 
+    /* Inline code: a tinted blue chip, so an identifier stands apart from
+       prose in both themes. */
+    --code-fg:     light-dark(hsl(220 70% 40%),    hsl(212 90% 76%));
+    --code-bg:     light-dark(hsl(220 60% 97%),    hsl(220 30% 12%));
+    --code-border: light-dark(hsl(220 40% 89%),    hsl(220 22% 21%));
+
     /* Type */
     --font-sans: 'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
     --font-mono: 'Geist Mono', ui-monospace, 'SFMono-Regular', Menlo, monospace;
@@ -459,6 +465,7 @@ h1, h2, h3, h4 {
     line-height: 1.2;
     letter-spacing: -0.022em;
     text-wrap: balance;
+    overflow-wrap: break-word;
     scroll-margin-top: calc(var(--header-h) + var(--s5));
 }
 
@@ -561,6 +568,7 @@ hr:not(.section-divider) { border: 0; height: 1px; background: var(--border); ma
     opacity: 0.7;
 }
 .feature-tag code { color: var(--foreground); }
+.card .feature-tag { margin-bottom: var(--s2); }
 
 /* --------------------------------------------------------------------------
    7. Callouts
@@ -668,8 +676,8 @@ svg.cd {
 }
 
 .cd text {
-    font-family: var(--font-sans);
-    font-size: 15px;
+    font-family: var(--font-mono);
+    font-size: 12px;
     fill: var(--foreground);
     text-anchor: middle;
     dominant-baseline: middle;
@@ -691,10 +699,11 @@ svg.cd {
 .cd .e-dash   { stroke-dasharray: 5 5; }
 .cd .lifeline { fill: none; stroke: var(--dg-steel-dim); stroke-width: 1.1; stroke-dasharray: 3 6; opacity: 0.75; }
 
-/* Text variants */
-.cd .t-strong { font-weight: 600; }
-.cd .t-mut    { fill: var(--muted-foreground); font-size: 12.5px; }
-.cd .t-code   { font-family: var(--font-mono); font-size: 12.5px; }
+/* Text variants. As on cuca's site: labels are monospace, node titles are the
+   one sans-serif weight, and secondary text is a step smaller and muted. */
+.cd .t-strong { font-family: var(--font-sans); font-weight: 600; font-size: 14px; letter-spacing: -0.01em; }
+.cd .t-mut    { fill: var(--muted-foreground); font-size: 11px; }
+.cd .t-code   { font-family: var(--font-mono); }
 .cd .t-hot    { fill: var(--dg-crab); }
 .cd .t-ok     { fill: var(--ok); }
 .cd .t-warn   { fill: var(--warn); }
@@ -709,6 +718,9 @@ svg.cd {
 .cd .band-hot { fill: var(--dg-crab-fill);  stroke: var(--dg-crab);      stroke-width: 1.2; }
 .cd .axis     { stroke: var(--dg-steel-dim); stroke-width: 1.4; }
 .cd .tick     { stroke: var(--border); stroke-width: 1; }
+
+/* A moving token in an animated diagram (`svg.cd-anim`): one unit of work. */
+.cd .token    { fill: var(--dg-crab); }
 
 /* --------------------------------------------------------------------------
    9. Code
@@ -739,16 +751,19 @@ pre code {
 :not(pre) > code {
     font-family: var(--font-mono);
     font-size: 0.85em;
-    padding: 0.15em 0.36em;
-    background: var(--muted);
+    padding: 0.12em 0.4em;
+    background: var(--code-bg);
+    border: 1px solid var(--code-border);
     border-radius: var(--r-sm);
-    color: var(--foreground);
+    color: var(--code-fg);
     overflow-wrap: break-word;
 }
+a > code, a:hover > code { color: inherit; }
 
 h1 code, h2 code, h3 code, h4 code, .brand code, .subtitle code {
     font-size: 0.88em;
     background: none;
+    border: 0;
     padding: 0;
     color: inherit;
 }
@@ -771,8 +786,10 @@ h1 code, h2 code, h3 code, h4 code, .brand code, .subtitle code {
 .code-block { margin: var(--s4) 0 var(--s5); }
 .code-block-label {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--s2);
+    overflow-wrap: anywhere;
     padding: var(--s2) var(--s5);
     background: var(--muted);
     border: 1px solid var(--border);
@@ -781,8 +798,9 @@ h1 code, h2 code, h3 code, h4 code, .brand code, .subtitle code {
     font: 500 0.75rem/1.7 var(--font-mono);
     color: var(--foreground);
 }
-.code-block-label code { font-size: 0.95em; background: none; padding: 0; }
+.code-block-label code { font-size: 0.95em; background: none; border: 0; padding: 0; color: inherit; }
 .code-block-label .label-icon { opacity: 0.8; }
+.diagram-label code { font-size: 1em; text-transform: none; letter-spacing: 0; background: none; border: 0; padding: 0; color: var(--foreground); }
 .code-block > pre { margin: 0; border-radius: 0 0 var(--r-lg) var(--r-lg); }
 
 /* Legacy inline label helper kept for backwards compatibility */
@@ -931,6 +949,7 @@ a.card:hover, .feature-card:hover, .mode-card:hover, .strategy-card:hover {
 .outcome-cards .card.outcome-danger { border-left-color: var(--err); }
 .outcome-cards .card h3 { font-size: var(--step-0); }
 .outcome-cards .card p { display: flex; align-items: baseline; gap: var(--s2); margin-bottom: var(--s2); }
+.outcome-cards .card p > code { min-width: 0; overflow-wrap: anywhere; }
 
 .outcome-key {
     flex: none;
@@ -1112,11 +1131,57 @@ a.card:hover, .feature-card:hover, .mode-card:hover, .strategy-card:hover {
     vertical-align: top;
     line-height: 1.65;
     color: var(--muted-foreground);
-    overflow-wrap: anywhere;
 }
 .styled-table tbody tr:hover td, .content tbody tr:hover td { background: var(--muted); }
 .styled-table td strong, .content td strong { color: var(--foreground); }
+
+/* A table never scrolls sideways. At desktop width cells wrap only at spaces
+   and inline code stays whole: `overflow-wrap: anywhere` would lower every
+   column's min-content to one character and let the auto layout squeeze short
+   columns to feed a long one. The pages keep every table inside the column at
+   that width. Below 1440px the column narrows, and there headers wrap and
+   inline code may break inside a word so the table still fits. */
 .styled-table td code, .content td code { white-space: nowrap; font-size: 0.82em; }
+.styled-table td, .styled-table th, .content td, .content th {
+    overflow-wrap: normal;
+    word-break: normal;
+    hyphens: none;
+}
+@media (max-width: 1439px) {
+    .styled-table th, .content th { white-space: normal; }
+    .styled-table td code, .content td code { white-space: normal; overflow-wrap: anywhere; }
+    .styled-table td, .styled-table th, .content td, .content th {
+        padding-left: var(--s3);
+        padding-right: var(--s3);
+    }
+}
+@media (max-width: 640px) {
+    .styled-table td, .content td { overflow-wrap: anywhere; }
+}
+
+/* A key list replaces a table whose identifier column is too long to sit
+   beside a description: the term line holds the identifier and, in <small>,
+   its facets (a default, a type); the description takes the full width. */
+.key-list { margin: var(--s4) 0 var(--s6); }
+.key-list dt {
+    margin-top: var(--s4);
+    padding-top: var(--s3);
+    border-top: 1px solid var(--border-soft);
+    color: var(--foreground);
+}
+.key-list dt:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.key-list dt code { overflow-wrap: anywhere; }
+.key-list dt small {
+    margin-left: var(--s2);
+    font-size: var(--step--1);
+    color: var(--muted-foreground);
+}
+.key-list dd {
+    margin: var(--s2) 0 0;
+    font-size: var(--step--1);
+    line-height: 1.65;
+    color: var(--muted-foreground);
+}
 
 /* --------------------------------------------------------------------------
    15. Landing page

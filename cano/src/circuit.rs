@@ -49,7 +49,7 @@
 //! ## Advanced: register as a `Resource`
 //!
 //! [`CircuitBreaker`] also implements [`Resource`] (no-op lifecycle) so it can be
-//! registered in [`Resources`] and looked up by key inside a task body. **This bypasses
+//! registered in [`Resources`] and looked up by type inside a task body. **This bypasses
 //! the retry-loop integration**: callers must invoke [`try_acquire`](CircuitBreaker::try_acquire),
 //! [`record_success`](CircuitBreaker::record_success), and
 //! [`record_failure`](CircuitBreaker::record_failure) themselves, and they lose both

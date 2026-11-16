@@ -52,10 +52,14 @@
    Trailing slashes are trimmed on both sides: `get_url(path='/')` returns the
    bare base URL while `current_url` for the same page carries the slash, and
    the home page would otherwise match nothing. Tera cannot compare a function
-   call directly, so every URL is bound to a variable first. #}
-{%- set here = current_url | default(value="") | trim_end_matches(pat="/") -%}
+   call directly, so every URL is bound to a variable first.
+
+   An item's children are visited right after the item, so reading order is
+   depth first. The child body repeats the item body because a Tera macro
+   cannot `set_global` into its caller. #}
+{%- set here = current_url | default(value="") | trim_end(pat="/") -%}
 {%- set home = get_url(path='/') -%}
-{%- set home_key = home | trim_end_matches(pat="/") -%}
+{%- set home_key = home | trim_end(pat="/") -%}
 {%- set_global nav_group = "" -%}
 {%- set_global nav_prev = false -%}
 {%- set_global nav_prev_group = "" -%}
@@ -66,20 +70,32 @@
 {%- set_global nav_last_group = "" -%}
 {%- for group in config.extra.nav -%}
     {%- for item in group.items -%}
-        {%- set_global nav_walk = [item] | concat(with=item.children | default(value=[])) -%}
-        {%- for stop in nav_walk -%}
-            {%- set stop_url = get_url(path=stop.path) | trim_end_matches(pat="/") -%}
+        {%- set item_url = get_url(path=item.path) | trim_end(pat="/") -%}
+        {%- if nav_seen and not nav_next -%}
+            {%- set_global nav_next = item -%}
+            {%- set_global nav_next_group = group.label -%}
+        {%- endif -%}
+        {%- if item_url == here -%}
+            {%- set_global nav_seen = true -%}
+            {%- set_global nav_group = group.label -%}
+            {%- set_global nav_prev = nav_last -%}
+            {%- set_global nav_prev_group = nav_last_group -%}
+        {%- endif -%}
+        {%- set_global nav_last = item -%}
+        {%- set_global nav_last_group = group.label -%}
+        {%- for child in item.children | default(value=[]) -%}
+            {%- set child_url = get_url(path=child.path) | trim_end(pat="/") -%}
             {%- if nav_seen and not nav_next -%}
-                {%- set_global nav_next = stop -%}
+                {%- set_global nav_next = child -%}
                 {%- set_global nav_next_group = group.label -%}
             {%- endif -%}
-            {%- if stop_url == here -%}
+            {%- if child_url == here -%}
                 {%- set_global nav_seen = true -%}
                 {%- set_global nav_group = group.label -%}
                 {%- set_global nav_prev = nav_last -%}
                 {%- set_global nav_prev_group = nav_last_group -%}
             {%- endif -%}
-            {%- set_global nav_last = stop -%}
+            {%- set_global nav_last = child -%}
             {%- set_global nav_last_group = group.label -%}
         {%- endfor -%}
     {%- endfor -%}

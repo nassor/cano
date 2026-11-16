@@ -9,66 +9,63 @@ template = "section.html"
 <p class="subtitle">Lifecycle-managed, typed dependency injection for Cano workflows.</p>
 
 <p>
-<code>Resources</code> is the typed dictionary every workflow carries. Database
-pools, HTTP clients, config structs, <a href="../store/">MemoryStore</a>, and per-run parameters
-are all resources: registered once, injected everywhere. A resource is looked up by its
-type, so <code>res.get::&lt;R&gt;()?</code> returns a <code>&amp;R</code> with no key to mistype.
-A second instance of the same type is registered under a name and read with
-<code>get_named</code>. <code>get_arc::&lt;R&gt;()</code> hands out an <code>Arc&lt;R&gt;</code>,
-cheap to clone and safe to share across concurrent split tasks.
+<code>Resources</code> is the typed map every workflow carries. Database pools, HTTP clients, config structs,
+a <a href="../store/">MemoryStore</a> and per-run parameters are all resources, registered once and read from any task.
+A resource is looked up by its type, so <code>res.get::&lt;R&gt;()?</code> returns a <code>&amp;R</code> with no key to mistype.
+A second instance of the same type goes under a name and is read with <code>get_named</code>.
 </p>
 
 <p>
-The engine calls <code>setup()</code> on each registered resource in insertion order before
-the FSM runs, and <code>teardown()</code> in reverse order after, even on failure. Tasks
-never receive resources directly; they retrieve them from the injected
-<code>&amp;Resources</code> via <code>res.get::&lt;R&gt;()?</code>.
+<code>get_arc::&lt;R&gt;()</code> hands out an <code>Arc&lt;R&gt;</code>, cheap to clone and safe to share across split tasks.
+The engine calls <code>setup()</code> on each resource in insertion order before the machine runs, and
+<code>teardown()</code> in reverse order after it, even on failure.
 </p>
 
 <!-- Table of Contents -->
 <nav class="page-toc" aria-label="Table of contents">
 <div class="page-toc-title">On this page</div>
 <ol>
-<li><a href="#quick-start">Quick Start</a></li>
-<li><a href="#defining">Defining a Resource</a></li>
-<li><a href="#building">Building a Resources Map</a></li>
-<li><a href="#retrieving">Retrieving Resources in Tasks</a></li>
-<li><a href="#from-resources">Declarative Dependency Loading</a></li>
-<li><a href="#named">Named Instances</a></li>
-<li><a href="#lifecycle-guide">Lifecycle &amp; Concurrency</a></li>
-<li><a href="#no-resources">Workflows Without Resources</a></li>
-<li><a href="#api-reference">API Reference</a></li>
+<li><a href="#quick-start">Quick start</a></li>
+<li><a href="#defining">Defining a resource</a></li>
+<li><a href="#building">Building a Resources map</a></li>
+<li><a href="#retrieving">Retrieving resources in tasks</a></li>
+<li><a href="#from-resources">Declarative dependency loading</a></li>
+<li><a href="#named">Named instances</a></li>
+<li><a href="#lifecycle-guide">Lifecycle and concurrency</a></li>
+<li><a href="#no-resources">Workflows without resources</a></li>
+<li><a href="#api-reference">API reference</a></li>
 </ol>
 </nav>
 
 <!-- Section: Quick Start -->
 <hr class="section-divider">
-<h2 id="quick-start"><a href="#quick-start" class="anchor-link" aria-hidden="true">#</a>Quick Start</h2>
+<h2 id="quick-start"><a href="#quick-start" class="anchor-link" aria-hidden="true">#</a>Quick start</h2>
 
 <p>
-Define a resource, register it, retrieve it by type in any task. The engine wires
-<code>setup</code> / <code>teardown</code> automatically.
+Define a resource, insert it, and read it by type in any task. The engine runs
+<code>setup</code> and <code>teardown</code> for you.
 </p>
 
 <div class="diagram-frame">
 <p class="diagram-label">insert(value) at build time &rarr; res.get::&lt;R&gt;() inside tasks</p>
 <div class="cd-wrap">
-<svg class="cd" viewBox="0 0 780 316" role="img">
-<title>Resources is a typed map: every build-time insert stores one value under its type, and inside a task res.get::&lt;R&gt; names the resource type to borrow the value back out, so one entry can be read by several tasks.</title>
-<defs><marker id="res-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<svg class="cd" viewBox="0 0 780 316" role="img" aria-labelledby="res-map-title res-map-desc">
+<title id="res-map-title">Resources as a typed map</title>
+<desc id="res-map-desc">Three build-time inserts each store one value under its type: MemoryStore, AppConfig and WorkflowParams. Inside tasks, res.get names a resource type and borrows the stored value. InitTask reads MemoryStore, ProcessTask reads MemoryStore and AppConfig, and ReportTask reads WorkflowParams, so one entry can have several readers.</desc>
+<defs><marker id="res-map-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
 <text class="t-strong" x="107" y="24">Build time</text>
 <text class="t-code t-mut" x="107" y="43">.insert(value)</text>
 <text class="t-strong" x="386" y="24">Typed map</text>
 <text class="t-code t-mut" x="386" y="43">Resources::new()</text>
 <text class="t-strong" x="669" y="24">In tasks</text>
 <text class="t-code t-mut" x="669" y="43">res.get::&lt;R&gt;()?</text>
-<path class="e" d="M200,96 H262" marker-end="url(#res-ah)"/>
-<path class="e" d="M200,166 H262" marker-end="url(#res-ah)"/>
-<path class="e" d="M200,236 H262" marker-end="url(#res-ah)"/>
-<path class="e e-hot" d="M506,96 H572" marker-end="url(#res-ah)"/>
-<path class="e e-hot" d="M506,108 H524 Q536,108 536,120 V133 Q536,145 548,145 H572" marker-end="url(#res-ah)"/>
-<path class="e" d="M506,166 H572" marker-end="url(#res-ah)"/>
-<path class="e" d="M506,236 H572" marker-end="url(#res-ah)"/>
+<path class="e" d="M200,96 H262" marker-end="url(#res-map-ah)"/>
+<path class="e" d="M200,166 H262" marker-end="url(#res-map-ah)"/>
+<path class="e" d="M200,236 H262" marker-end="url(#res-map-ah)"/>
+<path class="e e-hot" d="M506,96 H572" marker-end="url(#res-map-ah)"/>
+<path class="e e-hot" d="M506,108 H524 Q536,108 536,120 V133 Q536,145 548,145 H572" marker-end="url(#res-map-ah)"/>
+<path class="e" d="M506,166 H572" marker-end="url(#res-map-ah)"/>
+<path class="e" d="M506,236 H572" marker-end="url(#res-map-ah)"/>
 <rect class="n" x="14" y="72" width="186" height="48" rx="10"/>
 <text class="t-code" x="107" y="87">insert(store)</text>
 <text class="t-code t-mut" x="107" y="107">MemoryStore::new()</text>
@@ -78,7 +75,7 @@ Define a resource, register it, retrieve it by type in any task. The engine wire
 <rect class="n" x="14" y="212" width="186" height="48" rx="10"/>
 <text class="t-code" x="107" y="227">insert(params)</text>
 <text class="t-code t-mut" x="107" y="247">WorkflowParams { .. }</text>
-<rect class="n-cop" x="266" y="56" width="240" height="216" rx="12"/>
+<rect class="n-ghost" x="266" y="56" width="240" height="216" rx="12"/>
 <rect class="n-hot" x="282" y="76" width="208" height="40" rx="6"/>
 <text class="t-code" x="386" y="97">MemoryStore &rarr; value</text>
 <rect class="n" x="282" y="146" width="208" height="40" rx="6"/>
@@ -144,20 +141,19 @@ async fn main() -> Result<(), CanoError> {
 </div>
 
 <div class="callout callout-tip">
-<p>Runnable example: <code>cargo run --example workflow_resources</code> — a stateless config resource,
-a stateful counter resource (interior mutability), and a resource with real <code>setup</code> /
-<code>teardown</code> lifecycle work, all retrieved by type inside tasks.</p>
+<p>Runnable example: <code>cargo run --example workflow_resources</code>. It has a stateless config resource,
+a stateful counter resource (interior mutability), and a resource with real <code>setup</code> and
+<code>teardown</code> work, all read by type inside tasks.</p>
 </div>
 
 <!-- Section: Defining a Resource -->
 <hr class="section-divider">
-<h2 id="defining"><a href="#defining" class="anchor-link" aria-hidden="true">#</a>Defining a Resource</h2>
+<h2 id="defining"><a href="#defining" class="anchor-link" aria-hidden="true">#</a>Defining a resource</h2>
 
 <p>
-The <code>Resource</code> trait gives every dependency three hooks — two lifecycle, one
-observability. All default to no-ops (and <code>health()</code> defaults to
-<code>Healthy</code>), so most resources need no manual impl. <code>health()</code> is
-opt-in observability — it is never called during normal workflow execution; see
+The <code>Resource</code> trait has three hooks: <code>setup</code> and <code>teardown</code> for the lifecycle, and
+<code>health</code> for observability. All default to no-ops (<code>health()</code> returns <code>Healthy</code>),
+so most resources need no manual impl. The engine never calls <code>health()</code> during a run; see
 <a href="../observers/#health">Observers &amp; Health Probes</a>.
 </p>
 
@@ -174,10 +170,9 @@ pub trait Resource: Send + Sync + 'static {
 ```
 </div>
 
-<h3>Stateless — <code>#[derive(Resource)]</code></h3>
+<h3>Stateless: <code>#[derive(Resource)]</code></h3>
 <p>
-Generates an empty <code>impl Resource for T {}</code>. Use it for config, parameter bags,
-read-only data — anything without lifecycle work.
+Generates an empty <code>impl Resource for T {}</code>. Use it for config, parameter bags and read-only data.
 </p>
 
 <div class="code-block">
@@ -193,12 +188,11 @@ struct WorkflowParams {
 ```
 </div>
 
-<h3>Stateful — <code>#[resource]</code> on the impl block</h3>
+<h3>Stateful: <code>#[resource]</code> on the impl block</h3>
 <p>
-Override <code>setup</code> / <code>teardown</code> for resources that open connections,
-allocate buffers, or flush state. Both hooks take <code>&amp;self</code>: resources are shared
-via <code>Arc</code>, so mutation requires interior mutability —
-<code>tokio::sync::Mutex</code>, <code>RwLock</code>, atomics, etc.
+Override <code>setup</code> and <code>teardown</code> for resources that open connections, allocate buffers or flush state.
+Both take <code>&amp;self</code> and resources are shared through <code>Arc</code>, so mutation needs interior mutability:
+<code>tokio::sync::Mutex</code>, <code>RwLock</code> or atomics.
 </p>
 
 <div class="code-block">
@@ -231,15 +225,13 @@ impl Resource for CounterResource {
 
 <!-- Section: Building -->
 <hr class="section-divider">
-<h2 id="building"><a href="#building" class="anchor-link" aria-hidden="true">#</a>Building a Resources Map</h2>
+<h2 id="building"><a href="#building" class="anchor-link" aria-hidden="true">#</a>Building a Resources map</h2>
 
 <p>
-<code>Resources</code> is a typed builder. <code>insert</code> consumes <code>self</code> and
-panics when a resource of the same type is already present (programmer error).
-<code>insert_named</code> registers a second instance of a type under a name.
-<code>try_insert</code> and <code>try_insert_named</code> return
-<code>Result&lt;Self, CanoError&gt;</code> so dynamic input can handle collisions explicitly.
-They compose in a single chain.
+<code>Resources</code> is a typed builder. <code>insert</code> consumes <code>self</code> and panics when a resource of
+the same type is already present, which is a programmer error. <code>insert_named</code> registers a second instance
+of a type under a name. <code>try_insert</code> and <code>try_insert_named</code> return
+<code>Result&lt;Self, CanoError&gt;</code>, so dynamic input can handle a collision as data.
 </p>
 
 <div class="code-block">
@@ -260,7 +252,7 @@ let resources = Resources::new()
 
 <!-- Section: Retrieving -->
 <hr class="section-divider">
-<h2 id="retrieving"><a href="#retrieving" class="anchor-link" aria-hidden="true">#</a>Retrieving Resources in Tasks</h2>
+<h2 id="retrieving"><a href="#retrieving" class="anchor-link" aria-hidden="true">#</a>Retrieving resources in tasks</h2>
 
 <p>
 <code>get::&lt;R&gt;()</code> returns <code>Result&lt;&amp;R, CanoError&gt;</code>, a plain
@@ -297,7 +289,7 @@ let shared_replica = res.get_named_arc::<MemoryStore>("replica")?;
 
 <!-- Section: FromResources -->
 <hr class="section-divider">
-<h2 id="from-resources"><a href="#from-resources" class="anchor-link" aria-hidden="true">#</a>Declarative Loading with <code>#[derive(FromResources)]</code></h2>
+<h2 id="from-resources"><a href="#from-resources" class="anchor-link" aria-hidden="true">#</a>Declarative loading with <code>#[derive(FromResources)]</code></h2>
 
 <p>
 A struct of <code>Arc</code> dependencies can declare its lookups instead of calling
@@ -339,14 +331,15 @@ fn lookup(res: &Resources) -> Result<(), CanoError> {
 
 <!-- Section: Named Instances -->
 <hr class="section-divider">
-<h2 id="named"><a href="#named" class="anchor-link" aria-hidden="true">#</a>Named Instances</h2>
+<h2 id="named"><a href="#named" class="anchor-link" aria-hidden="true">#</a>Named instances</h2>
 
 <p>
-By default a <code>Resources</code> holds one value per type. When a workflow needs two
-instances of the same type (two <code>MemoryStore</code>s, a primary and a replica pool),
-register the extra one with <code>insert_named</code> and read it with <code>get_named</code>.
-Names live in their own namespace: a named resource never collides with the by-type entry
-of the same type, and unnamed lookups never see named entries.
+A <code>Resources</code> holds one value per type. When a workflow needs two instances of one type, such as two
+<code>MemoryStore</code>s or a primary and a replica pool, register the extra one with <code>insert_named</code>
+and read it with <code>get_named</code>. Names live in their own namespace: a named resource never collides with the
+by-type entry of the same type, and <code>get</code> never sees named entries.
+A duplicate type or name panics; <code>try_insert</code> and <code>try_insert_named</code> return
+<code>ResourceDuplicateKey</code> instead.
 </p>
 
 <table class="styled-table">
@@ -356,9 +349,8 @@ of the same type, and unnamed lookups never see named entries.
 <tbody>
 <tr><td>Insert</td><td><code>insert(value)</code></td><td><code>insert_named("name", value)</code></td></tr>
 <tr><td>Read</td><td><code>get::&lt;R&gt;()</code></td><td><code>get_named::&lt;R&gt;("name")</code></td></tr>
-<tr><td>Typo detection</td><td>The type name is checked at compile time; a missing registration is still <code>ResourceNotFound</code> at runtime</td><td>Runtime: <code>ResourceNotFound</code></td></tr>
-<tr><td>Duplicate</td><td>Panics (or <code>try_insert</code> error)</td><td>Panics (or <code>try_insert_named</code> error)</td></tr>
-<tr><td>Health label</td><td>Type name</td><td>The name</td></tr>
+<tr><td>Not inserted</td><td><code>ResourceNotFound</code></td><td><code>ResourceNotFound</code></td></tr>
+<tr><td>Health label</td><td>the type name</td><td>the name</td></tr>
 </tbody>
 </table>
 
@@ -371,13 +363,10 @@ type, and the partial-LIFO rollback when a later resource's <code>setup</code> f
 <!-- Section: Lifecycle -->
 <hr class="section-divider">
 
-<h2 id="lifecycle-guide"><a href="#lifecycle-guide" class="anchor-link" aria-hidden="true">#</a>Lifecycle &amp; Concurrency</h2>
-<p>When <code>setup()</code> and <code>teardown()</code> fire, how resources behave across concurrent splits, and standalone vs scheduler lifecycle are covered on a dedicated page:</p>
-<ul>
-<li><a href="lifecycle-and-concurrency/">Resource Lifecycle and Concurrency</a></li>
-</ul>
+<h2 id="lifecycle-guide"><a href="#lifecycle-guide" class="anchor-link" aria-hidden="true">#</a>Lifecycle and concurrency</h2>
+<p><a href="lifecycle-and-concurrency/">Resource lifecycle and concurrency</a> covers when <code>setup()</code> and <code>teardown()</code> fire, how resources behave across concurrent splits, and the standalone and scheduler lifecycles.</p>
 <hr class="section-divider">
-<h2 id="no-resources"><a href="#no-resources" class="anchor-link" aria-hidden="true">#</a>Workflows Without Resources</h2>
+<h2 id="no-resources"><a href="#no-resources" class="anchor-link" aria-hidden="true">#</a>Workflows without resources</h2>
 
 <p>
 When every task is self-contained, skip the resources map. Write the method without the
@@ -416,31 +405,39 @@ fn build() -> Workflow<Step> {
 </div>
 
 <div class="callout callout-tip">
-<p>Runnable example: <code>cargo run --example workflow_bare</code> — a workflow with no resources at all.</p>
+<p>Runnable example: <code>cargo run --example workflow_bare</code>, a workflow with no resources at all.</p>
 </div>
 
 <!-- Section: API Reference -->
 <hr class="section-divider">
-<h2 id="api-reference"><a href="#api-reference" class="anchor-link" aria-hidden="true">#</a>API Reference</h2>
+<h2 id="api-reference"><a href="#api-reference" class="anchor-link" aria-hidden="true">#</a>API reference</h2>
 
-<table class="styled-table">
-<thead>
-<tr><th>Method</th><th>Signature</th><th>Notes</th></tr>
-</thead>
-<tbody>
-<tr><td><code>new()</code></td><td><code>Resources::new() -&gt; Self</code></td><td>Empty map.</td></tr>
-<tr><td><code>insert</code></td><td><code>insert&lt;R: Resource&gt;(self, resource: R) -&gt; Self</code></td><td>Builder; one resource per type; <strong>panics</strong> on a duplicate type.</td></tr>
-<tr><td><code>insert_named</code></td><td><code>insert_named&lt;R: Resource&gt;(self, name, resource: R) -&gt; Self</code></td><td>Builder; a named instance. <strong>Panics</strong> on a duplicate name.</td></tr>
-<tr><td><code>try_insert</code></td><td><code>try_insert&lt;R&gt;(self, resource: R) -&gt; Result&lt;Self, CanoError&gt;</code></td><td>Returns <code>ResourceDuplicateKey</code> on a duplicate type.</td></tr>
-<tr><td><code>try_insert_named</code></td><td><code>try_insert_named&lt;R&gt;(self, name, resource: R) -&gt; Result&lt;Self, CanoError&gt;</code></td><td>Returns <code>ResourceDuplicateKey</code> on a duplicate name.</td></tr>
-<tr><td><code>get</code></td><td><code>get&lt;R&gt;(&amp;self) -&gt; Result&lt;&amp;R, CanoError&gt;</code></td><td><code>ResourceNotFound</code> when the type is absent.</td></tr>
-<tr><td><code>get_named</code></td><td><code>get_named&lt;R&gt;(&amp;self, name: &amp;str) -&gt; Result&lt;&amp;R, CanoError&gt;</code></td><td><code>ResourceNotFound</code> / <code>ResourceTypeMismatch</code>.</td></tr>
-<tr><td><code>get_arc</code></td><td><code>get_arc&lt;R&gt;(&amp;self) -&gt; Result&lt;Arc&lt;R&gt;, CanoError&gt;</code></td><td>Same as <code>get</code>, returning a cloned <code>Arc</code>.</td></tr>
-<tr><td><code>get_named_arc</code></td><td><code>get_named_arc&lt;R&gt;(&amp;self, name: &amp;str) -&gt; Result&lt;Arc&lt;R&gt;, CanoError&gt;</code></td><td>Same as <code>get_named</code>, returning a cloned <code>Arc</code>.</td></tr>
-<tr><td><code>setup_all()</code></td><td><code>async fn setup_all(&amp;self) -&gt; Result&lt;(), CanoError&gt;</code></td><td>FIFO setup with partial LIFO rollback. Engine calls this.</td></tr>
-<tr><td><code>teardown_all()</code></td><td><code>async fn teardown_all(&amp;self)</code></td><td>LIFO teardown. Errors logged, never propagated.</td></tr>
-<tr><td><code>check_all_health()</code></td><td><code>async fn check_all_health(&amp;self) -&gt; Vec&lt;(Cow&lt;'static, str&gt;, HealthStatus)&gt;</code></td><td>Insertion order; each entry is labelled by name, or by type name when inserted unnamed.</td></tr>
-</tbody>
-</table>
+<p>Every public method on <code>Resources</code>; <code>R</code> is always <code>R: Resource</code>.</p>
+<dl class="key-list">
+<dt><code>Resources::new() -&gt; Self</code></dt>
+<dd>An empty map.</dd>
+<dt><code>insert&lt;R&gt;(self, resource: R) -&gt; Self</code></dt>
+<dd>Builder. One value per type; panics on a duplicate type.</dd>
+<dt><code>insert_named&lt;R&gt;(self, name: impl Into&lt;Cow&lt;'static, str&gt;&gt;, resource: R) -&gt; Self</code></dt>
+<dd>Builder for a second value of a type, under a name. Panics on a duplicate name.</dd>
+<dt><code>try_insert&lt;R&gt;(self, resource: R) -&gt; Result&lt;Self, CanoError&gt;</code></dt>
+<dd><code>ResourceDuplicateKey</code> on a duplicate type.</dd>
+<dt><code>try_insert_named&lt;R&gt;(self, name, resource: R) -&gt; Result&lt;Self, CanoError&gt;</code></dt>
+<dd><code>ResourceDuplicateKey</code> on a duplicate name.</dd>
+<dt><code>get&lt;R&gt;(&amp;self) -&gt; Result&lt;&amp;R, CanoError&gt;</code></dt>
+<dd><code>ResourceNotFound</code> when no value of that type was inserted.</dd>
+<dt><code>get_named&lt;R&gt;(&amp;self, name: &amp;str) -&gt; Result&lt;&amp;R, CanoError&gt;</code></dt>
+<dd><code>ResourceNotFound</code> for an unknown name, <code>ResourceTypeMismatch</code> when the name holds another type.</dd>
+<dt><code>get_arc&lt;R&gt;(&amp;self) -&gt; Result&lt;Arc&lt;R&gt;, CanoError&gt;</code> <small>and <code>get_named_arc</code></small></dt>
+<dd>As <code>get</code> and <code>get_named</code>, returning a cloned <code>Arc</code> you can move into a spawned task.</dd>
+<dt><code>async fn setup_all(&amp;self) -&gt; Result&lt;(), CanoError&gt;</code></dt>
+<dd>Setup in insertion order, rolling back the ones already set up if one fails. The engine calls it.</dd>
+<dt><code>async fn teardown_all(&amp;self)</code></dt>
+<dd>Teardown in reverse order. Errors are logged, never returned.</dd>
+<dt><code>async fn check_all_health(&amp;self) -&gt; Vec&lt;(Cow&lt;'static, str&gt;, HealthStatus)&gt;</code></dt>
+<dd>One entry per resource in insertion order, labelled by its name, or by its type name when inserted unnamed.</dd>
+<dt><code>async fn aggregate_health(&amp;self) -&gt; HealthStatus</code></dt>
+<dd>The worst status across all resources; <code>Healthy</code> when there are none.</dd>
+</dl>
 
 </div>

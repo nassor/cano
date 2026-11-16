@@ -6,26 +6,24 @@ template = "section.html"
 
 <div class="content-wrapper">
 <h1>StreamTask</h1>
-<p class="subtitle">Consume an unbounded stream — flush per window, run until cancelled or exhausted, resume from a cursor.</p>
+<p class="subtitle">Consume an unbounded stream: flush per window, run until cancelled or exhausted, resume from a cursor.</p>
 
 <p>
-A <code>StreamTask</code> consumes an <code>impl Stream</code> <strong>continuously</strong>: it pulls
-one item at a time, processes each into an output, and flushes per tumbling
-<a href="#windowing">window</a> — so memory stays bounded and downstream sees progress before the
-source ends. It runs until the stream is exhausted, until a window asks to stop, or until the run is
-<a href="#cancellation">cancelled</a>; each flushed window commits a <a href="#cursor">cursor</a> so a
-crashed or cancelled run resumes where it left off. It is one of the
-<a href="../task/">Task</a> family of processing models, alongside
+A <code>StreamTask</code> consumes an <code>impl Stream</code> continuously. It pulls one item at a
+time, processes each into an output, and flushes per tumbling <a href="#windowing">window</a>, so
+memory stays bounded and downstream sees progress before the source ends. It runs until the stream is
+exhausted, a window asks to stop, or the run is <a href="#cancellation">cancelled</a>. Each flushed
+window commits a <a href="#cursor">cursor</a>, so a crashed or cancelled run resumes where it left
+off. It is one of the <a href="../task/">Task</a> family of processing models, alongside
 <a href="../router-task/">RouterTask</a>, <a href="../poll-task/">PollTask</a>,
-<a href="../timer-task/">TimerTask</a>, <a href="../batch-task/">BatchTask</a>, and
+<a href="../timer-task/">TimerTask</a>, <a href="../batch-task/">BatchTask</a> and
 <a href="../stepped-task/">SteppedTask</a>, and it reads typed dependencies from
-<a href="../resources/">Resources</a> like the rest. New to Cano? Read
-<a href="../workflows/">Workflows</a> and <a href="../resources/">Resources</a> first; for the
-cursor-persistence half, <a href="../recovery/">Recovery</a>.
+<a href="../resources/">Resources</a>. New to Cano? Read
+<a href="../workflows/">Workflows</a> and <a href="../resources/">Resources</a> first.
 </p>
 
 <div class="code-block">
-<span class="code-block-label">At a glance — <code>open</code> a stream, <code>process_item</code> per item, <code>flush_window</code> per window</span>
+<span class="code-block-label">At a glance: <code>open</code> a stream, <code>process_item</code> per item, <code>flush_window</code> per window</span>
 
 ```rust
 use cano::prelude::*;
@@ -46,7 +44,7 @@ impl ConsumeEvents {
     async fn open(&self, _res: &Resources, cursor: Option<u64>)
         -> Result<Pin<Box<dyn Stream<Item = u64> + Send>>, CanoError>
     {
-        // On a fresh run `cursor` is `None`; on resume it's the last committed offset.
+        // On a fresh run `cursor` is `None`; on resume it is the last committed offset.
         let start = cursor.map(|c| c + 1).unwrap_or(0);
         Ok(Box::pin(stream::iter(start..10)) as Pin<Box<dyn Stream<Item = u64> + Send>>)
     }
@@ -60,7 +58,7 @@ impl ConsumeEvents {
     async fn flush_window(&self, _res: &Resources, outputs: Vec<u64>)
         -> Result<WindowSignal<Step>, CanoError>
     {
-        // Commit side effects / offsets for this window here.
+        // Commit side effects for this window here.
         println!("flushed window of {} outputs", outputs.len());
         Ok(WindowSignal::Continue)
     }
@@ -79,32 +77,21 @@ let workflow = Workflow::bare()
 ```
 </div>
 
-<div class="callout callout-info">
-<div class="callout-label">Key concept</div>
-<p>
-A <code>StreamTask</code> is for sources that <em>don't end on their own</em> — Kafka, SSE, a
-file-tail, a WebSocket. Instead of buffering everything and aggregating once, it emits
-<strong>per window</strong> and keeps memory bounded, runs until you stop it, and resumes from a
-persisted cursor after a crash. If your data is a <em>bounded</em> <code>Vec</code> you want to map
-over and aggregate once, reach for a <a href="../batch-task/">BatchTask</a> instead.
-</p>
-</div>
-
 <!-- Table of Contents -->
 <nav class="page-toc" aria-label="Table of contents">
 <div class="page-toc-title">On this page</div>
 <ol>
 <li><a href="#batch-vs-stream">BatchTask vs StreamTask</a></li>
-<li><a href="#how-it-works">How the Stream Loop Works</a></li>
-<li><a href="#quick-start">Quick Start with <code>#[task::stream]</code></a></li>
+<li><a href="#how-it-works">How the stream loop works</a></li>
+<li><a href="#quick-start">Quick start with <code>#[task::stream]</code></a></li>
 <li><a href="#windowing">Windowing: <code>StreamWindow</code></a></li>
-<li><a href="#error-policy">Per-Item Error Policy</a></li>
-<li><a href="#cursor">Cursor Persistence &amp; Resume</a></li>
-<li><a href="#cancellation">The Cancellation Contract</a></li>
-<li><a href="#idempotency">The Idempotency Contract</a></li>
-<li><a href="#register">Registering a Stream Task</a></li>
-<li><a href="#explicit">Explicit Trait-Impl Form</a></li>
-<li><a href="#when-to-use">When to Use StreamTask</a></li>
+<li><a href="#error-policy">Per-item error policy</a></li>
+<li><a href="#cursor">Cursor persistence and resume</a></li>
+<li><a href="#cancellation">The cancellation contract</a></li>
+<li><a href="#idempotency">The idempotency contract</a></li>
+<li><a href="#register">Registering a stream task</a></li>
+<li><a href="#explicit">Explicit trait-impl form</a></li>
+<li><a href="#when-to-use">When to use StreamTask</a></li>
 </ol>
 </nav>
 
@@ -112,12 +99,10 @@ over and aggregate once, reach for a <a href="../batch-task/">BatchTask</a> inst
 <hr class="section-divider">
 <h2 id="batch-vs-stream"><a href="#batch-vs-stream" class="anchor-link" aria-hidden="true">#</a>BatchTask vs StreamTask</h2>
 <p>
-The two look similar — both fan a sub-operation over many items — but they solve opposite problems. A
-<a href="../batch-task/">BatchTask</a> loads a <strong>bounded</strong> <code>Vec</code>, processes
-all of it, and aggregates <strong>once</strong> at the end: O(N) memory, one emission, and it
-<em>requires the data to end</em>. A <code>StreamTask</code> is for <strong>unbounded</strong> /
-continuous sources: it emits incrementally per window, keeps memory bounded, runs until
-cancelled/exhausted, and resumes from a cursor.
+Both fan an operation over many items. A <a href="../batch-task/">BatchTask</a> loads a bounded
+<code>Vec</code>, processes all of it, and aggregates once at the end. A <code>StreamTask</code>
+consumes a source that does not end on its own (Kafka, SSE, a tailed file, a WebSocket) and emits per
+window.
 </p>
 
 <table class="styled-table">
@@ -130,59 +115,62 @@ cancelled/exhausted, and resumes from a cursor.
 </thead>
 <tbody>
 <tr>
-<td><strong>Data</strong></td>
-<td>bounded — a <code>Vec</code> loaded up front</td>
-<td>unbounded — a continuous <code>impl Stream</code></td>
+<td>Data</td>
+<td>bounded <code>Vec</code>, loaded up front</td>
+<td>unbounded <code>impl Stream</code></td>
 </tr>
 <tr>
-<td><strong>Termination</strong></td>
-<td>when the loaded items are exhausted</td>
+<td>Ends when</td>
+<td>the items are exhausted</td>
 <td>exhausted, a window <code>Stop</code>, or cancelled</td>
 </tr>
 <tr>
-<td><strong>Emission</strong></td>
+<td>Emits</td>
 <td>one aggregate, in <code>finish</code></td>
-<td>per-window, in <code>flush_window</code></td>
+<td>one flush per window, in <code>flush_window</code></td>
 </tr>
 <tr>
-<td><strong>Memory</strong></td>
-<td>O(N) — the whole batch is held</td>
-<td>bounded — one window at a time</td>
+<td>Memory</td>
+<td>the whole batch</td>
+<td>one window at a time</td>
 </tr>
 <tr>
-<td><strong>Recovery</strong></td>
-<td>re-run the whole state on resume</td>
-<td>resume from the last committed cursor</td>
+<td>After a crash</td>
+<td>re-runs the whole state</td>
+<td>resumes from the last committed cursor</td>
 </tr>
 </tbody>
 </table>
 
 <!-- Section: how it works -->
 <hr class="section-divider">
-<h2 id="how-it-works"><a href="#how-it-works" class="anchor-link" aria-hidden="true">#</a>How the Stream Loop Works</h2>
+<h2 id="how-it-works"><a href="#how-it-works" class="anchor-link" aria-hidden="true">#</a>How the stream loop works</h2>
 
 <div class="diagram-frame">
-<p class="diagram-label">open &rarr; process_item (×window) &rarr; flush_window &rarr; commit cursor &rarr; … &rarr; on_close</p>
+<p class="diagram-label">open, process_item per item, flush_window per window, commit the cursor, repeat until on_close</p>
 <div class="cd-wrap">
-<svg class="cd" viewBox="0 0 780 340" role="img">
-<title>The stream loop: open resumes from a cursor, process_item buffers items until the window is full, flush_window emits that window, its cursor is committed and the loop repeats; a Stop signal or an exhausted source ends via on_close in the next state.</title>
+<svg class="cd" viewBox="0 0 780 352" role="img" aria-labelledby="stream-loop-title stream-loop-desc">
+<title id="stream-loop-title">The stream loop</title>
+<desc id="stream-loop-desc">open resumes the source from a cursor once per run. process_item runs per item and buffers outputs until the window is full. flush_window then emits the window and the engine commits its cursor. On Continue the loop returns to process_item for the next window. On Stop(state) the run moves to the next state. When the source is exhausted or the run is cancelled, the partial window is flushed and on_close runs: Exhausted returns Ok(state) for the next state, and Cancelled ends the run with Err(Cancelled). Each exit also commits the last cursor.</desc>
 <defs><marker id="stream-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
 <path class="e e-dim" d="M292,64 V44 Q292,36 300,36 H362 Q370,36 370,44 V61" marker-end="url(#stream-ah)"/>
 <text class="t-mut" x="331" y="18">buffer until window full</text>
-<path class="e" d="M688,87 H722 Q734,87 734,99 V287 Q734,299 722,299 H692" marker-end="url(#stream-ah)"/>
-<text class="t-code ta-e" x="724" y="124">Stop(result)</text>
 <path class="e" d="M158,87 H248" marker-end="url(#stream-ah)"/>
 <text class="t-mut" x="203" y="70">once per run</text>
 <path class="e e-hot" d="M410,87 H526" marker-end="url(#stream-ah)"/>
 <text class="t-code t-hot" x="468" y="70">window full</text>
 <path class="e" d="M609,110 V186" marker-end="url(#stream-ah)"/>
-<text class="t-code ta-e" x="598" y="150">Continue</text>
+<text class="t-mut ta-e" x="598" y="154">flushed</text>
 <path class="e" d="M530,213 H352 Q340,213 340,201 V114" marker-end="url(#stream-ah)"/>
-<text class="t-mut" x="440" y="196">next window</text>
+<text class="t-code" x="440" y="196">Continue: next window</text>
+<path class="e" d="M609,236 V272" marker-end="url(#stream-ah)"/>
+<text class="t-code ta-e" x="598" y="258">Stop(state)</text>
 <path class="e" d="M292,110 V272" marker-end="url(#stream-ah)"/>
-<text class="t-mut ta-e" x="282" y="160">source exhausted</text>
+<text class="t-mut ta-e" x="282" y="160">source ends or run cancelled</text>
 <path class="e" d="M372,299 H526" marker-end="url(#stream-ah)"/>
-<text class="t-code t-mut" x="449" y="282">Ok(state)</text>
+<text class="t-code" x="449" y="282">Ok(state)</text>
+<path class="e e-dim" d="M212,299 H140" marker-end="url(#stream-ah)"/>
+<text class="t-mut" x="176" y="282">Cancelled</text>
 <rect class="n" x="16" y="64" width="142" height="46" rx="10"/>
 <text class="t-code" x="87" y="88">open(cursor)</text>
 <rect class="n" x="252" y="64" width="158" height="46" rx="10"/>
@@ -190,77 +178,66 @@ cancelled/exhausted, and resumes from a cursor.
 <rect class="n-hot" x="530" y="64" width="158" height="46" rx="10"/>
 <text class="t-code t-strong" x="609" y="88">flush_window</text>
 <rect class="n-cop" x="530" y="190" width="158" height="46" rx="10"/>
-<text x="609" y="214">commit cursor</text>
-<text class="t-mut" x="609" y="252">StepCursor checkpoint row</text>
+<text x="609" y="209">commit cursor</text>
+<text class="t-mut" x="609" y="227">StepCursor row</text>
 <rect class="n" x="212" y="276" width="160" height="46" rx="10"/>
 <text class="t-code" x="292" y="300">on_close(reason)</text>
 <rect class="n-ok" x="530" y="276" width="158" height="46" rx="10"/>
-<text x="609" y="300">Next State</text>
+<text x="609" y="300">Next state</text>
+<rect class="n-err" x="16" y="276" width="124" height="46" rx="10"/>
+<text class="t-code" x="78" y="300">Err(Cancelled)</text>
+<text class="t-mut" x="390" y="344">Every exit commits the last cursor when a store and workflow id are attached.</text>
 </svg>
 </div>
 </div>
 
 <p>
-A <code>StreamTask</code> has three associated types — <code>type Item</code> (one element pulled from
-the source), <code>type Output</code> (the per-item result accumulated into a window), and
-<code>type Cursor</code> (the resumable position; <code>Serialize + DeserializeOwned + Send + Sync +
-'static</code>) — and four required methods:
+A <code>StreamTask</code> has three associated types: <code>type Item</code> (one element pulled from
+the source), <code>type Output</code> (the per-item result collected into a window) and
+<code>type Cursor</code> (the resumable position, <code>Serialize + DeserializeOwned + Send + Sync +
+'static</code>). Four methods are required:
 </p>
 
-<table class="styled-table">
-<thead>
-<tr>
-<th>Method</th>
-<th>Role</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>open(res, cursor)</code></td>
-<td>Open (or resume) the source stream. <code>cursor</code> is <code>None</code> on a fresh run, or the last committed position on resume.</td>
-</tr>
-<tr>
-<td><code>process_item(res, item)</code></td>
-<td>Process one item; return <code>(Output, Cursor)</code> — the cursor is the position reached by consuming this item.</td>
-</tr>
-<tr>
-<td><code>flush_window(res, outputs)</code></td>
-<td>Flush one full window: commit side effects, then return <code>WindowSignal::Continue</code> or <code>WindowSignal::Stop(result)</code>. The window's cursor is committed after this returns.</td>
-</tr>
-<tr>
-<td><code>on_close(res, reason)</code></td>
-<td>Terminal transition when the stream is <code>Exhausted</code> or the run is <code>Cancelled</code>. The in-flight partial window has already been flushed.</td>
-</tr>
-</tbody>
-</table>
+<dl class="key-list">
+<dt><code>open(res, cursor: Option&lt;Cursor&gt;) -&gt; Pin&lt;Box&lt;dyn Stream&gt;&gt;</code></dt>
+<dd>Opens or resumes the source. <code>cursor</code> is <code>None</code> on a fresh run and the last committed position on resume.</dd>
+<dt><code>process_item(res, item: Item) -&gt; (Output, Cursor)</code></dt>
+<dd>Processes one item. The returned cursor is the position reached by consuming it.</dd>
+<dt><code>flush_window(res, outputs: Vec&lt;Output&gt;) -&gt; WindowSignal&lt;TState&gt;</code></dt>
+<dd>Flushes one window: commit side effects, then return <code>WindowSignal::Continue</code> or <code>WindowSignal::Stop(state)</code>. The engine commits the window's cursor after this returns.</dd>
+<dt><code>on_close(res, reason: CloseReason) -&gt; TState</code></dt>
+<dd>Runs after the partial window is flushed, with <code>CloseReason::Exhausted</code> or <code>CloseReason::Cancelled</code>. For <code>Exhausted</code> the returned state is the next state. It does not run when the loop ends in an item error or a failed flush, except on cancel.</dd>
+</dl>
 
-<p>
-Optional methods carry defaults: <code>window()</code> (defaults to
-<code>StreamWindow::Count(1)</code> — flush per item), <code>on_item_error()</code> (defaults to
-<code>StreamErrorPolicy::FailFast</code>), <code>config()</code> (defaults to
-<code>TaskConfig::new()</code>; only its <code>attempt_timeout</code> is applied, as a bound on each
-<code>process_item</code> call — there is <strong>no outer retry</strong>, because an outer retry would
-re-invoke <code>open()</code> and re-consume the stream), and <code>name()</code> (defaults to the
-type name).
-</p>
+<p>Four methods are optional, each shown with its default:</p>
+
+<dl class="key-list">
+<dt><code>fn window(&amp;self) -&gt; StreamWindow</code> <small>default <code>StreamWindow::Count(1)</code>, flush per item</small></dt>
+<dd>The tumbling-window trigger.</dd>
+<dt><code>fn on_item_error(&amp;self) -&gt; StreamErrorPolicy</code> <small>default <code>StreamErrorPolicy::FailFast</code></small></dt>
+<dd>What the loop does when <code>process_item</code> returns <code>Err</code>.</dd>
+<dt><code>fn config(&amp;self) -&gt; TaskConfig</code> <small>default <code>TaskConfig::new()</code></small></dt>
+<dd>Only <code>attempt_timeout</code> applies, as a bound on each <code>process_item</code> call. A timeout is an item error handled by <code>on_item_error</code>. It also bounds cancel latency when <code>process_item</code> can hang, because the loop observes cancellation between items. There is no outer retry: it would call <code>open()</code> again and re-consume the stream.</dd>
+<dt><code>fn name(&amp;self) -&gt; Cow&lt;'static, str&gt;</code> <small>default: the type name</small></dt>
+<dd>Identifies the task in logs and observers.</dd>
+</dl>
 
 <!-- Section: Quick Start -->
 <hr class="section-divider">
-<h2 id="quick-start"><a href="#quick-start" class="anchor-link" aria-hidden="true">#</a>Quick Start with <code>#[task::stream]</code></h2>
+<h2 id="quick-start"><a href="#quick-start" class="anchor-link" aria-hidden="true">#</a>Quick start with <code>#[task::stream]</code></h2>
 <p>
-Attach <code>#[task::stream(state = MyState)]</code> to an inherent <code>impl</code> block. The macro
+Put <code>#[task::stream(state = MyState)]</code> on an inherent <code>impl</code> block. The macro
 infers <code>Item</code> from <code>process_item</code>'s owned <code>item</code> parameter and
-<code>Output</code> / <code>Cursor</code> from the <code>Ok</code> tuple of its return type,
-synthesises the <code>impl StreamTask&lt;MyState&gt; for ConsumeEvents</code> header (<code>window</code> /
-<code>on_item_error</code> / <code>config</code> / <code>name</code> fall back to the trait defaults),
-and emits a companion <code>impl Task&lt;MyState&gt; for ConsumeEvents</code> whose <code>run</code>
-drives an in-memory loop — useful as a <code>register_split</code> branch, where there is no
-persistence. <code>open</code>, <code>process_item</code>, <code>flush_window</code> and
-<code>on_close</code> may omit the <code>res</code> parameter when they don't read resources.
+<code>Output</code> and <code>Cursor</code> from the <code>Ok</code> tuple of its return type, and
+writes the <code>impl StreamTask&lt;MyState&gt; for ConsumeEvents</code> header. It also emits a
+companion <code>impl Task&lt;MyState&gt; for ConsumeEvents</code> whose <code>run</code> drives an
+in-memory loop, which is what a <code>register_split</code> branch uses. <code>open</code>,
+<code>process_item</code>, <code>flush_window</code> and <code>on_close</code> may omit the
+<code>res</code> parameter when they do not read resources.
 </p>
 
 <div class="code-block">
-<span class="code-block-label"><span class="label-icon">&#9889;</span> Inference form — <code>#[task::stream(state = ...)]</code> on an inherent impl</span>
+<span class="code-block-label"><span class="label-icon">&#9889;</span> Inference form: <code>#[task::stream(state = ...)]</code> on an inherent impl</span>
 
 ```rust
 use cano::prelude::*;
@@ -325,75 +302,71 @@ impl ConsumeEvents {
 <hr class="section-divider">
 <h2 id="windowing"><a href="#windowing" class="anchor-link" aria-hidden="true">#</a>Windowing: <code>StreamWindow</code></h2>
 <p>
-The <code>window()</code> method returns a <strong>tumbling-window</strong> trigger that controls how
-often <code>flush_window</code> fires and how much the driver buffers. Larger windows amortise the
-flush + checkpoint cost.
+<code>window()</code> returns a tumbling-window trigger. It sets how often <code>flush_window</code>
+fires and how much the driver buffers. Larger windows spread the flush and checkpoint cost over more
+items.
 </p>
 
- <div class="card-stack">
- <div class="card">
- <h3><code>StreamWindow::Count(n)</code></h3>
- <p>Flush after every <code>n</code> successfully processed items (clamped to a minimum of 1). The
- default is <code>Count(1)</code> — flush per item.</p>
- </div>
- <div class="card">
- <h3><code>StreamWindow::Duration(d)</code></h3>
- <p>Flush every <code>d</code> of wall-clock time, tumbling (clamped to a floor of <strong>1ms</strong>
- — a zero duration would leave the tick permanently ready and busy-loop without ever polling the
- source). <strong>Empty windows are skipped</strong> — an idle source emits no spurious empty flushes;
- the deadline simply advances.</p>
- </div>
- </div>
+<div class="card-stack">
+<div class="card">
+<h3><code>StreamWindow::Count(n)</code></h3>
+<p>Flush after every <code>n</code> successfully processed items. <code>n</code> is clamped to a
+minimum of 1. The default is <code>Count(1)</code>, a flush per item.</p>
+</div>
+<div class="card">
+<h3><code>StreamWindow::Duration(d)</code></h3>
+<p>Flush every <code>d</code> of wall-clock time. <code>d</code> is clamped to a minimum of 1 ms, since
+a zero duration would keep the tick permanently ready and never poll the source. An empty window is
+skipped: an idle source emits no empty flushes and the deadline advances.</p>
+</div>
+</div>
 
- <!-- Section: Error policy -->
-<hr class="section-divider">
-<h2 id="error-policy"><a href="#error-policy" class="anchor-link" aria-hidden="true">#</a>Per-Item Error Policy</h2>
+<div class="callout callout-warning">
+<span class="callout-label">Duration windows can drop an item</span>
 <p>
-<code>on_item_error()</code> returns a <code>StreamErrorPolicy</code> deciding what the windowed loop
-does when <code>process_item</code> returns an <code>Err</code>:
+When the deadline wins the race against a slow source, the driver drops the in-flight
+<code>stream.next()</code> future. If the source's <code>poll_next</code> future owns the read state,
+as in <code>stream::unfold(rx, |rx| async move { rx.recv().await })</code>, dropping it closes the
+channel and loses the queued item. Use a source whose <code>poll_next</code> borrows its state, or
+choose a window that is long relative to the source's cadence.
+</p>
+</div>
+
+<!-- Section: Error policy -->
+<hr class="section-divider">
+<h2 id="error-policy"><a href="#error-policy" class="anchor-link" aria-hidden="true">#</a>Per-item error policy</h2>
+<p>
+<code>on_item_error()</code> returns a <code>StreamErrorPolicy</code> that decides what the loop does
+when <code>process_item</code> returns <code>Err</code>:
 </p>
 
-<table class="styled-table">
-<thead>
-<tr>
-<th><code>StreamErrorPolicy</code> variant</th>
-<th>Effect</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>FailFast</code> <em>(default)</em></td>
-<td>Propagate the first item error — the loop stops and the run fails.</td>
-</tr>
-<tr>
-<td><code>SkipAndContinue</code></td>
-<td>Drop the bad item and keep consuming (poison-message handling). The skipped item's cursor is not committed — the next good item advances it.</td>
-</tr>
-<tr>
-<td><code>RetryOnError { max_errors }</code></td>
-<td>Tolerate up to <code>max_errors</code> <strong>consecutive</strong> item errors before failing. The counter resets on every successfully processed item.</td>
-</tr>
-</tbody>
-</table>
+<dl class="key-list">
+<dt><code>FailFast</code> <small>default</small></dt>
+<dd>Propagates the first item error. The loop stops and the run fails.</dd>
+<dt><code>SkipAndContinue</code></dt>
+<dd>Drops the bad item and keeps consuming, which suits poison messages. The skipped item's cursor is not committed. The next good item advances it.</dd>
+<dt><code>RetryOnError { max_errors: u32 }</code></dt>
+<dd>Tolerates up to <code>max_errors</code> consecutive item errors before failing. The counter resets on every successfully processed item.</dd>
+</dl>
 
 <!-- Section: Cursor -->
 <hr class="section-divider">
-<h2 id="cursor"><a href="#cursor" class="anchor-link" aria-hidden="true">#</a>Cursor Persistence &amp; Resume</h2>
+<h2 id="cursor"><a href="#cursor" class="anchor-link" aria-hidden="true">#</a>Cursor persistence and resume</h2>
 <p>
-Register a stream with <code>Workflow::register(state, task)</code> — the durable, cancellable
-engine path. When a <a href="../recovery/"><code>CheckpointStore</code></a> plus a workflow id are
-attached (<code>with_checkpoint_store</code> + <code>with_workflow_id</code>), the engine persists the
-cursor returned by the <strong>last item of each flushed window</strong> as a
-<code>CheckpointRow</code> whose <code>kind</code> is <code>RowKind::StepCursor</code> (the cursor is
-<a href="https://docs.rs/serde_json"><code>serde_json</code></a>-encoded). On
-<code>Workflow::resume_from(workflow_id)</code>, the latest persisted cursor is rehydrated and
-passed to <code>open(Some(cursor))</code> — so a crashed or cancelled run re-opens the source from the
-last committed position instead of starting over. Only <strong>fully flushed</strong> windows commit
-a cursor; a window that errors mid-flush commits nothing.
+Register a stream with <code>Workflow::register(state, task)</code>. With a
+<a href="../recovery/"><code>CheckpointStore</code></a> and a workflow id attached
+(<code>with_checkpoint_store</code> and <code>with_workflow_id</code>), the engine persists the cursor
+of the last item of each flushed window as a <code>CheckpointRow</code> whose <code>kind</code> is
+<code>RowKind::StepCursor</code>, encoded with
+<a href="https://docs.rs/serde_json"><code>serde_json</code></a>. On
+<code>Workflow::resume_from(workflow_id)</code> the latest persisted cursor is passed to
+<code>open(Some(cursor))</code>, so a crashed or cancelled run re-opens the source at the last
+committed position. Only fully flushed windows commit a cursor. A window that errors mid-flush commits
+nothing.
 </p>
 
 <div class="code-block">
-<span class="code-block-label"><span class="label-icon">&#9998;</span> Wiring a durable, resumable stream into a checkpointed workflow</span>
+<span class="code-block-label"><span class="label-icon">&#9998;</span> Wiring a resumable stream into a checkpointed workflow</span>
 
 ```rust
 use cano::prelude::*;
@@ -409,79 +382,58 @@ let workflow = Workflow::new(resources)
 
 // A crashed or cancelled run resumes from the last committed window:
 // let result = workflow.resume_from_with_token("event-consumer", &token).await?;
-// open() is called with Some(cursor) — the position of the last fully-flushed window.
+// open() is called with Some(cursor), the position of the last fully flushed window.
 ```
 </div>
 
 <!-- Section: Cancellation -->
 <hr class="section-divider">
-<h2 id="cancellation"><a href="#cancellation" class="anchor-link" aria-hidden="true">#</a>The Cancellation Contract</h2>
+<h2 id="cancellation"><a href="#cancellation" class="anchor-link" aria-hidden="true">#</a>The cancellation contract</h2>
 <p>
-Because an unbounded stream never ends on its own, cancellation is how you stop it cleanly. When the
-run's <code>CancellationToken</code> fires, the engine-driven driver performs a <strong>cooperative
-drain</strong>:
+An unbounded stream never ends on its own, so cancellation is how you stop it cleanly. When the run's
+<code>CancellationToken</code> fires, the engine performs a cooperative drain:
 </p>
 <ol>
-<li>it flushes the in-flight (partial) window via <code>flush_window</code>;</li>
-<li>it commits that window's cursor;</li>
-<li>it calls <code>on_close(CloseReason::Cancelled)</code> for cleanup — its returned state is
-<strong>ignored</strong>;</li>
+<li>it flushes the in-flight partial window through <code>flush_window</code>;</li>
+<li>it calls <code>on_close(CloseReason::Cancelled)</code> for cleanup, and ignores the state it returns;</li>
+<li>it commits the window's cursor;</li>
 <li>the run ends as <code>CanoError::Cancelled</code> (<code>is_cancelled()</code> is true).</li>
 </ol>
 
 <p>
-Cancel a run by passing a token: <code>workflow.orchestrate_with_token(state, &amp;token)</code> or
-<code>resume_from_with_token(id, &amp;token)</code>, then call <code>token.cancel()</code> from anywhere.
-<code>orchestrate</code> takes no token, so such a run ends only by exhaustion, a
+Pass a token with <code>workflow.orchestrate_with_token(state, &amp;token)</code> or
+<code>resume_from_with_token(id, &amp;token)</code>, then call <code>token.cancel()</code> from
+anywhere. <code>orchestrate</code> takes no token, so such a run ends only by exhaustion, a
 <code>WindowSignal::Stop</code>, an error, or a total timeout.
 </p>
 
 <p>
-The window boundary is not the only cancellable point: <code>open()</code> races the <em>same</em>
-effective token as the loop. A source that hangs while connecting — a broker that never hands back a
-consumer — is cancellable and timeoutable too, not just the gaps between windows. No cursor exists
-yet at that point, so there is nothing to flush or commit; the pending <code>open</code> future is
-simply dropped.
+<code>open()</code> races the same token, so a source that hangs while connecting is cancellable too.
+No cursor exists yet at that point, so nothing is flushed or committed and the pending
+<code>open</code> future is dropped.
 </p>
 
 <p>
-<a href="../resilience/#workflow-total-timeout"><code>Workflow::with_total_timeout</code></a> is
-honoured for Stream states, and it is honoured <em>through that same drain</em>. Instead of wrapping
-the state in a deadline that would drop the future mid-window, the engine folds the budget into the
-token the loop already watches — so a deadline trip still flushes the in-flight window and still
-commits its cursor, exactly like a real cancel. Only the error at the end differs:
+<a href="../resilience/#workflow-total-timeout"><code>Workflow::with_total_timeout</code></a> applies to
+stream states through the same drain. The engine folds the budget into the token the loop already
+watches, so a deadline trip also flushes the in-flight window and commits its cursor. The stop trigger
+decides the error:
 </p>
 
-<table class="styled-table">
-<thead>
-<tr>
-<th>Stop trigger</th>
-<th>In-flight window</th>
-<th>Surfaced error</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>the run's <code>CancellationToken</code> fires</td>
-<td>flushed, cursor committed, <code>on_close(Cancelled)</code> runs</td>
-<td><code>CanoError::Cancelled</code> (<code>is_cancelled()</code> is true)</td>
-</tr>
-<tr>
-<td>the <code>with_total_timeout</code> deadline trips</td>
-<td>identical — the same cooperative drain</td>
-<td><code>CanoError::WorkflowTimeout</code> (category <code>"workflow_timeout"</code>)</td>
-</tr>
-</tbody>
-</table>
+<dl class="key-list">
+<dt>The run's <code>CancellationToken</code> fires <small>surfaces <code>CanoError::Cancelled</code></small></dt>
+<dd>The in-flight window is flushed, its cursor committed, and <code>on_close(Cancelled)</code> runs. <code>is_cancelled()</code> is true.</dd>
+<dt>The <code>with_total_timeout</code> deadline trips <small>surfaces <code>CanoError::WorkflowTimeout</code>, category <code>"workflow_timeout"</code></small></dt>
+<dd>The same drain runs.</dd>
+</dl>
 
 <div class="callout callout-warning">
-<span class="callout-label">Cancel means "stop cleanly + resumable", not "transition onward"</span>
+<span class="callout-label">Cancel is a resumable stop</span>
 <p>
-A cancelled stream does <strong>not</strong> gracefully transition to another state — it surfaces as
-<code>CanoError::Cancelled</code>. But because the committed cursor survives, a later
-<code>resume_from</code> continues from the last committed window. So cancellation is a clean,
-resumable stop, not a hand-off. (An <code>Err</code> returned by <code>on_close</code> during the
-drain <em>is</em> propagated.)
+A cancelled stream does not transition to another state. It surfaces as
+<code>CanoError::Cancelled</code>, and a later <code>resume_from</code> continues from the last
+committed window. An <code>Err</code> returned by <code>on_close</code> during the drain is
+propagated.
 </p>
 </div>
 
@@ -497,63 +449,61 @@ as soon as <code>stop()</code> is called.
 </div>
 
 <div class="callout callout-warning">
-<span class="callout-label">If the drain's own flush fails, that window replays</span>
+<span class="callout-label">A failed drain flush replays its window</span>
 <p>
-The drain's <code>flush_window</code> can itself return an <code>Err</code>. When it does,
-<code>on_close(CloseReason::Cancelled)</code> still gets its cleanup shot — best-effort, its own error
-discarded in favour of the flush error — and the window's cursor is <strong>not</strong> committed.
-The flush error is what the run surfaces, and a later <code>resume_from</code> re-opens at the
-<em>previous</em> committed cursor, replaying that window. That is the
-<a href="#idempotency">at-least-once contract</a> earning its keep.
+If the drain's <code>flush_window</code> returns <code>Err</code>, <code>on_close(Cancelled)</code>
+still runs as best-effort cleanup and its own error is discarded. The window's cursor is not
+committed, and the run surfaces the flush error. A later <code>resume_from</code> re-opens at the
+previous committed cursor and replays that window, as the
+<a href="#idempotency">at-least-once contract</a> allows.
 </p>
 </div>
 
 <div class="callout callout-info">
-<div class="callout-label">"Cancelled" is a classification, not just a trigger</div>
+<div class="callout-label">What counts as cancelled</div>
 <p>
-A run is <em>reported</em> as cancelled — the
+A run is reported as cancelled (the
 <a href="../observers/#on-cancelled"><code>on_cancelled</code></a> observer hook, the
-<code>"cancelled"</code> metrics label — only when the engine's drain fired <strong>and</strong> the
-final result is still <code>Cancelled</code>. If something after an otherwise successful drain fails,
-most realistically the <code>StepCursor</code> checkpoint append, that error wins and the run is
-reported as <strong>failed</strong>. Conversely, a <code>StreamTask</code> that organically returns
-<code>Err(CanoError::Cancelled)</code> from <code>process_item</code> / <code>flush_window</code> /
-<code>on_close</code> never triggered the drain, so it stays on the failure path too.
+<code>"cancelled"</code> metrics label) only when the engine's drain fired and the final result is
+still <code>Cancelled</code>. If a later step of an otherwise successful drain fails, most likely the
+<code>StepCursor</code> checkpoint append, that error wins and the run is reported as failed. A
+<code>StreamTask</code> that returns <code>Err(CanoError::Cancelled)</code> from
+<code>process_item</code>, <code>flush_window</code> or <code>on_close</code> never triggered the
+drain, so it also stays on the failure path.
 </p>
 </div>
 
 <!-- Section: idempotency -->
 <hr class="section-divider">
-<h2 id="idempotency"><a href="#idempotency" class="anchor-link" aria-hidden="true">#</a>The Idempotency Contract</h2>
+<h2 id="idempotency"><a href="#idempotency" class="anchor-link" aria-hidden="true">#</a>The idempotency contract</h2>
 
 <div class="callout callout-warning">
-<span class="callout-label">Important — at-least-once</span>
-<p><strong><code>open</code> and <code>process_item</code> must be idempotent.</strong> The FSM writes
-the state-entry checkpoint <em>before</em> running the task, so a resumed run re-enters the state and
-calls <code>open(Some(cursor))</code> from the last committed cursor. The window <em>after</em> that
-cursor may have been partially processed and then replayed — make <code>process_item</code> safe to
-re-apply (upserts, dedupe keys, "if not already processed" guards, conditional writes). This is also
-why the engine never applies an outer retry to a stream: it would re-invoke <code>open()</code> and
-re-consume the stream.</p>
+<span class="callout-label">At-least-once: make <code>open</code>, <code>process_item</code> and <code>on_close</code> idempotent</span>
+<p>The FSM writes the state-entry checkpoint before running the task, so a resumed run re-enters the
+state and calls <code>open(Some(cursor))</code> from the last committed cursor. The window after that
+cursor may have been partly processed and is replayed. Make <code>process_item</code> safe to
+re-apply: upserts, dedupe keys, "if not already processed" guards, conditional writes.
+<code>on_close</code> runs once per run but may run again on resume, since a crash between
+<code>on_close</code> and the cursor commit replays the boundary window.</p>
 </div>
 
 <div class="callout callout-info">
-<div class="callout-label">Limitation — the cursor log only clears at an exit state</div>
+<div class="callout-label">The cursor log clears only at an exit state</div>
 <p>
-The checkpoint log is append-only and is only cleared when the run reaches an exit state, so a
-<em>never-terminating</em> stream accumulates one <code>StepCursor</code> row per flushed window
-indefinitely. For bounded streams, or runs that reach an exit state via <code>on_close</code> /
-<code>WindowSignal::Stop</code>, this is fine. For genuinely endless sources, prefer bounded windows
-plus periodic restarts (which clear the log on the clean exit) until a log-compaction step lands.
+The checkpoint log is append-only and is cleared when the run reaches an exit state. A stream that
+never terminates therefore accumulates one <code>StepCursor</code> row per flushed window. Bounded
+streams, and runs that reach an exit state through <code>on_close</code> or
+<code>WindowSignal::Stop</code>, are unaffected. For an endless source, use bounded windows and
+restart periodically, which clears the log on the clean exit.
 </p>
 </div>
 
 <!-- Section: registering -->
 <hr class="section-divider">
-<h2 id="register"><a href="#register" class="anchor-link" aria-hidden="true">#</a>Registering a Stream Task</h2>
+<h2 id="register"><a href="#register" class="anchor-link" aria-hidden="true">#</a>Registering a stream task</h2>
 <p>
 Register a stream with <code>Workflow::register(state, task)</code>, the same call every task model
-uses. The macro marks the task as a stream, so the engine drives the windowed loop itself:
+uses. The engine drives the windowed loop itself:
 </p>
 <ul>
 <li>with a checkpoint store and a workflow id, each flushed window's cursor is persisted;</li>
@@ -563,24 +513,23 @@ above;</li>
 safety, so a panic becomes a <code>CanoError</code> instead of unwinding past the FSM.</li>
 </ul>
 <p>
-The macro-generated companion <code>Task</code> impl, used when a stream is a
-<code>register_split</code> branch, drives an <strong>in-memory</strong> windowed loop with
-<strong>no</strong> cursor persistence and <strong>no</strong> cancellation: it cannot be cancelled
-once running, and ends only via source exhaustion, a <code>WindowSignal::Stop</code>, or an error.
+The companion <code>Task</code> impl that the macro emits serves <code>register_split</code>
+branches. It drives an in-memory windowed loop with no cursor persistence and no cancellation, and it
+ends only through source exhaustion, a <code>WindowSignal::Stop</code>, or an error.
 </p>
 
 <!-- Section: explicit -->
 <hr class="section-divider">
-<h2 id="explicit"><a href="#explicit" class="anchor-link" aria-hidden="true">#</a>Explicit Trait-Impl Form</h2>
+<h2 id="explicit"><a href="#explicit" class="anchor-link" aria-hidden="true">#</a>Explicit trait-impl form</h2>
 <p>
-Prefer writing the trait header yourself — e.g. to name the associated types, or for a generic impl?
-Put a bare <code>#[task::stream]</code> on an <code>impl StreamTask&lt;...&gt; for ...</code> block and
-declare the three <code>type</code> lines (<code>Item</code> / <code>Output</code> / <code>Cursor</code>)
-yourself. The companion <code>impl Task</code> is still emitted.
+To name the associated types or write a generic impl, put a bare <code>#[task::stream]</code> on an
+<code>impl StreamTask&lt;...&gt; for ...</code> block and declare the three <code>type</code> lines
+(<code>Item</code>, <code>Output</code>, <code>Cursor</code>) yourself. The companion
+<code>impl Task</code> is still emitted.
 </p>
 
 <div class="code-block">
-<span class="code-block-label"><span class="label-icon">&#9998;</span> Explicit form — <code>#[task::stream]</code> on a trait impl</span>
+<span class="code-block-label"><span class="label-icon">&#9998;</span> Explicit form: <code>#[task::stream]</code> on a trait impl</span>
 
 ```rust
 use cano::prelude::*;
@@ -632,27 +581,23 @@ impl StreamTask<Step> for Collector {
 
 <!-- Section: When to use -->
 <hr class="section-divider">
-<h2 id="when-to-use"><a href="#when-to-use" class="anchor-link" aria-hidden="true">#</a>When to Use StreamTask</h2>
-<p>Reach for a <code>StreamTask</code> when:</p>
-<ul>
-<li>your source is <strong>unbounded or continuous</strong> — a Kafka topic, an SSE feed, a tailed
-file, a WebSocket — and never produces a final <code>Vec</code> to aggregate;</li>
-<li>you want <strong>incremental, per-window emission</strong> with bounded memory rather than one
-end-of-batch aggregate;</li>
-<li>you need the consumer to <strong>resume from a committed offset</strong> after a crash or a
-cancellation, not start over.</li>
-</ul>
+<h2 id="when-to-use"><a href="#when-to-use" class="anchor-link" aria-hidden="true">#</a>When to use StreamTask</h2>
 <p>
-If your data is a <em>bounded</em> collection you want to map over and aggregate once, a
-<a href="../batch-task/">BatchTask</a> is simpler. If you have a long iterative job over a finite
-range that you want to crash-resume mid-loop, a <a href="../stepped-task/">SteppedTask</a> fits
-better.
+Use a <code>StreamTask</code> when the source is unbounded or continuous (a Kafka topic, an SSE feed,
+a tailed file, a WebSocket) and never produces a final <code>Vec</code> to aggregate. It fits when you
+want per-window emission with bounded memory, and a consumer that resumes from a committed offset
+after a crash or a cancellation.
+</p>
+<p>
+For a bounded collection that you map over and aggregate once, a
+<a href="../batch-task/">BatchTask</a> is simpler. For a long iterative job over a finite range that
+resumes mid-loop, a <a href="../stepped-task/">SteppedTask</a> fits better.
 </p>
 
 <div class="callout callout-tip">
 <div class="callout-label">Runnable example</div>
 <p>
-The crate ships a complete example — run it with <code>cargo run --example stream_task</code>.
+Run the complete example with <code>cargo run --example stream_task</code>.
 </p>
 </div>
 </div>
