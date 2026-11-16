@@ -780,8 +780,10 @@ h1 code, h2 code, h3 code, h4 code, .brand code, .subtitle code {
 .code-block { margin: var(--s4) 0 var(--s5); }
 .code-block-label {
     display: flex;
+    flex-wrap: wrap;
     align-items: center;
     gap: var(--s2);
+    overflow-wrap: anywhere;
     padding: var(--s2) var(--s5);
     background: var(--muted);
     border: 1px solid var(--border);
@@ -940,6 +942,7 @@ a.card:hover, .feature-card:hover, .mode-card:hover, .strategy-card:hover {
 .outcome-cards .card.outcome-danger { border-left-color: var(--err); }
 .outcome-cards .card h3 { font-size: var(--step-0); }
 .outcome-cards .card p { display: flex; align-items: baseline; gap: var(--s2); margin-bottom: var(--s2); }
+.outcome-cards .card p > code { min-width: 0; overflow-wrap: anywhere; }
 
 .outcome-key {
     flex: none;
@@ -1121,11 +1124,57 @@ a.card:hover, .feature-card:hover, .mode-card:hover, .strategy-card:hover {
     vertical-align: top;
     line-height: 1.65;
     color: var(--muted-foreground);
-    overflow-wrap: anywhere;
 }
 .styled-table tbody tr:hover td, .content tbody tr:hover td { background: var(--muted); }
 .styled-table td strong, .content td strong { color: var(--foreground); }
+
+/* A table never scrolls sideways. At desktop width cells wrap only at spaces
+   and inline code stays whole: `overflow-wrap: anywhere` would lower every
+   column's min-content to one character and let the auto layout squeeze short
+   columns to feed a long one. The pages keep every table inside the column at
+   that width. Below 1440px the column narrows, and there headers wrap and
+   inline code may break inside a word so the table still fits. */
 .styled-table td code, .content td code { white-space: nowrap; font-size: 0.82em; }
+.styled-table td, .styled-table th, .content td, .content th {
+    overflow-wrap: normal;
+    word-break: normal;
+    hyphens: none;
+}
+@media (max-width: 1439px) {
+    .styled-table th, .content th { white-space: normal; }
+    .styled-table td code, .content td code { white-space: normal; overflow-wrap: anywhere; }
+    .styled-table td, .styled-table th, .content td, .content th {
+        padding-left: var(--s3);
+        padding-right: var(--s3);
+    }
+}
+@media (max-width: 640px) {
+    .styled-table td, .content td { overflow-wrap: anywhere; }
+}
+
+/* A key list replaces a table whose identifier column is too long to sit
+   beside a description: the term line holds the identifier and, in <small>,
+   its facets (a default, a type); the description takes the full width. */
+.key-list { margin: var(--s4) 0 var(--s6); }
+.key-list dt {
+    margin-top: var(--s4);
+    padding-top: var(--s3);
+    border-top: 1px solid var(--border-soft);
+    color: var(--foreground);
+}
+.key-list dt:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
+.key-list dt code { overflow-wrap: anywhere; }
+.key-list dt small {
+    margin-left: var(--s2);
+    font-size: var(--step--1);
+    color: var(--muted-foreground);
+}
+.key-list dd {
+    margin: var(--s2) 0 0;
+    font-size: var(--step--1);
+    line-height: 1.65;
+    color: var(--muted-foreground);
+}
 
 /* --------------------------------------------------------------------------
    15. Landing page

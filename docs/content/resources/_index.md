@@ -423,24 +423,32 @@ fn build() -> Workflow<Step> {
 <hr class="section-divider">
 <h2 id="api-reference"><a href="#api-reference" class="anchor-link" aria-hidden="true">#</a>API Reference</h2>
 
-<table class="styled-table">
-<thead>
-<tr><th>Method</th><th>Signature</th><th>Notes</th></tr>
-</thead>
-<tbody>
-<tr><td><code>new()</code></td><td><code>Resources::new() -&gt; Self</code></td><td>Empty map.</td></tr>
-<tr><td><code>insert</code></td><td><code>insert&lt;R: Resource&gt;(self, resource: R) -&gt; Self</code></td><td>Builder; one resource per type; <strong>panics</strong> on a duplicate type.</td></tr>
-<tr><td><code>insert_named</code></td><td><code>insert_named&lt;R: Resource&gt;(self, name, resource: R) -&gt; Self</code></td><td>Builder; a named instance. <strong>Panics</strong> on a duplicate name.</td></tr>
-<tr><td><code>try_insert</code></td><td><code>try_insert&lt;R&gt;(self, resource: R) -&gt; Result&lt;Self, CanoError&gt;</code></td><td>Returns <code>ResourceDuplicateKey</code> on a duplicate type.</td></tr>
-<tr><td><code>try_insert_named</code></td><td><code>try_insert_named&lt;R&gt;(self, name, resource: R) -&gt; Result&lt;Self, CanoError&gt;</code></td><td>Returns <code>ResourceDuplicateKey</code> on a duplicate name.</td></tr>
-<tr><td><code>get</code></td><td><code>get&lt;R&gt;(&amp;self) -&gt; Result&lt;&amp;R, CanoError&gt;</code></td><td><code>ResourceNotFound</code> when the type is absent.</td></tr>
-<tr><td><code>get_named</code></td><td><code>get_named&lt;R&gt;(&amp;self, name: &amp;str) -&gt; Result&lt;&amp;R, CanoError&gt;</code></td><td><code>ResourceNotFound</code> / <code>ResourceTypeMismatch</code>.</td></tr>
-<tr><td><code>get_arc</code></td><td><code>get_arc&lt;R&gt;(&amp;self) -&gt; Result&lt;Arc&lt;R&gt;, CanoError&gt;</code></td><td>Same as <code>get</code>, returning a cloned <code>Arc</code>.</td></tr>
-<tr><td><code>get_named_arc</code></td><td><code>get_named_arc&lt;R&gt;(&amp;self, name: &amp;str) -&gt; Result&lt;Arc&lt;R&gt;, CanoError&gt;</code></td><td>Same as <code>get_named</code>, returning a cloned <code>Arc</code>.</td></tr>
-<tr><td><code>setup_all()</code></td><td><code>async fn setup_all(&amp;self) -&gt; Result&lt;(), CanoError&gt;</code></td><td>FIFO setup with partial LIFO rollback. Engine calls this.</td></tr>
-<tr><td><code>teardown_all()</code></td><td><code>async fn teardown_all(&amp;self)</code></td><td>LIFO teardown. Errors logged, never propagated.</td></tr>
-<tr><td><code>check_all_health()</code></td><td><code>async fn check_all_health(&amp;self) -&gt; Vec&lt;(Cow&lt;'static, str&gt;, HealthStatus)&gt;</code></td><td>Insertion order; each entry is labelled by name, or by type name when inserted unnamed.</td></tr>
-</tbody>
-</table>
+<p>Every public method on <code>Resources</code>; <code>R</code> is always <code>R: Resource</code>.</p>
+<dl class="key-list">
+<dt><code>Resources::new() -&gt; Self</code></dt>
+<dd>An empty map.</dd>
+<dt><code>insert&lt;R&gt;(self, resource: R) -&gt; Self</code></dt>
+<dd>Builder. One value per type; <strong>panics</strong> on a duplicate type.</dd>
+<dt><code>insert_named&lt;R&gt;(self, name: impl Into&lt;Cow&lt;'static, str&gt;&gt;, resource: R) -&gt; Self</code></dt>
+<dd>Builder for a second value of a type, under a name. <strong>Panics</strong> on a duplicate name.</dd>
+<dt><code>try_insert&lt;R&gt;(self, resource: R) -&gt; Result&lt;Self, CanoError&gt;</code></dt>
+<dd><code>ResourceDuplicateKey</code> on a duplicate type.</dd>
+<dt><code>try_insert_named&lt;R&gt;(self, name, resource: R) -&gt; Result&lt;Self, CanoError&gt;</code></dt>
+<dd><code>ResourceDuplicateKey</code> on a duplicate name.</dd>
+<dt><code>get&lt;R&gt;(&amp;self) -&gt; Result&lt;&amp;R, CanoError&gt;</code></dt>
+<dd><code>ResourceNotFound</code> when no value of that type was inserted.</dd>
+<dt><code>get_named&lt;R&gt;(&amp;self, name: &amp;str) -&gt; Result&lt;&amp;R, CanoError&gt;</code></dt>
+<dd><code>ResourceNotFound</code> for an unknown name, <code>ResourceTypeMismatch</code> when the name holds another type.</dd>
+<dt><code>get_arc&lt;R&gt;(&amp;self) -&gt; Result&lt;Arc&lt;R&gt;, CanoError&gt;</code> <small>and <code>get_named_arc</code></small></dt>
+<dd>As <code>get</code> and <code>get_named</code>, returning a cloned <code>Arc</code> you can move into a spawned task.</dd>
+<dt><code>async fn setup_all(&amp;self) -&gt; Result&lt;(), CanoError&gt;</code></dt>
+<dd>Setup in insertion order, rolling back the ones already set up if one fails. The engine calls it.</dd>
+<dt><code>async fn teardown_all(&amp;self)</code></dt>
+<dd>Teardown in reverse order. Errors are logged, never returned.</dd>
+<dt><code>async fn check_all_health(&amp;self) -&gt; Vec&lt;(Cow&lt;'static, str&gt;, HealthStatus)&gt;</code></dt>
+<dd>One entry per resource in insertion order, labelled by its name, or by its type name when inserted unnamed.</dd>
+<dt><code>async fn aggregate_health(&amp;self) -&gt; HealthStatus</code></dt>
+<dd>The worst status across all resources; <code>Healthy</code> when there are none.</dd>
+</dl>
 
 </div>

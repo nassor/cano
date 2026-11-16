@@ -113,65 +113,30 @@ for "map this one operation over N <em>items</em>".
 </div>
 
 <p>
-A <code>BatchTask</code> has two associated types — <code>type Item: Send + Sync + 'static</code> and
-<code>type ItemOutput: Send + 'static</code> (inferred by <code>#[task::batch(state = ...)]</code> from
-the method signatures, or written explicitly) — and three methods:
+A <code>BatchTask</code> has two associated types, <code>type Item: Send + Sync + 'static</code> and
+<code>type ItemOutput: Send + 'static</code>. <code>#[task::batch(state = ...)]</code> infers both from
+the method signatures, or you write them yourself. It has three required methods:
 </p>
-<table class="styled-table">
-<thead>
-<tr>
-<th>Method</th>
-<th>Role</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>async fn load(&amp;self, res) -&gt; Result&lt;Vec&lt;Self::Item&gt;, CanoError&gt;</code></td>
-<td>Produce the items. An <code>Err</code> here fails the batch (and triggers the outer <code>config()</code> retry).</td>
-</tr>
-<tr>
-<td><code>async fn process_item(&amp;self, item: &amp;Self::Item) -&gt; Result&lt;Self::ItemOutput, CanoError&gt;</code></td>
-<td>Process one item. Takes <code>&amp;Item</code> because <code>item_retry</code> may re-invoke it. Returning <code>Err</code> does <strong>not</strong> fail the batch — it lands in that slot of <code>finish</code>'s <code>outputs</code>.</td>
-</tr>
-<tr>
-<td><code>async fn finish(&amp;self, res, outputs: Vec&lt;Result&lt;Self::ItemOutput, CanoError&gt;&gt;) -&gt; Result&lt;TState, CanoError&gt;</code></td>
-<td>Aggregate — one slot per input item, <strong>in input order</strong> — and decide the next state. This is where the partial-failure <em>policy</em> lives (e.g. "≥ 50% must succeed"). An <code>Err</code> here fails the batch.</td>
-</tr>
-</tbody>
-</table>
+<dl class="key-list">
+<dt><code>async fn load(&amp;self, res: &amp;Resources) -&gt; Result&lt;Vec&lt;Self::Item&gt;, CanoError&gt;</code></dt>
+<dd>Produces the items. An <code>Err</code> fails the batch and triggers the outer <code>config()</code> retry.</dd>
+<dt><code>async fn process_item(&amp;self, item: &amp;Self::Item) -&gt; Result&lt;Self::ItemOutput, CanoError&gt;</code></dt>
+<dd>Processes one item. It takes <code>&amp;Item</code> because <code>item_retry</code> may call it again. An <code>Err</code> does <strong>not</strong> fail the batch: it lands in that item's slot of <code>finish</code>'s <code>outputs</code>.</dd>
+<dt><code>async fn finish(&amp;self, res: &amp;Resources, outputs: Vec&lt;Result&lt;Self::ItemOutput, CanoError&gt;&gt;) -&gt; Result&lt;TState, CanoError&gt;</code></dt>
+<dd>Receives one slot per input item, <strong>in input order</strong>, and returns the next state. The partial-failure policy lives here, for example "at least 50% must succeed". An <code>Err</code> fails the batch.</dd>
+</dl>
 
-<p>Optional knobs, all with defaults:</p>
-<table class="styled-table">
-<thead>
-<tr>
-<th>Method</th>
-<th>Default</th>
-<th>Purpose</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>fn concurrency(&amp;self) -&gt; usize</code></td>
-<td><code>1</code> (sequential)</td>
-<td>How many items run at once.</td>
-</tr>
-<tr>
-<td><code>fn item_retry(&amp;self) -&gt; RetryMode</code></td>
-<td><code>RetryMode::None</code></td>
-<td>Per-item retry policy, independent of the outer dispatch.</td>
-</tr>
-<tr>
-<td><code>fn config(&amp;self) -&gt; TaskConfig</code></td>
-<td><code>TaskConfig::new()</code> (one attempt, no retries)</td>
-<td>Retry config for the <em>whole</em> <code>load → process → finish</code> cycle — the batch only <code>Err</code>s (triggering this) when <code>load</code> or <code>finish</code> <code>Err</code>s. Opt in with <code>TaskConfig::new().with_exponential_retry(3)</code>.</td>
-</tr>
-<tr>
-<td><code>fn name(&amp;self) -&gt; Cow&lt;'static, str&gt;</code></td>
-<td>type name</td>
-<td>Identifies the task in logs / observers.</td>
-</tr>
-</tbody>
-</table>
+<p>Four optional methods, each shown with its default:</p>
+<dl class="key-list">
+<dt><code>fn concurrency(&amp;self) -&gt; usize</code> <small>default <code>1</code>, sequential</small></dt>
+<dd>How many items run at once.</dd>
+<dt><code>fn item_retry(&amp;self) -&gt; RetryMode</code> <small>default <code>RetryMode::None</code></small></dt>
+<dd>Retry policy for each item, independent of the outer dispatch.</dd>
+<dt><code>fn config(&amp;self) -&gt; TaskConfig</code> <small>default <code>TaskConfig::new()</code>, one attempt</small></dt>
+<dd>Retry config for the whole <code>load</code>, process, <code>finish</code> cycle. The cycle only fails, and so only retries, when <code>load</code> or <code>finish</code> returns <code>Err</code>. Opt in with <code>TaskConfig::new().with_exponential_retry(3)</code>.</dd>
+<dt><code>fn name(&amp;self) -&gt; Cow&lt;'static, str&gt;</code> <small>default: the type name</small></dt>
+<dd>Identifies the task in logs and observers.</dd>
+</dl>
 
 <!-- Section: Quick Start -->
 <hr class="section-divider">
