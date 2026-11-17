@@ -24,7 +24,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use cano::RedbCheckpointStore;
+use cano::RedbStore;
 use cano::prelude::*;
 
 const TARGET: u32 = 10;
@@ -96,7 +96,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let db_path = &args[1];
     let mode = args[2].as_str();
 
-    let store = Arc::new(RedbCheckpointStore::new(db_path)?);
+    let store = Arc::new(RedbStore::new(db_path)?);
     let is_resume = mode == "resume";
 
     let workflow = Workflow::bare()

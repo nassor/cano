@@ -6,7 +6,7 @@
 //! enables crash-resume: when registered via
 //! [`Workflow::register`](crate::workflow::Workflow::register) with a
 //! checkpoint store attached, each `StepOutcome::More` persists the cursor as a
-//! [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row so
+//! [`RowKind::StepCursor`](crate::checkpoint::RowKind::StepCursor) row so
 //! [`Workflow::resume_from`](crate::workflow::Workflow::resume_from) can continue from the
 //! last persisted cursor rather than restarting from `None`.
 //!
@@ -291,7 +291,7 @@ where
 /// The synthesised `Task::run` emitted by `#[task::stepped]` delegates here; it
 /// serves [`Workflow::register_split`](crate::workflow::Workflow::register_split).
 /// `Workflow::register` uses the engine path, which persists each cursor as a
-/// [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row.
+/// [`RowKind::StepCursor`](crate::checkpoint::RowKind::StepCursor) row.
 #[doc(hidden)]
 pub async fn run_stepped<S, S2>(s: &S, res: &Resources) -> Result<S2, CanoError>
 where

@@ -34,8 +34,8 @@ struct AwaitJob;
 #[task::poll(state = Stage)]
 impl AwaitJob {
     async fn poll(&self, res: &Resources) -> Result<PollOutcome<Stage>, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        match store.get::<bool>("job_done") {
+        let board = res.get::<Blackboard>()?;
+        match board.get::<bool>("job_done") {
             Ok(true) => Ok(PollOutcome::Ready(Stage::Done)),
             _        => Ok(PollOutcome::Pending { delay_ms: 250 }), // async sleep, then poll again
         }

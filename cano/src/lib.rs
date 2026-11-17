@@ -28,10 +28,10 @@
 //! impl Task<Step> for FetchTask {
 //!     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
 //!         let config = res.get::<FetchConfig>()?;
-//!         let store = res.get::<MemoryStore>()?;
-//!         // Produce `batch_size` items and store them for the next task.
+//!         let board = res.get::<Blackboard>()?;
+//!         // Produce `batch_size` items and put them on the blackboard for the next task.
 //!         let data: Vec<u32> = (1..=(config.batch_size as u32)).collect();
-//!         store.put("data", data);
+//!         board.put("data", data);
 //!         Ok(Step::Process)
 //!     }
 //! }
@@ -39,19 +39,19 @@
 //! #[task]
 //! impl Task<Step> for ProcessTask {
 //!     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
-//!         let store = res.get::<MemoryStore>()?;
-//!         let data: Vec<u32> = store.get("data")?;
-//!         store.put("sum", data.iter().sum::<u32>());
+//!         let board = res.get::<Blackboard>()?;
+//!         let data: Vec<u32> = board.get("data")?;
+//!         board.put("sum", data.iter().sum::<u32>());
 //!         Ok(Step::Done)
 //!     }
 //! }
 //!
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), CanoError> {
-//! let store = MemoryStore::new();
+//! let board = Blackboard::new();
 //! let resources = Resources::new()
 //!     .insert(FetchConfig { batch_size: 3 })
-//!     .insert(store.clone());
+//!     .insert(board.clone());
 //! let workflow = Workflow::new(resources)
 //!     .register(Step::Fetch, FetchTask)
 //!     .register(Step::Process, ProcessTask)
@@ -61,7 +61,7 @@
 //! assert_eq!(final_state, Step::Done);
 //!
 //! // The sum of 1..=3 is 6.
-//! assert_eq!(store.get::<u32>("sum")?, 6);
+//! assert_eq!(board.get::<u32>("sum")?, 6);
 //! # Ok(())
 //! # }
 //! ```
@@ -149,9 +149,9 @@
 //! strategies: `All`, `Any`, `Quorum(n)`, `Percentage(f64)`, `PartialResults(min)`,
 //! or `PartialTimeout`.
 //!
-//! ### Store
+//! ### Blackboard
 //!
-//! [`MemoryStore`] provides a thread-safe `Arc<RwLock<HashMap>>` for sharing typed data
+//! [`Blackboard`] provides a thread-safe `Arc<RwLock<HashMap>>` for sharing typed data
 //! between states. For custom backends, register a concrete storage resource in [`Resources`].
 //!
 //! ### Observability
@@ -170,9 +170,11 @@
 //! entered — *before* that state's task runs. After a crash, [`Workflow::resume_from`]
 //! reloads the run, re-enters the FSM at the last checkpointed state, and continues
 //! forward; the resumed state's task re-runs, so tasks at and after the resume point must
-//! be idempotent. The trait is backend-agnostic; with the `recovery` feature,
-//! `RedbCheckpointStore` is a ready-made embedded, ACID implementation. Workflows
-//! without a checkpoint store pay nothing. See the `workflow_recovery` example.
+//! be idempotent. The trait is backend-agnostic: implement it yourself, or use one of
+//! the built-in [`store`]s: [`RedbStore`] (feature `store-redb`, on by default, an
+//! embedded file), `PostgresStore` (feature `store-postgres`) or `NatsStore` (feature
+//! `store-nats`, a JetStream Key/Value bucket). Workflows without a checkpoint store pay
+//! nothing. See the `workflow_recovery` example.
 //!
 //! [`Workflow::with_workflow_version`] stamps a `u32` version onto every appended
 //! [`CheckpointRow`] (default `0`); [`Workflow::resume_from`] then refuses to replay a
@@ -251,10 +253,11 @@
 //!   counters / histograms / gauges for workflow, task, retry, split/join, circuit-breaker,
 //!   scheduler, processing-loop, recovery and saga internals — call `cano::metrics::describe()`
 //!   for the full list with help text and units
-//! - [`recovery`]: [`CheckpointStore`] / [`CheckpointRow`] — append-only checkpoint log for crash recovery (and `RedbCheckpointStore`, behind the `recovery` feature)
+//! - [`checkpoint`]: [`CheckpointStore`] / [`CheckpointRow`], the append-only checkpoint log behind crash recovery, suspend and resume
+//! - [`store`]: the storage backends that implement [`CheckpointStore`]: [`RedbStore`] (`store-redb`, on by default), `PostgresStore` (`store-postgres`) and `NatsStore` (`store-nats`)
 //! - [`saga`]: [`CompensatableTask`] — pair a forward step with a compensating action; failures roll back via [`Workflow::register`]
 //! - [`rate_limit`]: [`RateLimiter`] (token bucket) and [`WindowedRateLimiter`] (fixed window) throttles, both implementing [`Meter`] so they compose into a [`MultiRateLimiter`] that enforces several weighted tiers (e.g. a 5h + 7d + per-model limit) at once
-//! - [`store`]: [`MemoryStore`] — a typed in-memory store that implements [`Resource`]
+//! - [`blackboard`]: [`Blackboard`] — a typed in-memory key-value map that implements [`Resource`]
 //! - `testing` (requires `testing` feature): batteries-included test fixtures —
 //!   a `RecordingObserver`, a public `InMemoryCheckpointStore`, a `panic_on_attempt` task factory and an `assert_compensation_ran`
 //!   saga helper. Import explicitly with `use cano::testing::*;` — it is deliberately
@@ -270,11 +273,12 @@
 // Lets macro output use `::cano::…` paths inside this crate too.
 extern crate self as cano;
 
+pub mod blackboard;
+pub mod checkpoint;
 pub mod circuit;
 pub mod error;
 pub mod observer;
 pub mod rate_limit;
-pub mod recovery;
 pub mod resource;
 pub mod saga;
 pub mod store;
@@ -291,6 +295,7 @@ pub mod scheduler;
 pub mod testing;
 
 // Core public API - simplified imports
+pub use checkpoint::{CheckpointRow, CheckpointStore, RowKind};
 pub use circuit::{CircuitBreaker, CircuitPolicy, CircuitState, Permit as CircuitPermit};
 pub use error::{CanoError, CanoResult};
 pub use observer::WorkflowObserver;
@@ -298,7 +303,6 @@ pub use rate_limit::{
     Meter, MeterStatus, MultiPermit, MultiRateLimiter, Permit as RateLimiterPermit, RateLimiter,
     RateLimiterPolicy, Reservation, Tier, WindowPermit, WindowPolicy, WindowedRateLimiter,
 };
-pub use recovery::{CheckpointRow, CheckpointStore, RowKind};
 pub use resource::{HealthStatus, Resource, Resources};
 pub use saga::CompensatableTask;
 pub use task::batch::BatchTask;
@@ -310,9 +314,13 @@ pub use task::suspend::SuspendTask;
 pub use task::timer::{TimerOutcome, TimerTask};
 pub use tokio_util::sync::CancellationToken;
 
-#[cfg(feature = "recovery")]
-pub use recovery::RedbCheckpointStore;
-pub use store::MemoryStore;
+pub use blackboard::Blackboard;
+#[cfg(feature = "store-nats")]
+pub use store::NatsStore;
+#[cfg(feature = "store-postgres")]
+pub use store::PostgresStore;
+#[cfg(feature = "store-redb")]
+pub use store::RedbStore;
 pub use task::{RetryMode, Task, TaskConfig};
 pub use workflow::{JoinConfig, JoinStrategy, Workflow};
 
@@ -384,15 +392,18 @@ pub mod prelude {
     //! Use `use cano::prelude::*;` to import the most commonly used types and traits.
 
     pub use crate::{
-        BatchTask, CancellationToken, CanoError, CanoResult, CheckpointRow, CheckpointStore,
-        CircuitBreaker, CircuitPermit, CircuitPolicy, CircuitState, CloseReason, CompensatableTask,
-        HealthStatus, JoinConfig, JoinStrategy, MemoryStore, Meter, MeterStatus, MultiPermit,
+        BatchTask, Blackboard, CancellationToken, CanoError, CanoResult, CheckpointRow,
+        CheckpointStore, CircuitBreaker, CircuitPermit, CircuitPolicy, CircuitState, CloseReason,
+        CompensatableTask, HealthStatus, JoinConfig, JoinStrategy, Meter, MeterStatus, MultiPermit,
         MultiRateLimiter, PollErrorPolicy, PollOutcome, PollTask, RateLimiter, RateLimiterPermit,
         RateLimiterPolicy, Reservation, Resource, Resources, RetryMode, RouterTask, RowKind,
         StepOutcome, SteppedTask, StreamErrorPolicy, StreamTask, StreamWindow, SuspendTask, Task,
         TaskConfig, Tier, TimerOutcome, TimerTask, WindowPermit, WindowPolicy, WindowSignal,
         WindowedRateLimiter, Workflow, WorkflowObserver,
     };
+
+    #[cfg(feature = "store-redb")]
+    pub use crate::RedbStore;
 
     #[cfg(feature = "scheduler")]
     pub use crate::{
@@ -404,9 +415,6 @@ pub mod prelude {
 
     #[cfg(feature = "metrics")]
     pub use crate::MetricsObserver;
-
-    #[cfg(feature = "recovery")]
-    pub use crate::RedbCheckpointStore;
 
     // Attribute macros kept at the crate root: `#[task]`, `#[resource]`, `#[checkpoint_store]`.
     pub use crate::{checkpoint_store, resource, task};

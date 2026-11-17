@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use futures_util::FutureExt;
 
+use crate::checkpoint::CheckpointRow;
 use crate::error::CanoError;
-use crate::recovery::CheckpointRow;
 use crate::saga::{
     CompensatableAdapter, CompensatableTask, CompensationEntry, ErasedCompensatable,
 };
@@ -70,7 +70,7 @@ pub(crate) enum Entry<TState> {
         name: Arc<str>,
     },
     /// An engine-driven step loop persisting each cursor as a
-    /// [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row.
+    /// [`RowKind::StepCursor`](crate::checkpoint::RowKind::StepCursor) row.
     Stepped {
         task: Arc<dyn ErasedSteppedTask<TState>>,
         config: TaskConfig,
@@ -84,7 +84,7 @@ pub(crate) enum Entry<TState> {
         name: Cow<'static, str>,
     },
     /// A task that parks the run after `suspend` (writing a
-    /// [`RowKind::Suspended`](crate::recovery::RowKind::Suspended) row) and continues with
+    /// [`RowKind::Suspended`](crate::checkpoint::RowKind::Suspended) row) and continues with
     /// `resume` when `Workflow::resume_with` delivers an input.
     Suspend {
         task: Arc<dyn ErasedSuspendTask<TState>>,
@@ -174,7 +174,7 @@ impl<TState> Entry<TState> {
     }
 }
 
-/// Writes a stepped task's cursors as [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor)
+/// Writes a stepped task's cursors as [`RowKind::StepCursor`](crate::checkpoint::RowKind::StepCursor)
 /// rows through [`Workflow::append_row`].
 pub(super) struct CheckpointSink<'a, TState>
 where
@@ -1759,8 +1759,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_split_with_data_sharing() {
-        let store = crate::store::MemoryStore::new();
-        let resources = Resources::new().insert(store.clone());
+        let board = crate::blackboard::Blackboard::new();
+        let resources = Resources::new().insert(board.clone());
 
         let tasks = vec![
             DataTask::new("task1", "value1", TestState::Join),
@@ -1778,9 +1778,9 @@ mod tests {
         assert_eq!(result, TestState::Complete);
 
         // Verify all tasks wrote their data
-        let data1: String = store.get("task1").unwrap();
-        let data2: String = store.get("task2").unwrap();
-        let data3: String = store.get("task3").unwrap();
+        let data1: String = board.get("task1").unwrap();
+        let data2: String = board.get("task2").unwrap();
+        let data3: String = board.get("task3").unwrap();
 
         assert_eq!(data1, "value1");
         assert_eq!(data2, "value2");
@@ -1789,8 +1789,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_complex_workflow_with_split_join() {
-        let store = crate::store::MemoryStore::new();
-        let resources = Resources::new().insert(store.clone());
+        let board = crate::blackboard::Blackboard::new();
+        let resources = Resources::new().insert(board.clone());
 
         let split_tasks = vec![
             DataTask::new("parallel1", "data1", TestState::Join),
@@ -1812,9 +1812,9 @@ mod tests {
         assert_eq!(result, TestState::Complete);
 
         // Verify all data was written
-        let init: String = store.get("init").unwrap();
-        let parallel1: String = store.get("parallel1").unwrap();
-        let parallel2: String = store.get("parallel2").unwrap();
+        let init: String = board.get("init").unwrap();
+        let parallel1: String = board.get("parallel1").unwrap();
+        let parallel2: String = board.get("parallel2").unwrap();
 
         assert_eq!(init, "initialized");
         assert_eq!(parallel1, "data1");
@@ -3468,8 +3468,8 @@ mod dispatch_with_budget_tests {
 
 #[cfg(test)]
 mod register_paths_tests {
+    use crate::checkpoint::RowKind;
     use crate::error::CanoError;
-    use crate::recovery::RowKind;
     use crate::resource::Resources;
     use crate::task::poll::PollOutcome;
     use crate::task::stepped::StepOutcome;

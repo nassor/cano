@@ -1,15 +1,13 @@
-//! Crash-recovery hardening against a *real* [`RedbCheckpointStore`] file: the redb
+//! Crash-recovery hardening against a *real* [`RedbStore`] file: the redb
 //! write lock and on-disk durability are exercised for real here (the unit tests cover
 //! the same shapes against an in-memory store).
-//!
-//! Requires the `recovery` feature.
-#![cfg(feature = "recovery")]
+#![cfg(feature = "store-redb")]
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use cano::RedbCheckpointStore;
+use cano::RedbStore;
 use cano::prelude::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -77,7 +75,7 @@ fn build(store: Arc<dyn CheckpointStore>, id: &str, sidefx: &Path) -> Workflow<S
 /// A `CheckpointStore` that errors after the first `ok_appends` appends — a stand-in
 /// for a process dying mid-run with its earlier checkpoints already durable on disk.
 struct KillAfter {
-    inner: RedbCheckpointStore,
+    inner: RedbStore,
     ok_appends: AtomicUsize,
 }
 #[checkpoint_store]
@@ -100,7 +98,7 @@ impl CheckpointStore for KillAfter {
 async fn many_workflows_one_redb_file_concurrently() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("ckpt.redb");
-    let store: Arc<dyn CheckpointStore> = Arc::new(RedbCheckpointStore::new(&db).unwrap());
+    let store: Arc<dyn CheckpointStore> = Arc::new(RedbStore::new(&db).unwrap());
 
     const RUNS: usize = 12;
     let mut handles = Vec::new();
@@ -138,7 +136,7 @@ async fn many_workflows_one_redb_file_concurrently() {
 async fn racing_runs_of_one_id_on_a_real_file() {
     let dir = tempfile::tempdir().unwrap();
     let db = dir.path().join("ckpt.redb");
-    let store: Arc<dyn CheckpointStore> = Arc::new(RedbCheckpointStore::new(&db).unwrap());
+    let store: Arc<dyn CheckpointStore> = Arc::new(RedbStore::new(&db).unwrap());
 
     let mut handles = Vec::new();
     for i in 0..2 {
@@ -176,7 +174,7 @@ async fn crash_mid_work_then_resume_does_not_re_run_start() {
     // entry row (3) fails. So Work ran exactly once and its checkpoint is durable.
     {
         let store = Arc::new(KillAfter {
-            inner: RedbCheckpointStore::new(&db).unwrap(),
+            inner: RedbStore::new(&db).unwrap(),
             ok_appends: AtomicUsize::new(2),
         });
         let err = build(store, wf_id, &sidefx)
@@ -194,7 +192,7 @@ async fn crash_mid_work_then_resume_does_not_re_run_start() {
     // Generation 2: resume on the same file — must pick up at Work, re-run it, finish at
     // Done, and NOT re-run Start (which is before the resume point).
     {
-        let store: Arc<dyn CheckpointStore> = Arc::new(RedbCheckpointStore::new(&db).unwrap());
+        let store: Arc<dyn CheckpointStore> = Arc::new(RedbStore::new(&db).unwrap());
         let wf = build(store, wf_id, &sidefx);
         assert_eq!(wf.resume_from(wf_id).await.unwrap(), St::Done);
     }
@@ -205,6 +203,6 @@ async fn crash_mid_work_then_resume_does_not_re_run_start() {
     );
 
     // The completed run cleared its recovery log.
-    let reopened = RedbCheckpointStore::new(&db).unwrap();
+    let reopened = RedbStore::new(&db).unwrap();
     assert!(reopened.load_run(wf_id).await.unwrap().is_empty());
 }

@@ -50,8 +50,8 @@ ecosystem, see <a href="../observers/">Observers</a>. Attach
 
 <h2 id="setup"><a href="#setup" class="anchor-link" aria-hidden="true">#</a>Setup</h2>
 <p>Enable the <code>tracing</code> feature in your <code>Cargo.toml</code>. <code>features = ["all"]</code>
-enables every optional feature (<code>scheduler</code>, <code>tracing</code>, <code>recovery</code>,
-<code>metrics</code> and <code>testing</code>).</p>
+enables every optional feature (<code>scheduler</code>, <code>tracing</code>, <code>store-redb</code>,
+<code>store-postgres</code>, <code>store-nats</code>, <code>metrics</code> and <code>testing</code>).</p>
 
 ```toml
 [dependencies]
@@ -308,8 +308,8 @@ fn build_workflow() -> Workflow<MyState> {
         batch_id = "batch_001"
     );
 
-    let store = MemoryStore::new();
-    Workflow::new(Resources::new().insert(store))
+    let board = Blackboard::new();
+    Workflow::new(Resources::new().insert(board))
         .with_tracing_span(workflow_span)
         .register(MyState::Start, MyProcessor)
         .add_exit_state(MyState::Complete)
@@ -341,14 +341,14 @@ struct PaymentTask;
 #[task(state = AppState)]
 impl PaymentTask {
     async fn run(&self, res: &Resources) -> Result<AppState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let order_id: String = store.get("order_id")?;
+        let board = res.get::<Blackboard>()?;
+        let order_id: String = board.get("order_id")?;
         info!(order_id = %order_id, "Processing payment");
 
         match process_payment(&order_id).await {
             Ok(receipt) => {
                 info!(order_id = %order_id, receipt = %receipt, "Payment succeeded");
-                store.put("receipt", receipt);
+                board.put("receipt", receipt);
                 Ok(AppState::Confirm)
             }
             Err(e) => {
@@ -448,7 +448,7 @@ async fn main() -> Result<(), CanoError> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let store = MemoryStore::new();
+    let board = Blackboard::new();
 
     // 2. Create the workflow with a custom span.
     // The span wraps every event this workflow logs.
@@ -458,7 +458,7 @@ async fn main() -> Result<(), CanoError> {
         customer = "Acme Corp"
     );
 
-    let workflow = Workflow::new(Resources::new().insert(store))
+    let workflow = Workflow::new(Resources::new().insert(board))
         .register(State::Start, ProcessOrder)
         .add_exit_state(State::Complete)
         .with_tracing_span(workflow_span);

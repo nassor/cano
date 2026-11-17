@@ -2,43 +2,40 @@ use cano::prelude::*;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::sync::Arc;
 
-/// Benchmark 1: Resources lookups (hot path overhead vs direct &MemoryStore)
+/// Benchmark 1: Resources lookups (hot path overhead vs direct &Blackboard)
 fn bench_resources_get(c: &mut Criterion) {
     let mut group = c.benchmark_group("resources_get");
 
-    // Direct MemoryStore reference (baseline)
+    // Direct Blackboard reference (baseline)
     group.bench_function("direct_store_get", |b| {
-        let store = MemoryStore::new();
-        store.put("counter", 42u64);
+        let board = Blackboard::new();
+        board.put("counter", 42u64);
         b.iter(|| {
-            let _: u64 = store.get("counter").unwrap();
+            let _: u64 = board.get("counter").unwrap();
         });
     });
 
-    // Resources::get by type → &MemoryStore → store.get. The id predates the
+    // Resources::get by type → &Blackboard → board.get. The id predates the
     // type-keyed API and is kept so the baseline stays comparable.
     group.bench_function("resources_get_string_key", |b| {
-        let resources = Resources::new().insert(MemoryStore::new());
-        resources
-            .get::<MemoryStore>()
-            .unwrap()
-            .put("counter", 42u64);
+        let resources = Resources::new().insert(Blackboard::new());
+        resources.get::<Blackboard>().unwrap().put("counter", 42u64);
         b.iter(|| {
-            let store = resources.get::<MemoryStore>().unwrap();
-            let _: u64 = store.get("counter").unwrap();
+            let board = resources.get::<Blackboard>().unwrap();
+            let _: u64 = board.get("counter").unwrap();
         });
     });
 
-    // Resources::get_named → &MemoryStore → store.get
+    // Resources::get_named → &Blackboard → board.get
     group.bench_function("named", |b| {
-        let resources = Resources::new().insert_named("store", MemoryStore::new());
+        let resources = Resources::new().insert_named("board", Blackboard::new());
         resources
-            .get_named::<MemoryStore>("store")
+            .get_named::<Blackboard>("board")
             .unwrap()
             .put("counter", 42u64);
         b.iter(|| {
-            let store = resources.get_named::<MemoryStore>("store").unwrap();
-            let _: u64 = store.get("counter").unwrap();
+            let board = resources.get_named::<Blackboard>("board").unwrap();
+            let _: u64 = board.get("counter").unwrap();
         });
     });
 
@@ -85,14 +82,14 @@ fn bench_resources_get_concurrent(c: &mut Criterion) {
             &concurrency,
             |b, &concurrency| {
                 let resources: Arc<Resources> =
-                    Arc::new(Resources::new().insert(MemoryStore::new()));
+                    Arc::new(Resources::new().insert(Blackboard::new()));
                 b.iter(|| {
                     runtime.block_on(async {
                         let mut handles = Vec::with_capacity(concurrency);
                         for _ in 0..concurrency {
                             let res = Arc::clone(&resources);
                             handles.push(tokio::spawn(async move {
-                                let _store = res.get::<MemoryStore>().unwrap();
+                                let _store = res.get::<Blackboard>().unwrap();
                             }));
                         }
                         for h in handles {

@@ -51,7 +51,7 @@ enum OrderState {
 <h2 id="building-a-workflow"><a href="#building-a-workflow" class="anchor-link" aria-hidden="true">#</a>Building a workflow</h2>
 <p>
 <code>Workflow::new(resources)</code> takes a <a href="../resources/"><code>Resources</code></a> map that tasks
-look up by type while they run. Put shared state there, such as a <code>MemoryStore</code>, configuration or clients.
+look up by type while they run. Put shared state there, such as a <code>Blackboard</code>, configuration or clients.
 <code>Workflow::bare()</code> is <code>Workflow::new(Resources::new())</code>, for tasks that need nothing.
 A task that needs no resources can leave the <code>res</code> parameter out of its signature
 (<code>async fn run(&amp;self)</code>); the task macros add it.
@@ -128,7 +128,7 @@ impl ProcessTask {
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     // Each builder method consumes the workflow and returns it, so chain the calls.
-    let workflow = Workflow::new(Resources::new().insert(MemoryStore::new()))
+    let workflow = Workflow::new(Resources::new().insert(Blackboard::new()))
         // 1. Register a task for each state
         .register(OrderState::Start, StartTask)
         .register(OrderState::Validate, ValidateTask)
@@ -295,7 +295,7 @@ plus a <code>JoinConfig</code>. The <code>JoinConfig</code> picks a <code>JoinSt
 let join_config = JoinConfig::new(JoinStrategy::All, State::Aggregate)
     .with_timeout(Duration::from_secs(5));
 
-Workflow::new(Resources::new().insert(store))
+Workflow::new(Resources::new().insert(board))
     .register_split(State::Fanout, vec![Worker { id: 1 }, Worker { id: 2 }], join_config)
     .register(State::Aggregate, Aggregator)
     .add_exit_state(State::Complete)
@@ -317,9 +317,9 @@ each request its own parallelism.
 </p>
 
 <div class="callout callout-warning">
-<span class="callout-label">Store isolation</span>
+<span class="callout-label">Blackboard isolation</span>
 <p>
-A <code>MemoryStore</code> is <code>Arc</code>-wrapped, so a clone shares the same data. Create a fresh store
+A <code>Blackboard</code> is <code>Arc</code>-wrapped, so a clone shares the same data. Create a fresh blackboard
 for every request, or request data leaks between concurrent requests.
 </p>
 </div>
@@ -329,7 +329,7 @@ for every request, or request data leaks between concurrent requests.
 <div class="cd-wrap">
 <svg class="cd" viewBox="0 0 730 384" role="img" aria-labelledby="wf-request-title wf-request-desc">
 <title id="wf-request-title">Workflow per HTTP request</title>
-<desc id="wf-request-desc">A sequence between four parties. The client posts to the HTTP handler. The handler builds a workflow around a fresh store and calls orchestrate with the initial state. While it runs, the workflow reads and writes the store. When the workflow returns its exit state, the handler reads the results from the store and sends a 200 JSON response to the client.</desc>
+<desc id="wf-request-desc">A sequence between four parties. The client posts to the HTTP handler. The handler builds a workflow around a fresh blackboard and calls orchestrate with the initial state. While it runs, the workflow reads and writes the blackboard. When the workflow returns its exit state, the handler reads the results from the blackboard and sends a 200 JSON response to the client.</desc>
 <defs><marker id="wf-request-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
 <line class="lifeline" x1="70" y1="46" x2="70" y2="322"/>
 <line class="lifeline" x1="258" y1="46" x2="258" y2="322"/>
@@ -340,7 +340,7 @@ for every request, or request data leaks between concurrent requests.
 <rect class="n" x="188" y="8" width="140" height="38" rx="8"/>
 <text class="t-strong" x="258" y="28">HTTP handler</text>
 <rect class="n-cop" x="378" y="8" width="140" height="38" rx="8"/>
-<text class="t-strong" x="448" y="28">MemoryStore</text>
+<text class="t-strong" x="448" y="28">Blackboard</text>
 <rect class="n" x="568" y="8" width="140" height="38" rx="8"/>
 <text class="t-strong" x="638" y="28">Workflow</text>
 <path class="e" d="M76,90 H252" marker-end="url(#wf-request-ah)"/>
@@ -356,16 +356,16 @@ for every request, or request data leaks between concurrent requests.
 <path class="e e-dash" d="M252,310 H76" marker-end="url(#wf-request-ah)"/>
 <text class="t-code t-ok" x="164" y="298">200 JSON response</text>
 <rect class="n-hot" x="14" y="334" width="702" height="34" rx="10"/>
-<text class="t-strong" x="365" y="352">One fresh store and one workflow per request, so nothing leaks between requests.</text>
+<text class="t-strong" x="365" y="352">One fresh blackboard and one workflow per request, so nothing leaks between requests.</text>
 </svg>
 </div>
 </div>
 
 <p>The handler does three things:</p>
 <ol>
-<li>Creates a fresh <code>MemoryStore</code>, puts the request data into the workflow's <code>Resources</code>, and builds the workflow with a factory function.</li>
+<li>Creates a fresh <code>Blackboard</code>, puts the request data into the workflow's <code>Resources</code>, and builds the workflow with a factory function.</li>
 <li>Calls <code>workflow.orchestrate(initial_state)</code> to drive the machine to an exit state. The returned exit state says which terminal branch ran, so use it to choose the response.</li>
-<li>Reads the results back out of the store and returns them.</li>
+<li>Reads the results back out of the blackboard and returns them.</li>
 </ol>
 
 ```rust
@@ -379,20 +379,20 @@ fn build_workflow(resources: Resources) -> Workflow<TextPipelineState> {
 }
 
 // Inside an HTTP handler:
-let store = MemoryStore::new(); // fresh store, full isolation
+let board = Blackboard::new(); // fresh blackboard, full isolation
 let resources = Resources::new()
-    .insert(store.clone())
+    .insert(board.clone())
     .insert(RequestParams { text });
 let workflow = build_workflow(resources);
 let final_state = workflow.orchestrate(TextPipelineState::Parse).await?;
-let word_count: usize = store.get("word_count")?;
+let word_count: usize = board.get("word_count")?;
 ```
 
 <div class="callout callout-tip">
 <span class="callout-label">Tip</span>
 <p>
 <code>.with_total_timeout()</code> keeps a hung request from blocking forever. For read-heavy workloads with
-shared reference data, fill one store, share it, and use per-request keys to avoid collisions. The full Axum
+shared reference data, fill one blackboard, share it, and use per-request keys to avoid collisions. The full Axum
 version is <code>cargo run --example workflow_on_request</code>.
 </p>
 </div>

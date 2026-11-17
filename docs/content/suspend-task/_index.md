@@ -213,10 +213,10 @@ workflow has a suspend state and no store.
 
 ```rust
 use cano::prelude::*;
-use cano::RedbCheckpointStore;            // requires the `recovery` feature
+use cano::RedbStore;
 use std::sync::Arc;
 
-let store = Arc::new(RedbCheckpointStore::new("/var/lib/myapp/checkpoints.redb")?);
+let store = Arc::new(RedbStore::new("/var/lib/myapp/cano.redb")?);
 let workflow = Workflow::bare()
     .register(Step::Review, Review)
     .add_exit_states([Step::Approved, Step::Rejected])
@@ -231,6 +231,16 @@ let state = workflow.resume_with("review-1", &Decision::Approve).await?;
 assert_eq!(state, Step::Approved);
 ```
 </div>
+
+<p>
+Where the later call can run depends on the store. A
+<a href="../recovery/#redb"><code>RedbStore</code></a> file is held by one process at
+a time, so the input is delivered by the process that parked the run, or by its replacement
+after a restart. With <a href="../recovery/#postgres"><code>PostgresStore</code></a>
+or <a href="../recovery/#nats"><code>NatsStore</code></a>, any process that reaches
+the server can call <code>resume_with</code>, such as a web handler on another host that
+receives the reviewer's decision.
+</p>
 
 <ul>
 <li><code>orchestrate</code> returns the parked state. Compare it with the state you registered to tell a parked run from a finished one.</li>
@@ -275,7 +285,10 @@ The last checkpoint row decides what a call does. <code>resume_from(workflow_id)
 <dd>The message contains "deserialize input". Nothing is recorded, so a following correct call succeeds.</dd>
 
 <dt><code>CanoError::CheckpointStore</code> <small>concurrent delivery</small></dt>
-<dd>Two concurrent calls for one run both append the same sequence number. The store rejects the duplicate, so one input wins and the other call fails.</dd>
+<dd>Two concurrent calls for one run both append the same sequence number. The store rejects the duplicate, so one input wins and the other call fails. A network store built with <code>with_retry</code> re-sends an append whose acknowledgement was lost and accepts its own row, so that call still returns <code>Ok</code>; a different row from a competing call stays a conflict.</dd>
+
+<dt><code>CanoError::CheckpointStore</code> <small>a network store timed out or lost its connection</small></dt>
+<dd>The <code>ResumeInput</code> row may have been written anyway: see <a href="../recovery/#network-failures">timeouts and retries</a>. Call <code>resume_from</code> next. It delivers a recorded input again, and returns the parked state when nothing was recorded. Send a different input only after it returns the parked state.</dd>
 
 <dt>the error from <code>resume</code> <small>the task failed</small></dt>
 <dd>With an empty compensation stack the recorded input stays in the log, so <code>resume_from</code> delivers it again. With a non-empty stack the run fails like any other: the stack drains.</dd>
@@ -424,7 +437,7 @@ assert!(store.load_run(run_id).await?.is_empty());
 </div>
 
 <p>
-Run it with <code>cargo run --example suspend_task --features recovery</code>. The command is the same
+Run it with <code>cargo run --example suspend_task</code>. The command is the same
 on Linux, macOS and Windows.
 </p>
 
@@ -489,7 +502,7 @@ channel is simpler.
 <div class="callout callout-tip">
 <div class="callout-label">Runnable example</div>
 <p>
-Run <code>cargo run --example suspend_task --features recovery</code>. It parks a review, checks that
+Run <code>cargo run --example suspend_task</code>. It parks a review, checks that
 an idle <code>resume_from</code> runs nothing, sends a request for changes and then an approval, and
 asserts the result of each call.
 </p>

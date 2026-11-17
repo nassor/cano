@@ -47,7 +47,7 @@ impl ApiTask {
 #[task(state = ApiState)]
 impl ApiTask {
     async fn run(&self, res: &Resources) -> Result<ApiState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         println!(
             "Task {}: Starting (latency: {}ms)",
             self.id, self.latency_ms
@@ -65,7 +65,7 @@ impl ApiTask {
         } else {
             println!("Task {}: Completed successfully", self.id);
             // Store result
-            store.put(
+            board.put(
                 &format!("result_{}", self.id),
                 format!("data_from_{}", self.id),
             );
@@ -93,9 +93,9 @@ async fn main() -> Result<(), CanoError> {
     // - PartialResults(2): Proceed as soon as 2 tasks complete successfully
     let join_config = JoinConfig::new(JoinStrategy::PartialResults(2), ApiState::Complete);
 
-    let store = MemoryStore::new();
+    let board = Blackboard::new();
 
-    let workflow = Workflow::new(Resources::new().insert(store.clone()))
+    let workflow = Workflow::new(Resources::new().insert(board.clone()))
         .register_split(ApiState::Start, tasks, join_config)
         .add_exit_state(ApiState::Complete)
         .add_exit_state(ApiState::Failed);
@@ -116,7 +116,7 @@ async fn main() -> Result<(), CanoError> {
     let task_ids = [1usize, 2, 3, 4];
     let results: Vec<(usize, Option<String>)> = task_ids
         .iter()
-        .map(|&id| (id, store.get::<String>(&format!("result_{id}")).ok()))
+        .map(|&id| (id, board.get::<String>(&format!("result_{id}")).ok()))
         .collect();
 
     println!("\nResults:");

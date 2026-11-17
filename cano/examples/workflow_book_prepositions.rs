@@ -243,14 +243,14 @@ impl BookDownloaderTask {
             failed_count
         );
 
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         if books.is_empty() {
             return Err(CanoError::task_execution(
                 "No books were successfully downloaded",
             ));
         }
 
-        store.put("downloaded_books", books.clone());
+        board.put("downloaded_books", books.clone());
         println!("Stored {} books in memory for analysis", books.len());
         Ok(BookPrepositionAction::Analyze)
     }
@@ -318,8 +318,8 @@ impl PrepositionTask {
 #[task(state = BookPrepositionAction)]
 impl PrepositionTask {
     async fn run(&self, res: &Resources) -> Result<BookPrepositionAction, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let books: Vec<Book> = store
+        let board = res.get::<Blackboard>()?;
+        let books: Vec<Book> = board
             .get("downloaded_books")
             .map_err(|e| CanoError::task_execution(format!("Failed to load books: {e}")))?;
 
@@ -351,10 +351,10 @@ impl PrepositionTask {
             return Err(CanoError::task_execution("No book analyses were completed"));
         }
 
-        store.put("book_analyses", analyses.clone());
+        board.put("book_analyses", analyses.clone());
 
         // Clean up the raw book content to save memory
-        store.remove("downloaded_books");
+        board.remove("downloaded_books");
 
         println!(
             "Stored {} book analyses and cleaned up raw content",
@@ -376,8 +376,8 @@ impl BookRankingByPrepositionTask {
 #[task(state = BookPrepositionAction)]
 impl BookRankingByPrepositionTask {
     async fn run(&self, res: &Resources) -> Result<BookPrepositionAction, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let analyses: Vec<BookAnalysis> = store
+        let board = res.get::<Blackboard>()?;
+        let analyses: Vec<BookAnalysis> = board
             .get("book_analyses")
             .map_err(|e| CanoError::task_execution(format!("Failed to load analyses: {e}")))?;
 
@@ -407,7 +407,7 @@ impl BookRankingByPrepositionTask {
 
         println!("Ranked {} books by preposition diversity", rankings.len());
 
-        store.put("book_rankings", rankings.clone());
+        board.put("book_rankings", rankings.clone());
 
         // Display results
         println!("\nFINAL BOOK RANKINGS BY PREPOSITION DIVERSITY");
@@ -479,9 +479,9 @@ async fn run_workflow() -> Result<(), CanoError> {
     println!("Starting Book Preposition Analysis Workflow");
     println!("========================================================");
 
-    let store = MemoryStore::new();
+    let board = Blackboard::new();
 
-    let workflow = Workflow::new(Resources::new().insert(store.clone()))
+    let workflow = Workflow::new(Resources::new().insert(board.clone()))
         .register(BookPrepositionAction::Download, BookDownloaderTask::new())
         .register(BookPrepositionAction::Analyze, PrepositionTask::new())
         .register(
@@ -506,7 +506,7 @@ async fn run_workflow() -> Result<(), CanoError> {
                     println!("\nBook preposition analysis workflow completed successfully!");
 
                     // Display summary from the final rankings
-                    if let Ok(rankings) = store.get::<Vec<BookRanking>>("book_rankings") {
+                    if let Ok(rankings) = board.get::<Vec<BookRanking>>("book_rankings") {
                         println!("\nWORKFLOW SUMMARY");
                         println!("==================");
                         println!("Total books analyzed: {}", rankings.len());
@@ -603,7 +603,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_preposition_task_with_mock_data() {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
 
         // Setup mock books
         let mock_books = vec![
@@ -619,16 +619,16 @@ mod tests {
             },
         ];
 
-        store.put("downloaded_books", mock_books);
+        board.put("downloaded_books", mock_books);
 
         let analyzer = PrepositionTask::new();
-        let res = Resources::new().insert(store.clone());
+        let res = Resources::new().insert(board.clone());
         let result = analyzer.run(&res).await.unwrap();
 
         assert_eq!(result, BookPrepositionAction::Rank);
 
         // Verify analyses were stored
-        let analyses: Vec<BookAnalysis> = store.get("book_analyses").unwrap();
+        let analyses: Vec<BookAnalysis> = board.get("book_analyses").unwrap();
         assert_eq!(analyses.len(), 2);
 
         for analysis in &analyses {
@@ -640,7 +640,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ranking_task() {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
 
         // Setup mock analyses
         let mock_analyses = vec![
@@ -670,16 +670,16 @@ mod tests {
             },
         ];
 
-        store.put("book_analyses", mock_analyses);
+        board.put("book_analyses", mock_analyses);
 
         let ranker = BookRankingByPrepositionTask::new();
-        let res = Resources::new().insert(store.clone());
+        let res = Resources::new().insert(board.clone());
         let result = ranker.run(&res).await.unwrap();
 
         assert_eq!(result, BookPrepositionAction::Complete);
 
         // Verify rankings were stored and properly sorted
-        let rankings: Vec<BookRanking> = store.get("book_rankings").unwrap();
+        let rankings: Vec<BookRanking> = board.get("book_rankings").unwrap();
         assert_eq!(rankings.len(), 3);
 
         // Should be sorted by preposition count (descending)

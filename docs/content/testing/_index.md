@@ -28,6 +28,7 @@ The module is not in the <a href="../"><code>prelude</code></a>. Import it expli
 <li><a href="#enabling">Enabling the feature</a></li>
 <li><a href="#recording-observer">RecordingObserver</a></li>
 <li><a href="#in-memory-store">InMemoryCheckpointStore</a></li>
+<li><a href="#store-contract">assert_checkpoint_store_contract</a></li>
 <li><a href="#panic-on-attempt">panic_on_attempt</a></li>
 <li><a href="#assert-compensation">assert_compensation_ran</a></li>
 </ol>
@@ -216,7 +217,7 @@ async fn every_registered_state_is_reached() {
 
 <p>
 A process-local <a href="../recovery/"><code>CheckpointStore</code></a> for resume and recovery tests.
-It needs neither the <code>recovery</code> feature nor an on-disk file. Share one
+It needs no on-disk file. Share one
 <code>Arc&lt;InMemoryCheckpointStore&gt;</code> between an <code>orchestrate</code> run and a later
 <code>resume_from</code> to exercise crash recovery entirely in memory. It honors the full trait
 contract: a duplicate <code>(workflow_id, sequence)</code> is rejected, <code>load_run</code> returns
@@ -258,6 +259,33 @@ async fn checkpoints_run_in_memory() {
     // A successful run clears its live log; history() keeps every appended row.
     assert!(store.rows("run-1").is_empty());
     assert!(!store.history().is_empty());
+}
+```
+
+<h2 id="store-contract"><a href="#store-contract" class="anchor-link" aria-hidden="true">#</a>assert_checkpoint_store_contract</h2>
+
+<p>
+Runs the <a href="../recovery/#trait"><code>CheckpointStore</code> contract</a> against any store and
+panics with the name of the first clause it breaks. Use it on your own backend, or on a built-in one
+pointed at a real server. It writes only workflow ids that start with <code>namespace/</code> and
+clears them before and after, so it can share a database with other data.
+</p>
+
+<p>
+It checks that an unknown id loads empty, that every field and <code>RowKind</code> round-trips, that
+rows load sorted by sequence, that a duplicate sequence is rejected and changes nothing, that ids
+sharing a prefix stay isolated under <code>clear</code>, that awkward ids (spaces, wildcards,
+non-ASCII, 200+ characters) work, that concurrent appends of one sequence have exactly one winner, and
+that a 256 KiB blob round-trips.
+</p>
+
+```rust
+use cano::testing::{InMemoryCheckpointStore, assert_checkpoint_store_contract};
+
+#[tokio::test]
+async fn my_store_meets_the_contract() {
+    let store = InMemoryCheckpointStore::new(); // your store here
+    assert_checkpoint_store_contract(&store, "contract-test").await;
 }
 ```
 

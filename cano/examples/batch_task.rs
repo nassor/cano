@@ -22,7 +22,7 @@
 //! - `concurrency()` to bound parallel `process_item` calls
 //! - `item_retry()` for per-item transient-failure recovery
 //! - Partial-failure tolerance in `finish`
-//! - Passing data between states via [`MemoryStore`]
+//! - Passing data between states via [`Blackboard`]
 
 use std::time::Duration;
 
@@ -61,8 +61,8 @@ impl ParseUrls {
     }
 
     async fn load(&self, res: &Resources) -> Result<Vec<String>, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let urls: Vec<String> = store.get("input_urls")?;
+        let board = res.get::<Blackboard>()?;
+        let urls: Vec<String> = board.get("input_urls")?;
         println!("parse urls : loaded {} URLs", urls.len());
         Ok(urls)
     }
@@ -97,8 +97,8 @@ impl ParseUrls {
             return Err(CanoError::task_execution("no valid URLs to fetch"));
         }
 
-        let store = res.get::<MemoryStore>()?;
-        store.put("valid_urls", valid);
+        let board = res.get::<Blackboard>()?;
+        board.put("valid_urls", valid);
         Ok(Step::FetchUrls)
     }
 }
@@ -122,8 +122,8 @@ impl FetchUrls {
     }
 
     async fn load(&self, res: &Resources) -> Result<Vec<String>, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let urls: Vec<String> = store.get("valid_urls")?;
+        let board = res.get::<Blackboard>()?;
+        let urls: Vec<String> = board.get("valid_urls")?;
         println!(
             "fetch urls : fetching {} URLs (concurrency=3, retry=2)",
             urls.len()
@@ -147,8 +147,8 @@ impl FetchUrls {
         let results: Vec<(String, usize)> = outputs.into_iter().filter_map(|r| r.ok()).collect();
         println!("fetch urls : {} URLs fetched successfully", results.len());
 
-        let store = res.get::<MemoryStore>()?;
-        store.put("fetch_results", results);
+        let board = res.get::<Blackboard>()?;
+        board.put("fetch_results", results);
         Ok(Step::Summarise)
     }
 }
@@ -166,8 +166,8 @@ struct Summarise {
 #[task::batch(state = Step)]
 impl Summarise {
     async fn load(&self, res: &Resources) -> Result<Vec<(String, usize)>, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let results: Vec<(String, usize)> = store.get("fetch_results")?;
+        let board = res.get::<Blackboard>()?;
+        let results: Vec<(String, usize)> = board.get("fetch_results")?;
         Ok(results)
     }
 
@@ -219,10 +219,10 @@ async fn main() -> CanoResult<()> {
     println!("=== batch_task example ===");
     println!("input: {} URL strings\n", input_urls.len());
 
-    let store = MemoryStore::new();
-    store.put("input_urls", input_urls.clone());
+    let board = Blackboard::new();
+    board.put("input_urls", input_urls.clone());
 
-    let resources = Resources::new().insert(store);
+    let resources = Resources::new().insert(board);
 
     let url_count = input_urls.len();
     let workflow = Workflow::new(resources)

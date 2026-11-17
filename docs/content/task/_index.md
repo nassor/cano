@@ -103,15 +103,15 @@ impl GeneratorTask {
     async fn run(&self, res: &Resources) -> Result<Action, CanoError> {
         println!("GeneratorTask: creating random numbers...");
 
-        // 1. Look up the shared store from resources
-        let store = res.get::<MemoryStore>()?;
+        // 1. Look up the shared blackboard from resources
+        let board = res.get::<Blackboard>()?;
 
         // 2. Perform logic
         let mut rng = rand::rng();
         let numbers: Vec<u32> = (0..10).map(|_| rng.random_range(1..=100)).collect();
 
         // 3. Store results
-        store.put("numbers", numbers);
+        board.put("numbers", numbers);
         println!("Stored numbers");
 
         // 4. Return next state
@@ -181,7 +181,7 @@ when no task needs shared state, such as pure pipelines or computational benchma
 <span class="pattern-number">1</span>
 <h3>Data transformation</h3>
 </div>
-<p>Read data from the store, transform it, write it back.</p>
+<p>Read data from the blackboard, transform it, write it back.</p>
 <div class="code-block">
 <span class="code-block-label">Data transformation</span>
 
@@ -197,8 +197,8 @@ struct DataTransformer;
 #[task(state = State)]
 impl DataTransformer {
     async fn run(&self, res: &Resources) -> Result<State, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let raw_data: Vec<i32> = store.get("raw_data")?;
+        let board = res.get::<Blackboard>()?;
+        let raw_data: Vec<i32> = board.get("raw_data")?;
 
         // Transform: filter and multiply
         let processed: Vec<i32> = raw_data
@@ -207,7 +207,7 @@ impl DataTransformer {
             .map(|x| x * 2)
             .collect();
 
-        store.put("processed_data", processed);
+        board.put("processed_data", processed);
         Ok(State::Complete)
     }
 }
@@ -237,8 +237,8 @@ struct ValidatorTask;
 #[task(state = State)]
 impl ValidatorTask {
     async fn run(&self, res: &Resources) -> Result<State, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let data: Vec<f64> = store.get("processed_data")?;
+        let board = res.get::<Blackboard>()?;
+        let data: Vec<f64> = board.get("processed_data")?;
 
         let mut errors = Vec::new();
 
@@ -250,7 +250,7 @@ impl ValidatorTask {
             errors.push("Contains NaN values");
         }
 
-        store.put("validation_errors", errors.clone());
+        board.put("validation_errors", errors.clone());
 
         if errors.is_empty() {
             Ok(State::Process)
@@ -285,9 +285,9 @@ struct RoutingTask;
 #[task(state = State)]
 impl RoutingTask {
     async fn run(&self, res: &Resources) -> Result<State, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let item_count: usize = store.get("item_count")?;
-        let priority: String = store.get("priority")?;
+        let board = res.get::<Blackboard>()?;
+        let item_count: usize = board.get("item_count")?;
+        let priority: String = board.get("priority")?;
 
         // Dynamic routing based on conditions
         let next_state = match (item_count, priority.as_str()) {
@@ -328,7 +328,7 @@ struct AggregatorTask;
 #[task(state = State)]
 impl AggregatorTask {
     async fn run(&self, res: &Resources) -> Result<State, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         println!("Aggregating results...");
 
         let mut total = 0;
@@ -336,14 +336,14 @@ impl AggregatorTask {
 
         // Collect results from parallel tasks
         for i in 1..=3 {
-            if let Ok(result) = store.get::<i32>(&format!("result_{}", i)) {
+            if let Ok(result) = board.get::<i32>(&format!("result_{}", i)) {
                 total += result;
                 count += 1;
             }
         }
 
-        store.put("total", total);
-        store.put("count", count);
+        board.put("total", total);
+        board.put("count", count);
 
         println!("Aggregated {} results, total: {}", count, total);
         Ok(State::Complete)

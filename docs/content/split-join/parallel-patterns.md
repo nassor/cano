@@ -140,10 +140,10 @@ impl QueueConsumer {
         res: &Resources,
         outputs: Vec<Result<String, CanoError>>,
     ) -> Result<QueueState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         // Failed items are skipped here; return Err to fail the whole batch instead.
         for item in outputs.into_iter().flatten() {
-            store.put(&format!("result_{item}"), "completed");
+            board.put(&format!("result_{item}"), "completed");
         }
         if self.queue.lock().await.is_empty() {
             Ok(QueueState::Done)
@@ -155,13 +155,13 @@ impl QueueConsumer {
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let store = MemoryStore::new();
+    let board = Blackboard::new();
     let queue: SharedQueue = Arc::new(Mutex::new(VecDeque::from(vec![
         "order1".to_string(), "order2".to_string(), "order3".to_string(),
         "order4".to_string(), "order5".to_string(),
     ])));
 
-    let workflow = Workflow::new(Resources::new().insert(store.clone()))
+    let workflow = Workflow::new(Resources::new().insert(board.clone()))
         .register(QueueState::Consume, QueueConsumer { queue: queue.clone(), batch_size: 10 })
         .add_exit_state(QueueState::Done);
 
@@ -182,7 +182,7 @@ the wiring.
 <h3 id="pattern-dynamic"><a href="#pattern-dynamic" class="anchor-link" aria-hidden="true">#</a>Pattern 2: dynamic task generation</h3>
 <p>
 Build the task list with an iterator when the number of tasks is not a compile-time constant. The count
-is fixed when the workflow is built. A loader writes the dataset into the store, each processor reads
+is fixed when the workflow is built. A loader writes the dataset into the blackboard, each processor reads
 its own item by index, and an aggregator runs once after the split joins.
 </p>
 
@@ -199,8 +199,8 @@ struct RecordLoader;
 #[task(state = DataState)]
 impl RecordLoader {
     async fn run(&self, res: &Resources) -> Result<DataState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        store.put("records", (1..=100).collect::<Vec<i32>>());
+        let board = res.get::<Blackboard>()?;
+        board.put("records", (1..=100).collect::<Vec<i32>>());
         Ok(DataState::ProcessBatch)
     }
 }
@@ -211,10 +211,10 @@ struct RecordProcessor { index: usize }
 #[task(state = DataState)]
 impl RecordProcessor {
     async fn run(&self, res: &Resources) -> Result<DataState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let records: Vec<i32> = store.get("records")?;
+        let board = res.get::<Blackboard>()?;
+        let records: Vec<i32> = board.get("records")?;
         tokio::time::sleep(Duration::from_millis(10)).await;
-        store.put(&format!("result_{}", self.index), records[self.index] * 2);
+        board.put(&format!("result_{}", self.index), records[self.index] * 2);
         Ok(DataState::Aggregate)
     }
 }
@@ -225,9 +225,9 @@ struct FinishAggregate;
 #[task(state = DataState)]
 impl FinishAggregate {
     async fn run(&self, res: &Resources) -> Result<DataState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         let total: i32 = (0..100)
-            .filter_map(|i| store.get::<i32>(&format!("result_{}", i)).ok())
+            .filter_map(|i| board.get::<i32>(&format!("result_{}", i)).ok())
             .sum();
         println!("Aggregated total: {}", total);
         Ok(DataState::Complete)
@@ -236,13 +236,13 @@ impl FinishAggregate {
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let store = MemoryStore::new();
+    let board = Blackboard::new();
 
     // Build the processor tasks before constructing the workflow.
     let processors: Vec<RecordProcessor> = (0..100).map(|i| RecordProcessor { index: i }).collect();
     let join_config = JoinConfig::new(JoinStrategy::All, DataState::Aggregate);
 
-    let workflow = Workflow::new(Resources::new().insert(store.clone()))
+    let workflow = Workflow::new(Resources::new().insert(board.clone()))
         .register(DataState::LoadRecords, RecordLoader)
         .register_split(DataState::ProcessBatch, processors, join_config)
         .register(DataState::Aggregate, FinishAggregate)
@@ -341,16 +341,16 @@ struct RateLimitedApiTask { api_id: usize, semaphore: Arc<Semaphore> }
 #[task(state = ApiState)]
 impl RateLimitedApiTask {
     async fn run(&self, res: &Resources) -> Result<ApiState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         let _permit = self.semaphore.acquire().await
             .map_err(|e| CanoError::task_execution(e.to_string()))?;
         let result = make_api_call(self.api_id).await?;
-        store.put(&format!("api_result_{}", self.api_id), result);
+        board.put(&format!("api_result_{}", self.api_id), result);
         Ok(ApiState::Complete)
     }
 }
 
-fn build_workflow(store: MemoryStore) -> Workflow<ApiState> {
+fn build_workflow(board: Blackboard) -> Workflow<ApiState> {
     // 20 tasks, at most 5 in flight at once.
     let semaphore = Arc::new(Semaphore::new(5));
     let tasks: Vec<RateLimitedApiTask> = (0..20)
@@ -358,7 +358,7 @@ fn build_workflow(store: MemoryStore) -> Workflow<ApiState> {
         .collect();
     let join_config = JoinConfig::new(JoinStrategy::All, ApiState::Complete);
 
-    Workflow::new(Resources::new().insert(store))
+    Workflow::new(Resources::new().insert(board))
         .register_split(ApiState::Start, tasks, join_config)
         .add_exit_state(ApiState::Complete)
 }
@@ -388,8 +388,8 @@ struct WorkProcessor { item_index: usize }
 #[task(state = ProcessState)]
 impl WorkProcessor {
     async fn run(&self, res: &Resources) -> Result<ProcessState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let items: Vec<String> = store.get("work_items")?;
+        let board = res.get::<Blackboard>()?;
+        let items: Vec<String> = board.get("work_items")?;
         if let Some(item) = items.get(self.item_index) {
             println!("Processing item: {}", item);
         }
@@ -403,25 +403,25 @@ struct BatchLoaderTask;
 #[task(state = ProcessState)]
 impl BatchLoaderTask {
     async fn run(&self, res: &Resources) -> Result<ProcessState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         let items = fetch_pending_work().await?;
         if items.is_empty() {
             return Ok(ProcessState::Complete);
         }
-        store.put("work_items", items);
+        board.put("work_items", items);
         Ok(ProcessState::ProcessBatch)
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let store = MemoryStore::new();
+    let board = Blackboard::new();
 
     let batch_size = 10usize;
     let processors: Vec<WorkProcessor> = (0..batch_size).map(|i| WorkProcessor { item_index: i }).collect();
     let join_config = JoinConfig::new(JoinStrategy::All, ProcessState::Complete);
 
-    let batch_workflow = Workflow::new(Resources::new().insert(store.clone()))
+    let batch_workflow = Workflow::new(Resources::new().insert(board.clone()))
         .register(ProcessState::Start, BatchLoaderTask)
         .register_split(ProcessState::ProcessBatch, processors, join_config)
         .add_exit_state(ProcessState::Complete);

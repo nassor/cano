@@ -1,9 +1,9 @@
 //! # Processing Models Tour — Chaining All Four Models in One Workflow
 //!
-//! Run with: `cargo run --example processing_models_tour --features recovery`
+//! Run with: `cargo run --example processing_models_tour`
 //!
 //! Demonstrates that all four Cano processing models compose cleanly in a single
-//! workflow, with a [`RedbCheckpointStore`] attached to observe checkpoint
+//! workflow, with a [`RedbStore`] attached to observe checkpoint
 //! behaviour across model boundaries.
 //!
 //! Workflow shape:
@@ -15,24 +15,24 @@
 //! Each state showcases a different processing model:
 //!
 //! - **`Route`** ([`RouterTask`]) — inspects a [`Config`] resource and returns the next
-//!   state. Side-effect-free; writes no [`CheckpointRow`](cano::recovery::CheckpointRow).
+//!   state. Side-effect-free; writes no [`CheckpointRow`](cano::checkpoint::CheckpointRow).
 //! - **`Wait`** ([`PollTask`]) — polls a shared [`AtomicU32`] counter until a background
 //!   task has incremented it past a threshold, then proceeds.
 //! - **`Crunch`** ([`BatchTask`]) — fan-out over a small `Vec<u32>`, squaring each item
 //!   in parallel (concurrency = 4), then summing the results in `finish`.
 //! - **`Grind`** ([`SteppedTask`]) — counts from 0 to 6 one step at a time, with each
-//!   cursor persisted as a [`RowKind::StepCursor`](cano::recovery::RowKind) row.
+//!   cursor persisted as a [`RowKind::StepCursor`](cano::checkpoint::RowKind) row.
 //! - **`Done`** — exit state.
 //!
 //! On a successful run the engine clears the checkpoint log. Run
-//! `cargo test -p cano --features recovery` for the assertion that no `Route` row
+//! `cargo test -p cano` for the assertion that no `Route` row
 //! was ever written, and that sequence numbers are dense.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use cano::RedbCheckpointStore;
+use cano::RedbStore;
 use cano::prelude::*;
 
 // ---------------------------------------------------------------------------
@@ -211,7 +211,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create a temporary checkpoint store.
     let dir = tempfile::tempdir()?;
-    let checkpoint_store = Arc::new(RedbCheckpointStore::new(dir.path().join("tour.redb"))?);
+    let checkpoint_store = Arc::new(RedbStore::new(dir.path().join("tour.redb"))?);
 
     // --- counter resource + background incrementer ---
     const THRESHOLD: u32 = 4;
@@ -261,7 +261,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "\nNote: the `Route` router state never wrote a checkpoint row; `Wait`, `Crunch`,\n\
          `Grind` (entry + cursor rows), and `Done` each did during the run.\n\
-         Run `cargo test -p cano --features recovery` for the cross-model interop assertion."
+         Run `cargo test -p cano` for the cross-model interop assertion."
     );
 
     // The temp directory (and the redb file) is cleaned up when `dir` drops here.

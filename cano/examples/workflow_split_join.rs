@@ -33,12 +33,12 @@ struct DataLoader;
 #[task(state = DataProcessingState)]
 impl DataLoader {
     async fn run(&self, res: &Resources) -> Result<DataProcessingState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         println!("Loading initial data...");
 
         // Simulate loading data
         let data = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
-        store.put("input_data", data);
+        board.put("input_data", data);
 
         println!("Data loaded: 10 numbers");
         Ok(DataProcessingState::ParallelProcessing)
@@ -60,11 +60,11 @@ impl ProcessorTask {
 #[task(state = DataProcessingState)]
 impl ProcessorTask {
     async fn run(&self, res: &Resources) -> Result<DataProcessingState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         println!("Processor {} starting...", self.task_id);
 
         // Get input data
-        let data: Vec<i32> = store.get("input_data")?;
+        let data: Vec<i32> = board.get("input_data")?;
 
         // Simulate processing time
         tokio::time::sleep(Duration::from_millis(100 * self.task_id as u64)).await;
@@ -73,7 +73,7 @@ impl ProcessorTask {
         let result: i32 = data.iter().map(|&x| x * self.task_id as i32).sum();
 
         // Store individual result
-        store.put(&format!("result_{}", self.task_id), result);
+        board.put(&format!("result_{}", self.task_id), result);
 
         println!(
             "Processor {} completed with result: {}",
@@ -90,7 +90,7 @@ struct Aggregator;
 #[task(state = DataProcessingState)]
 impl Aggregator {
     async fn run(&self, res: &Resources) -> Result<DataProcessingState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         println!("Aggregating results...");
 
         // Collect all results
@@ -98,14 +98,14 @@ impl Aggregator {
         let mut count = 0;
 
         for i in 1..=3 {
-            if let Ok(result) = store.get::<i32>(&format!("result_{}", i)) {
+            if let Ok(result) = board.get::<i32>(&format!("result_{}", i)) {
                 total += result;
                 count += 1;
             }
         }
 
-        store.put("final_result", total);
-        store.put("processor_count", count as usize);
+        board.put("final_result", total);
+        board.put("processor_count", count as usize);
 
         println!(
             "Aggregation complete: {} processors completed, total: {}",
@@ -122,7 +122,7 @@ async fn main() -> Result<(), CanoError> {
     // Example 1: All Strategy - Wait for all tasks
     println!("--- Example 1: All Strategy ---");
     {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
 
         let processors = vec![
             ProcessorTask::new(1),
@@ -132,7 +132,7 @@ async fn main() -> Result<(), CanoError> {
 
         let join_config = JoinConfig::new(JoinStrategy::All, DataProcessingState::Aggregate);
 
-        let workflow = Workflow::new(Resources::new().insert(store.clone()))
+        let workflow = Workflow::new(Resources::new().insert(board.clone()))
             .register(DataProcessingState::Start, DataLoader)
             .register_split(
                 DataProcessingState::ParallelProcessing,
@@ -144,7 +144,7 @@ async fn main() -> Result<(), CanoError> {
 
         let result = workflow.orchestrate(DataProcessingState::Start).await?;
 
-        let final_result: i32 = store.get("final_result")?;
+        let final_result: i32 = board.get("final_result")?;
         println!("Final result: {}", final_result);
         println!("Workflow completed: {:?}\n", result);
     }
@@ -152,7 +152,7 @@ async fn main() -> Result<(), CanoError> {
     // Example 2: Quorum Strategy - Wait for 2 out of 3 tasks
     println!("--- Example 2: Quorum Strategy (2/3) ---");
     {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
 
         let processors = vec![
             ProcessorTask::new(1),
@@ -162,7 +162,7 @@ async fn main() -> Result<(), CanoError> {
 
         let join_config = JoinConfig::new(JoinStrategy::Quorum(2), DataProcessingState::Aggregate);
 
-        let workflow = Workflow::new(Resources::new().insert(store.clone()))
+        let workflow = Workflow::new(Resources::new().insert(board.clone()))
             .register(DataProcessingState::Start, DataLoader)
             .register_split(
                 DataProcessingState::ParallelProcessing,
@@ -174,7 +174,7 @@ async fn main() -> Result<(), CanoError> {
 
         let result = workflow.orchestrate(DataProcessingState::Start).await?;
 
-        let processor_count: usize = store.get("processor_count")?;
+        let processor_count: usize = board.get("processor_count")?;
         println!(
             "Processors completed: {} (quorum satisfied)",
             processor_count
@@ -185,7 +185,7 @@ async fn main() -> Result<(), CanoError> {
     // Example 3: Any Strategy - Continue after first completion
     println!("--- Example 3: Any Strategy ---");
     {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
 
         let processors = vec![
             ProcessorTask::new(1),
@@ -195,7 +195,7 @@ async fn main() -> Result<(), CanoError> {
 
         let join_config = JoinConfig::new(JoinStrategy::Any, DataProcessingState::Aggregate);
 
-        let workflow = Workflow::new(Resources::new().insert(store.clone()))
+        let workflow = Workflow::new(Resources::new().insert(board.clone()))
             .register(DataProcessingState::Start, DataLoader)
             .register_split(
                 DataProcessingState::ParallelProcessing,
@@ -213,7 +213,7 @@ async fn main() -> Result<(), CanoError> {
     // Example 4: Percentage Strategy - Wait for 66% of tasks
     println!("--- Example 4: Percentage Strategy (66%) ---");
     {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
 
         let processors = vec![
             ProcessorTask::new(1),
@@ -226,7 +226,7 @@ async fn main() -> Result<(), CanoError> {
             DataProcessingState::Aggregate,
         );
 
-        let workflow = Workflow::new(Resources::new().insert(store.clone()))
+        let workflow = Workflow::new(Resources::new().insert(board.clone()))
             .register(DataProcessingState::Start, DataLoader)
             .register_split(
                 DataProcessingState::ParallelProcessing,
@@ -238,7 +238,7 @@ async fn main() -> Result<(), CanoError> {
 
         let result = workflow.orchestrate(DataProcessingState::Start).await?;
 
-        let processor_count: usize = store.get("processor_count")?;
+        let processor_count: usize = board.get("processor_count")?;
         println!("Processors completed: {} (66% threshold)", processor_count);
         println!("Workflow completed: {:?}\n", result);
     }
@@ -246,7 +246,7 @@ async fn main() -> Result<(), CanoError> {
     // Example 5: With Timeout
     println!("--- Example 5: Split with Timeout ---");
     {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
 
         let processors = vec![
             ProcessorTask::new(1),
@@ -257,7 +257,7 @@ async fn main() -> Result<(), CanoError> {
         let join_config = JoinConfig::new(JoinStrategy::All, DataProcessingState::Aggregate)
             .with_timeout(Duration::from_millis(250)); // Will complete 2 out of 3 tasks
 
-        let workflow = Workflow::new(Resources::new().insert(store.clone()))
+        let workflow = Workflow::new(Resources::new().insert(board.clone()))
             .register(DataProcessingState::Start, DataLoader)
             .register_split(
                 DataProcessingState::ParallelProcessing,

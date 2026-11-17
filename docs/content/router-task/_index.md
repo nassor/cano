@@ -10,7 +10,7 @@ template = "section.html"
 
 <p>
 A <code>RouterTask</code> reads <a href="../resources/">Resources</a> and returns the next state
-(<code>Result&lt;TState, CanoError&gt;</code>). It writes to no store and calls no external system.
+(<code>Result&lt;TState, CanoError&gt;</code>). It writes to no blackboard and calls no external system.
 Because re-running a router costs nothing, the engine records no checkpoint row for it (see
 <a href="../recovery/">Crash recovery</a>). It is one of the <a href="../task/">Task</a> family of
 processing models, alongside <a href="../poll-task/">PollTask</a>, <a href="../timer-task/">TimerTask</a>,
@@ -248,7 +248,7 @@ already-loaded data, a feature toggle. The branch then leaves no checkpoint row 
 number.
 </p>
 <p>
-If the branching logic also does work, such as writing to the store or calling an external system,
+If the branching logic also does work, such as writing to the blackboard or calling an external system,
 use a plain <a href="../task/">Task</a> and return the next state from <code>run</code>. That is the
 "Conditional Routing Task" pattern on the <a href="../task/#patterns">Tasks</a> page, and its side
 effects need a checkpoint.

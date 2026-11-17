@@ -93,7 +93,7 @@ has one constructor and two optional settings:
 let join_config = JoinConfig::new(JoinStrategy::All, State::Aggregate)
     .with_timeout(Duration::from_secs(5));
 
-Workflow::new(Resources::new().insert(store))
+Workflow::new(Resources::new().insert(board))
     .register(State::Start, Loader)
     .register_split(State::Fanout, vec![Worker { id: 1 }, Worker { id: 2 }, Worker { id: 3 }], join_config)
     .register(State::Aggregate, Aggregator)
@@ -205,7 +205,7 @@ let join_config = JoinConfig::new(JoinStrategy::All, State::Aggregate)
 
 <h2 id="complete-example"><a href="#complete-example" class="anchor-link" aria-hidden="true">#</a>Complete example</h2>
 <p>
-A loader writes input data into the store, three processors fan out in parallel, the <code>All</code>
+A loader writes input data into the blackboard, three processors fan out in parallel, the <code>All</code>
 strategy waits for every one of them, and an aggregator reads the per-task results back out. Run the
 full version with <code>cargo run --example workflow_split_join</code>.
 </p>
@@ -223,8 +223,8 @@ struct DataLoader;
 #[task(state = DataState)]
 impl DataLoader {
     async fn run(&self, res: &Resources) -> Result<DataState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        store.put("input_data", vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+        let board = res.get::<Blackboard>()?;
+        board.put("input_data", vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         Ok(DataState::ParallelProcessing)
     }
 }
@@ -236,11 +236,11 @@ impl ProcessorTask { fn new(task_id: usize) -> Self { Self { task_id } } }
 #[task(state = DataState)]
 impl ProcessorTask {
     async fn run(&self, res: &Resources) -> Result<DataState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let data: Vec<i32> = store.get("input_data")?;
+        let board = res.get::<Blackboard>()?;
+        let data: Vec<i32> = board.get("input_data")?;
         tokio::time::sleep(Duration::from_millis(100 * self.task_id as u64)).await;
         let result: i32 = data.iter().map(|&x| x * self.task_id as i32).sum();
-        store.put(&format!("result_{}", self.task_id), result);
+        board.put(&format!("result_{}", self.task_id), result);
         Ok(DataState::Aggregate)
     }
 }
@@ -251,18 +251,18 @@ struct Aggregator;
 #[task(state = DataState)]
 impl Aggregator {
     async fn run(&self, res: &Resources) -> Result<DataState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         let total: i32 = (1..=3)
-            .filter_map(|i| store.get::<i32>(&format!("result_{}", i)).ok())
+            .filter_map(|i| board.get::<i32>(&format!("result_{}", i)).ok())
             .sum();
-        store.put("final_result", total);
+        board.put("final_result", total);
         Ok(DataState::Complete)
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let store = MemoryStore::new();
+    let board = Blackboard::new();
 
     let processors = vec![
         ProcessorTask::new(1),
@@ -274,14 +274,14 @@ async fn main() -> Result<(), CanoError> {
     let join_config = JoinConfig::new(JoinStrategy::All, DataState::Aggregate)
         .with_timeout(Duration::from_secs(5));
 
-    let workflow = Workflow::new(Resources::new().insert(store.clone()))
+    let workflow = Workflow::new(Resources::new().insert(board.clone()))
         .register(DataState::Start, DataLoader)
         .register_split(DataState::ParallelProcessing, processors, join_config)
         .register(DataState::Aggregate, Aggregator)
         .add_exit_state(DataState::Complete);
 
     let result = workflow.orchestrate(DataState::Start).await?;
-    let final_result: i32 = store.get("final_result")?;
+    let final_result: i32 = board.get("final_result")?;
     println!("Workflow completed: {:?}, total {}", result, final_result);
     Ok(())
 }

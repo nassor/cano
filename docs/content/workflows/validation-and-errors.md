@@ -119,7 +119,7 @@ impl ProcessTask {
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let workflow = Workflow::new(Resources::new().insert(MemoryStore::new()))
+    let workflow = Workflow::new(Resources::new().insert(Blackboard::new()))
         .register(State::Start, MyTask)
         .register(State::Process, ProcessTask)
         .add_exit_state(State::Complete);
@@ -224,7 +224,7 @@ its error is the one returned; a <code>teardown</code> error is returned only wh
 <dd>A single task panicked. The message starts with <code>"panic:"</code> and carries the panic payload. Fix the broken invariant in the task body.</dd>
 
 <dt>Any other <code>CanoError</code> <small>task error</small></dt>
-<dd>Whatever the task returned, such as <code>TaskExecution</code> or <code>Store</code>. Check the task's own logic.</dd>
+<dd>Whatever the task returned, such as <code>TaskExecution</code> or <code>Blackboard</code>. Check the task's own logic.</dd>
 </dl>
 
 <div class="callout callout-info">

@@ -6,8 +6,8 @@
 //! `use cano::testing::*;`. This example exercises each helper the way a test would:
 //!
 //! - [`RecordingObserver`] — capture and assert the path a workflow took.
-//! - [`InMemoryCheckpointStore`] — a process-local checkpoint store (no `recovery`
-//!   feature, no on-disk file) whose `Checkpoint` events the observer records.
+//! - [`InMemoryCheckpointStore`] — a process-local checkpoint store (no on-disk file)
+//!   whose `Checkpoint` events the observer records.
 //! - [`panic_on_attempt`] — a task that panics; the engine converts it to an error
 //!   (panic safety) and fails fast.
 //! - [`assert_compensation_ran`] — assert the order a saga rolled back in.
@@ -37,8 +37,8 @@ struct WorkTask;
 #[task(state = Step)]
 impl WorkTask {
     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        store.put("processed", 42_u32);
+        let board = res.get::<Blackboard>()?;
+        board.put("processed", 42_u32);
         Ok(Step::Done)
     }
 }
@@ -103,7 +103,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 1. RecordingObserver + InMemoryCheckpointStore --------------------
     let observer = Arc::new(RecordingObserver::new());
     let checkpoints = Arc::new(InMemoryCheckpointStore::new());
-    let resources = Resources::new().insert(MemoryStore::new());
+    let resources = Resources::new().insert(Blackboard::new());
 
     let workflow = Workflow::new(resources)
         .register(Step::Start, StartTask)

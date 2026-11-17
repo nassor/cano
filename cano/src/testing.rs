@@ -15,9 +15,10 @@
 //! | helper | what it gives you |
 //! |---|---|
 //! | [`RecordingObserver`] | a [`WorkflowObserver`] that captures every lifecycle event into an inspectable [`Vec<RecordedEvent>`] |
-//! | [`InMemoryCheckpointStore`] | a process-local [`CheckpointStore`] for resume/recovery tests, with no `recovery` feature or on-disk file needed |
+//! | [`InMemoryCheckpointStore`] | a process-local [`CheckpointStore`] for resume/recovery tests, with no on-disk file needed |
 //! | [`panic_on_attempt`] | a [`PanicOnAttempt`] task factory that panics on its first *N* attempts — exercises the panic-safety path (panics fail fast, they are not retried) |
 //! | [`assert_compensation_ran`] | a saga assertion that compares the recorded compensation order against an expected sequence |
+//! | [`assert_checkpoint_store_contract`] | runs the [`CheckpointStore`] contract against any implementation, yours included |
 //!
 //! This module is **not** in the [`prelude`](crate::prelude) — import it explicitly with
 //! `use cano::testing::*;` so production code never picks these up by accident.
@@ -59,9 +60,9 @@ use std::time::Duration;
 
 use parking_lot::Mutex;
 
+use crate::checkpoint::{CheckpointRow, CheckpointStore};
 use crate::error::CanoError;
 use crate::observer::WorkflowObserver;
-use crate::recovery::{CheckpointRow, CheckpointStore};
 use crate::task::{Task, TaskConfig};
 
 /// A single event captured by [`RecordingObserver`].
@@ -355,7 +356,7 @@ impl WorkflowObserver for RecordingObserver {
 /// A process-local [`CheckpointStore`] for resume /
 /// recovery tests.
 ///
-/// It needs neither the `recovery` feature nor an on-disk file — a single
+/// It needs no on-disk file — a single
 /// `Arc<InMemoryCheckpointStore>` can be shared across an
 /// [`orchestrate`](crate::workflow::Workflow::orchestrate) run and a later
 /// [`resume_from`](crate::workflow::Workflow::resume_from) to exercise the crash-recovery
@@ -532,6 +533,291 @@ pub fn assert_compensation_ran<S: AsRef<str>>(actual: &[S], expected: &[&str]) {
         expected,
         "compensation order mismatch:\n  expected: {expected:?}\n  actual:   {actual_refs:?}"
     );
+}
+
+/// Run the [`CheckpointStore`] contract against `store`.
+///
+/// Use it to test your own backend, or a built-in one against a real server. It uses only
+/// workflow ids of the form `{namespace}/{case}`, clears each of them before and after use,
+/// and leaves every other id alone, so it can run against a shared database. Pick a
+/// `namespace` no workflow uses.
+///
+/// The clauses: an unknown id loads empty and clears as a no-op; every [`CheckpointRow`]
+/// field and [`RowKind`](crate::checkpoint::RowKind) round-trips exactly; rows load sorted by
+/// sequence whatever the append order; a duplicate `(workflow_id, sequence)` is rejected with
+/// a `checkpoint_store` error and leaves the first row in place; ids that share a prefix
+/// (`a`, `a.b`, `a/b`, `ab`) stay isolated, including under `clear`; a cleared id accepts
+/// sequence `0` again; ids with spaces, wildcards, non-ASCII and 200+ characters work;
+/// concurrent appends of distinct sequences all land; of concurrent appends of one sequence
+/// exactly one wins; a 256 KiB blob round-trips.
+///
+/// # Panics
+///
+/// Panics with a message naming the violated clause, or the store error that interrupted it.
+///
+/// ```rust
+/// use cano::testing::{InMemoryCheckpointStore, assert_checkpoint_store_contract};
+///
+/// # #[tokio::main]
+/// # async fn main() {
+/// let store = InMemoryCheckpointStore::new();
+/// assert_checkpoint_store_contract(&store, "contract").await;
+/// # }
+/// ```
+pub async fn assert_checkpoint_store_contract(store: &dyn CheckpointStore, namespace: &str) {
+    let id = |case: &str| format!("{namespace}/{case}");
+    let isolated = ["a", "a.b", "a/b", "ab"].map(id);
+    let awkward = [
+        id(" spaced id"),
+        id("wild*card>"),
+        id("ünï©ode-✓"),
+        id("per%cent=eq"),
+        id(&"x".repeat(200)),
+    ];
+    let mut ids: Vec<String> = [
+        "unknown",
+        "roundtrip",
+        "order",
+        "duplicate",
+        "reuse",
+        "concurrent",
+        "race",
+        "blob",
+    ]
+    .into_iter()
+    .map(id)
+    .collect();
+    ids.extend(isolated.iter().cloned());
+    ids.extend(awkward.iter().cloned());
+    for workflow_id in &ids {
+        must("setup", "clear", store.clear(workflow_id)).await;
+    }
+
+    // 1. Unknown id.
+    let unknown = id("unknown");
+    let rows = must("unknown id", "load_run", store.load_run(&unknown)).await;
+    assert!(
+        rows.is_empty(),
+        "checkpoint store contract [unknown id]: load_run returned {rows:?}"
+    );
+    must("unknown id", "clear", store.clear(&unknown)).await;
+
+    // 2. Every field and kind round-trips.
+    let roundtrip = id("roundtrip");
+    let expected = vec![
+        CheckpointRow::new(0, "Start", "fetch"),
+        CheckpointRow::new(1, "Pay", "charge").with_output(vec![0, 159, 146, 150, 255]),
+        CheckpointRow::new(2, "Step", "stepper").with_cursor(vec![]),
+        CheckpointRow::new(3, "Wait", "approval").suspended(),
+        CheckpointRow::new(4, "Wait", "approval").with_resume_input(br#"{"ok":true}"#.to_vec()),
+        CheckpointRow::new(5, "Ünïcode ✓ state", "task 'quoted' \"x\"")
+            .with_workflow_version(u32::MAX),
+    ];
+    for row in &expected {
+        must(
+            "round trip",
+            "append",
+            store.append(&roundtrip, row.clone()),
+        )
+        .await;
+    }
+    let rows = must("round trip", "load_run", store.load_run(&roundtrip)).await;
+    assert_eq!(
+        rows, expected,
+        "checkpoint store contract [round trip]: loaded rows differ from appended rows"
+    );
+
+    // 3. Sorted by sequence whatever the append order.
+    let order = id("order");
+    for sequence in [2, 0, 1] {
+        let row = CheckpointRow::new(sequence, format!("S{sequence}"), "t");
+        must("sorted load", "append", store.append(&order, row)).await;
+    }
+    let rows = must("sorted load", "load_run", store.load_run(&order)).await;
+    assert_eq!(
+        rows.iter().map(|r| r.sequence).collect::<Vec<_>>(),
+        [0, 1, 2],
+        "checkpoint store contract [sorted load]: rows must load ascending by sequence"
+    );
+
+    // 4. A duplicate sequence is rejected and changes nothing.
+    let duplicate = id("duplicate");
+    let first = CheckpointRow::new(0, "First", "t");
+    must(
+        "duplicate",
+        "append",
+        store.append(&duplicate, first.clone()),
+    )
+    .await;
+    match store
+        .append(&duplicate, CheckpointRow::new(0, "Second", "t"))
+        .await
+    {
+        Err(e) => assert_eq!(
+            e.category(),
+            "checkpoint_store",
+            "checkpoint store contract [duplicate]: wrong error category: {e}"
+        ),
+        Ok(()) => {
+            panic!("checkpoint store contract [duplicate]: a second append at sequence 0 succeeded")
+        }
+    }
+    let next = CheckpointRow::new(1, "Next", "t");
+    must(
+        "duplicate",
+        "append after a conflict",
+        store.append(&duplicate, next.clone()),
+    )
+    .await;
+    let rows = must("duplicate", "load_run", store.load_run(&duplicate)).await;
+    assert_eq!(
+        rows,
+        [first, next],
+        "checkpoint store contract [duplicate]: the rejected append changed the log"
+    );
+
+    // 5. Ids sharing a prefix are isolated, including under `clear`.
+    for (n, workflow_id) in isolated.iter().enumerate() {
+        let row = CheckpointRow::new(0, format!("isolated-{n}"), "t");
+        must("isolation", "append", store.append(workflow_id, row)).await;
+    }
+    must("isolation", "clear", store.clear(&isolated[0])).await;
+    for (n, workflow_id) in isolated.iter().enumerate() {
+        let rows = must("isolation", "load_run", store.load_run(workflow_id)).await;
+        let expected: Vec<CheckpointRow> = if n == 0 {
+            Vec::new()
+        } else {
+            vec![CheckpointRow::new(0, format!("isolated-{n}"), "t")]
+        };
+        assert_eq!(
+            rows, expected,
+            "checkpoint store contract [isolation]: wrong rows for {workflow_id:?} after clearing {:?}",
+            isolated[0]
+        );
+    }
+
+    // 6. A cleared id accepts sequence 0 again.
+    let reuse = id("reuse");
+    must(
+        "reuse after clear",
+        "append",
+        store.append(&reuse, CheckpointRow::new(0, "Old", "t")),
+    )
+    .await;
+    must("reuse after clear", "clear", store.clear(&reuse)).await;
+    let fresh = CheckpointRow::new(0, "New", "t");
+    must(
+        "reuse after clear",
+        "append",
+        store.append(&reuse, fresh.clone()),
+    )
+    .await;
+    let rows = must("reuse after clear", "load_run", store.load_run(&reuse)).await;
+    assert_eq!(
+        rows,
+        [fresh],
+        "checkpoint store contract [reuse after clear]: wrong rows"
+    );
+
+    // 7. Awkward ids round-trip and stay isolated.
+    for (n, workflow_id) in awkward.iter().enumerate() {
+        let row = CheckpointRow::new(0, format!("awkward-{n}"), "t");
+        must("awkward ids", "append", store.append(workflow_id, row)).await;
+    }
+    for (n, workflow_id) in awkward.iter().enumerate() {
+        let rows = must("awkward ids", "load_run", store.load_run(workflow_id)).await;
+        assert_eq!(
+            rows,
+            [CheckpointRow::new(0, format!("awkward-{n}"), "t")],
+            "checkpoint store contract [awkward ids]: wrong rows for {workflow_id:?}"
+        );
+    }
+
+    // 8. Concurrent appends of distinct sequences all land.
+    let concurrent = id("concurrent");
+    let expected: Vec<CheckpointRow> = (0..32)
+        .map(|sequence| CheckpointRow::new(sequence, format!("S{sequence}"), "t"))
+        .collect();
+    let results = futures_util::future::join_all(
+        expected
+            .iter()
+            .map(|row| store.append(&concurrent, row.clone())),
+    )
+    .await;
+    for (sequence, result) in results.into_iter().enumerate() {
+        if let Err(e) = result {
+            panic!(
+                "checkpoint store contract [concurrent appends]: append of sequence {sequence} failed: {e}"
+            );
+        }
+    }
+    let rows = must(
+        "concurrent appends",
+        "load_run",
+        store.load_run(&concurrent),
+    )
+    .await;
+    assert_eq!(
+        rows, expected,
+        "checkpoint store contract [concurrent appends]: wrong rows"
+    );
+
+    // 9. Of concurrent appends of one sequence, exactly one wins.
+    let race = id("race");
+    let racers: Vec<CheckpointRow> = (0..8)
+        .map(|n| CheckpointRow::new(0, format!("racer-{n}"), "t"))
+        .collect();
+    let results =
+        futures_util::future::join_all(racers.iter().map(|row| store.append(&race, row.clone())))
+            .await;
+    let mut winners = Vec::new();
+    for (n, result) in results.into_iter().enumerate() {
+        match result {
+            Ok(()) => winners.push(n),
+            Err(e) => assert_eq!(
+                e.category(),
+                "checkpoint_store",
+                "checkpoint store contract [duplicate race]: wrong error category: {e}"
+            ),
+        }
+    }
+    assert_eq!(
+        winners.len(),
+        1,
+        "checkpoint store contract [duplicate race]: {} of 8 appends at one sequence succeeded",
+        winners.len()
+    );
+    let rows = must("duplicate race", "load_run", store.load_run(&race)).await;
+    assert_eq!(
+        rows,
+        [racers[winners[0]].clone()],
+        "checkpoint store contract [duplicate race]: the stored row is not the winner's"
+    );
+
+    // 10. A large blob round-trips.
+    let blob = id("blob");
+    let big = CheckpointRow::new(0, "Big", "t")
+        .with_output((0..256 * 1024).map(|i| (i % 251) as u8).collect());
+    must("large blob", "append", store.append(&blob, big.clone())).await;
+    let rows = must("large blob", "load_run", store.load_run(&blob)).await;
+    assert!(
+        rows == [big],
+        "checkpoint store contract [large blob]: the 256 KiB blob did not round-trip"
+    );
+
+    for workflow_id in &ids {
+        must("cleanup", "clear", store.clear(workflow_id)).await;
+    }
+}
+
+/// Await a store call inside the contract suite, panicking with the clause name on `Err`.
+async fn must<T>(
+    clause: &str,
+    what: &str,
+    call: impl std::future::Future<Output = Result<T, CanoError>>,
+) -> T {
+    call.await
+        .unwrap_or_else(|e| panic!("checkpoint store contract [{clause}]: {what} failed: {e}"))
 }
 
 #[cfg(test)]
@@ -799,5 +1085,10 @@ mod tests {
         wf.orchestrate(S::A).await.unwrap();
         let missing = observer.assert_registered_states_entered(&wf).unwrap_err();
         assert!(missing.contains(&"C".to_string()), "missing={missing:?}");
+    }
+
+    #[tokio::test]
+    async fn in_memory_store_meets_the_checkpoint_store_contract() {
+        assert_checkpoint_store_contract(&InMemoryCheckpointStore::new(), "contract").await;
     }
 }

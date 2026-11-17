@@ -38,7 +38,7 @@ The engine is built on three core concepts: **Tasks** for logic, **Workflows** f
 - **Circuit Breaker**: Shared `CircuitBreaker` short-circuits calls to failing dependencies before the retry loop, with configurable failure threshold, cool-down, and half-open probing.
 - **Rate Limiting**: Token-bucket (`RateLimiter`) and fixed-window (`WindowedRateLimiter`) throttles that compose into a `MultiRateLimiter` enforcing several weighted tiers at once.
 - **Built-in Scheduling**: Cron, interval and manual triggers for background jobs, with a bounded graceful stop (drain, then cancel, then abort).
-- **Crash Recovery**: Pluggable `CheckpointStore` records every FSM state entry; `Workflow::resume_from` rehydrates a crashed run and continues. Ships with an embedded, ACID `RedbCheckpointStore` behind the `recovery` feature.
+- **Crash Recovery**: Pluggable `CheckpointStore` records every FSM state entry; `Workflow::resume_from` rehydrates a crashed run and continues. Built-in stores in `cano::store`: the embedded `RedbStore` (`store-redb`, on by default), `PostgresStore` (`store-postgres`) and the NATS JetStream `NatsStore` (`store-nats`).
 - **Sagas / Compensation**: Pair a forward step with a `compensate` action via `CompensatableTask`; if a later step fails, the engine rolls back the work already done in reverse order (and replays the rollback across a crash when checkpointing is on).
 - **Observability**: Optional `tracing` (spans + events, plus `TracingObserver`) and `metrics` (a `MetricsObserver` plus low-cardinality counters / histograms / gauges via the [`metrics`](https://docs.rs/metrics) facade) features for deep insight into workflow, task, retry, split/join, circuit-breaker, scheduler, processing-loop, recovery and saga internals; plus synchronous `WorkflowObserver` hooks for lifecycle/failure events and `Resource::health()` probes (`Resources::check_all_health`).
 - **Performance-Focused**: Minimizes heap allocations by leveraging stack-based objects wherever possible, giving you control over where allocations occur.
@@ -98,8 +98,8 @@ impl FetchPriceTask {
     }
 
     async fn run(&self, res: &Resources) -> Result<FlowState, CanoError> {
-        // Look up the shared store from the workflow's resources by type.
-        let store = res.get::<MemoryStore>()?;
+        // Look up the shared blackboard from the workflow's resources by type.
+        let board = res.get::<Blackboard>()?;
 
         // Simulate the network round-trip.
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -113,7 +113,7 @@ impl FetchPriceTask {
             )));
         }
 
-        store.put(&format!("quotes_{}", self.exchange), self.quotes.to_vec());
+        board.put(&format!("quotes_{}", self.exchange), self.quotes.to_vec());
         Ok(FlowState::Aggregate)
     }
 }
@@ -127,19 +127,19 @@ struct AggregatePricesTask {
 #[task(state = FlowState)]
 impl AggregatePricesTask {
     async fn run(&self, res: &Resources) -> Result<FlowState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
 
         let batches: Vec<Vec<f64>> = self
             .exchanges
             .iter()
-            .filter_map(|exchange| store.get::<Vec<f64>>(&format!("quotes_{exchange}")).ok())
+            .filter_map(|exchange| board.get::<Vec<f64>>(&format!("quotes_{exchange}")).ok())
             .collect();
         let reporting = batches.len();
         let total = self.exchanges.len();
 
         let quotes: Vec<f64> = batches.into_iter().flatten().collect();
         let reference = quotes.iter().sum::<f64>() / quotes.len() as f64;
-        store.put("average_price", reference);
+        board.put("average_price", reference);
         println!(
             "Reference {reference:.2} from {} quotes across {reporting}/{total} exchanges",
             quotes.len()
@@ -191,7 +191,7 @@ impl MonitorTicksTask {
     // Per-item work: how far this tick strays from the reference the split produced.
     // The returned cursor is the position to commit once this item's window flushes.
     async fn process_item(&self, res: &Resources, item: Tick) -> Result<(f64, u64), CanoError> {
-        let reference: f64 = res.get::<MemoryStore>()?.get("average_price")?;
+        let reference: f64 = res.get::<Blackboard>()?.get("average_price")?;
         Ok(((item.price - reference) / reference * 100.0, item.seq))
     }
 
@@ -201,7 +201,7 @@ impl MonitorTicksTask {
         res: &Resources,
         deviations: Vec<f64>,
     ) -> Result<WindowSignal<FlowState>, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         let outliers = deviations.iter().filter(|d| d.abs() >= ALERT_PCT).count();
         let worst = deviations.iter().fold(0.0f64, |acc, d| acc.max(d.abs()));
         println!(
@@ -209,14 +209,14 @@ impl MonitorTicksTask {
             deviations.len()
         );
 
-        let seen: usize = store.get("outliers").unwrap_or(0);
-        store.put("outliers", seen + outliers);
+        let seen: usize = board.get("outliers").unwrap_or(0);
+        board.put("outliers", seen + outliers);
         Ok(WindowSignal::Continue)
     }
 
     // The feed ran dry: the partial window is flushed, then this picks the next state.
     async fn on_close(&self, res: &Resources, reason: CloseReason) -> Result<FlowState, CanoError> {
-        let total: usize = res.get::<MemoryStore>()?.get("outliers").unwrap_or(0);
+        let total: usize = res.get::<Blackboard>()?.get("outliers").unwrap_or(0);
         println!("Tick feed closed ({reason:?}): {total} outlier(s) beyond {ALERT_PCT:.0}%");
         Ok(FlowState::Complete)
     }
@@ -225,7 +225,7 @@ impl MonitorTicksTask {
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     // 1. Register shared resources, keyed by type.
-    let resources = Resources::new().insert(MemoryStore::new());
+    let resources = Resources::new().insert(Blackboard::new());
 
     // 2. Build one fetch task per exchange, each carrying its own retry budget.
     let exchanges: Vec<&'static str> = EXCHANGES.iter().map(|&(name, _, _)| name).collect();

@@ -180,12 +180,12 @@ impl ApiClientTask {
     async fn run(&self, res: &Resources) -> Result<State, CanoError> {
         println!("Calling API: {}", self.endpoint);
 
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
 
         // Replace this with your HTTP client of choice (reqwest, hyper, etc.)
         let data = String::new();
 
-        store.put("api_response", data);
+        board.put("api_response", data);
         println!("API call successful");
 
         Ok(State::Complete)

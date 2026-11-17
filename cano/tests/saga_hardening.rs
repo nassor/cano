@@ -1,14 +1,14 @@
 //! Saga / compensation hardening: many compensatable workflows concurrently against a
 //! shared ledger with failures injected at every possible step, plus crash-and-resume of
 //! a compensatable run against a real redb file (the resume point must not compensate
-//! itself twice). The `recovery` parts are gated behind that feature.
+//! itself twice).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use cano::prelude::*;
 
-// -- shared, clone-shares-its-data ledger (the `MemoryStore` pattern) --
+// -- shared, clone-shares-its-data ledger (the `Blackboard` pattern) --
 
 #[derive(Clone, Default)]
 struct Ledger(Arc<Mutex<HashMap<String, i64>>>);
@@ -137,10 +137,10 @@ async fn many_compensatable_workflows_concurrent_with_injected_failures() {
 
 // -- crash / resume with no double compensation (real redb file) --
 
-#[cfg(feature = "recovery")]
+#[cfg(feature = "store-redb")]
 mod recovery {
     use super::*;
-    use cano::RedbCheckpointStore;
+    use cano::RedbStore;
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     enum St {
@@ -195,7 +195,7 @@ mod recovery {
         // Seed a log that crashed *after* B's completion row but *before* the next state's
         // entry row: A entry@0, A completion@1 (out 1), B entry@2, B completion@3 (out 2).
         {
-            let seed = RedbCheckpointStore::new(&db).unwrap();
+            let seed = RedbStore::new(&db).unwrap();
             seed.append("g", CheckpointRow::new(0, "Start", "A"))
                 .await
                 .unwrap();
@@ -220,7 +220,7 @@ mod recovery {
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
         // Keep our own handle to the same store so we can inspect it after the run without
         // opening a *second* `Database` on the file (which redb would reject).
-        let store = Arc::new(RedbCheckpointStore::new(&db).unwrap());
+        let store = Arc::new(RedbStore::new(&db).unwrap());
         let wf = Workflow::new(Resources::new().insert(LogRes(log.clone())))
             .register(
                 St::Start,

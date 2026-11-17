@@ -60,9 +60,9 @@ mod timer_task_impl;
 ///
 /// #[derive(FromResources)]
 /// struct Deps {
-///     store: Arc<MemoryStore>,
+///     board: Arc<Blackboard>,
 ///     #[res("audit")]
-///     audit: Arc<MemoryStore>,
+///     audit: Arc<Blackboard>,
 /// }
 /// ```
 #[proc_macro_derive(FromResources, attributes(res))]

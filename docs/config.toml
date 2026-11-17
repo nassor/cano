@@ -47,8 +47,8 @@ path = "@/resources/_index.md"
 title = "Lifecycle and concurrency"
 path = "@/resources/lifecycle-and-concurrency.md"
 [[extra.nav.items.children]]
-title = "MemoryStore"
-path = "@/store/_index.md"
+title = "Blackboard"
+path = "@/blackboard/_index.md"
 [[extra.nav.items]]
 title = "Workflows"
 path = "@/workflows/_index.md"

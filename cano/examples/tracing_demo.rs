@@ -54,7 +54,7 @@ impl TracedDataProcessorTask {
     }
 
     async fn run(&self, res: &Resources) -> Result<WorkflowState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
 
         info!(processor_id = %self.processor_id, "Starting data preparation");
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -64,7 +64,7 @@ impl TracedDataProcessorTask {
             "record_2".to_string(),
             "record_3".to_string(),
         ];
-        store.put("prep_timestamp", chrono::Utc::now().to_rfc3339());
+        board.put("prep_timestamp", chrono::Utc::now().to_rfc3339());
         info!(processor_id = %self.processor_id, record_count = data.len(), "Data preparation completed");
 
         // Process with custom span
@@ -83,8 +83,8 @@ impl TracedDataProcessorTask {
 
         info!(processor_id = %self.processor_id, "Starting post-processing");
         let result_summary = format!("Processed {} records", processed_data.len());
-        store.put("processing_result", result_summary);
-        store.put("completion_timestamp", chrono::Utc::now().to_rfc3339());
+        board.put("processing_result", result_summary);
+        board.put("completion_timestamp", chrono::Utc::now().to_rfc3339());
         tokio::time::sleep(Duration::from_millis(30)).await;
         info!(processor_id = %self.processor_id, processed_count = processed_data.len(), "Post-processing completed");
 
@@ -144,16 +144,16 @@ impl SimpleMathTask {
     }
 
     async fn run(&self, res: &Resources) -> Result<WorkflowState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
 
         info!(task_id = %self.task_id, operation = %self.operation, "Starting math task");
 
         // Simulate some computation work
         tokio::time::sleep(Duration::from_millis(150)).await;
 
-        // Get operands from store or use defaults
-        let a: i32 = store.get("operand_a").unwrap_or(10);
-        let b: i32 = store.get("operand_b").unwrap_or(5);
+        // Get operands from the blackboard or use defaults
+        let a: i32 = board.get("operand_a").unwrap_or(10);
+        let b: i32 = board.get("operand_b").unwrap_or(5);
 
         let result = match self.operation.as_str() {
             "add" => a + b,
@@ -165,8 +165,8 @@ impl SimpleMathTask {
             }
         };
 
-        store.put("math_result", result);
-        store.put("task_completed_by", self.task_id.clone());
+        board.put("math_result", result);
+        board.put("task_completed_by", self.task_id.clone());
 
         info!(
             task_id = %self.task_id,
@@ -202,8 +202,8 @@ async fn main() -> CanoResult<()> {
     {
         info!("Example 1: Basic Workflow with Tracing");
 
-        let store = MemoryStore::new();
-        let resources = Resources::new().insert(store.clone());
+        let board = Blackboard::new();
+        let resources = Resources::new().insert(board.clone());
         let workflow = Workflow::new(resources)
             .register(WorkflowState::Start, ValidationTask::new(true))
             .register(
@@ -223,10 +223,10 @@ async fn main() -> CanoResult<()> {
     {
         info!("Example 2: Task-based Workflow with Tracing, Retry, and with_tracing_span");
 
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
         // Set some operands for the math task
-        store.put("operand_a", 7);
-        store.put("operand_b", 6);
+        board.put("operand_a", 7);
+        board.put("operand_b", 6);
 
         // Build a span with a business field so every log event inside this
         // workflow run is decorated with `workflow_id` in structured output.
@@ -236,7 +236,7 @@ async fn main() -> CanoResult<()> {
             operation = "multiply"
         );
 
-        let resources = Resources::new().insert(store.clone());
+        let resources = Resources::new().insert(board.clone());
         let task_workflow = Workflow::new(resources)
             .register(
                 WorkflowState::Start,
@@ -250,8 +250,8 @@ async fn main() -> CanoResult<()> {
         info!("Starting task-based workflow execution (with custom span)...");
         let result = task_workflow.orchestrate(WorkflowState::Start).await?;
 
-        let math_result: i32 = store.get("math_result").unwrap_or(0);
-        let completed_by: String = store.get("task_completed_by").unwrap_or_default();
+        let math_result: i32 = board.get("math_result").unwrap_or(0);
+        let completed_by: String = board.get("task_completed_by").unwrap_or_default();
 
         info!(
             final_state = ?result,
@@ -272,8 +272,8 @@ async fn main() -> CanoResult<()> {
         info!("Example 3: Scheduler with Workflow Tracing");
 
         let scheduler = Scheduler::new();
-        let store = MemoryStore::new();
-        let resources = Resources::new().insert(store.clone());
+        let board = Blackboard::new();
+        let resources = Resources::new().insert(board.clone());
 
         // Create a workflow for scheduled execution
         let scheduled_workflow = Workflow::new(resources)
@@ -318,8 +318,8 @@ async fn main() -> CanoResult<()> {
     {
         info!("Example 4: Error Handling with Tracing");
 
-        let store = MemoryStore::new();
-        let resources = Resources::new().insert(store);
+        let board = Blackboard::new();
+        let resources = Resources::new().insert(board);
         let error_workflow = Workflow::new(resources)
             .register(WorkflowState::Start, ValidationTask::new(false)) // This will fail
             .register(
@@ -349,10 +349,10 @@ async fn main() -> CanoResult<()> {
     {
         info!("Example 5: TracingObserver (events under the `cano::observer` target)");
 
-        let store = MemoryStore::new();
-        store.put("operand_a", 3);
-        store.put("operand_b", 4);
-        let resources = Resources::new().insert(store.clone());
+        let board = Blackboard::new();
+        board.put("operand_a", 3);
+        board.put("operand_b", 4);
+        let resources = Resources::new().insert(board.clone());
 
         let observed_workflow = Workflow::new(resources)
             .register(

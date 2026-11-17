@@ -13,7 +13,7 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use cano_e2e::{Faults, Phase, PostgresCheckpointStore, StdoutTracer, build_workflow};
+use cano_e2e::{Faults, Phase, StdoutTracer, build_workflow};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -39,13 +39,13 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Postgres may still be coming up — retry the first connect for a while.
-    let store = {
-        let mut store = None;
+    let (store, db) = {
+        let mut connected = None;
         let mut last_err = None;
         for _ in 0..40 {
-            match PostgresCheckpointStore::connect(&dsn).await {
-                Ok(s) => {
-                    store = Some(s);
+            match cano_e2e::connect(&dsn).await {
+                Ok(pair) => {
+                    connected = Some(pair);
                     break;
                 }
                 Err(e) => {
@@ -54,11 +54,11 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
         }
-        store.ok_or_else(|| last_err.expect("at least one connect attempt"))?
+        connected.ok_or_else(|| last_err.expect("at least one connect attempt"))?
     };
 
-    let workflow =
-        build_workflow(store, &workflow_id, faults).with_observer(Arc::new(StdoutTracer::new()));
+    let workflow = build_workflow(store, db, &workflow_id, faults)
+        .with_observer(Arc::new(StdoutTracer::new()));
     emit(&format!("READY {workflow_id} {mode}"));
 
     let result = match mode.as_str() {

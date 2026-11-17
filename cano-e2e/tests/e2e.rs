@@ -1,7 +1,7 @@
 //! End-to-end hardening of crash recovery + sagas, using Docker via `testcontainers`:
 //!
 //! - a Postgres container is the [`cano::CheckpointStore`] backend
-//!   (`cano_e2e::PostgresCheckpointStore`);
+//!   (`cano::store::postgres::PostgresStore`);
 //! - the workflow runs inside a separate container — the `cano_workflow_app` binary
 //!   (built from `../Dockerfile`) — so we can stop it mid-flight and restart it to resume;
 //! - the test process connects to the Postgres container directly to assert on the
@@ -11,13 +11,15 @@
 //! the app image first; locally it's built on demand (see [`ensure_app_image`]).
 //! Run with `cargo test -p cano-e2e --test e2e -- --test-threads=1`.
 
+mod support;
+
 use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use cano_e2e::{UNITS, events, ledger_balance};
+use support::unique;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
@@ -48,16 +50,6 @@ fn ensure_app_image() {
             .expect("run `docker build` (is Docker installed and running?)");
         assert!(status.success(), "docker build failed");
     });
-}
-
-/// Unique suffix so concurrently-running tests don't collide on container / network names.
-fn unique(prefix: &str) -> String {
-    static N: AtomicU32 = AtomicU32::new(0);
-    format!(
-        "{prefix}-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    )
 }
 
 /// A scenario fixture: a Postgres container plus a private network app containers join.

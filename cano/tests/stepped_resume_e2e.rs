@@ -10,16 +10,16 @@
 //! restarting from `None`.
 //!
 //! Unix-only (relies on `Child::kill` delivering SIGKILL) and requires the
-//! `recovery` feature (the child binary uses `RedbCheckpointStore`).
-#![cfg(all(feature = "recovery", unix))]
+//! `testing` and `store-redb` features, which build the `stepped_resume` child binary.
+#![cfg(all(feature = "testing", feature = "store-redb", unix))]
 
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use cano::RedbCheckpointStore;
-use cano::recovery::{CheckpointStore, RowKind};
+use cano::RedbStore;
+use cano::checkpoint::{CheckpointStore, RowKind};
 
 const BIN: &str = env!("CARGO_BIN_EXE_stepped_resume");
 const WORKFLOW_ID: &str = "stepped-run";
@@ -82,7 +82,7 @@ fn sigkill_then_resume_continues_from_persisted_cursor() {
             .build()
             .unwrap();
         rt.block_on(async {
-            let store = Arc::new(RedbCheckpointStore::new(&db).expect("open redb after kill"));
+            let store = Arc::new(RedbStore::new(&db).expect("open redb after kill"));
             let rows = store
                 .load_run(WORKFLOW_ID)
                 .await

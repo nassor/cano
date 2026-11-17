@@ -370,10 +370,10 @@ nothing.
 
 ```rust
 use cano::prelude::*;
-use cano::RedbCheckpointStore;            // requires the `recovery` feature
+use cano::RedbStore;
 use std::sync::Arc;
 
-let checkpoint_store = RedbCheckpointStore::new("/var/lib/myapp/checkpoints.redb")?;
+let checkpoint_store = RedbStore::new("/var/lib/myapp/cano.redb")?;
 let workflow = Workflow::new(resources)
     .with_checkpoint_store(Arc::new(checkpoint_store))
     .with_workflow_id("event-consumer")

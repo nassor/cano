@@ -1,19 +1,19 @@
-//! # Custom Store Backend and `get_shared`
+//! # Namespaced Blackboard and `get_shared`
 //!
-//! Run with: `cargo run --example store_custom_backend`
+//! Run with: `cargo run --example blackboard_namespaced`
 //!
-//! Two related store demonstrations in one example:
+//! Two related blackboard demonstrations in one example:
 //!
-//! ## Part 1 — `NamespacedStore`
+//! ## Part 1 — `NamespacedBoard`
 //!
-//! A custom resource that wraps a [`MemoryStore`] and automatically prefixes every
-//! key with a namespace string. Two tasks share the same underlying `MemoryStore`
+//! A custom resource that wraps a [`Blackboard`] and automatically prefixes every
+//! key with a namespace string. Two tasks share the same underlying `Blackboard`
 //! but each sees only its own namespace, avoiding accidental key collisions without
 //! requiring per-task key-naming conventions.
 //!
-//! ## Part 2 — `MemoryStore::get_shared` and `Arc::ptr_eq`
+//! ## Part 2 — `Blackboard::get_shared` and `Arc::ptr_eq`
 //!
-//! [`MemoryStore::get_shared::<T>`] returns an `Arc<T>` pointing at the same
+//! [`Blackboard::get_shared::<T>`] returns an `Arc<T>` pointing at the same
 //! allocation that was stored with `put`. Cloning the `Arc` is O(1) — no copying
 //! of the underlying value. Two `get_shared` calls on the same key return arcs that
 //! are `ptr_eq` to each other, proving they reference the same heap allocation.
@@ -22,20 +22,20 @@ use cano::prelude::*;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
-// Part 1: NamespacedStore resource
+// Part 1: NamespacedBoard resource
 // ---------------------------------------------------------------------------
 
-/// Wraps a [`MemoryStore`] and prefixes every key with `"{namespace}/"`.
+/// Wraps a [`Blackboard`] and prefixes every key with `"{namespace}/"`.
 ///
-/// Multiple `NamespacedStore` instances can share one `MemoryStore` without
+/// Multiple `NamespacedBoard` instances can share one `Blackboard` without
 /// key collisions as long as their namespaces differ.
-struct NamespacedStore {
+struct NamespacedBoard {
     namespace: String,
-    inner: MemoryStore,
+    inner: Blackboard,
 }
 
-impl NamespacedStore {
-    fn new(namespace: impl Into<String>, inner: MemoryStore) -> Self {
+impl NamespacedBoard {
+    fn new(namespace: impl Into<String>, inner: Blackboard) -> Self {
         Self {
             namespace: namespace.into(),
             inner,
@@ -53,12 +53,12 @@ impl NamespacedStore {
         let namespaced = format!("{}/{key}", self.namespace);
         self.inner
             .get(&namespaced)
-            .map_err(|e| CanoError::store(format!("{e}")))
+            .map_err(|e| CanoError::blackboard(format!("{e}")))
     }
 }
 
 #[resource]
-impl Resource for NamespacedStore {}
+impl Resource for NamespacedBoard {}
 
 // ---------------------------------------------------------------------------
 // State enum
@@ -75,7 +75,7 @@ enum Step {
 }
 
 // ---------------------------------------------------------------------------
-// Part 1 tasks — use NamespacedStore
+// Part 1 tasks — use NamespacedBoard
 // ---------------------------------------------------------------------------
 
 struct WriterA;
@@ -83,9 +83,9 @@ struct WriterA;
 #[task(state = Step)]
 impl WriterA {
     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
-        let store = res.get_named::<NamespacedStore>("ns_a")?;
-        store.put("result", 100u32);
-        store.put("label", "from-writer-a".to_string());
+        let board = res.get_named::<NamespacedBoard>("ns_a")?;
+        board.put("result", 100u32);
+        board.put("label", "from-writer-a".to_string());
         println!("  WriterA: wrote result=100, label='from-writer-a' in namespace 'a'");
         Ok(Step::WriteB)
     }
@@ -96,10 +96,10 @@ struct WriterB;
 #[task(state = Step)]
 impl WriterB {
     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
-        let store = res.get_named::<NamespacedStore>("ns_b")?;
+        let board = res.get_named::<NamespacedBoard>("ns_b")?;
         // Same key names as WriterA, but a different namespace — no collision.
-        store.put("result", 200u32);
-        store.put("label", "from-writer-b".to_string());
+        board.put("result", 200u32);
+        board.put("label", "from-writer-b".to_string());
         println!("  WriterB: wrote result=200, label='from-writer-b' in namespace 'b'");
         Ok(Step::ReadBack)
     }
@@ -110,8 +110,8 @@ struct ReadBack;
 #[task(state = Step)]
 impl ReadBack {
     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
-        let ns_a = res.get_named::<NamespacedStore>("ns_a")?;
-        let ns_b = res.get_named::<NamespacedStore>("ns_b")?;
+        let ns_a = res.get_named::<NamespacedBoard>("ns_a")?;
+        let ns_b = res.get_named::<NamespacedBoard>("ns_b")?;
 
         let a_result: u32 = ns_a.get("result")?;
         let a_label: String = ns_a.get("label")?;
@@ -148,15 +148,15 @@ impl LargePayload {
     }
 }
 
-/// Stores a `LargePayload` in the `MemoryStore` via `put`.
+/// Stores a `LargePayload` in the `Blackboard` via `put`.
 struct LoadLarge;
 
 #[task(state = Step)]
 impl LoadLarge {
     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         let payload = LargePayload::new(1_000_000); // 1 MiB
-        store.put("payload", payload);
+        board.put("payload", payload);
         println!("  LoadLarge: stored 1 MiB payload");
         Ok(Step::SharedArc)
     }
@@ -169,12 +169,12 @@ struct SharedArc;
 #[task(state = Step)]
 impl SharedArc {
     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
 
         // First Arc — points at the stored allocation.
-        let arc1: Arc<LargePayload> = store.get_shared("payload")?;
+        let arc1: Arc<LargePayload> = board.get_shared("payload")?;
         // Second Arc — must be ptr_eq to arc1: no copy, same heap address.
-        let arc2: Arc<LargePayload> = store.get_shared("payload")?;
+        let arc2: Arc<LargePayload> = board.get_shared("payload")?;
 
         println!("  SharedArc: arc1 data length = {} bytes", arc1.data.len());
         println!("  SharedArc: arc2 data length = {} bytes", arc2.data.len());
@@ -199,18 +199,18 @@ impl SharedArc {
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    println!("=== Custom Store Backend and get_shared Demo ===\n");
+    println!("=== Namespaced Blackboard and get_shared Demo ===\n");
 
-    // Shared underlying store — both namespaced views point at it.
-    let shared_mem = MemoryStore::new();
+    // Shared underlying blackboard — both namespaced views point at it.
+    let shared_mem = Blackboard::new();
 
     let resources = Resources::new()
         .insert(shared_mem.clone())
-        // Two `NamespacedStore`s of one type: each needs a name.
-        .insert_named("ns_a", NamespacedStore::new("a", shared_mem.clone()))
-        .insert_named("ns_b", NamespacedStore::new("b", shared_mem.clone()));
+        // Two `NamespacedBoard`s of one type: each needs a name.
+        .insert_named("ns_a", NamespacedBoard::new("a", shared_mem.clone()))
+        .insert_named("ns_b", NamespacedBoard::new("b", shared_mem.clone()));
 
-    println!("-- Part 1: NamespacedStore (key isolation) --");
+    println!("-- Part 1: NamespacedBoard (key isolation) --");
     let workflow = Workflow::new(resources)
         .register(Step::WriteA, WriterA)
         .register(Step::WriteB, WriterB)
@@ -219,7 +219,7 @@ async fn main() -> Result<(), CanoError> {
         .register(Step::SharedArc, SharedArc)
         .add_exit_state(Step::Done);
 
-    println!("\n-- Part 2: MemoryStore::get_shared (Arc zero-copy sharing) --");
+    println!("\n-- Part 2: Blackboard::get_shared (Arc zero-copy sharing) --");
     let result = workflow.orchestrate(Step::WriteA).await?;
     println!("\ncompleted at {result:?}");
 

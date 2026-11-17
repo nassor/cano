@@ -8,8 +8,8 @@
 //! (which is before the resume point).
 //!
 //! Unix-only (relies on `Child::kill` delivering SIGKILL) and requires the
-//! `recovery` feature (the child binary uses `RedbCheckpointStore`).
-#![cfg(all(feature = "recovery", unix))]
+//! `testing` and `store-redb` features, which build the `recovery_resume` child binary.
+#![cfg(all(feature = "testing", feature = "store-redb", unix))]
 
 use std::io::{BufRead, BufReader};
 use std::path::Path;

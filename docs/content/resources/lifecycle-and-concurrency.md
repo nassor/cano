@@ -191,8 +191,8 @@ resource instances, so a DB pool opens once and serves every run.
 <div class="callout-label">Per-run state under the scheduler</div>
 <p>
 Resources persist across runs, so anything accumulated in one carries forward: counters, cached state, the contents
-of a <code>MemoryStore</code>. To reset per run, clear it at the start of the workflow, for example with
-<code>store.clear()</code> in the initial task.
+of a <code>Blackboard</code>. To reset per run, clear it at the start of the workflow, for example with
+<code>board.clear()</code> in the initial task.
 </p>
 </div>
 

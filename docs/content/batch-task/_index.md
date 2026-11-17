@@ -169,8 +169,8 @@ impl FetchUrls {
     fn item_retry(&self) -> RetryMode { RetryMode::fixed(2, Duration::from_millis(50)) }
 
     async fn load(&self, res: &Resources) -> Result<Vec<String>, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        Ok(store.get("urls")?)
+        let board = res.get::<Blackboard>()?;
+        Ok(board.get("urls")?)
     }
 
     async fn process_item(&self, url: &String) -> Result<usize, CanoError> {
@@ -183,8 +183,8 @@ impl FetchUrls {
     {
         let ok = outputs.iter().filter(|r| r.is_ok()).count();
         let total: usize = outputs.iter().filter_map(|r| r.as_ref().ok()).sum();
-        let store = res.get::<MemoryStore>()?;
-        store.put("total_bytes", total);
+        let board = res.get::<Blackboard>()?;
+        board.put("total_bytes", total);
         if ok * 2 >= outputs.len() {                 // partial-failure policy: ≥ 50% must succeed
             Ok(Step::Summarise)
         } else {
@@ -294,8 +294,8 @@ impl BatchTask<Step> for FetchUrls {
     fn concurrency(&self) -> usize { 8 }
 
     async fn load(&self, res: &Resources) -> Result<Vec<String>, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        Ok(store.get("urls")?)
+        let board = res.get::<Blackboard>()?;
+        Ok(board.get("urls")?)
     }
 
     async fn process_item(&self, url: &String) -> Result<usize, CanoError> {

@@ -49,8 +49,8 @@ ecosystem, see <a href="../observers/">Observers</a>. Attach
 
 <h2 id="setup"><a href="#setup" class="anchor-link" aria-hidden="true">#</a>Setup</h2>
 <p>Enable the <code>metrics</code> feature in your <code>Cargo.toml</code>. <code>features = ["all"]</code>
-enables every optional feature (<code>scheduler</code>, <code>tracing</code>, <code>recovery</code>,
-<code>metrics</code> and <code>testing</code>).</p>
+enables every optional feature (<code>scheduler</code>, <code>tracing</code>, <code>store-redb</code>,
+<code>store-postgres</code>, <code>store-nats</code>, <code>metrics</code> and <code>testing</code>).</p>
 
 ```toml
 [dependencies]

@@ -104,7 +104,7 @@ impl InherentWithKey {
         res: &Resources,
         _cursor: Option<u64>,
     ) -> Result<Pin<Box<dyn Stream<Item = u32> + Send>>, CanoError> {
-        let _ = res.get::<MemoryStore>();
+        let _ = res.get::<Blackboard>();
         Ok(Box::pin(stream::iter(vec![10u32, 20, 30, 40]))
             as Pin<Box<dyn Stream<Item = u32> + Send>>)
     }

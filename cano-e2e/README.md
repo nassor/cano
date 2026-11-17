@@ -7,7 +7,7 @@ explicitly with `-p cano-e2e`.
 
 ## What's here
 
-- **`src/lib.rs` — `PostgresCheckpointStore`**: a real `cano::CheckpointStore` over
+- **`src/lib.rs` — `PostgresStore`**: a real `cano::CheckpointStore` over
   Postgres (`tokio-postgres`). Demonstrates the pluggable storage contract; its primary key
   on `(workflow_id, sequence)` enforces the no-duplicate-checkpoint rule at the database
   level. The `kind` column (`SMALLINT NOT NULL DEFAULT 0`) maps `RowKind` to an integer

@@ -1,8 +1,8 @@
 //! # Saga + Recovery — Compensatable Tasks with a Persistent Checkpoint Log
 //!
-//! Run with: `cargo run --example saga_recovery --features recovery`
+//! Run with: `cargo run --example saga_recovery`
 //!
-//! Combines [`CompensatableTask`] (saga) with [`RedbCheckpointStore`] (recovery) to show
+//! Combines [`CompensatableTask`] (saga) with [`RedbStore`] (recovery) to show
 //! what happens when a workflow fails partway through a chain of compensatable steps:
 //!
 //! - Compensations drain the stack **LIFO** — the most recent step rolls back first.
@@ -24,7 +24,7 @@
 
 use std::sync::Arc;
 
-use cano::RedbCheckpointStore;
+use cano::RedbStore;
 use cano::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -144,7 +144,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Build a unique path in the OS temp dir so multiple runs don't collide.
     let db_path =
         std::env::temp_dir().join(format!("cano_saga_recovery_{}.redb", std::process::id()));
-    let checkpoint_store = Arc::new(RedbCheckpointStore::new(&db_path)?);
+    let checkpoint_store = Arc::new(RedbStore::new(&db_path)?);
     let run_id = "saga-recovery-demo";
 
     println!("=== Saga + Recovery Demo ===");
@@ -180,7 +180,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    // Clean up the temp file — `RedbCheckpointStore` is not a `tempfile`.
+    // Clean up the temp file — `RedbStore` is not a `tempfile`.
     std::fs::remove_file(&db_path).ok();
 
     println!("\n=== Done ===");

@@ -18,11 +18,11 @@
 //!
 //! let resources = Resources::new()
 //!     .insert(Settings { batch: 3 })
-//!     .insert(MemoryStore::new());
+//!     .insert(Blackboard::new());
 //!
 //! let settings: &Settings = resources.get::<Settings>().unwrap();
 //! assert_eq!(settings.batch, 3);
-//! resources.get::<MemoryStore>().unwrap().put("n", settings.batch);
+//! resources.get::<Blackboard>().unwrap().put("n", settings.batch);
 //! ```
 //!
 //! A second instance of a type already present needs a name: insert it with
@@ -33,11 +33,11 @@
 //! use cano::prelude::*;
 //!
 //! let resources = Resources::new()
-//!     .insert(MemoryStore::new())
-//!     .insert_named("audit", MemoryStore::new());
+//!     .insert(Blackboard::new())
+//!     .insert_named("audit", Blackboard::new());
 //!
-//! let _primary = resources.get::<MemoryStore>().unwrap();
-//! let _audit = resources.get_named::<MemoryStore>("audit").unwrap();
+//! let _primary = resources.get::<Blackboard>().unwrap();
+//! let _audit = resources.get_named::<Blackboard>("audit").unwrap();
 //! ```
 //!
 //! `get` / `get_named` borrow (`&R`); [`get_arc`](Resources::get_arc) /
@@ -57,7 +57,7 @@
 //! struct PrepDeps {
 //!     settings: Arc<Settings>,
 //!     #[res("audit")]
-//!     audit: Arc<MemoryStore>,
+//!     audit: Arc<Blackboard>,
 //! }
 //!
 //! // ... inside a Task::run:

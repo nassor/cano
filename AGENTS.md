@@ -11,13 +11,13 @@ macros `cano-macros`. The API is pre-1.0 and changes between minor versions.
 
 | Path | Purpose |
 | --- | --- |
-| `cano/` | The library. `src/workflow/` is the FSM engine (`execution.rs` dispatch loop, `compensation.rs` saga drain and resume), `src/task/` the task models, `src/scheduler/` the scheduler, `src/resource.rs` the type-keyed `Resources`, `src/testing.rs` the `testing` feature's doubles. |
+| `cano/` | The library. `src/workflow/` is the FSM engine (`execution.rs` dispatch loop, `compensation.rs` saga drain and resume), `src/task/` the task models, `src/scheduler/` the scheduler, `src/checkpoint.rs` the `CheckpointStore` trait, `CheckpointRow` and `RowKind`, `src/store/` the built-in stores (`redb.rs`, `postgres.rs`, `nats.rs`, sharing `codec.rs` and `retry.rs`), `src/blackboard.rs` the in-memory `Blackboard`, `src/resource.rs` the type-keyed `Resources`, `src/testing.rs` the `testing` feature's doubles and `assert_checkpoint_store_contract`. Features: `store-redb` (default), `scheduler`, `tracing`, `store-postgres`, `store-nats`, `metrics`, `testing`, `all`. |
 | `cano/src/bin/` | `recovery_resume`, `stepped_resume`: subprocess drivers for the SIGKILL recovery tests. Not user binaries. |
 | `cano/tests/` | Integration suites (cancellation, scheduler, reliability, recovery, tracing). `tests/support/` holds `MemStore`, the double these suites use because they cannot see `cfg(test)` items. |
 | `cano/examples/` | Runnable examples, auto-discovered. Only examples that need a feature have an `[[example]]` block with `required-features`. |
-| `cano/benches/` | Criterion benches: `workflow_performance`, `task_performance`, `resource_performance`, `store_performance`, `store_shared_performance`, `circuit_performance`, `rate_limiter_performance`. |
+| `cano/benches/` | Criterion benches: `workflow_performance`, `task_performance`, `resource_performance`, `blackboard_performance`, `blackboard_shared_performance`, `circuit_performance`, `rate_limiter_performance`. |
 | `cano-macros/` | `#[task]`, `#[task::router]`, `#[task::poll]`, `#[task::timer]`, `#[task::batch]`, `#[task::stepped]`, `#[task::stream]`, `#[task::suspend]`, `#[saga::task]`, `#[resource]`, `#[checkpoint_store]`, `#[derive(Resource)]`, `#[derive(FromResources)]`. `src/model.rs` is the one driver every task-model macro goes through. |
-| `cano-e2e/` | Docker and Postgres crash-recovery tests. A workspace member outside `default-members`; never published. |
+| `cano-e2e/` | Docker tests: Postgres crash recovery (`tests/e2e.rs`) and `PostgresStore` and `NatsStore` under Toxiproxy faults (`tests/postgres_store.rs`, `tests/nats_store.rs`, fixtures in `tests/support/`). A workspace member outside `default-members`; never published. |
 | `docs/` | Zola site (`content/`, `templates/`, `static/`, `config.toml`), deployed to GitHub Pages. |
 
 ## Architecture rules
@@ -119,7 +119,7 @@ python3 search-index.py public   # or python build-local.py for a browsable loca
   tests, doctests, a `cano-e2e` compile check, and `cargo audit`.
 - `.github/workflows/examples.yml`: runs every example (skips `ai_workflow_yes_and`, which needs an
   LLM server) and curl-tests `workflow_on_request`.
-- `.github/workflows/e2e.yml`: the Docker crash-recovery suite (`cargo test -p cano-e2e --test e2e`).
+- `.github/workflows/e2e.yml`: the Docker suites (`cargo test -p cano-e2e --tests -- --test-threads=1`).
 - `.github/workflows/docs.yml`: builds and link-checks the site on pull requests touching `docs/`;
   deploys to GitHub Pages on a push to `main` that touches `docs/`, or on `workflow_dispatch`.
 

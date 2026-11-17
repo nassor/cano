@@ -7,7 +7,7 @@
 //! ## When to use `RouterTask`
 //!
 //! - **Pure routing**: redirect the FSM to a different state based on a flag, a
-//!   counter in the store, or a configuration value in resources.
+//!   counter in the blackboard, or a configuration value in resources.
 //! - **Zero side effects**: because a router only *reads* state (no writes), it is
 //!   safe to retry or re-execute without idempotency concerns.
 //!
@@ -31,7 +31,7 @@
 //! #[task::router(state = Step)]
 //! impl MyRouter {
 //!     async fn route(&self, _res: &Resources) -> Result<Step, CanoError> {
-//!         // Pure decision: no writes to the store.
+//!         // Pure decision: no writes to the blackboard.
 //!         Ok(Step::PathA)
 //!     }
 //! }
@@ -121,8 +121,8 @@ use std::fmt;
 /// #[task::router(state = Step)]
 /// impl ThresholdRouter {
 ///     async fn route(&self, res: &Resources) -> Result<Step, CanoError> {
-///         let store = res.get::<MemoryStore>()?;
-///         let value: u32 = store.get("value").unwrap_or(0);
+///         let board = res.get::<Blackboard>()?;
+///         let value: u32 = board.get("value").unwrap_or(0);
 ///         if value >= self.threshold {
 ///             Ok(Step::Right)
 ///         } else {

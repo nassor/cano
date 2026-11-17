@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use futures_util::FutureExt;
 
+use crate::checkpoint::{CheckpointRow, RowKind};
 use crate::error::CanoError;
-use crate::recovery::{CheckpointRow, RowKind};
 use crate::saga::{CompensationEntry, ErasedCompensatable};
 use crate::task::{ObserverCtx, TaskConfig, run_with_retries_observed};
 use tokio_util::sync::CancellationToken;
@@ -85,7 +85,7 @@ where
     /// `on_unknown_resume_state` hook can fire inline; the caller does
     /// not need a second pass.
     pub(super) fn from_rows(
-        rows: &[crate::recovery::CheckpointRow],
+        rows: &[crate::checkpoint::CheckpointRow],
         resume_label: &str,
         resume_sequence: u64,
         expected_workflow_version: u32,
@@ -454,8 +454,8 @@ where
 
     /// Resume a previously checkpointed run.
     ///
-    /// Loads every [`CheckpointRow`](crate::recovery::CheckpointRow) recorded for
-    /// `workflow_id` from the attached [`CheckpointStore`](crate::recovery::CheckpointStore),
+    /// Loads every [`CheckpointRow`](crate::checkpoint::CheckpointRow) recorded for
+    /// `workflow_id` from the attached [`CheckpointStore`](crate::checkpoint::CheckpointStore),
     /// takes the highest-`sequence` row, maps its state label back to a registered (or exit)
     /// state, and re-enters the FSM loop from there — re-running that state's task. **Tasks
     /// at and after the resume point must be idempotent**: the workflow has no way to know
@@ -469,7 +469,7 @@ where
     /// under the same `workflow_id` and continue the sequence.
     ///
     /// The [compensation stack](crate::saga) is rehydrated from the loaded rows: every
-    /// row whose [`kind`](crate::recovery::CheckpointRow::kind) is
+    /// row whose [`kind`](crate::checkpoint::CheckpointRow::kind) is
     /// [`RowKind::CompensationCompletion`] becomes a stack entry (in sequence order), so a
     /// failure after the resume point can still compensate work done before the crash.
     /// Rows with other kinds — ordinary [`RowKind::StateEntry`] rows and
@@ -631,7 +631,7 @@ where
     async fn execute_resume_inner(
         &self,
         workflow_id: Arc<str>,
-        store: Arc<dyn crate::recovery::CheckpointStore>,
+        store: Arc<dyn crate::checkpoint::CheckpointStore>,
         input: Option<Vec<u8>>,
         token: Option<&CancellationToken>,
     ) -> Result<TState, CanoError> {
@@ -797,7 +797,7 @@ mod tests {
 
     // ---- Checkpoint / resume ----
 
-    use crate::recovery::{CheckpointRow, CheckpointStore};
+    use crate::checkpoint::{CheckpointRow, CheckpointStore};
     use std::sync::Mutex;
 
     // A task `Output` type whose `Serialize` impl always errors, so the saga
@@ -1421,7 +1421,7 @@ mod tests {
     /// the stack — everything else passes through silently.
     #[tokio::test]
     async fn resume_step_cursor_row_is_not_added_to_compensation_stack() {
-        use crate::recovery::RowKind;
+        use crate::checkpoint::RowKind;
 
         let store = Arc::new(InMemoryCheckpointStore::new());
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
@@ -2275,7 +2275,7 @@ mod tests {
     #[tokio::test]
     async fn cross_model_chain_router_poll_batch_stepped_interop() {
         use crate::PollOutcome;
-        use crate::recovery::RowKind;
+        use crate::checkpoint::RowKind;
         use crate::task::{BatchTask, PollTask, RouterTask, StepOutcome, SteppedTask};
         use serde::{Deserialize, Serialize};
         use std::sync::atomic::AtomicU32;
@@ -2618,7 +2618,7 @@ mod tests {
 
     // ---- SteppedTask with checkpoint store ----
 
-    use crate::recovery::RowKind;
+    use crate::checkpoint::RowKind;
     use crate::task::stepped::{StepOutcome, SteppedTask};
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
@@ -4059,8 +4059,8 @@ mod tests {
 #[cfg(test)]
 mod rehydrated_run_tests {
     use super::*;
+    use crate::checkpoint::CheckpointRow;
     use crate::observer::WorkflowObserver;
-    use crate::recovery::CheckpointRow;
     use crate::workflow::test_support::{EventLog, TestState};
 
     /// Resolver that matches stored labels back to `TestState`. Returns None

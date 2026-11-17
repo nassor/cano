@@ -310,8 +310,8 @@ runs in that case.</li>
 </ul>
 
 <div class="callout callout-tip">
-<p>Run <code>cargo run --example saga_recovery --features recovery</code> for a saga wired to a
-<code>RedbCheckpointStore</code>. A later step fails, the compensations drain LIFO, and the clean
+<p>Run <code>cargo run --example saga_recovery</code> for a saga wired to a
+<code>RedbStore</code>. A later step fails, the compensations drain LIFO, and the clean
 rollback clears the checkpoint log.</p>
 </div>
 <hr class="section-divider">

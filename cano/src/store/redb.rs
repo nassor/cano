@@ -1,13 +1,13 @@
-//! [`RedbCheckpointStore`] — the default [`CheckpointStore`] backed by [`redb`].
+//! [`RedbStore`]: the default store, an embedded [`redb`] database file.
 //!
 //! [`redb`](https://docs.rs/redb) is an embedded, ACID, pure-Rust key-value store
-//! with no background daemon — a good fit for a crash-recovery log that ships in
-//! the same process as the workflow engine. This module is compiled only when the
-//! `recovery` feature is enabled.
+//! with no background daemon, a good fit for state that lives in the same process as
+//! the workflow engine. Compiled with the `store-redb` feature, on by default.
+//! [`RedbStore`] implements [`CheckpointStore`].
 //!
-//! ## Storage layout
+//! ## Checkpoint layout
 //!
-//! A single table, `cano_checkpoints`, maps `(workflow_id, sequence)` to a
+//! One table, `cano_checkpoints`, maps `(workflow_id, sequence)` to a
 //! version-tagged, [`postcard`]-encoded [`StoredRow`] (the [`CheckpointRow`]
 //! fields *other than* `sequence` — which is already the second key component, so
 //! there's no need to store it twice). Every row written by this version of the
@@ -21,40 +21,22 @@
 //! stored — and range-scanned — in ascending `sequence` order, which is exactly
 //! what [`CheckpointStore::load_run`] returns.
 
+use std::ffi::{OsStr, OsString};
 use std::ops::RangeInclusive;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use redb::{Database, ReadableDatabase, TableDefinition};
 
-use super::{CheckpointRow, CheckpointStore, RowKind};
+use super::codec::{self, ROW_TAG_V1, StoredRow};
+use super::conflict_error;
+use crate::checkpoint::{CheckpointRow, CheckpointStore, RowKind};
 use crate::error::CanoError;
 use cano_macros::checkpoint_store;
 
 /// `(workflow_id, sequence) -> [ROW_TAG_V1][postcard(StoredRow)]` (or an untagged
 /// legacy payload for databases written before version tagging).
 const CHECKPOINTS: TableDefinition<(&str, u64), &[u8]> = TableDefinition::new("cano_checkpoints");
-
-/// Magic prefix stamped on every row this version of the store writes.
-///
-/// A legacy (untagged) row's first bytes are the postcard length-prefix of its
-/// `state` string, so a single tag byte could collide with real legacy rows (e.g.
-/// `0x01` = a one-character state label, which the test suites use liberally).
-/// Two printable bytes make the collision vanishingly unlikely — a legacy row
-/// would need a 67-character state label whose first UTF-8 byte is `V` — and even
-/// then the misread is a loud decode error, never silent corruption.
-const ROW_TAG_V1: [u8; 2] = *b"CV";
-
-/// The payload half of a [`CheckpointRow`]: everything except `sequence`, which
-/// is carried by the redb key. Kept private — callers only ever see `CheckpointRow`.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-struct StoredRow {
-    state: String,
-    task_id: String,
-    output_blob: Option<Vec<u8>>,
-    kind: super::RowKind,
-    workflow_version: u32,
-}
 
 /// Pre-versioning on-disk shape. Kept solely as a decode fallback so existing
 /// redb databases written before `workflow_version` was added still load.
@@ -63,7 +45,7 @@ struct StoredRowV0 {
     state: String,
     task_id: String,
     output_blob: Option<Vec<u8>>,
-    kind: super::RowKind,
+    kind: RowKind,
 }
 
 /// The key range covering every row for `workflow_id`, in ascending `sequence` order.
@@ -101,20 +83,27 @@ fn stored_to_row(
     }
 }
 
-/// An embedded, ACID [`CheckpointStore`] backed by a single `redb` database file.
+/// The embedded store: one `redb` database file. Implements [`CheckpointStore`].
 ///
 /// Cheap to clone — the database handle is held behind an `Arc`, so every clone
-/// shares the same file and write lock. Construct one with [`new`](Self::new);
-/// the constructor creates the file (if absent) and the checkpoint table so that
+/// shares the same file and write lock. Construct one with [`new`](Self::new) at a path you
+/// choose, or with [`open_default`](Self::open_default) at a persistent per-user or
+/// per-service location; both create the file (if absent) and its tables so that
 /// later reads never trip over a missing table.
 #[derive(Clone)]
-pub struct RedbCheckpointStore {
+pub struct RedbStore {
     db: Arc<Database>,
 }
 
-impl RedbCheckpointStore {
+impl RedbStore {
+    /// File name of the database inside the default directory.
+    pub const DEFAULT_FILE_NAME: &str = "cano.redb";
+
+    /// Environment variable that overrides the default directory.
+    pub const DATA_DIR_ENV: &str = "CANO_DATA_DIR";
+
     /// Open (creating if necessary) the `redb` database at `path` and ensure the
-    /// checkpoint table exists.
+    /// checkpoint table exists. The parent directory must exist.
     pub fn new(path: impl AsRef<Path>) -> Result<Self, CanoError> {
         let db = Database::create(path).map_err(redb_err)?;
         // Materialize the table up front so `begin_read` + `open_table` in
@@ -126,30 +115,150 @@ impl RedbCheckpointStore {
         tx.commit().map_err(redb_err)?;
         Ok(Self { db: Arc::new(db) })
     }
+
+    /// Open the store at [`default_path`](Self::default_path), creating its directory when
+    /// missing.
+    ///
+    /// The directory is the first of these that applies; an empty variable counts as unset:
+    ///
+    /// 1. `CANO_DATA_DIR` ([`DATA_DIR_ENV`](Self::DATA_DIR_ENV)), used as is, on every platform.
+    /// 2. On Linux and other Unix systems except macOS, `STATE_DIRECTORY`, which systemd sets
+    ///    for a unit with `StateDirectory=`: its first entry, then `cano`.
+    /// 3. A per-user directory, then `cano/<executable file name>`:
+    ///    `$XDG_STATE_HOME` when it is an absolute path, else `~/.local/state`, on Linux and
+    ///    other Unix systems; `~/Library/Application Support` on macOS; `%LOCALAPPDATA%`,
+    ///    else `~\AppData\Local`, on Windows.
+    ///
+    /// The database file inside it is [`DEFAULT_FILE_NAME`](Self::DEFAULT_FILE_NAME). The
+    /// log survives restarts.
+    ///
+    /// redb locks the file, so one process holds it at a time: a second open fails while a
+    /// store on that file is alive (clones share one handle). The per-user path contains the
+    /// executable's file name, so renaming the binary starts a new file. A service sets
+    /// `CANO_DATA_DIR`, or runs under systemd with `StateDirectory=`.
+    ///
+    /// # Errors
+    ///
+    /// [`CanoError::Configuration`] when rule 3 applies and the home directory or the
+    /// executable name is unknown; [`CanoError::CheckpointStore`] when the directory cannot
+    /// be created or the database cannot be opened.
+    pub fn open_default() -> Result<Self, CanoError> {
+        Self::open_in(&current_default_dir()?)
+    }
+
+    /// The file [`open_default`](Self::open_default) opens. Reads the environment only; no
+    /// file system access.
+    ///
+    /// # Errors
+    ///
+    /// [`CanoError::Configuration`] under the same condition as `open_default`.
+    pub fn default_path() -> Result<PathBuf, CanoError> {
+        Ok(current_default_dir()?.join(Self::DEFAULT_FILE_NAME))
+    }
+
+    /// Create `dir` and its parents when missing, then open [`DEFAULT_FILE_NAME`](Self::DEFAULT_FILE_NAME) in it.
+    fn open_in(dir: &Path) -> Result<Self, CanoError> {
+        std::fs::create_dir_all(dir).map_err(|e| {
+            CanoError::CheckpointStore(format!(
+                "create checkpoint directory {}: {e}",
+                dir.display()
+            ))
+        })?;
+        Self::new(dir.join(Self::DEFAULT_FILE_NAME))
+    }
+}
+
+/// The operating system family whose conventions pick the per-user directory.
+#[derive(Clone, Copy)]
+enum Platform {
+    Unix,
+    MacOs,
+    Windows,
+}
+
+impl Platform {
+    const CURRENT: Self = if cfg!(windows) {
+        Self::Windows
+    } else if cfg!(target_os = "macos") {
+        Self::MacOs
+    } else {
+        Self::Unix
+    };
+}
+
+/// [`default_dir`] for this process: its environment, home directory and executable.
+fn current_default_dir() -> Result<PathBuf, CanoError> {
+    default_dir(
+        Platform::CURRENT,
+        &|key| std::env::var_os(key),
+        std::env::home_dir(),
+        exe_name().as_deref(),
+    )
+}
+
+/// The directory rules of [`RedbStore::open_default`], with every input passed in
+/// so each platform's rules are testable on any host. Paths are built with `join` and the
+/// platform checks avoid `Path::is_absolute` and `split_paths`, whose meaning follows the host.
+fn default_dir(
+    platform: Platform,
+    env: &dyn Fn(&str) -> Option<OsString>,
+    home: Option<PathBuf>,
+    app: Option<&OsStr>,
+) -> Result<PathBuf, CanoError> {
+    let var = |key: &str| env(key).filter(|value| !value.is_empty());
+
+    if let Some(dir) = var(RedbStore::DATA_DIR_ENV) {
+        return Ok(PathBuf::from(dir));
+    }
+    if let Platform::Unix = platform
+        && let Some(dirs) = var("STATE_DIRECTORY")
+    {
+        let first = match dirs.to_str() {
+            Some(dirs) => PathBuf::from(dirs.split(':').next().unwrap_or_default()),
+            // Only a Unix host sets this variable, and there `split_paths` splits on `:`.
+            None => std::env::split_paths(&dirs).next().unwrap_or_default(),
+        };
+        if !first.as_os_str().is_empty() {
+            return Ok(first.join("cano"));
+        }
+    }
+
+    let home = home.filter(|home| !home.as_os_str().is_empty());
+    let base = match platform {
+        Platform::Unix => var("XDG_STATE_HOME")
+            .filter(|dir| dir.as_encoded_bytes().first() == Some(&b'/'))
+            .map(PathBuf::from)
+            .or_else(|| home.map(|home| home.join(".local").join("state"))),
+        Platform::MacOs => home.map(|home| home.join("Library").join("Application Support")),
+        Platform::Windows => var("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .or_else(|| home.map(|home| home.join("AppData").join("Local"))),
+    };
+    match (base, app) {
+        (Some(base), Some(app)) => Ok(base.join("cano").join(app)),
+        _ => Err(CanoError::configuration(
+            "no default checkpoint directory: set CANO_DATA_DIR or pass a path to \
+            RedbStore::new",
+        )),
+    }
+}
+
+/// The running executable's file name without its extension.
+fn exe_name() -> Option<OsString> {
+    Some(std::env::current_exe().ok()?.file_stem()?.to_os_string())
 }
 
 #[checkpoint_store]
-impl CheckpointStore for RedbCheckpointStore {
+impl CheckpointStore for RedbStore {
     async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
         let sequence = row.sequence;
         // Serialize *before* handing off to the blocking thread so heap
         // allocation does not hold the redb write lock open. On failure the
         // transaction is never begun, avoiding unnecessary lock contention.
-        let payload = StoredRow {
-            state: row.state,
-            task_id: row.task_id,
-            output_blob: row.output_blob,
-            kind: row.kind,
-            workflow_version: row.workflow_version,
-        };
-        let bytes = postcard::to_stdvec(&payload)
-            .map_err(|e| CanoError::CheckpointStore(format!("encode checkpoint row: {e}")))?;
-        // Stamp the row with the version tag so `load_run` never has to guess the
+        // The payload carries the version tag so `load_run` never has to guess the
         // on-disk shape from decode success — a corrupt tagged row is reported
         // loudly instead of being misread as a legacy row (see `ROW_TAG_V1`).
-        let mut tagged = Vec::with_capacity(bytes.len() + ROW_TAG_V1.len());
-        tagged.extend_from_slice(&ROW_TAG_V1);
-        tagged.extend_from_slice(&bytes);
+        let tagged = codec::encode(row)?;
 
         // redb is a synchronous embedded store: `begin_write` + `insert` + `commit`
         // (a full fsync at the default `Durability::Immediate`) block the calling
@@ -174,11 +283,7 @@ impl CheckpointStore for RedbCheckpointStore {
                     .map_err(redb_err)?
                     .is_some()
                 {
-                    return Err(CanoError::CheckpointStore(format!(
-                        "checkpoint conflict: workflow {wf_id:?} already has a row at \
-                         sequence {sequence}; resume the existing run or clear it before starting \
-                         a new one"
-                    )));
+                    return Err(conflict_error(&wf_id, sequence));
                 }
             }
             tx.commit().map_err(redb_err)?;
@@ -210,20 +315,7 @@ impl CheckpointStore for RedbCheckpointStore {
                     // corruption — surface it instead of falling back to the legacy
                     // shape (the V0 fallback would silently mask a corrupt V1 row
                     // as a plausible-looking legacy one).
-                    let payload = postcard::from_bytes::<StoredRow>(&bytes[ROW_TAG_V1.len()..])
-                        .map_err(|e| {
-                            CanoError::CheckpointStore(format!(
-                                "decode checkpoint row at workflow_id={wf_id:?} sequence={sequence}: {e}"
-                            ))
-                        })?;
-                    stored_to_row(
-                        sequence,
-                        payload.state,
-                        payload.task_id,
-                        payload.output_blob,
-                        payload.kind,
-                        payload.workflow_version,
-                    )
+                    codec::decode(&wf_id, sequence, bytes)?
                 } else {
                     // Untagged row written before version tagging: try the current
                     // shape, then the pre-`workflow_version` shape. Only this legacy
@@ -294,7 +386,7 @@ mod tests {
     #[tokio::test]
     async fn append_load_clear_roundtrip() {
         let dir = tempdir().unwrap();
-        let store = RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap();
+        let store = RedbStore::new(dir.path().join("ckpt.redb")).unwrap();
 
         store
             .append("run", CheckpointRow::new(0, "A", "t0"))
@@ -334,7 +426,7 @@ mod tests {
         // iterate the redb file by hand.
         let dir = tempdir().unwrap();
         let path = dir.path().join("ckpt.redb");
-        let store = RedbCheckpointStore::new(&path).unwrap();
+        let store = RedbStore::new(&path).unwrap();
 
         // Append three valid rows.
         for seq in 0u64..=2 {
@@ -368,7 +460,7 @@ mod tests {
         // Databases written before version tagging store raw postcard(StoredRowV0)
         // bytes with no tag byte. They must keep loading, with workflow_version 0.
         let dir = tempdir().unwrap();
-        let store = RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap();
+        let store = RedbStore::new(dir.path().join("ckpt.redb")).unwrap();
 
         // Mirror of the pre-versioning on-disk shape with the same field order
         // and types, so `StoredRowV0` (intentionally Deserialize-only, it exists
@@ -378,13 +470,13 @@ mod tests {
             state: String,
             task_id: String,
             output_blob: Option<Vec<u8>>,
-            kind: crate::recovery::RowKind,
+            kind: crate::checkpoint::RowKind,
         }
         let legacy = LegacyRow {
             state: "Start".to_string(),
             task_id: "t0".to_string(),
             output_blob: None,
-            kind: crate::recovery::RowKind::StateEntry,
+            kind: crate::checkpoint::RowKind::StateEntry,
         };
         let bytes = postcard::to_stdvec(&legacy).unwrap();
         assert!(!bytes.starts_with(&ROW_TAG_V1), "fixture must be untagged");
@@ -411,7 +503,7 @@ mod tests {
         // corruption, never silently fall back to the legacy V0 shape — that mask
         // is the exact hazard the version tag exists to close.
         let dir = tempdir().unwrap();
-        let store = RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap();
+        let store = RedbStore::new(dir.path().join("ckpt.redb")).unwrap();
 
         let corrupt: Vec<u8> = ROW_TAG_V1
             .iter()
@@ -439,7 +531,7 @@ mod tests {
     #[tokio::test]
     async fn rows_ordered_by_sequence_regardless_of_insert_order() {
         let dir = tempdir().unwrap();
-        let store = RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap();
+        let store = RedbStore::new(dir.path().join("ckpt.redb")).unwrap();
 
         for seq in [5u64, 1, 9, 0, 3] {
             store
@@ -460,7 +552,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("ckpt.redb");
         {
-            let store = RedbCheckpointStore::new(&path).unwrap();
+            let store = RedbStore::new(&path).unwrap();
             store
                 .append("run", CheckpointRow::new(0, "A", "t0"))
                 .await
@@ -471,7 +563,7 @@ mod tests {
                 .unwrap();
         }
         // New instance over the same file — committed rows must still be there.
-        let reopened = RedbCheckpointStore::new(&path).unwrap();
+        let reopened = RedbStore::new(&path).unwrap();
         let rows = reopened.load_run("run").await.unwrap();
         assert_eq!(
             rows.iter().map(|r| r.sequence).collect::<Vec<_>>(),
@@ -483,7 +575,7 @@ mod tests {
     #[tokio::test]
     async fn clear_isolates_workflows() {
         let dir = tempdir().unwrap();
-        let store = RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap();
+        let store = RedbStore::new(dir.path().join("ckpt.redb")).unwrap();
 
         store
             .append("a", CheckpointRow::new(0, "A0", "t"))
@@ -509,7 +601,7 @@ mod tests {
     #[tokio::test]
     async fn load_run_unknown_id_is_empty() {
         let dir = tempdir().unwrap();
-        let store = RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap();
+        let store = RedbStore::new(dir.path().join("ckpt.redb")).unwrap();
         assert!(store.load_run("nope").await.unwrap().is_empty());
     }
 
@@ -518,7 +610,7 @@ mod tests {
     #[tokio::test]
     async fn append_rejects_duplicate_sequence() {
         let dir = tempdir().unwrap();
-        let store = RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap();
+        let store = RedbStore::new(dir.path().join("ckpt.redb")).unwrap();
 
         store
             .append("run", CheckpointRow::new(0, "A", "t0"))
@@ -556,7 +648,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_appends_distinct_ids_stay_isolated_and_monotonic() {
         let dir = tempdir().unwrap();
-        let store = Arc::new(RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap());
+        let store = Arc::new(RedbStore::new(dir.path().join("ckpt.redb")).unwrap());
 
         const RUNS: u64 = 16;
         const ROWS_PER_RUN: u64 = 12;
@@ -600,7 +692,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_appends_same_id_distinct_sequences_all_land() {
         let dir = tempdir().unwrap();
-        let store = Arc::new(RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap());
+        let store = Arc::new(RedbStore::new(dir.path().join("ckpt.redb")).unwrap());
 
         const N: u64 = 32;
         let mut handles = Vec::new();
@@ -628,7 +720,7 @@ mod tests {
     #[tokio::test]
     async fn large_output_blob_roundtrips() {
         let dir = tempdir().unwrap();
-        let store = RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap();
+        let store = RedbStore::new(dir.path().join("ckpt.redb")).unwrap();
         let blob: Vec<u8> = (0..5 * 1024 * 1024usize).map(|i| (i % 251) as u8).collect();
         store
             .append(
@@ -645,7 +737,7 @@ mod tests {
     #[tokio::test]
     async fn corrupted_stored_row_is_a_decode_error_not_a_panic() {
         let dir = tempdir().unwrap();
-        let store = RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap();
+        let store = RedbStore::new(dir.path().join("ckpt.redb")).unwrap();
         store
             .append("run", CheckpointRow::new(0, "A", "t0"))
             .await
@@ -680,7 +772,7 @@ mod tests {
     #[tokio::test]
     async fn all_row_kinds_roundtrip() {
         let dir = tempdir().unwrap();
-        let store = RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap();
+        let store = RedbStore::new(dir.path().join("ckpt.redb")).unwrap();
 
         // StateEntry: kind=StateEntry, output_blob=None
         store
@@ -726,25 +818,25 @@ mod tests {
 
         assert_eq!(rows[0].sequence, 0);
         assert_eq!(rows[0].state, "A");
-        assert_eq!(rows[0].kind, super::super::RowKind::StateEntry);
+        assert_eq!(rows[0].kind, RowKind::StateEntry);
         assert_eq!(rows[0].output_blob, None);
 
         assert_eq!(rows[1].sequence, 1);
         assert_eq!(rows[1].state, "B");
-        assert_eq!(rows[1].kind, super::super::RowKind::CompensationCompletion);
+        assert_eq!(rows[1].kind, RowKind::CompensationCompletion);
         assert_eq!(rows[1].output_blob.as_deref(), Some(&[1u8, 2, 3][..]));
 
         assert_eq!(rows[2].sequence, 2);
         assert_eq!(rows[2].state, "C");
-        assert_eq!(rows[2].kind, super::super::RowKind::StepCursor);
+        assert_eq!(rows[2].kind, RowKind::StepCursor);
         assert_eq!(rows[2].output_blob.as_deref(), Some(&[4u8, 5][..]));
 
         assert_eq!(rows[3].sequence, 3);
-        assert_eq!(rows[3].kind, super::super::RowKind::Suspended);
+        assert_eq!(rows[3].kind, RowKind::Suspended);
         assert_eq!(rows[3].output_blob, None);
 
         assert_eq!(rows[4].sequence, 4);
-        assert_eq!(rows[4].kind, super::super::RowKind::ResumeInput);
+        assert_eq!(rows[4].kind, RowKind::ResumeInput);
         assert_eq!(rows[4].output_blob.as_deref(), Some(&[6u8][..]));
     }
 
@@ -753,7 +845,7 @@ mod tests {
     #[tokio::test]
     async fn workflow_version_roundtrips_through_redb_store() {
         let dir = tempdir().unwrap();
-        let store = RedbCheckpointStore::new(dir.path().join("ckpt.redb")).unwrap();
+        let store = RedbStore::new(dir.path().join("ckpt.redb")).unwrap();
         let row = CheckpointRow::new(0, "Start", "task").with_workflow_version(7);
         store.append("wf-roundtrip", row).await.unwrap();
         let loaded = store.load_run("wf-roundtrip").await.unwrap();
@@ -772,7 +864,7 @@ mod tests {
             state: String,
             task_id: String,
             output_blob: Option<Vec<u8>>,
-            kind: super::super::RowKind,
+            kind: RowKind,
         }
 
         let dir = tempdir().unwrap();
@@ -789,7 +881,7 @@ mod tests {
                     state: "Start".into(),
                     task_id: "task".into(),
                     output_blob: None,
-                    kind: super::super::RowKind::StateEntry,
+                    kind: RowKind::StateEntry,
                 };
                 let bytes = postcard::to_stdvec(&legacy).unwrap();
                 table.insert(("wf-legacy", 0u64), bytes.as_slice()).unwrap();
@@ -799,13 +891,176 @@ mod tests {
 
         // Now open the store the normal way and confirm the legacy row decodes
         // with workflow_version defaulted to 0.
-        let store = RedbCheckpointStore::new(&path).unwrap();
+        let store = RedbStore::new(&path).unwrap();
         let rows = store.load_run("wf-legacy").await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].sequence, 0);
         assert_eq!(rows[0].state, "Start");
         assert_eq!(rows[0].task_id, "task");
-        assert_eq!(rows[0].kind, super::super::RowKind::StateEntry);
+        assert_eq!(rows[0].kind, RowKind::StateEntry);
         assert_eq!(rows[0].workflow_version, 0);
+    }
+
+    #[tokio::test]
+    async fn meets_the_checkpoint_store_contract() {
+        let dir = tempdir().unwrap();
+        let store = RedbStore::new(dir.path().join("ckpt.redb")).unwrap();
+        crate::testing::assert_checkpoint_store_contract(&store, "contract").await;
+    }
+
+    const PLATFORMS: [Platform; 3] = [Platform::Unix, Platform::MacOs, Platform::Windows];
+
+    fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
+        move |key| {
+            pairs
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| OsString::from(v))
+        }
+    }
+
+    fn dir_for(
+        platform: Platform,
+        pairs: &'static [(&'static str, &'static str)],
+    ) -> Result<PathBuf, CanoError> {
+        default_dir(
+            platform,
+            &env_of(pairs),
+            Some(PathBuf::from("/home/u")),
+            Some(OsStr::new("svc")),
+        )
+    }
+
+    #[test]
+    fn data_dir_env_wins_on_every_platform() {
+        let env = &[
+            ("CANO_DATA_DIR", "/srv/ckpt"),
+            ("STATE_DIRECTORY", "/var/lib/app"),
+            ("XDG_STATE_HOME", "/x"),
+            ("LOCALAPPDATA", "/l"),
+        ];
+        for platform in PLATFORMS {
+            assert_eq!(dir_for(platform, env).unwrap(), PathBuf::from("/srv/ckpt"));
+        }
+    }
+
+    #[test]
+    fn systemd_state_directory_uses_the_first_entry() {
+        let env = &[("STATE_DIRECTORY", "/var/lib/app:/var/lib/other")];
+        assert_eq!(
+            dir_for(Platform::Unix, env).unwrap(),
+            PathBuf::from("/var/lib/app").join("cano")
+        );
+        assert_eq!(
+            dir_for(Platform::MacOs, env).unwrap(),
+            PathBuf::from("/home/u")
+                .join("Library")
+                .join("Application Support")
+                .join("cano")
+                .join("svc")
+        );
+        assert_eq!(
+            dir_for(Platform::Windows, env).unwrap(),
+            PathBuf::from("/home/u")
+                .join("AppData")
+                .join("Local")
+                .join("cano")
+                .join("svc")
+        );
+    }
+
+    #[test]
+    fn unix_uses_xdg_state_home_then_home() {
+        assert_eq!(
+            dir_for(Platform::Unix, &[("XDG_STATE_HOME", "/x/state")]).unwrap(),
+            PathBuf::from("/x/state").join("cano").join("svc")
+        );
+        let fallback = PathBuf::from("/home/u")
+            .join(".local")
+            .join("state")
+            .join("cano")
+            .join("svc");
+        assert_eq!(dir_for(Platform::Unix, &[]).unwrap(), fallback);
+        assert_eq!(
+            dir_for(Platform::Unix, &[("XDG_STATE_HOME", "")]).unwrap(),
+            fallback
+        );
+        assert_eq!(
+            dir_for(Platform::Unix, &[("XDG_STATE_HOME", "state")]).unwrap(),
+            fallback
+        );
+    }
+
+    #[test]
+    fn macos_uses_application_support() {
+        assert_eq!(
+            dir_for(Platform::MacOs, &[]).unwrap(),
+            PathBuf::from("/home/u")
+                .join("Library")
+                .join("Application Support")
+                .join("cano")
+                .join("svc")
+        );
+    }
+
+    #[test]
+    fn windows_uses_localappdata_then_home() {
+        assert_eq!(
+            dir_for(Platform::Windows, &[("LOCALAPPDATA", "/l")]).unwrap(),
+            PathBuf::from("/l").join("cano").join("svc")
+        );
+        assert_eq!(
+            dir_for(Platform::Windows, &[]).unwrap(),
+            PathBuf::from("/home/u")
+                .join("AppData")
+                .join("Local")
+                .join("cano")
+                .join("svc")
+        );
+    }
+
+    #[test]
+    fn no_base_directory_is_a_configuration_error() {
+        let no_env = env_of(&[]);
+        for platform in PLATFORMS {
+            for (home, app) in [
+                (None, Some(OsStr::new("svc"))),
+                (Some(PathBuf::from("/home/u")), None),
+            ] {
+                let err = default_dir(platform, &no_env, home, app).unwrap_err();
+                assert_eq!(err.category(), "configuration");
+                assert!(err.to_string().contains("CANO_DATA_DIR"), "{err}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn open_in_creates_missing_directories_and_survives_reopen() {
+        let root = tempdir().unwrap();
+        let dir = root.path().join("a").join("b").join("c");
+        let store = RedbStore::open_in(&dir).unwrap();
+        store
+            .append("run", CheckpointRow::new(0, "S", "t"))
+            .await
+            .unwrap();
+        drop(store);
+
+        let store = RedbStore::open_in(&dir).unwrap();
+        assert_eq!(
+            store.load_run("run").await.unwrap(),
+            vec![CheckpointRow::new(0, "S", "t")]
+        );
+        assert!(dir.join(RedbStore::DEFAULT_FILE_NAME).is_file());
+    }
+
+    #[test]
+    fn a_held_file_cannot_be_opened_twice() {
+        let dir = tempdir().unwrap();
+        let _held = RedbStore::open_in(dir.path()).unwrap();
+        let err = match RedbStore::open_in(dir.path()) {
+            Ok(_) => panic!("a second open of a held file must fail"),
+            Err(err) => err,
+        };
+        assert_eq!(err.category(), "checkpoint_store");
     }
 }

@@ -3,12 +3,12 @@
 //! A [`SuspendTask`] parks a run at its state until an outside party (a human reviewer, a
 //! webhook, another service) delivers a typed input. When the FSM enters the state the
 //! engine runs [`suspend`](SuspendTask::suspend), writes a
-//! [`RowKind::Suspended`](crate::recovery::RowKind::Suspended) checkpoint row and returns
+//! [`RowKind::Suspended`](crate::checkpoint::RowKind::Suspended) checkpoint row and returns
 //! `Ok(state)` from [`orchestrate`](crate::workflow::Workflow::orchestrate): the run is
 //! parked, not failed, so the compensation stack and the checkpoint log are kept.
 //!
 //! [`Workflow::resume_with`](crate::workflow::Workflow::resume_with) delivers the input:
-//! the engine records it as a [`RowKind::ResumeInput`](crate::recovery::RowKind::ResumeInput)
+//! the engine records it as a [`RowKind::ResumeInput`](crate::checkpoint::RowKind::ResumeInput)
 //! row, calls [`resume`](SuspendTask::resume) with it, and continues the FSM from the state
 //! `resume` returns. The pause can span process restarts: only the checkpoint store and the
 //! application's own storage carry state across it.
@@ -265,7 +265,7 @@ where
 mod tests {
     use super::*;
 
-    use crate::recovery::RowKind;
+    use crate::checkpoint::RowKind;
     use crate::saga::CompensatableTask;
     use crate::task::Task;
     use crate::testing::InMemoryCheckpointStore;

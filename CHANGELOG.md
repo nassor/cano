@@ -17,6 +17,44 @@
   their own encoding need the two new variants.
 - `cano_workflow_runs_total` and `cano_workflow_duration_seconds` use the outcome label
   `suspended` for a run that parks at a suspend state.
+- `cano::store::postgres::PostgresStore` (feature `store-postgres`): a `CheckpointStore` in one
+  PostgreSQL table, `cano_checkpoints` by default, over a `deadpool-postgres` pool. A builder sets
+  the schema, table (`with_checkpoint_table`), pool size and timeouts, TLS connector or your own
+  pool, and whether to create the table; `schema_sql()` returns the DDL. The primary key
+  `(workflow_id, sequence)` is the only index. Re-exported as `cano::PostgresStore`.
+- `cano::store::nats::NatsStore` (feature `store-nats`): a `CheckpointStore` in a NATS JetStream
+  Key/Value bucket, `cano_checkpoints` by default, one key per row. A builder sets the bucket
+  name (`with_checkpoint_bucket`) and config (`with_checkpoint_bucket_config`), connect options,
+  JetStream domain or API prefix, and whether to create the bucket. Re-exported as
+  `cano::NatsStore`.
+- Both network stores bound every call with an operation timeout (10 s by default) and retry
+  transient failures with `with_retry(RetryMode)`, off by default. A retried append that finds
+  its own byte-identical row reports `Ok`.
+- `cano::testing::assert_checkpoint_store_contract`: runs the `CheckpointStore` contract
+  (round trip of every field, ordering, duplicate rejection, id isolation, concurrency, large
+  blobs) against any implementation.
+- `RedbStore::open_default()` opens `cano.redb` (`RedbStore::DEFAULT_FILE_NAME`) in a persistent
+  directory, creating it when missing; `RedbStore::default_path()` returns that file. The
+  directory is `CANO_DATA_DIR` (`RedbStore::DATA_DIR_ENV`) when set; else, on Linux and other
+  Unix systems except macOS, systemd's `STATE_DIRECTORY` plus `cano`; else a per-user directory
+  plus `cano/<executable name>`: `$XDG_STATE_HOME` when it is an absolute path, else
+  `~/.local/state`, on Linux and other Unix systems; `~/Library/Application Support` on macOS;
+  `%LOCALAPPDATA%` on Windows.
+
+### Changed
+
+- **Breaking:** the `recovery` feature is replaced by `store-redb`, which is on by default.
+  `default-features = false` removes redb from the build.
+- **Breaking:** `RedbCheckpointStore` is `cano::store::RedbStore`, re-exported as `cano::RedbStore`
+  and in the prelude. Its default file is `cano.redb`.
+- **Breaking:** the module `cano::recovery` is split: `cano::checkpoint` holds `CheckpointStore`,
+  `CheckpointRow` and `RowKind`, and `cano::store` holds the backends.
+- **Breaking:** `MemoryStore` is `cano::blackboard::Blackboard`. `StoreError`, `StoreResult` and
+  `CanoError::Store` are `BlackboardError`, `BlackboardResult` and `CanoError::Blackboard`, with
+  the error category `blackboard` and the constructor `CanoError::blackboard`.
+- The examples `store_custom_backend` and `workflow_stack_store` are `blackboard_namespaced` and
+  `workflow_blackboard`; the benches `store_performance` and `store_shared_performance` are
+  `blackboard_performance` and `blackboard_shared_performance`.
 
 ## 0.16.0 - 2026-11-15 - API Simplification
 

@@ -212,9 +212,9 @@ impl HealthCheckTask {
         println!("Running health check...");
 
         // Check system health
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         let status = "healthy".to_string();
-        store.put("last_health_check", status);
+        board.put("last_health_check", status);
 
         Ok(State::Complete)
     }
@@ -222,9 +222,9 @@ impl HealthCheckTask {
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let store = MemoryStore::new();
+    let board = Blackboard::new();
 
-    let workflow = Workflow::new(Resources::new().insert(store.clone()))
+    let workflow = Workflow::new(Resources::new().insert(board.clone()))
         .register(State::Start, HealthCheckTask)
         .add_exit_state(State::Complete);
 
@@ -312,17 +312,17 @@ impl DailyReport {
     async fn run(&self, res: &Resources) -> Result<State, CanoError> {
         println!("Preparing {} report...", self.report_type);
 
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
 
         // Load data for report
         let data = vec!["metric1".to_string(), "metric2".to_string(), "metric3".to_string()];
-        store.put("report_start", Utc::now().to_rfc3339());
+        board.put("report_start", Utc::now().to_rfc3339());
 
         println!("Generating report with {} records", data.len());
         let result = format!("{} report: {} records processed", self.report_type, data.len());
 
         println!("Report completed: {}", result);
-        store.put("last_report", result);
+        board.put("last_report", result);
 
         Ok(State::Complete)
     }
@@ -330,17 +330,17 @@ impl DailyReport {
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let store = MemoryStore::new();
+    let board = Blackboard::new();
 
     // Morning report workflow
-    let morning_report = Workflow::new(Resources::new().insert(store.clone()))
+    let morning_report = Workflow::new(Resources::new().insert(board.clone()))
         .register(State::Start, DailyReport {
             report_type: "Morning".to_string()
         })
         .add_exit_state(State::Complete);
 
     // Evening report workflow
-    let evening_report = Workflow::new(Resources::new().insert(store.clone()))
+    let evening_report = Workflow::new(Resources::new().insert(board.clone()))
         .register(State::Start, DailyReport {
             report_type: "Evening".to_string()
         })
@@ -420,9 +420,9 @@ impl DataExportTask {
         println!("Starting data export...");
 
         // Export data to CSV
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         let export_path = "/tmp/export.csv".to_string();
-        store.put("export_path", export_path);
+        board.put("export_path", export_path);
 
         println!("Export completed");
         Ok(State::Complete)
@@ -431,9 +431,9 @@ impl DataExportTask {
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let store = MemoryStore::new();
+    let board = Blackboard::new();
 
-    let export_workflow = Workflow::new(Resources::new().insert(store.clone()))
+    let export_workflow = Workflow::new(Resources::new().insert(board.clone()))
         .register(State::Start, DataExportTask)
         .add_exit_state(State::Complete);
 
@@ -520,7 +520,7 @@ enum State { Start, Complete }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let store = MemoryStore::new();
+    let board = Blackboard::new();
 
     // Define simple tasks
     #[derive(Clone)]
@@ -567,22 +567,22 @@ async fn main() -> Result<(), CanoError> {
     }
 
     // 1. Interval: Data sync every 5 minutes
-    let sync_workflow = Workflow::new(Resources::new().insert(store.clone()))
+    let sync_workflow = Workflow::new(Resources::new().insert(board.clone()))
         .register(State::Start, DataSyncTask)
         .add_exit_state(State::Complete);
 
     // 2. Cron: Daily backup at 3 AM
-    let backup_workflow = Workflow::new(Resources::new().insert(store.clone()))
+    let backup_workflow = Workflow::new(Resources::new().insert(board.clone()))
         .register(State::Start, BackupTask)
         .add_exit_state(State::Complete);
 
     // 3. Cron: Weekly report on Mondays at 9 AM
-    let report_workflow = Workflow::new(Resources::new().insert(store.clone()))
+    let report_workflow = Workflow::new(Resources::new().insert(board.clone()))
         .register(State::Start, WeeklyReportTask)
         .add_exit_state(State::Complete);
 
     // 4. Manual: Emergency data export
-    let export_workflow = Workflow::new(Resources::new().insert(store.clone()))
+    let export_workflow = Workflow::new(Resources::new().insert(board.clone()))
         .register(State::Start, EmergencyExportTask)
         .add_exit_state(State::Complete);
 

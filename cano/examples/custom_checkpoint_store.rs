@@ -23,8 +23,8 @@
 //! `Process` fails on the first call (simulating a crash) and succeeds on the
 //! second — demonstrating that `resume_from` re-runs the checkpointed state.
 
+use cano::checkpoint::CheckpointRow;
 use cano::prelude::*;
-use cano::recovery::CheckpointRow;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};

@@ -55,8 +55,8 @@ impl LongProcessingTask {
         println!("Long task completed");
 
         let result = format!("Long task finished after {}s", self.duration_secs);
-        let store = res.get::<MemoryStore>()?;
-        store.put("long_task_result", result);
+        let board = res.get::<Blackboard>()?;
+        board.put("long_task_result", result);
         Ok(MyState::Processing)
     }
 }
@@ -68,8 +68,8 @@ struct ProcessingTask;
 #[task(state = MyState)]
 impl ProcessingTask {
     async fn run(&self, res: &Resources) -> Result<MyState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let result: String = store
+        let board = res.get::<Blackboard>()?;
+        let result: String = board
             .get("long_task_result")
             .unwrap_or_else(|_| "No result available".to_string());
 
@@ -77,7 +77,7 @@ impl ProcessingTask {
         sleep(Duration::from_secs(1)).await;
 
         let processed = format!("Processed: {}", result);
-        store.put("processed_result", processed);
+        board.put("processed_result", processed);
         println!("Processing completed");
         Ok(MyState::End)
     }
@@ -101,14 +101,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("Starting Scheduler Graceful Shutdown Example");
     println!("================================================\n");
 
-    let store = MemoryStore::new();
+    let board = Blackboard::new();
 
-    let long_flow = Workflow::new(Resources::new().insert(store.clone()))
+    let long_flow = Workflow::new(Resources::new().insert(board.clone()))
         .register(MyState::Start, LongProcessingTask::new(5))
         .register(MyState::Processing, ProcessingTask)
         .add_exit_state(MyState::End);
 
-    let quick_flow = Workflow::new(Resources::new().insert(store.clone()))
+    let quick_flow = Workflow::new(Resources::new().insert(board.clone()))
         .register(MyState::Start, QuickTask)
         .add_exit_state(MyState::End);
 

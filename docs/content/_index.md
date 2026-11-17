@@ -70,7 +70,7 @@ It fits work where state transitions matter:
 <div class="feature-card animate-in">
 <div class="feature-icon" aria-hidden="true">&#128190;</div>
 <h3>Crash recovery</h3>
-<p>A pluggable <code>CheckpointStore</code> records state entries. <code>resume_from</code> rehydrates a crashed run and refuses checkpoints whose <code>workflow_version</code> differs from the workflow's. The embedded <code>RedbCheckpointStore</code> needs the <code>recovery</code> feature.</p>
+<p>A pluggable <code>CheckpointStore</code> records state entries. <code>resume_from</code> rehydrates a crashed run and refuses checkpoints whose <code>workflow_version</code> differs from the workflow's. Built-in stores keep the log in an embedded redb file, a PostgreSQL table or a NATS JetStream Key/Value bucket.</p>
 </div>
 <div class="feature-card animate-in">
 <div class="feature-icon secondary" aria-hidden="true">&#8634;</div>
@@ -126,7 +126,7 @@ It fits work where state transitions matter:
 <text class="t-mut" x="683" y="186">rows per state entry</text>
 <rect class="n-cop" x="16" y="262" width="162" height="54" rx="10"/>
 <text class="t-strong" x="97" y="281">Resources</text>
-<text class="t-code" x="97" y="300">MemoryStore</text>
+<text class="t-code" x="97" y="300">Blackboard</text>
 <rect class="n" x="270" y="262" width="240" height="104" rx="10"/>
 <text class="t-strong" x="390" y="284">Task family</text>
 <text class="t-mut" x="390" y="310">Task &middot; RouterTask &middot; PollTask</text>
@@ -185,17 +185,19 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 </div>
 
 <p>
-Cano enables no features by default. <code>features = ["all"]</code> turns on all five optional features:
+Cano enables one feature by default, <code>store-redb</code>. <code>features = ["all"]</code> turns on all seven optional features:
 </p>
 <ul>
 <li><code>scheduler</code>: the <a href="scheduler/"><code>Scheduler</code></a> (cron, interval and manual triggers)</li>
 <li><code>tracing</code>: <a href="tracing/"><code>tracing</code>-crate spans</a> and the <code>TracingObserver</code></li>
-<li><code>recovery</code>: <a href="recovery/"><code>RedbCheckpointStore</code></a>, the embedded ACID checkpoint store (the <code>CheckpointStore</code> trait is always available)</li>
+<li><code>store-redb</code> (default): <a href="recovery/#redb"><code>RedbStore</code></a>, a checkpoint store in an embedded redb file. <code>default-features = false</code> drops redb from the build</li>
+<li><code>store-postgres</code>: <a href="recovery/#postgres"><code>PostgresStore</code></a>, a checkpoint store in one PostgreSQL table</li>
+<li><code>store-nats</code>: <a href="recovery/#nats"><code>NatsStore</code></a>, a checkpoint store in a NATS JetStream Key/Value bucket</li>
 <li><code>metrics</code>: <a href="metrics/"><code>metrics</code>-crate counters, histograms and gauges</a> and the <code>MetricsObserver</code></li>
-<li><code>testing</code>: <a href="testing/">test fixtures</a> (recording observer, in-memory checkpoint store, panic and saga helpers), usually enabled under <code>[dev-dependencies]</code></li>
+<li><code>testing</code>: <a href="testing/">test fixtures</a> (recording observer, in-memory checkpoint store, checkpoint store contract suite, panic and saga helpers), usually enabled under <code>[dev-dependencies]</code></li>
 </ul>
 <p>
-Enable only what you need, for example <code>features = ["recovery"]</code>, or omit <code>features</code>
+Enable only what you need, for example <code>features = ["scheduler"]</code>, or omit <code>features</code>
 for the core. Cano runs on Tokio, so <code>tokio</code> is a direct dependency and you start the runtime
 with <code>#[tokio::main]</code> or <code>tokio::runtime::Builder</code>. The two <code>tokio</code> features above are the minimum for that.
 Add <code>"time"</code>, <code>"sync"</code> and others only when your own code uses them, or use <code>"full"</code>.

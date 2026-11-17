@@ -5,12 +5,12 @@
 //!
 //! ## Key Concepts
 //!
-//! - **Per-request resource isolation**: Each request gets its own `MemoryStore`
+//! - **Per-request resource isolation**: Each request gets its own `Blackboard`
 //!   and `Resources` so concurrent requests never interfere with each other.
 //! - **Workflow factory function**: The workflow structure is cheap to build —
 //!   tasks are small `Clone` structs wrapped in `Arc` internally.
 //! - **Data flow via Resources**: Request data is inserted into `Resources` before
-//!   orchestration; results are read from the store after it completes.
+//!   orchestration; results are read from the blackboard after it completes.
 //!
 //! ## Running
 //!
@@ -81,14 +81,14 @@ impl Resource for RequestParams {}
 // ============================================================================
 
 /// Reads the request params from Resources, validates the text is non-empty,
-/// and writes it to the store so downstream tasks can consume it.
+/// and writes it to the blackboard so downstream tasks can consume it.
 #[derive(Clone)]
 struct ParseTask;
 
 #[task(state = TextPipelineState)]
 impl ParseTask {
     async fn run(&self, res: &Resources) -> Result<TextPipelineState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         let params = res.get::<RequestParams>()?;
 
         if params.text.trim().is_empty() {
@@ -96,31 +96,31 @@ impl ParseTask {
         }
 
         // Store the validated text for the next stage
-        store.put("validated_text", params.text.clone());
+        board.put("validated_text", params.text.clone());
 
         Ok(TextPipelineState::Transform)
     }
 }
 
 /// Transforms the validated text: computes word count and uppercased version,
-/// then writes results back to the store.
+/// then writes results back to the blackboard.
 #[derive(Clone)]
 struct TransformTask;
 
 #[task(state = TextPipelineState)]
 impl TransformTask {
     async fn run(&self, res: &Resources) -> Result<TextPipelineState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
 
-        let text: String = store
+        let text: String = board
             .get("validated_text")
             .map_err(|e| CanoError::task_execution(format!("missing validated_text: {e}")))?;
 
         let word_count = text.split_whitespace().count();
         let uppercased = text.to_uppercase();
 
-        store.put("word_count", word_count);
-        store.put("uppercased", uppercased);
+        board.put("word_count", word_count);
+        board.put("uppercased", uppercased);
 
         Ok(TextPipelineState::Done)
     }
@@ -146,10 +146,10 @@ fn build_workflow(resources: Resources) -> Workflow<TextPipelineState> {
 async fn process_handler(
     Json(payload): Json<ProcessRequest>,
 ) -> Result<Json<ProcessResponse>, StatusCode> {
-    // Each request gets its own store and resources — full isolation.
-    let store = MemoryStore::new();
+    // Each request gets its own blackboard and resources — full isolation.
+    let board = Blackboard::new();
     let resources = Resources::new()
-        .insert(store.clone())
+        .insert(board.clone())
         .insert(RequestParams {
             text: payload.text.clone(),
         });
@@ -162,11 +162,11 @@ async fn process_handler(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Read the results that the tasks wrote to the store.
-    let word_count: usize = store
+    // Read the results that the tasks wrote to the blackboard.
+    let word_count: usize = board
         .get("word_count")
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let uppercased: String = store
+    let uppercased: String = board
         .get("uppercased")
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 

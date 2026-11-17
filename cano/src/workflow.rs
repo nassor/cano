@@ -77,9 +77,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use crate::CancellationToken;
+use crate::checkpoint::CheckpointStore;
 use crate::error::CanoError;
 use crate::observer::WorkflowObserver;
-use crate::recovery::CheckpointStore;
 use crate::resource::Resources;
 use crate::saga::ErasedCompensatable;
 use crate::task::{Task, TaskConfig};
@@ -243,7 +243,7 @@ where
     /// returns it before its other checks (first one wins).
     config_error: Option<CanoError>,
     /// Optional append-only checkpoint store. When set (alongside [`workflow_id`](Self::workflow_id)),
-    /// every state entry writes a [`CheckpointRow`](crate::recovery::CheckpointRow) before the state's task runs, so a
+    /// every state entry writes a [`CheckpointRow`](crate::checkpoint::CheckpointRow) before the state's task runs, so a
     /// crashed run can be resumed via [`resume_from`](Self::resume_from). `None` by default —
     /// workflows without a store keep their zero-overhead behavior.
     checkpoint_store: Option<Arc<dyn CheckpointStore>>,
@@ -252,7 +252,7 @@ where
     /// is set on that path (the first checkpoint write errors if it's missing);
     /// [`resume_from`](Self::resume_from) takes the id explicitly.
     workflow_id: Option<Arc<str>>,
-    /// Version stamped onto every [`CheckpointRow`](crate::recovery::CheckpointRow) the
+    /// Version stamped onto every [`CheckpointRow`](crate::checkpoint::CheckpointRow) the
     /// engine appends, and checked against the persisted version when
     /// [`resume_from`](Self::resume_from) replays a run. Defaults to `0`; set via
     /// [`with_workflow_version`](Self::with_workflow_version).
@@ -418,7 +418,7 @@ where
     /// the model:
     ///
     /// - **Router** tasks are dispatched like any task but **skipped by the checkpoint
-    ///   writer**: no [`CheckpointRow`](crate::recovery::CheckpointRow) is appended and
+    ///   writer**: no [`CheckpointRow`](crate::checkpoint::CheckpointRow) is appended and
     ///   no sequence number is consumed (`on_state_enter` still fires). If the *initial*
     ///   state is a router and the run crashes before any other state is checkpointed,
     ///   `resume_from` finds zero rows and errors; restarting is safe, routers have no
@@ -426,7 +426,7 @@ where
     /// - **Stepped** tasks run each `step` under the task's retry policy and, with a
     ///   [checkpoint store](Self::with_checkpoint_store) and
     ///   [workflow id](Self::with_workflow_id), persist every cursor as a
-    ///   [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row;
+    ///   [`RowKind::StepCursor`](crate::checkpoint::RowKind::StepCursor) row;
     ///   [`resume_from`](Self::resume_from) continues from the last one.
     /// - **Stream** tasks are windowed by the engine, observe the run's
     ///   [`CancellationToken`](crate::CancellationToken) (flushing the in-flight window)
@@ -589,7 +589,7 @@ where
     /// Attach an append-only [`CheckpointStore`] so the workflow records its FSM
     /// progress and can be resumed after a crash via [`resume_from`](Self::resume_from).
     ///
-    /// When set, every state entry writes one [`CheckpointRow`](crate::recovery::CheckpointRow) *before* the state's
+    /// When set, every state entry writes one [`CheckpointRow`](crate::checkpoint::CheckpointRow) *before* the state's
     /// task runs: the sequence, the state's `Debug` label, and `task_id` — the
     /// [`Task::name`] for a single-task state, or `""` for a split state or a pure
     /// exit state. Split states write exactly one row — the entry row — not one per
@@ -611,7 +611,7 @@ where
         self
     }
 
-    /// Set the identifier under which this run's [`CheckpointRow`](crate::recovery::CheckpointRow)s are recorded.
+    /// Set the identifier under which this run's [`CheckpointRow`](crate::checkpoint::CheckpointRow)s are recorded.
     ///
     /// Required whenever a [`checkpoint_store`](Self::with_checkpoint_store) is attached.
     /// [`resume_from`](Self::resume_from) takes the id explicitly, so this builder is only
@@ -625,7 +625,7 @@ where
         self
     }
 
-    /// Stamp this version onto every [`CheckpointRow`](crate::recovery::CheckpointRow)
+    /// Stamp this version onto every [`CheckpointRow`](crate::checkpoint::CheckpointRow)
     /// the engine appends, and reject [`resume_from`](Self::resume_from) when the
     /// persisted version differs. Defaults to `0`.
     ///
@@ -1260,8 +1260,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_workflow_with_data() {
-        let store = crate::store::MemoryStore::new();
-        let resources = Resources::new().insert(store.clone());
+        let board = crate::blackboard::Blackboard::new();
+        let resources = Resources::new().insert(board.clone());
         let workflow = Workflow::new(resources)
             .register(
                 TestState::Start,
@@ -1272,7 +1272,7 @@ mod tests {
         let result = workflow.orchestrate(TestState::Start).await.unwrap();
         assert_eq!(result, TestState::Complete);
 
-        let data: String = store.get("test_key").unwrap();
+        let data: String = board.get("test_key").unwrap();
         assert_eq!(data, "test_value");
     }
 

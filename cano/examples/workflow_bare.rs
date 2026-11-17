@@ -20,7 +20,7 @@ use cano::prelude::*;
 enum Stage {
     Validate, // pure logic — no resources needed
     Sanitize, // pure logic — no resources needed
-    Persist,  // writes to a store — needs resources
+    Persist,  // writes to the blackboard — needs resources
     Done,
 }
 
@@ -57,18 +57,18 @@ impl SanitizeTask {
     }
 }
 
-// Resource tasks override `run()` to access the store or other resources.
+// Resource tasks override `run()` to access the blackboard or other resources.
 
-/// Persists the sanitized value to the shared store.
+/// Persists the sanitized value to the shared blackboard.
 struct PersistTask;
 
 #[task(state = Stage)]
 impl PersistTask {
     async fn run(&self, res: &Resources) -> CanoResult<Stage> {
-        let store = res.get::<MemoryStore>()?;
-        println!("PersistTask: writing result to store...");
+        let board = res.get::<Blackboard>()?;
+        println!("PersistTask: writing result to blackboard...");
         let result: i32 = 42_i32.clamp(0, 100);
-        store.put("sanitized_value", result);
+        board.put("sanitized_value", result);
         println!("  stored sanitized_value={result}");
         Ok(Stage::Done)
     }
@@ -96,8 +96,8 @@ async fn main() -> CanoResult<()> {
     println!("=== Mixed workflow (bare tasks + resource task) ===\n");
 
     // Resource-free tasks work in any workflow, next to tasks that use resources.
-    let store = MemoryStore::new();
-    let workflow = Workflow::new(Resources::new().insert(store.clone()))
+    let board = Blackboard::new();
+    let workflow = Workflow::new(Resources::new().insert(board.clone()))
         .register(Stage::Validate, ValidateTask) // bare task
         .register(Stage::Sanitize, SanitizeTask) // bare task
         .register(Stage::Persist, PersistTask) // resource task
@@ -106,7 +106,7 @@ async fn main() -> CanoResult<()> {
     match workflow.orchestrate(Stage::Validate).await {
         Ok(final_state) => {
             println!("\nMixed workflow reached: {final_state:?}");
-            if let Ok(v) = store.get::<i32>("sanitized_value") {
+            if let Ok(v) = board.get::<i32>("sanitized_value") {
                 println!("Persisted value: {v}");
             }
         }

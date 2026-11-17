@@ -37,7 +37,7 @@ impl ProcessingTask1 {
 #[task(state = TaskState)]
 impl ProcessingTask1 {
     async fn run(&self, res: &Resources) -> Result<TaskState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
 
         println!("Task '{}' - Loading data", self.name);
         let data = format!("data_for_{}", self.name);
@@ -46,7 +46,7 @@ impl ProcessingTask1 {
         let processed = format!("processed_{}", data);
 
         println!("Task '{}' - Storing {}", self.name, processed);
-        store.put("first_result", processed);
+        board.put("first_result", processed);
 
         Ok(TaskState::ProcessSecond)
     }
@@ -69,11 +69,11 @@ impl ProcessingTask2 {
 #[task(state = TaskState)]
 impl ProcessingTask2 {
     async fn run(&self, res: &Resources) -> Result<TaskState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
 
         println!("Task '{}' - Single run method: doing everything", self.name);
 
-        let first_result: String = store
+        let first_result: String = board
             .get("first_result")
             .map_err(|e| CanoError::task_execution(format!("Failed to load first result: {e}")))?;
 
@@ -82,7 +82,7 @@ impl ProcessingTask2 {
         let processed = format!("task_enhanced_{first_result}");
         println!("   Processing: {}", processed);
 
-        store.put("final_result", processed.clone());
+        board.put("final_result", processed.clone());
         println!("   Stored final result: {}", processed);
 
         Ok(TaskState::Complete)
@@ -96,11 +96,11 @@ struct InitializerTask;
 #[task(state = TaskState)]
 impl InitializerTask {
     async fn run(&self, res: &Resources) -> Result<TaskState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
 
         println!("Initializer Task - Setting up workflow data");
-        store.put("workflow_id", "demo_123".to_string());
-        store.put("start_time", std::time::SystemTime::now());
+        board.put("workflow_id", "demo_123".to_string());
+        board.put("start_time", std::time::SystemTime::now());
         Ok(TaskState::ProcessFirst)
     }
 }
@@ -116,8 +116,8 @@ async fn main() -> Result<(), CanoError> {
     println!("  Resources are shared across all tasks via the resource map");
     println!();
 
-    let store = MemoryStore::new();
-    let resources = Resources::new().insert(store.clone());
+    let board = Blackboard::new();
+    let resources = Resources::new().insert(board.clone());
 
     let workflow = Workflow::new(resources)
         .register(TaskState::Start, InitializerTask)
@@ -143,10 +143,10 @@ async fn main() -> Result<(), CanoError> {
             println!("Workflow completed successfully!");
             println!("   Final state: {final_state:?}");
 
-            if let Ok(workflow_id) = store.get::<String>("workflow_id") {
+            if let Ok(workflow_id) = board.get::<String>("workflow_id") {
                 println!("   Workflow ID: {workflow_id}");
             }
-            if let Ok(final_result) = store.get::<String>("final_result") {
+            if let Ok(final_result) = board.get::<String>("final_result") {
                 println!("   Final result: {final_result}");
             }
         }

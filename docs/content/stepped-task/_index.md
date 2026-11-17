@@ -206,10 +206,10 @@ after every step.
 
 ```rust
 use cano::prelude::*;
-use cano::RedbCheckpointStore;            // requires the `recovery` feature
+use cano::RedbStore;
 use std::sync::Arc;
 
-let checkpoint_store = RedbCheckpointStore::new("/var/lib/myapp/checkpoints.redb")?;
+let checkpoint_store = RedbStore::new("/var/lib/myapp/cano.redb")?;
 let workflow = Workflow::new(resources)
     .with_checkpoint_store(Arc::new(checkpoint_store))
     .with_workflow_id("nightly-crunch")
@@ -238,11 +238,10 @@ starts from <code>None</code>.
 </p>
 
 <div class="callout callout-info">
-<div class="callout-label">Works without the <code>recovery</code> feature</div>
+<div class="callout-label">Works with any store</div>
 <p>
-Any <code>CheckpointStore</code> receives cursor rows. Only the built-in <code>RedbCheckpointStore</code>
-needs the <code>recovery</code> feature. With no store or no workflow id attached, the engine still
-drives the step loop and writes no cursor rows.
+Any <code>CheckpointStore</code> receives cursor rows. With no store or no workflow id attached, the
+engine still drives the step loop and writes no cursor rows.
 </p>
 </div>
 
@@ -290,8 +289,8 @@ impl SteppedTask<Stage> for Cruncher {
         -> Result<StepOutcome<MyCursor, Stage>, CanoError>
     {
         let c = cursor.unwrap_or(MyCursor { offset: 0 });
-        let store = res.get::<MemoryStore>()?;
-        let total: u64 = store.get("row_count")?;
+        let board = res.get::<Blackboard>()?;
+        let total: u64 = board.get("row_count")?;
         if c.offset >= total {
             return Ok(StepOutcome::Done(Stage::Report));
         }
@@ -317,7 +316,7 @@ simpler.
 <div class="callout callout-tip">
 <div class="callout-label">Runnable example and crash test</div>
 <p>
-Run the example with <code>cargo run --example stepped_task --features recovery</code>. The
+Run the example with <code>cargo run --example stepped_task</code>. The
 crash-recovery integration test is <code>tests/stepped_resume_e2e.rs</code>: it kills a stepped run
 mid-loop and asserts that <code>resume_from</code> picks up from the persisted cursor.
 </p>

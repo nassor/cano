@@ -152,8 +152,8 @@ struct InherentWithKey;
 #[task::batch(state = Step)]
 impl InherentWithKey {
     async fn load(&self, res: &Resources) -> Result<Vec<u32>, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let items: Vec<u32> = store.get("items")?;
+        let board = res.get::<Blackboard>()?;
+        let items: Vec<u32> = board.get("items")?;
         Ok(items)
     }
 
@@ -174,9 +174,9 @@ impl InherentWithKey {
 
 #[tokio::test]
 async fn inherent_with_key_uses_custom_resource_key() {
-    let store = MemoryStore::new();
-    store.put("items", vec![1u32, 2, 3]);
-    let resources = Resources::new().insert(store);
+    let board = Blackboard::new();
+    board.put("items", vec![1u32, 2, 3]);
+    let resources = Resources::new().insert(board);
 
     let result = Task::run(&InherentWithKey, &resources).await.unwrap();
     assert_eq!(result, Step::Done);
@@ -184,9 +184,9 @@ async fn inherent_with_key_uses_custom_resource_key() {
 
 #[tokio::test]
 async fn inherent_with_key_integrates_with_workflow() {
-    let store = MemoryStore::new();
-    store.put("items", vec![1u32, 2, 3]);
-    let resources = Resources::new().insert(store);
+    let board = Blackboard::new();
+    board.put("items", vec![1u32, 2, 3]);
+    let resources = Resources::new().insert(board);
 
     let workflow = Workflow::new(resources)
         .register(Step::Process, InherentWithKey)
@@ -493,8 +493,8 @@ impl LoadStep {
     }
 
     async fn load(&self, res: &Resources) -> Result<Vec<u32>, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let items: Vec<u32> = store.get("input")?;
+        let board = res.get::<Blackboard>()?;
+        let items: Vec<u32> = board.get("input")?;
         Ok(items)
     }
 
@@ -508,18 +508,18 @@ impl LoadStep {
         outputs: Vec<Result<u32, CanoError>>,
     ) -> Result<Step, CanoError> {
         let doubled: Vec<u32> = outputs.into_iter().map(|r| r.unwrap()).collect();
-        let store = res.get::<MemoryStore>()?;
-        store.put("output", doubled);
+        let board = res.get::<Blackboard>()?;
+        board.put("output", doubled);
         Ok(Step::Done)
     }
 }
 
 #[tokio::test]
 async fn end_to_end_workflow_load_process_finish() {
-    let store = MemoryStore::new();
-    store.put("input", vec![1u32, 2, 3, 4, 5]);
+    let board = Blackboard::new();
+    board.put("input", vec![1u32, 2, 3, 4, 5]);
 
-    let resources = Resources::new().insert(store.clone());
+    let resources = Resources::new().insert(board.clone());
 
     let workflow = Workflow::new(resources)
         .register(Step::Process, LoadStep)
@@ -528,6 +528,6 @@ async fn end_to_end_workflow_load_process_finish() {
     let result = workflow.orchestrate(Step::Process).await.unwrap();
     assert_eq!(result, Step::Done);
 
-    let output: Vec<u32> = store.get("output").unwrap();
+    let output: Vec<u32> = board.get("output").unwrap();
     assert_eq!(output, vec![2, 4, 6, 8, 10]);
 }
