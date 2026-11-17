@@ -102,7 +102,7 @@ pub struct CheckpointRow {
     pub sequence: u64,            // increases by one per row within the run
     pub state: String,            // the Debug rendering of the state value
     pub task_id: String,          // Task::name() for a single-task state; "" for split and exit states
-    pub output_blob: Option<Vec<u8>>,  // serialized output (compensation) or cursor (stepped, stream); else None
+    pub output_blob: Option<Vec<u8>>,  // serialized output (compensation), cursor (stepped, stream) or resume input (ResumeInput); else None
     pub kind: RowKind,            // what this row records
     pub workflow_version: u32,    // see Workflow::with_workflow_version (default 0)
 }
@@ -112,6 +112,8 @@ pub enum RowKind {
     StateEntry,              // the engine entered this state (the usual case)
     CompensationCompletion,  // a compensatable task finished; output_blob holds its serialized output
     StepCursor,              // a stepped or stream task advanced; output_blob holds the serde_json-encoded cursor
+    Suspended,               // a SuspendTask finished suspend and the run is parked at this state; output_blob is None
+    ResumeInput,             // Workflow::resume_with delivered an input; output_blob holds the serde_json-encoded input
 }
 ```
 
@@ -121,6 +123,7 @@ pub enum RowKind {
 <li>A <a href="../router-task/">router</a> state writes no row and uses no sequence number. A router has no side effects, so there is nothing to recover.</li>
 <li>A <a href="../saga/">compensatable</a> state that succeeds writes a second row, <code>CompensationCompletion</code>, whose <code>output_blob</code> is the serialized output. Its entry row and completion row use two sequence numbers.</li>
 <li>A <a href="../stepped-task/">SteppedTask</a> writes a <code>StepCursor</code> row after each step that returns <code>More</code>, carrying the <code>serde_json</code>-encoded cursor. A <a href="../stream-task/">StreamTask</a> writes one per flushed window. Both register with the same <code>register</code> call as any task, and the rows are written only when a checkpoint store and a workflow id are both set. Without them the task runs in memory.</li>
+<li>A <a href="../suspend-task/">SuspendTask</a> writes a <code>Suspended</code> row after <code>suspend</code> returns <code>Ok</code>, and <code>orchestrate</code> returns the parked state with the log kept. <code>Workflow::resume_with</code> writes a <code>ResumeInput</code> row carrying the <code>serde_json</code>-encoded input before it calls <code>resume</code>. Both need a checkpoint store and a workflow id.</li>
 <li><code>state</code> is <code>format!("{state:?}")</code>, and resume maps it back to a registered or exit state, so each state needs a distinct <code>Debug</code> form. Any <code>#[derive(Debug)]</code> enum has one.</li>
 </ul>
 
@@ -186,6 +189,7 @@ makes the resumed run cancellable.
 <li><code>StateEntry</code> rows drive the state replay. The engine takes the highest-sequence row, maps its label back to a state and re-enters the FSM loop there, continuing the same sequence.</li>
 <li><code>CompensationCompletion</code> rows rebuild the <a href="../saga/">compensation stack</a> in sequence order, so a failure after the resume point can still roll back work an earlier process did. If the last row is itself a completion row, it is skipped: that state re-runs and pushes its entry again, and keeping both would compensate it twice.</li>
 <li><code>StepCursor</code> rows feed a resumed <a href="../stepped-task/">SteppedTask</a> or <a href="../stream-task/">StreamTask</a>. The latest cursor for the resumed state goes to the first <code>step</code> call, or to <code>open</code> for a stream, instead of <code>None</code>.</li>
+<li>A last row of <code>Suspended</code> marks a parked run. <code>resume_from</code> returns the parked state and runs nothing, and <code>resume_with</code> records the input and continues. A last row of <code>ResumeInput</code> means <code>resume</code> did not finish, so <code>resume_from</code> delivers the stored input again. Neither kind changes the <a href="../saga/">compensation stack</a> rebuild.</li>
 </ul>
 <p>
 Resource <code>setup</code> and <code>teardown</code> wrap the resumed run as they do in

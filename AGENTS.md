@@ -16,7 +16,7 @@ macros `cano-macros`. The API is pre-1.0 and changes between minor versions.
 | `cano/tests/` | Integration suites (cancellation, scheduler, reliability, recovery, tracing). `tests/support/` holds `MemStore`, the double these suites use because they cannot see `cfg(test)` items. |
 | `cano/examples/` | Runnable examples, auto-discovered. Only examples that need a feature have an `[[example]]` block with `required-features`. |
 | `cano/benches/` | Criterion benches: `workflow_performance`, `task_performance`, `resource_performance`, `store_performance`, `store_shared_performance`, `circuit_performance`, `rate_limiter_performance`. |
-| `cano-macros/` | `#[task]`, `#[task::router]`, `#[task::poll]`, `#[task::timer]`, `#[task::batch]`, `#[task::stepped]`, `#[task::stream]`, `#[saga::task]`, `#[resource]`, `#[checkpoint_store]`, `#[derive(Resource)]`, `#[derive(FromResources)]`. `src/model.rs` is the one driver every task-model macro goes through. |
+| `cano-macros/` | `#[task]`, `#[task::router]`, `#[task::poll]`, `#[task::timer]`, `#[task::batch]`, `#[task::stepped]`, `#[task::stream]`, `#[task::suspend]`, `#[saga::task]`, `#[resource]`, `#[checkpoint_store]`, `#[derive(Resource)]`, `#[derive(FromResources)]`. `src/model.rs` is the one driver every task-model macro goes through. |
 | `cano-e2e/` | Docker and Postgres crash-recovery tests. A workspace member outside `default-members`; never published. |
 | `docs/` | Zola site (`content/`, `templates/`, `static/`, `config.toml`), deployed to GitHub Pages. |
 
@@ -24,8 +24,12 @@ macros `cano-macros`. The API is pre-1.0 and changes between minor versions.
 
 - **One registration path.** `Workflow::register` takes any `Registrable`; the task macros
   implement it and choose the engine path (`StateEntry::single`, `router`, `stepped`, `stream`,
-  `compensatable`). A new task model adds a `Model` in `cano-macros/src/model.rs` and a
+  `suspend`, `compensatable`). A new task model adds a `Model` in `cano-macros/src/model.rs` and a
   `StateEntry` constructor; it never adds a `register_*` method.
+- **A parked run is `Ok`.** A suspend state writes a `Suspended` row and `orchestrate` returns
+  `Ok(state)` without draining or clearing the log; `resume_with` appends `ResumeInput` and
+  re-enters the state without a `StateEntry` row. `resume_from` reads run status from the last
+  row's kind only. `RowKind` variants are stored by index: append new ones at the end.
 - **Macros emit `::cano::…` paths only.** `cano/src/lib.rs` has `extern crate self as cano;`, so
   the same output works inside the crate.
 - **Tasks return the next state** (`Result<TState, CanoError>`). There is no split-returning task;

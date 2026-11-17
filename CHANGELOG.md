@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Added
+
+- `SuspendTask` and `#[task::suspend]`: a task model that parks a run at its state.
+  `suspend` runs on entry, the engine writes a `RowKind::Suspended` row, and `orchestrate`
+  returns `Ok(parked_state)` with the checkpoint log and compensation stack kept.
+  `Workflow::resume_with(id, &input)` (and `resume_with_token`) records the input as a
+  `RowKind::ResumeInput` row and continues the run from the state `resume` returns.
+  `resume_from` on a parked run returns the parked state without running anything, and
+  re-delivers a recorded input whose `resume` did not finish. A suspend task requires a
+  checkpoint store (`validate` rejects it otherwise). See the `suspend_task` example.
+- `RowKind::Suspended` and `RowKind::ResumeInput`, with `CheckpointRow::suspended` and
+  `CheckpointRow::with_resume_input`. Custom `CheckpointStore` backends that map `RowKind` to
+  their own encoding need the two new variants.
+- `cano_workflow_runs_total` and `cano_workflow_duration_seconds` use the outcome label
+  `suspended` for a run that parks at a suspend state.
+
 ## 0.16.0 - 2026-11-15 - API Simplification
 
 ### Changed

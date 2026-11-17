@@ -1,6 +1,6 @@
 //! Shared driver for the specialized task-model attribute macros
 //! (`#[task::router]`, `#[task::poll]`, `#[task::timer]`, `#[task::batch]`,
-//! `#[task::stepped]`, `#[task::stream]`).
+//! `#[task::stepped]`, `#[task::stream]`, `#[task::suspend]`).
 //!
 //! Each model is described by a [`Model`] constant; [`expand`] handles every
 //! surface form the same way:
@@ -63,7 +63,7 @@ pub(crate) struct Model {
     /// companion impl.
     pub companion_run: Option<fn(state: &Type) -> TokenStream>,
     /// `StateEntry` constructor the emitted `Registrable` impl calls (`"single"`,
-    /// `"router"`, `"stepped"`, `"stream"`, `"compensatable"`).
+    /// `"router"`, `"stepped"`, `"stream"`, `"suspend"`, `"compensatable"`).
     pub entry: &'static str,
 }
 

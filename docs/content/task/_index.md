@@ -1,6 +1,6 @@
 +++
 title = "Task"
-description = "Implement a Cano Task: one async method that returns the next state. Configure it, and choose among the seven processing models."
+description = "Implement a Cano Task: one async method that returns the next state. Configure it, and choose among the eight processing models."
 template = "section.html"
 +++
 
@@ -11,11 +11,12 @@ template = "section.html"
 <p>
 A <code>Task</code> is the basic building block of a Cano workflow: a single <code>run</code>
 method that returns the next state. It is the default choice for every processing unit.
-The other six models
+The other seven models
 (<a href="../router-task/">RouterTask</a>,
 <a href="../poll-task/">PollTask</a>, <a href="../timer-task/">TimerTask</a>,
 <a href="../batch-task/">BatchTask</a>,
-<a href="../stepped-task/">SteppedTask</a>, <a href="../stream-task/">StreamTask</a>)
+<a href="../stepped-task/">SteppedTask</a>, <a href="../stream-task/">StreamTask</a>,
+<a href="../suspend-task/">SuspendTask</a>)
 suit work that has a particular shape; see <a href="#task-family">the task family</a> and
 <a href="#choosing">choosing a processing model</a>. At dispatch a task receives a <code>&amp;Resources</code>;
 <a href="../resources/">Resources</a> explains how to register and retrieve typed dependencies.
@@ -357,12 +358,11 @@ impl AggregatorTask {
 <hr class="section-divider">
 <h2 id="task-family"><a href="#task-family" class="anchor-link" aria-hidden="true">#</a>The task family</h2>
 <p>
-Six more processing models build on <code>Task</code>. Each fits one shape of work, each dispatches as a
-<code>Task</code>, and all of them mix freely in one workflow. Each has its own page with the full reference.
+Seven more processing models build on <code>Task</code>. Each fits one shape of work and all of them mix freely in one workflow. Each has its own page with the full reference.
 </p>
 
 <div class="diagram-frame">
-<p class="diagram-label">The seven processing models, grouped by what they add to a plain Task</p>
+<p class="diagram-label">Seven of the processing models, grouped by what they add to a plain Task</p>
 <div class="cd-wrap">
 <svg class="cd" viewBox="0 0 780 272" role="img" aria-labelledby="task-family-title task-family-desc">
 <title id="task-family-title">The task family</title>
@@ -430,6 +430,11 @@ step, so a crash resumes mid-loop.</p>
 <p>Continuous stream consumption: <code>open</code>, then <code>process_item</code> and <code>flush_window</code> per tumbling window,
 until the stream is cancelled or exhausted. It resumes from a committed cursor.</p>
 </div>
+<div class="card">
+<h3><a href="../suspend-task/">SuspendTask</a></h3>
+<p>Durable pause: <code>suspend</code> notifies and the run parks. <code>Workflow::resume_with</code> later delivers a typed input to
+<code>resume</code>, which returns the next state.</p>
+</div>
 </div>
 
 <!-- Section: Choosing a Processing Model -->
@@ -475,6 +480,10 @@ Every model is registered with <code>Workflow::register</code>. Start from
 <tr>
 <td><a href="../stream-task/"><code>StreamTask</code></a></td>
 <td>You consume an unbounded source (Kafka, SSE, file tail) with per-window emission and bounded memory, and resume from a cursor.</td>
+</tr>
+<tr>
+<td><a href="../suspend-task/"><code>SuspendTask</code></a></td>
+<td>The run must wait for an outside party, such as a human approval or a webhook, possibly across restarts, then continue with that party's input.</td>
 </tr>
 </tbody>
 </table>

@@ -145,6 +145,11 @@ path = "examples/saga_recovery.rs"
 required-features = ["recovery"]
 
 [[example]]
+name = "suspend_task"
+path = "examples/suspend_task.rs"
+required-features = ["recovery"]
+
+[[example]]
 name = "testing_helpers"
 path = "examples/testing_helpers.rs"
 required-features = ["testing"]

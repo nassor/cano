@@ -14,8 +14,8 @@ where to go next. There is no loop and no condition re-check: a 30-minute timer 
 <code>tokio::time::sleep</code> and wakes a single time. It is one of the
 <a href="../task/">Task</a> family of processing models, alongside
 <a href="../router-task/">RouterTask</a>, <a href="../poll-task/">PollTask</a>,
-<a href="../batch-task/">BatchTask</a>, <a href="../stepped-task/">SteppedTask</a>, and
-<a href="../stream-task/">StreamTask</a>, and it reads typed dependencies from
+<a href="../batch-task/">BatchTask</a>, <a href="../stepped-task/">SteppedTask</a>,
+<a href="../stream-task/">StreamTask</a> and <a href="../suspend-task/">SuspendTask</a>, and it reads typed dependencies from
 <a href="../resources/">Resources</a> like the rest. New to Cano? Read
 <a href="../workflows/">Workflows</a> and <a href="../resources/">Resources</a> first.
 </p>

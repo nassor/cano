@@ -45,7 +45,7 @@ It fits work where state transitions matter:
 <div class="feature-card animate-in">
 <div class="feature-icon" aria-hidden="true">&#9881;</div>
 <h3>Processing models</h3>
-<p>Seven models in the <a href="task/#task-family"><code>Task</code> family</a>: <code>Task</code>, <code>RouterTask</code>, <code>PollTask</code>, <code>TimerTask</code>, <code>BatchTask</code>, <code>SteppedTask</code> and <code>StreamTask</code>. Mix them freely in one workflow.</p>
+<p>Eight models in the <a href="task/#task-family"><code>Task</code> family</a>: <code>Task</code>, <code>RouterTask</code>, <code>PollTask</code>, <code>TimerTask</code>, <code>BatchTask</code>, <code>SteppedTask</code>, <code>StreamTask</code> and <code>SuspendTask</code>. Mix them freely in one workflow.</p>
 </div>
 <div class="feature-card animate-in">
 <div class="feature-icon secondary" aria-hidden="true">&#9670;</div>
@@ -130,8 +130,8 @@ It fits work where state transitions matter:
 <rect class="n" x="270" y="262" width="240" height="104" rx="10"/>
 <text class="t-strong" x="390" y="284">Task family</text>
 <text class="t-mut" x="390" y="310">Task &middot; RouterTask &middot; PollTask</text>
-<text class="t-mut" x="390" y="330">TimerTask &middot; BatchTask</text>
-<text class="t-mut" x="390" y="350">SteppedTask &middot; StreamTask</text>
+<text class="t-mut" x="390" y="330">TimerTask &middot; BatchTask &middot; SteppedTask</text>
+<text class="t-mut" x="390" y="350">StreamTask &middot; SuspendTask</text>
 <rect class="n" x="16" y="396" width="748" height="56" rx="10"/>
 <text class="t-strong" x="390" y="415">Observability rail: opt-in, no cost when unused</text>
 <text class="t-mut" x="390" y="435">WorkflowObserver hooks &middot; tracing spans &middot; metrics counters</text>
@@ -267,7 +267,7 @@ async fn main() -> Result<(), CanoError> {
 <ol>
 <li><a href="workflows/">Workflows</a>: states, the builder, validation, and how a run executes.</li>
 <li><a href="resources/">Resources</a>: typed, lifecycle-managed dependency injection. Every task receives a <code>&amp;Resources</code>.</li>
-<li><a href="task/">Task</a>: the default processing unit. The rest of the <a href="task/#task-family">Task family</a> (<a href="router-task/">RouterTask</a>, <a href="poll-task/">PollTask</a>, <a href="timer-task/">TimerTask</a>, <a href="batch-task/">BatchTask</a>, <a href="stepped-task/">SteppedTask</a>, <a href="stream-task/">StreamTask</a>) covers shapes a plain task does not fit.</li>
+<li><a href="task/">Task</a>: the default processing unit. The rest of the <a href="task/#task-family">Task family</a> (<a href="router-task/">RouterTask</a>, <a href="poll-task/">PollTask</a>, <a href="timer-task/">TimerTask</a>, <a href="batch-task/">BatchTask</a>, <a href="stepped-task/">SteppedTask</a>, <a href="stream-task/">StreamTask</a>, <a href="suspend-task/">SuspendTask</a>) covers shapes a plain task does not fit.</li>
 <li><a href="split-join/">Split and join</a> and <a href="scheduler/">Scheduler</a>: parallelism within a workflow, and time-driven execution of workflows.</li>
 <li>Resilience and recovery: <a href="resilience/">Resilience</a>, <a href="recovery/">Recovery</a>, <a href="saga/">Saga</a>.</li>
 <li>Observability: <a href="tracing/">Tracing</a>, <a href="metrics/">Metrics</a>, <a href="observers/">Observers</a>.</li>

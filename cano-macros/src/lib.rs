@@ -17,6 +17,7 @@
 //! - `#[cano::task::timer]` — for `impl TimerTask` and the `TimerTask` trait
 //! - `#[cano::task::batch]` — for `impl BatchTask` and the `BatchTask` trait
 //! - `#[cano::task::stepped]` — for `impl SteppedTask` and the `SteppedTask` trait
+//! - `#[cano::task::suspend]` — for `impl SuspendTask` and the `SuspendTask` trait
 //! - `#[cano::task::stream]` — for `impl StreamTask` and the `StreamTask` trait
 //! - `#[cano::saga::task]` — for `impl CompensatableTask`
 //! - `#[cano::resource]` — for `impl Resource` and the `Resource` trait
@@ -40,6 +41,7 @@ mod resource_derive;
 mod router_task_impl;
 mod stepped_task_impl;
 mod stream_task_impl;
+mod suspend_task_impl;
 mod task_impl;
 mod timer_task_impl;
 
@@ -329,6 +331,30 @@ pub fn timer_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn stepped_task(attr: TokenStream, item: TokenStream) -> TokenStream {
     stepped_task_impl::expand(attr.into(), item.into())
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into()
+}
+
+/// Apply to the `SuspendTask` trait definition, an
+/// `impl SuspendTask<S> for T` block, or an inherent `impl T { ... }` block.
+///
+/// Use as `#[cano::task::suspend]`.
+///
+/// Two surface forms on impl blocks:
+///
+/// 1. **Trait-impl form:** `#[task::suspend] impl SuspendTask<S> for T { type Input = I; async fn suspend(..); async fn resume(..); }`.
+/// 2. **Inherent-impl form:** `#[task::suspend(state = S)] impl T { async fn suspend(..); async fn resume(..); }` —
+///    the macro builds the `impl SuspendTask<S> for T` header, infers `type Input` from the
+///    `input` parameter of `resume`, and requires `suspend` and `resume` (`config` / `name`
+///    may be overridden).
+///
+/// No companion `impl Task<S> for T` is emitted: parking a run needs the engine path, so a
+/// suspend task cannot be a `register_split` branch.
+///
+/// On a trait definition the macro just performs the async-fn-in-trait rewrite.
+#[proc_macro_attribute]
+pub fn suspend_task(attr: TokenStream, item: TokenStream) -> TokenStream {
+    suspend_task_impl::expand(attr.into(), item.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
 }

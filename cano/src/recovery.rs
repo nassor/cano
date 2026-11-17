@@ -86,8 +86,10 @@ mod redb;
 pub use redb::RedbCheckpointStore;
 
 /// Why a [`CheckpointRow`] was written — distinguishes ordinary state-entry rows
-/// from saga compensation-completion rows and `SteppedTask` cursor rows so
-/// `resume_from` can route each correctly.
+/// from saga compensation-completion rows, `SteppedTask` cursor rows and
+/// `SuspendTask` park / input rows so `resume_from` can route each correctly.
+///
+/// Variants are stored by index: new variants go at the end.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum RowKind {
@@ -98,6 +100,12 @@ pub enum RowKind {
     CompensationCompletion,
     /// A `SteppedTask` iteration row, carrying the serialized cursor in `output_blob`.
     StepCursor,
+    /// A `SuspendTask` finished `suspend` and the run is parked at this state;
+    /// `output_blob` is `None`.
+    Suspended,
+    /// The input delivered by [`Workflow::resume_with`](crate::workflow::Workflow::resume_with),
+    /// `serde_json` bytes in `output_blob`.
+    ResumeInput,
 }
 
 /// One recorded FSM transition.
@@ -156,6 +164,21 @@ impl CheckpointRow {
     pub fn with_cursor(mut self, cursor_blob: Vec<u8>) -> Self {
         self.output_blob = Some(cursor_blob);
         self.kind = RowKind::StepCursor;
+        self
+    }
+
+    /// Mark this row as [`RowKind::Suspended`]: a `SuspendTask` parked the run at this
+    /// state. Builder-style: `CheckpointRow::new(..).suspended()`.
+    pub fn suspended(mut self) -> Self {
+        self.kind = RowKind::Suspended;
+        self
+    }
+
+    /// Attach a `SuspendTask` input blob and mark the row as [`RowKind::ResumeInput`].
+    /// Builder-style: `CheckpointRow::new(..).with_resume_input(bytes)`.
+    pub fn with_resume_input(mut self, input_blob: Vec<u8>) -> Self {
+        self.output_blob = Some(input_blob);
+        self.kind = RowKind::ResumeInput;
         self
     }
 

@@ -86,6 +86,7 @@ mod retry;
 pub mod router;
 pub mod stepped;
 pub mod stream;
+pub mod suspend;
 pub mod timer;
 
 pub use batch::{BatchTask, run_batch};
@@ -95,18 +96,20 @@ pub use retry::{RetryMode, TaskConfig, run_with_retries};
 pub use router::RouterTask;
 pub use stepped::{StepOutcome, SteppedTask, run_stepped};
 pub use stream::{CloseReason, StreamErrorPolicy, StreamTask, StreamWindow, WindowSignal};
+pub use suspend::SuspendTask;
 pub use timer::{TimerOutcome, TimerTask, run_timer};
 
 // Attribute macros namespaced under `cano::task::` so that
 // `#[task::router]`, `#[task::poll]`, `#[task::timer]`, `#[task::batch]`,
-// `#[task::stepped]`, and `#[task::stream]` all resolve as path-qualified attribute macros.
-// (Modules and macros occupy different namespaces, so these coexist with the
-// `router`, `poll`, `timer`, `batch`, `stepped`, and `stream` submodules above.)
+// `#[task::stepped]`, `#[task::stream]` and `#[task::suspend]` all resolve as
+// path-qualified attribute macros. (Modules and macros occupy different namespaces, so
+// these coexist with the submodules of the same names above.)
 pub use cano_macros::batch_task as batch;
 pub use cano_macros::poll_task as poll;
 pub use cano_macros::router_task as router;
 pub use cano_macros::stepped_task as stepped;
 pub use cano_macros::stream_task as stream;
+pub use cano_macros::suspend_task as suspend;
 pub use cano_macros::timer_task as timer;
 
 /// Task trait for workflow processing

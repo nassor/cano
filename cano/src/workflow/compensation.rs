@@ -13,12 +13,12 @@ use std::sync::Arc;
 use futures_util::FutureExt;
 
 use crate::error::CanoError;
-use crate::recovery::RowKind;
+use crate::recovery::{CheckpointRow, RowKind};
 use crate::saga::{CompensationEntry, ErasedCompensatable};
 use crate::task::{ObserverCtx, TaskConfig, run_with_retries_observed};
 use tokio_util::sync::CancellationToken;
 
-use super::{Workflow, notify_observers, panic_payload_message};
+use super::{Entry, Workflow, notify_observers, panic_payload_message};
 
 #[cfg(feature = "tracing")]
 use tracing::{Instrument, debug, info, info_span};
@@ -148,6 +148,7 @@ where
                         resume_cursors.insert(r.state.clone(), blob.clone());
                     }
                 }
+                RowKind::Suspended | RowKind::ResumeInput => {}
             }
         }
 
@@ -474,6 +475,12 @@ where
     /// Rows with other kinds — ordinary [`RowKind::StateEntry`] rows and
     /// [`RowKind::StepCursor`] rows — are ignored by the rehydration.
     ///
+    /// A run parked at a [`SuspendTask`](crate::SuspendTask) state (last row
+    /// [`RowKind::Suspended`]) is returned as `Ok(parked_state)` at once: no row is
+    /// appended, no task runs and `on_resume` does not fire. Deliver its input with
+    /// [`resume_with`](Self::resume_with). A run whose input was recorded but whose
+    /// `resume` did not finish (last row [`RowKind::ResumeInput`]) re-delivers that input.
+    ///
     /// The resumed run cannot be cancelled from outside; use
     /// [`resume_from_with_token`](Self::resume_from_with_token) for that.
     ///
@@ -490,7 +497,7 @@ where
     ///   the run's own error (if any) always takes precedence, and teardown
     ///   errors on a failed run are logged but not surfaced.
     pub async fn resume_from(&self, workflow_id: impl Into<Arc<str>>) -> Result<TState, CanoError> {
-        self.resume_from_inner(workflow_id.into(), None).await
+        self.resume_from_inner(workflow_id.into(), None, None).await
     }
 
     /// [`resume_from`](Self::resume_from), cancellable through `token` with the same
@@ -506,13 +513,70 @@ where
         workflow_id: impl Into<Arc<str>>,
         token: &CancellationToken,
     ) -> Result<TState, CanoError> {
-        self.resume_from_inner(workflow_id.into(), Some(token))
+        self.resume_from_inner(workflow_id.into(), None, Some(token))
+            .await
+    }
+
+    /// Deliver `input` to a run parked at a [`SuspendTask`](crate::SuspendTask) state and
+    /// continue it.
+    ///
+    /// The input is serialized to JSON, checked against the task's `Input` type, and
+    /// recorded as a [`RowKind::ResumeInput`] row before the task's `resume` runs with it.
+    /// The FSM then continues from the state `resume` returns, exactly as in
+    /// [`resume_from`](Self::resume_from): the compensation stack is rehydrated from the
+    /// log, and the call returns the exit state, or the next suspend state the run parks at.
+    ///
+    /// If `resume` fails and the compensation stack is empty, the recorded input is kept:
+    /// [`resume_from`](Self::resume_from) delivers it again. Two concurrent calls for one
+    /// run both try to append the same sequence; the store's duplicate-sequence rejection
+    /// lets one input win.
+    ///
+    /// The resumed run cannot be cancelled from outside; use
+    /// [`resume_with_token`](Self::resume_with_token) for that.
+    ///
+    /// # Errors
+    ///
+    /// As [`resume_from`](Self::resume_from), plus:
+    /// - [`CanoError::Workflow`] — the run is not parked at a suspend state (its last row
+    ///   is not [`RowKind::Suspended`]), or `input` does not serialize.
+    /// - [`CanoError::TaskExecution`] — `input` does not deserialize as the task's `Input`
+    ///   type; nothing is recorded.
+    /// - [`CanoError::CheckpointStore`] — the input row could not be appended (including a
+    ///   concurrent `resume_with` that won).
+    pub async fn resume_with<I: serde::Serialize + ?Sized>(
+        &self,
+        workflow_id: impl Into<Arc<str>>,
+        input: &I,
+    ) -> Result<TState, CanoError> {
+        let bytes = serde_json::to_vec(input)
+            .map_err(|e| CanoError::workflow(format!("serialize resume input: {e}")))?;
+        self.resume_from_inner(workflow_id.into(), Some(bytes), None)
+            .await
+    }
+
+    /// [`resume_with`](Self::resume_with), cancellable through `token` with the same
+    /// semantics as [`resume_from_with_token`](Self::resume_from_with_token).
+    ///
+    /// # Errors
+    ///
+    /// As [`resume_with`](Self::resume_with), plus [`CanoError::Cancelled`] when the resumed
+    /// run was cancelled via `token`.
+    pub async fn resume_with_token<I: serde::Serialize + ?Sized>(
+        &self,
+        workflow_id: impl Into<Arc<str>>,
+        input: &I,
+        token: &CancellationToken,
+    ) -> Result<TState, CanoError> {
+        let bytes = serde_json::to_vec(input)
+            .map_err(|e| CanoError::workflow(format!("serialize resume input: {e}")))?;
+        self.resume_from_inner(workflow_id.into(), Some(bytes), Some(token))
             .await
     }
 
     async fn resume_from_inner(
         &self,
         workflow_id: Arc<str>,
+        input: Option<Vec<u8>>,
         token: Option<&CancellationToken>,
     ) -> Result<TState, CanoError> {
         #[cfg(feature = "tracing")]
@@ -526,7 +590,7 @@ where
             }
         });
 
-        let run = self.resume_from_body(workflow_id, token);
+        let run = self.resume_from_body(workflow_id, input, token);
         // Attach with `Instrument`, never `Span::enter()`: a guard held across `.await` stays
         // entered on this thread while other tasks run here (or exits on the wrong thread after
         // a migration), corrupting every trace on the runtime.
@@ -540,6 +604,7 @@ where
     async fn resume_from_body(
         &self,
         workflow_id: Arc<str>,
+        input: Option<Vec<u8>>,
         token: Option<&CancellationToken>,
     ) -> Result<TState, CanoError> {
         let store = self.checkpoint_store.clone().ok_or_else(|| {
@@ -553,7 +618,7 @@ where
         // Resources are set up before any rehydration work, so a setup failure leaves
         // the on-disk log unchanged and `on_resume` unfired; `with_lifecycle` tears them
         // down on every exit path of the rehydration + run.
-        self.with_lifecycle(|| self.execute_resume_inner(workflow_id, store, token))
+        self.with_lifecycle(|| self.execute_resume_inner(workflow_id, store, input, token))
             .await
     }
 
@@ -567,6 +632,7 @@ where
         &self,
         workflow_id: Arc<str>,
         store: Arc<dyn crate::recovery::CheckpointStore>,
+        input: Option<Vec<u8>>,
         token: Option<&CancellationToken>,
     ) -> Result<TState, CanoError> {
         let mut rows = store.load_run(&workflow_id).await.map_err(|e| {
@@ -604,8 +670,51 @@ where
                 last.state
             ))
         })?;
-        let start_sequence = last.sequence + 1;
+        let mut sequence = last.sequence + 1;
         let resume_sequence = last.sequence;
+
+        // Suspend states: the last row's kind decides whether the run is parked
+        // (`Suspended`), has a recorded input whose `resume` did not finish
+        // (`ResumeInput`), or is not suspended at all. `check_input` runs before the
+        // append so a wrongly typed input never becomes a durable row; an append
+        // failure (a concurrent `resume_with` that won) returns without a drain.
+        let suspend_task = match self.states.get(&resume_state).map(|e| &**e) {
+            Some(Entry::Suspend { task, .. }) => Some(task),
+            _ => None,
+        };
+        let resume_input: Option<Vec<u8>> = match (last.kind, suspend_task, input) {
+            (RowKind::Suspended | RowKind::ResumeInput, None, _) => {
+                return Err(CanoError::workflow(format!(
+                    "checkpoint state {:?} has a {:?} row but is not registered as a suspend task",
+                    last.state, last.kind
+                )));
+            }
+            (RowKind::Suspended, Some(_), None) => return Ok(resume_state),
+            (RowKind::Suspended, Some(task), Some(bytes)) => {
+                task.check_input(&bytes)?;
+                let row = CheckpointRow::new(sequence, last.state.clone(), last.task_id.clone())
+                    .with_resume_input(bytes.clone())
+                    .with_workflow_version(self.workflow_version);
+                self.append_row(&workflow_id, &mut sequence, row, "resume input")
+                    .await?;
+                Some(bytes)
+            }
+            (RowKind::ResumeInput, Some(_), None) => {
+                Some(last.output_blob.clone().ok_or_else(|| {
+                    CanoError::checkpoint_store(format!(
+                        "resume input row {} of workflow {workflow_id:?} has no payload",
+                        last.sequence
+                    ))
+                })?)
+            }
+            (_, _, Some(_)) => {
+                return Err(CanoError::workflow(format!(
+                    "workflow {workflow_id:?} is not suspended: last checkpoint row is {:?} at state {:?}",
+                    last.kind, last.state
+                )));
+            }
+            (_, _, None) => None,
+        };
 
         // Resolve checkpoint state labels (the `Debug` rendering of each state)
         // back to a `TState` in O(1). `from_rows` invokes the closure below once
@@ -651,10 +760,11 @@ where
         let total_budget = self.resolve_total_budget(started);
         let exec = self.execute_workflow_from(
             resume_state,
-            start_sequence,
+            sequence,
             Some(workflow_id),
             compensation_stack,
             resume_cursors,
+            resume_input,
             prior_transitions,
             total_budget,
             token,
@@ -664,7 +774,7 @@ where
         // the caller clean up. Emit the workflow-run outcome metric here, the
         // same way `run_workflow` does for the forward direction.
         let result = exec.await;
-        Self::record_run_outcome(&result, started);
+        self.record_run_outcome(&result, started);
         result
     }
 }

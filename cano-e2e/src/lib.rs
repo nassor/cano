@@ -130,7 +130,8 @@ async fn migrate(client: &Client) -> anyhow::Result<()> {
 
 /// Map [`cano::recovery::RowKind`] to the integer stored in the `kind` column.
 ///
-/// Encoding: `0 = StateEntry`, `1 = CompensationCompletion`, `2 = StepCursor`.
+/// Encoding: `0 = StateEntry`, `1 = CompensationCompletion`, `2 = StepCursor`,
+/// `3 = Suspended`, `4 = ResumeInput`.
 /// Because `RowKind` is `#[non_exhaustive]`, the match needs a catch-all arm — unknown
 /// future variants are stored as `0` (StateEntry), which is harmless for the e2e harness.
 fn row_kind_to_db(k: &cano::recovery::RowKind) -> i16 {
@@ -138,6 +139,8 @@ fn row_kind_to_db(k: &cano::recovery::RowKind) -> i16 {
         cano::recovery::RowKind::StateEntry => 0,
         cano::recovery::RowKind::CompensationCompletion => 1,
         cano::recovery::RowKind::StepCursor => 2,
+        cano::recovery::RowKind::Suspended => 3,
+        cano::recovery::RowKind::ResumeInput => 4,
         // unknown future RowKind variant — store as StateEntry; harmless in the e2e harness
         _ => 0,
     }
@@ -152,6 +155,8 @@ fn row_kind_from_db(i: i16) -> cano::recovery::RowKind {
         0 => cano::recovery::RowKind::StateEntry,
         1 => cano::recovery::RowKind::CompensationCompletion,
         2 => cano::recovery::RowKind::StepCursor,
+        3 => cano::recovery::RowKind::Suspended,
+        4 => cano::recovery::RowKind::ResumeInput,
         // unknown integer from a future schema version — treat as StateEntry; harmless
         _ => cano::recovery::RowKind::StateEntry,
     }
@@ -521,6 +526,8 @@ mod tests {
             (RowKind::StateEntry, 0i16),
             (RowKind::CompensationCompletion, 1i16),
             (RowKind::StepCursor, 2i16),
+            (RowKind::Suspended, 3i16),
+            (RowKind::ResumeInput, 4i16),
         ] {
             let db_int = row_kind_to_db(&variant);
             assert_eq!(db_int, expected_int, "to_db mismatch for {variant:?}");

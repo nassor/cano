@@ -697,6 +697,7 @@ where
     /// Checks:
     /// - At least one exit state is defined
     /// - The workflow has at least one registered state handler
+    /// - A workflow with a [`SuspendTask`](crate::SuspendTask) state has a checkpoint store
     ///
     /// Call this after building the workflow to catch configuration errors early.
     ///
@@ -705,6 +706,7 @@ where
     /// Returns [`CanoError::Configuration`] if:
     /// - No state handlers have been registered
     /// - No exit states have been defined
+    /// - A suspend task is registered without a checkpoint store
     ///
     /// # Example
     ///
@@ -739,6 +741,16 @@ where
         if self.exit_states.is_empty() {
             return Err(CanoError::configuration(
                 "Workflow has no exit states defined — orchestration may loop forever",
+            ));
+        }
+        if self.checkpoint_store.is_none()
+            && self
+                .states
+                .values()
+                .any(|e| matches!(**e, Entry::Suspend { .. }))
+        {
+            return Err(CanoError::configuration(
+                "a suspend task requires a checkpoint store (call with_checkpoint_store)",
             ));
         }
         // Each join_state in a Split entry must either be registered or an exit state;
@@ -946,12 +958,13 @@ where
                 self.workflow_id.clone(),
                 Vec::new(),
                 HashMap::new(),
+                None,
                 Vec::new(),
                 total_budget,
                 token,
             )
             .await;
-        Self::record_run_outcome(&result, started);
+        self.record_run_outcome(&result, started);
         result
     }
 
@@ -965,24 +978,36 @@ where
         self.total_timeout.map(|d| (started, d))
     }
 
-    /// Emit the workflow-run outcome metric (`completed` / `failed`) once per
-    /// run. Called by both `run_workflow` (forward) and `execute_resume_inner`
+    /// Emit the workflow-run outcome metric (`completed` / `suspended` / `failed`) once
+    /// per run. Called by both `run_workflow` (forward) and `execute_resume_inner`
     /// (resume) so the emission lives in one place. No-op without the `metrics`
     /// feature.
     #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
-    pub(crate) fn record_run_outcome<T>(
-        result: &Result<T, CanoError>,
+    pub(crate) fn record_run_outcome(
+        &self,
+        result: &Result<TState, CanoError>,
         started: std::time::Instant,
     ) {
         #[cfg(feature = "metrics")]
         crate::metrics::workflow_run(
-            if result.is_ok() {
-                "completed"
-            } else {
-                "failed"
+            match result {
+                Ok(state) if self.is_parked_at(state) => "suspended",
+                Ok(_) => "completed",
+                Err(_) => "failed",
             },
             started.elapsed(),
         );
+    }
+
+    /// Whether a run that returned `Ok(state)` is parked at a suspend state rather
+    /// than finished at an exit state.
+    #[cfg(feature = "metrics")]
+    fn is_parked_at(&self, state: &TState) -> bool {
+        !self.exit_states.contains(state)
+            && matches!(
+                self.states.get(state).map(|e| &**e),
+                Some(Entry::Suspend { .. })
+            )
     }
 }
 

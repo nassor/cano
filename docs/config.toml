@@ -82,6 +82,9 @@ path = "@/stepped-task/_index.md"
 [[extra.nav.items]]
 title = "StreamTask"
 path = "@/stream-task/_index.md"
+[[extra.nav.items]]
+title = "SuspendTask"
+path = "@/suspend-task/_index.md"
 
 [[extra.nav]]
 label = "Advanced workflows"

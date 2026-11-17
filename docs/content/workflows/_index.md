@@ -197,10 +197,10 @@ observer hook and the precedence against <code>with_total_timeout</code>.
 <p>Two methods put work on a state:</p>
 <dl class="key-list">
 <dt><code>register(state, task)</code></dt>
-<dd>Runs one task of any model: <a href="../task/">Task</a>, <a href="../router-task/">RouterTask</a>, <a href="../poll-task/">PollTask</a>, <a href="../timer-task/">TimerTask</a>, <a href="../batch-task/">BatchTask</a>, <a href="../stepped-task/">SteppedTask</a>, <a href="../stream-task/">StreamTask</a>, or a <a href="../saga/">CompensatableTask</a>. The model's macro tells the engine how to run it.</dd>
+<dd>Runs one task of any model: <a href="../task/">Task</a>, <a href="../router-task/">RouterTask</a>, <a href="../poll-task/">PollTask</a>, <a href="../timer-task/">TimerTask</a>, <a href="../batch-task/">BatchTask</a>, <a href="../stepped-task/">SteppedTask</a>, <a href="../stream-task/">StreamTask</a>, <a href="../suspend-task/">SuspendTask</a>, or a <a href="../saga/">CompensatableTask</a>. The model's macro tells the engine how to run it.</dd>
 
 <dt><code>register_split(state, tasks, join_config)</code></dt>
-<dd>Runs many tasks in parallel. A <code>JoinConfig</code> picks the <a href="../split-join/">join strategy</a> and the next state. Any task model can be a branch; stepped and stream branches run their loops in memory, without cursor persistence.</dd>
+<dd>Runs many tasks in parallel. A <code>JoinConfig</code> picks the <a href="../split-join/">join strategy</a> and the next state. Any task model except <code>SuspendTask</code> can be a branch; stepped and stream branches run their loops in memory, without cursor persistence.</dd>
 </dl>
 
 <p>The engine treats each model registered with <code>register</code> differently:</p>
@@ -216,6 +216,9 @@ observer hook and the precedence against <code>with_total_timeout</code>.
 
 <dt><code>StreamTask</code></dt>
 <dd>The engine drives the windows and stops when the run's token is cancelled. With a checkpoint store and a workflow id attached, it persists a cursor row per flushed window.</dd>
+
+<dt><code>SuspendTask</code></dt>
+<dd>Runs <code>suspend</code>, writes a <code>Suspended</code> row and returns the parked state from <code>orchestrate</code>. <code>resume_with</code> later delivers a typed input to <code>resume</code>. It requires a checkpoint store and a workflow id.</dd>
 
 <dt><code>CompensatableTask</code> <small><code>#[saga::task]</code></small></dt>
 <dd>Pushes onto the compensation stack on success, and runs only in single-task states. Two compensatable states that share a task <code>name()</code> make <code>validate()</code> fail with a configuration error.</dd>

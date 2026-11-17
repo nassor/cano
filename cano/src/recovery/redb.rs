@@ -675,7 +675,7 @@ mod tests {
 
     // -- RowKind round-trip ---------------------------------------------------
 
-    /// All three `RowKind` variants must survive an append → load_run cycle with
+    /// Every `RowKind` variant must survive an append → load_run cycle with
     /// their kind and output_blob intact.
     #[tokio::test]
     async fn all_row_kinds_roundtrip() {
@@ -706,8 +706,23 @@ mod tests {
             .await
             .unwrap();
 
+        // Suspended: kind=Suspended, output_blob=None
+        store
+            .append("run", CheckpointRow::new(3, "D", "task-d").suspended())
+            .await
+            .unwrap();
+
+        // ResumeInput: kind=ResumeInput, output_blob=Some
+        store
+            .append(
+                "run",
+                CheckpointRow::new(4, "E", "task-e").with_resume_input(vec![6]),
+            )
+            .await
+            .unwrap();
+
         let rows = store.load_run("run").await.unwrap();
-        assert_eq!(rows.len(), 3);
+        assert_eq!(rows.len(), 5);
 
         assert_eq!(rows[0].sequence, 0);
         assert_eq!(rows[0].state, "A");
@@ -723,6 +738,14 @@ mod tests {
         assert_eq!(rows[2].state, "C");
         assert_eq!(rows[2].kind, super::super::RowKind::StepCursor);
         assert_eq!(rows[2].output_blob.as_deref(), Some(&[4u8, 5][..]));
+
+        assert_eq!(rows[3].sequence, 3);
+        assert_eq!(rows[3].kind, super::super::RowKind::Suspended);
+        assert_eq!(rows[3].output_blob, None);
+
+        assert_eq!(rows[4].sequence, 4);
+        assert_eq!(rows[4].kind, super::super::RowKind::ResumeInput);
+        assert_eq!(rows[4].output_blob.as_deref(), Some(&[6u8][..]));
     }
 
     // -- workflow_version persistence ---------------------------------------

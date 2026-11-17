@@ -130,12 +130,16 @@
 //!   [`StreamWindow`] window, run until the [`CancellationToken`] fires, and resume from a
 //!   persisted cursor. Registered with [`Workflow::register`]; per-item errors are
 //!   governed by [`StreamErrorPolicy`].
+//! - [`SuspendTask`] trait: durable suspend / resume; `suspend()` parks the run at its state
+//!   (`orchestrate` returns `Ok(state)`), and [`Workflow::resume_with`] later delivers a typed
+//!   input to `resume()`, which returns the next state. Requires a checkpoint store; for
+//!   human-in-the-loop steps such as an approval.
 //!
 //! Every model registers with the same [`Workflow::register`] call: the model macros
 //! (`#[task::router]`, `#[task::poll]`, `#[task::timer]`, `#[task::batch]`,
-//! `#[task::stepped]`, `#[task::stream]`, `#[saga::task]`) implement
+//! `#[task::stepped]`, `#[task::stream]`, `#[task::suspend]`, `#[saga::task]`) implement
 //! [`Registrable`](workflow::Registrable), which picks the engine path for the model.
-//! They also emit a companion [`Task`] impl, so any model can be a
+//! They also emit a companion [`Task`] impl, so any model except [`SuspendTask`] can be a
 //! [`Workflow::register_split`] branch (stepped and stream tasks then run in-memory loops
 //! without cursor persistence).
 //!
@@ -237,6 +241,7 @@
 //! - [`task::batch`]: The [`BatchTask`] trait — fan-out over data items via `load`/`process_item`/`finish`; registered with [`Workflow::register`]
 //! - [`task::stepped`]: The [`SteppedTask`] trait — resumable iterative work via `step()` with a serializable cursor; registered with [`Workflow::register`] (persists the cursor when a checkpoint store is attached)
 //! - [`task::stream`]: The [`StreamTask`] trait — a genuine stream-processing model: consume an `impl Stream` continuously, flush per [`StreamWindow`] window, run until the [`CancellationToken`] fires, and resume from a persisted cursor; registered with [`Workflow::register`]
+//! - [`task::suspend`]: The [`SuspendTask`] trait — park a run until [`Workflow::resume_with`] delivers a typed input; registered with [`Workflow::register`]
 //! - [`CancellationToken`] — cooperative cancellation for [`orchestrate_with_token`](Workflow::orchestrate_with_token)
 //! - [`workflow`]: [`Workflow`] — FSM orchestration with Split/Join support
 //! - `scheduler` (requires `scheduler` feature): `Scheduler` (builder) and `RunningScheduler` (live handle) — cron and interval scheduling
@@ -301,6 +306,7 @@ pub use task::poll::{PollErrorPolicy, PollOutcome, PollTask};
 pub use task::router::RouterTask;
 pub use task::stepped::{StepOutcome, SteppedTask};
 pub use task::stream::{CloseReason, StreamErrorPolicy, StreamTask, StreamWindow, WindowSignal};
+pub use task::suspend::SuspendTask;
 pub use task::timer::{TimerOutcome, TimerTask};
 pub use tokio_util::sync::CancellationToken;
 
@@ -335,6 +341,7 @@ pub use scheduler::{
 /// - `#[cano::task::batch]` — for `impl BatchTask` blocks
 /// - `#[cano::task::stepped]` — for `impl SteppedTask` blocks
 /// - `#[cano::task::stream]` — for `impl StreamTask` blocks
+/// - `#[cano::task::suspend]` — for `impl SuspendTask` blocks
 /// - `#[cano::saga::task]` — for `impl CompensatableTask` blocks
 ///
 /// [`cano-macros`]: https://docs.rs/cano-macros
@@ -382,8 +389,8 @@ pub mod prelude {
         HealthStatus, JoinConfig, JoinStrategy, MemoryStore, Meter, MeterStatus, MultiPermit,
         MultiRateLimiter, PollErrorPolicy, PollOutcome, PollTask, RateLimiter, RateLimiterPermit,
         RateLimiterPolicy, Reservation, Resource, Resources, RetryMode, RouterTask, RowKind,
-        StepOutcome, SteppedTask, StreamErrorPolicy, StreamTask, StreamWindow, Task, TaskConfig,
-        Tier, TimerOutcome, TimerTask, WindowPermit, WindowPolicy, WindowSignal,
+        StepOutcome, SteppedTask, StreamErrorPolicy, StreamTask, StreamWindow, SuspendTask, Task,
+        TaskConfig, Tier, TimerOutcome, TimerTask, WindowPermit, WindowPolicy, WindowSignal,
         WindowedRateLimiter, Workflow, WorkflowObserver,
     };
 

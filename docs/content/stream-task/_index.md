@@ -16,8 +16,8 @@ exhausted, a window asks to stop, or the run is <a href="#cancellation">cancelle
 window commits a <a href="#cursor">cursor</a>, so a crashed or cancelled run resumes where it left
 off. It is one of the <a href="../task/">Task</a> family of processing models, alongside
 <a href="../router-task/">RouterTask</a>, <a href="../poll-task/">PollTask</a>,
-<a href="../timer-task/">TimerTask</a>, <a href="../batch-task/">BatchTask</a> and
-<a href="../stepped-task/">SteppedTask</a>, and it reads typed dependencies from
+<a href="../timer-task/">TimerTask</a>, <a href="../batch-task/">BatchTask</a>,
+<a href="../stepped-task/">SteppedTask</a> and <a href="../suspend-task/">SuspendTask</a>, and it reads typed dependencies from
 <a href="../resources/">Resources</a>. New to Cano? Read
 <a href="../workflows/">Workflows</a> and <a href="../resources/">Resources</a> first.
 </p>

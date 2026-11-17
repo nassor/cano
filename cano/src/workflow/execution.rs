@@ -20,6 +20,7 @@ use crate::saga::{
 };
 use crate::task::stepped::{CursorSink, ErasedSteppedTask, SteppedAdapter, SteppedTask};
 use crate::task::stream::{ErasedStreamTask, ErasedWindowStep, StreamAdapter, StreamTask};
+use crate::task::suspend::{ErasedSuspendTask, SuspendAdapter, SuspendTask};
 use crate::task::{ObserverCtx, RouterTask, Task, TaskConfig, run_with_retries_observed};
 use futures_util::future::BoxFuture;
 use tokio_util::sync::CancellationToken;
@@ -82,6 +83,14 @@ pub(crate) enum Entry<TState> {
         config: TaskConfig,
         name: Cow<'static, str>,
     },
+    /// A task that parks the run after `suspend` (writing a
+    /// [`RowKind::Suspended`](crate::recovery::RowKind::Suspended) row) and continues with
+    /// `resume` when `Workflow::resume_with` delivers an input.
+    Suspend {
+        task: Arc<dyn ErasedSuspendTask<TState>>,
+        config: TaskConfig,
+        name: Cow<'static, str>,
+    },
 }
 
 #[doc(hidden)]
@@ -127,6 +136,15 @@ where
         })
     }
 
+    /// An engine-driven suspend task.
+    pub fn suspend<T: SuspendTask<TState> + 'static>(task: T) -> Self {
+        Self(Entry::Suspend {
+            config: SuspendTask::config(&task),
+            name: SuspendTask::name(&task),
+            task: Arc::new(SuspendAdapter(task)),
+        })
+    }
+
     /// A compensatable (saga) task. The retry loop's config drops `attempt_timeout`:
     /// the adapter applies it to the forward call only, so a timeout can never drop
     /// the inline-compensate path and lose the typed output.
@@ -148,7 +166,8 @@ impl<TState> Entry<TState> {
         match self {
             Entry::Single { name, .. }
             | Entry::Stepped { name, .. }
-            | Entry::Stream { name, .. } => name,
+            | Entry::Stream { name, .. }
+            | Entry::Suspend { name, .. } => name,
             Entry::Compensatable { name, .. } => name,
             Entry::Split { .. } => "",
         }
@@ -250,6 +269,11 @@ where
         // Entries are consumed via `remove` so visiting the same state twice (on the
         // resumed run continuing past it) starts fresh from `None`.
         mut resume_cursors: HashMap<String, Vec<u8>>,
+        // Input delivered by `resume_with` (or re-delivered by `resume_from`) for the
+        // `Suspend` state the run re-enters. `Some` only on that resume; the re-entry
+        // writes no `StateEntry` row so the log keeps ending in the `ResumeInput` row
+        // until the next state's row is written.
+        mut resume_input: Option<Vec<u8>>,
         // States visited *before* this call entered the FSM. Empty on a fresh
         // `orchestrate`; on `resume_from` it carries the pre-crash path (every
         // `RowKind::StateEntry` recorded for this run, ascending by sequence) so
@@ -312,6 +336,7 @@ where
             (start, limit, deadline)
         });
 
+        let mut skip_entry_row = resume_input.is_some();
         loop {
             // Cooperative cancellation observed at a state boundary: stop before
             // entering this state, fire `on_cancelled` once, and drain whatever
@@ -371,8 +396,12 @@ where
             // a split is one state, hence one row regardless of fan-out. Router states
             // (`checkpoint: false`) are pure routing with nothing to recover: no row and
             // no sequence number, so sequence numbers stay dense for `resume_from`.
+            // A suspend state re-entered with its delivered input writes no row either
+            // (`skip_entry_row`, first iteration only).
             // `on_state_enter` already fired above — the FSM did enter the state.
+            let skip = std::mem::take(&mut skip_entry_row);
             if self.checkpoint_store.is_some()
+                && !skip
                 && !matches!(
                     entry,
                     Some(Entry::Single {
@@ -636,6 +665,88 @@ where
                     )
                     .await
                 }
+                Entry::Suspend { task, config, name } => {
+                    let obs = ObserverCtx::new(&self.observers, name);
+                    let fan = |o: &dyn crate::observer::WorkflowObserver, err: &CanoError| {
+                        o.on_task_failure(name, err);
+                    };
+                    match resume_input.take() {
+                        Some(input) => {
+                            let fut = self.execute_suspend_call(
+                                name,
+                                task.resume(&self.resources, config, obs, &input),
+                            );
+                            Self::dispatch_with_budget(
+                                step_budget,
+                                token,
+                                state_label.as_deref(),
+                                &self.observers,
+                                fut,
+                                fan,
+                            )
+                            .await
+                        }
+                        None => {
+                            let fut = self.execute_suspend_call(
+                                name,
+                                task.suspend(&self.resources, config, obs),
+                            );
+                            match Self::dispatch_with_budget(
+                                step_budget,
+                                token,
+                                state_label.as_deref(),
+                                &self.observers,
+                                fut,
+                                fan,
+                            )
+                            .await
+                            {
+                                Err(e) => Err(e),
+                                Ok(()) => {
+                                    // Park: record the `Suspended` row and return the state.
+                                    // The log and the compensation stack are kept (its
+                                    // entries are already persisted and are rehydrated on
+                                    // resume).
+                                    let appended = match workflow_id.as_deref() {
+                                        Some(wf_id) => {
+                                            let row = CheckpointRow::new(
+                                                sequence,
+                                                state_label.as_deref().unwrap_or_default(),
+                                                &**name,
+                                            )
+                                            .suspended()
+                                            .with_workflow_version(self.workflow_version);
+                                            self.append_row(
+                                                wf_id,
+                                                &mut sequence,
+                                                row,
+                                                "suspend checkpoint",
+                                            )
+                                            .await
+                                        }
+                                        None => Err(CanoError::checkpoint_store(
+                                            "checkpointing requires a workflow id (call with_workflow_id)",
+                                        )),
+                                    };
+                                    match appended {
+                                        Ok(()) => {
+                                            #[cfg(feature = "metrics")]
+                                            crate::metrics::task_dispatch_duration(
+                                                _state_label,
+                                                "suspend",
+                                                _dispatch_started.elapsed(),
+                                            );
+                                            #[cfg(feature = "tracing")]
+                                            info!(state = ?current_state, "Workflow suspended");
+                                            return Ok(current_state);
+                                        }
+                                        Err(e) => Err(e),
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             };
 
             // Compensatable records its own duration earlier (before the
@@ -652,6 +763,7 @@ where
                 Entry::Compensatable { .. } => None,
                 Entry::Stepped { .. } => Some("stepped"),
                 Entry::Stream { .. } => Some("stream"),
+                Entry::Suspend { .. } => Some("suspend"),
             } {
                 crate::metrics::task_dispatch_duration(
                     _state_label,
@@ -979,6 +1091,23 @@ where
             debug!(next_state = ?next_state, "Stepped task completed");
         }
 
+        match &outcome {
+            Ok(_) => notify_observers(&self.observers, |o| o.on_task_success(task_name)),
+            Err(e) => notify_observers(&self.observers, |o| o.on_task_failure(task_name, e)),
+        }
+        outcome
+    }
+
+    /// Run one `suspend` or `resume` call of a `Suspend` state, pairing
+    /// `on_task_start` with `on_task_success` / `on_task_failure` and turning a panic
+    /// into an error.
+    async fn execute_suspend_call<T>(
+        &self,
+        task_name: &str,
+        call: impl Future<Output = Result<T, CanoError>>,
+    ) -> Result<T, CanoError> {
+        notify_observers(&self.observers, |o| o.on_task_start(task_name));
+        let outcome = super::catch_panic_to_error(call, "Suspend task").await;
         match &outcome {
             Ok(_) => notify_observers(&self.observers, |o| o.on_task_success(task_name)),
             Err(e) => notify_observers(&self.observers, |o| o.on_task_failure(task_name, e)),

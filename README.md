@@ -31,6 +31,7 @@ The engine is built on three core concepts: **Tasks** for logic, **Workflows** f
 
 - **Type-Safe State Machines**: Enum-driven transitions with compile-time guarantees.
 - **Multiple Processing Models**: `Task` for general-purpose work, plus `RouterTask`, `PollTask`, `TimerTask`, `BatchTask`, `SteppedTask`, and `StreamTask` for specialized shapes — mixed freely in one workflow.
+- **Human in the Loop**: a `SuspendTask` parks a run at its state until `Workflow::resume_with` delivers a typed input, such as a reviewer's decision. The pause survives restarts through the checkpoint store.
 - **Resource Dependency Injection**: Typed, lifecycle-managed `Resources` with `setup`/`teardown`/`health` hooks, looked up by type (`res.get::<T>()`) or by name for a second instance, plus `#[derive(FromResources)]` for ergonomic wiring.
 - **Parallel Execution (Split/Join)**: Run tasks concurrently and join results with strategies like `All`, `Any`, `Quorum`, or `PartialResults`, with an optional bulkhead to cap concurrency.
 - **Retry Logic**: Tasks run once by default; opt into fixed or exponential backoff with jitter and per-attempt timeouts.

@@ -14,8 +14,8 @@ A <code>RouterTask</code> reads <a href="../resources/">Resources</a> and return
 Because re-running a router costs nothing, the engine records no checkpoint row for it (see
 <a href="../recovery/">Crash recovery</a>). It is one of the <a href="../task/">Task</a> family of
 processing models, alongside <a href="../poll-task/">PollTask</a>, <a href="../timer-task/">TimerTask</a>,
-<a href="../batch-task/">BatchTask</a>, <a href="../stepped-task/">SteppedTask</a>, and
-<a href="../stream-task/">StreamTask</a>.
+<a href="../batch-task/">BatchTask</a>, <a href="../stepped-task/">SteppedTask</a>,
+<a href="../stream-task/">StreamTask</a> and <a href="../suspend-task/">SuspendTask</a>.
 </p>
 
 <div class="callout callout-info">

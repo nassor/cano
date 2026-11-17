@@ -208,7 +208,7 @@ pub fn describe() {
     describe_counter!(
         WORKFLOW_RUNS_TOTAL,
         Unit::Count,
-        "Workflow runs (via Workflow::orchestrate/resume_from), by terminal outcome (completed|failed)"
+        "Workflow runs (via Workflow::orchestrate/resume_from/resume_with), by outcome (completed|suspended|failed)"
     );
     describe_histogram!(
         WORKFLOW_DURATION_SECONDS,
