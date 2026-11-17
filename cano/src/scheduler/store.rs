@@ -51,6 +51,9 @@ pub enum CasOutcome {
 ///   isolated from each other.
 ///
 /// Backends must be `Send + Sync + 'static`; every method may be called concurrently.
+/// The scheduler fails any call that takes longer than its lease TTL, dropping the
+/// future, so a backend must tolerate a swap cancelled mid-flight: it either landed or
+/// it did not, and the scheduler re-reads the record either way.
 #[scheduler_store]
 pub trait SchedulerStore: Send + Sync + 'static {
     /// The current record for `flow_id`, or `None` when there is none.

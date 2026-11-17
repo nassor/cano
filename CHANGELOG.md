@@ -51,7 +51,8 @@
   `every` interval and each `cron` firing once across the cluster. A run holds a lease renewed every third
   of the TTL, a lost lease cancels the local run, and a crashed instance's lease expires into one counted
   failure. Backoff, trip state, `run_count` and `last_run` persist, so a restarted cluster does not re-run an
-  `every` flow within its interval. Without `with_store` nothing changes.
+  `every` flow within its interval. A store call that takes longer than one TTL fails, so a store that
+  stops answering cannot hold a flow in `Running`. Without `with_store` nothing changes.
 - `Status::RunningElsewhere { owner, lease_expires }`: another instance holds the flow's lease.
   `trigger` is refused while one does, and the error names the owner.
 - `SchedulerStore` for the built-in stores, each behind `scheduler` plus its store feature:

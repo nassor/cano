@@ -246,14 +246,22 @@ pub(super) struct Coordinator {
     ttl: Duration,
 }
 
-/// Run a store call so a panic inside a custom store becomes an error instead of
-/// ending the dispatch task with the flow stuck in `Running`.
-async fn guarded<T>(call: impl Future<Output = Result<T, CanoError>>) -> Result<T, CanoError> {
-    match std::panic::AssertUnwindSafe(call).catch_unwind().await {
-        Ok(result) => result,
-        Err(payload) => Err(CanoError::scheduler_store(format!(
+/// Run a store call so that a panic inside a custom store becomes an error instead of
+/// ending the dispatch task with the flow stuck in `Running`, and a call that never
+/// returns fails after `limit` (one lease TTL) instead of holding the flow forever.
+/// A call that outlives a TTL could not have kept any lease it wrote anyway.
+async fn guarded<T>(
+    limit: Duration,
+    call: impl Future<Output = Result<T, CanoError>>,
+) -> Result<T, CanoError> {
+    match tokio::time::timeout(limit, std::panic::AssertUnwindSafe(call).catch_unwind()).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(payload)) => Err(CanoError::scheduler_store(format!(
             "scheduler store panicked: {}",
             crate::workflow::panic_payload_message(&*payload)
+        ))),
+        Err(_) => Err(CanoError::scheduler_store(format!(
+            "scheduler store call timed out after {limit:?}"
         ))),
     }
 }
@@ -292,7 +300,7 @@ impl Coordinator {
 
     /// The record and its version; `None` when the flow was never written.
     async fn load(&self, flow_id: &str) -> Result<Option<(u64, FlowRecord)>, CanoError> {
-        guarded(self.store.load(flow_id))
+        guarded(self.ttl, self.store.load(flow_id))
             .await?
             .map(|stored| {
                 FlowRecord::decode(flow_id, &stored.value).map(|record| (stored.version, record))
@@ -338,7 +346,12 @@ impl Coordinator {
             CanoError::scheduler_store(format!("flow '{flow_id}': record encoding failed: {e}"))
         })?;
         Ok(
-            match guarded(self.store.compare_and_swap(flow_id, expected, bytes)).await? {
+            match guarded(
+                self.ttl,
+                self.store.compare_and_swap(flow_id, expected, bytes),
+            )
+            .await?
+            {
                 CasOutcome::Written(version) => Some(version),
                 CasOutcome::Conflict => None,
             },

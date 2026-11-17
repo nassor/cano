@@ -162,7 +162,7 @@ and clears the lease.
 <dd>The lease expires within one TTL. The next instance that looks at the flow counts the lost run as one failure with the error <code>lease expired: ...</code> and carries on. That failure feeds the flow's <a href="../backoff-and-trip/">backoff and trip</a> state like any other.</dd>
 
 <dt>Store outage <small>the store errors or times out</small></dt>
-<dd>A failed claim skips the tick, and the scheduler stays up (with the <code>tracing</code> feature the error is logged). A run that cannot renew for a whole TTL is cancelled as a lost lease. A release that keeps failing is retried a few times, then left to expire and counted as one failure.</dd>
+<dd>A store call that does not answer within one TTL fails like an error. A failed claim skips the tick, and the scheduler stays up (with the <code>tracing</code> feature the error is logged). A run that cannot renew for a whole TTL is cancelled as a lost lease. A release that keeps failing is retried a few times, then left to expire and counted as one failure, unless the same instance claims the flow again before the lease expires.</dd>
 
 <dt>Shutdown abort <small><code>stop()</code> aborts a run after the cancel timeout</small></dt>
 <dd>The aborted run leaves its lease to expire and is counted as one failure, the same as a crash. A run that finishes during the drain or cancel phase writes its outcome as usual.</dd>
