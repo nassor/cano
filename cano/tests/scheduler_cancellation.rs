@@ -138,7 +138,7 @@ async fn cancel_flow_drains_scheduled_saga_and_returns_to_idle() {
     let scheduler = scheduler.manual("order", wf, Step::Reserve);
     let running = scheduler.start().await.unwrap();
 
-    running.trigger("order").unwrap();
+    running.trigger("order").await.unwrap();
     await_flag(&ship_started).await;
     running.cancel_flow("order").unwrap();
     await_not_running(&running, "order").await;
@@ -190,7 +190,7 @@ async fn cancel_flow_dirty_rollback_saga_parks_in_backoff() {
     let scheduler = scheduler.manual("order", wf, Step::Reserve);
     let running = scheduler.start().await.unwrap();
 
-    running.trigger("order").unwrap();
+    running.trigger("order").await.unwrap();
     await_flag(&ship_started).await;
     running.cancel_flow("order").unwrap();
     await_not_running(&running, "order").await;
@@ -237,7 +237,7 @@ async fn graceful_stop_rolls_back_in_flight_saga() {
         .await
         .unwrap();
 
-    running.trigger("order").unwrap();
+    running.trigger("order").await.unwrap();
     await_flag(&ship_started).await;
 
     let t_start = Instant::now();
@@ -289,7 +289,7 @@ async fn cancel_flow_cancels_in_flight_split_flow() {
     let scheduler = scheduler.manual("split", wf, Step::Work);
     let running = scheduler.start().await.unwrap();
 
-    running.trigger("split").unwrap();
+    running.trigger("split").await.unwrap();
     let t_start = Instant::now();
     while started.load(SeqCst) < 3 {
         assert!(
@@ -350,7 +350,7 @@ async fn cancel_flow_cancels_in_flight_stepped_flow() {
     let scheduler = scheduler.manual("stepped", wf, Step::Work);
     let running = scheduler.start().await.unwrap();
 
-    running.trigger("stepped").unwrap();
+    running.trigger("stepped").await.unwrap();
     await_flag(&started).await;
     let t_start = Instant::now();
     running.cancel_flow("stepped").unwrap();
@@ -400,7 +400,7 @@ async fn cancel_flow_cancels_in_flight_timer_flow() {
     let scheduler = scheduler.manual("timer", wf, Step::Work);
     let running = scheduler.start().await.unwrap();
 
-    running.trigger("timer").unwrap();
+    running.trigger("timer").await.unwrap();
     await_flag(&started).await;
     running.cancel_flow("timer").unwrap();
     await_not_running(&running, "timer").await;
@@ -442,7 +442,7 @@ async fn cancel_flow_cancels_in_flight_poll_flow() {
     let scheduler = scheduler.manual("poll", wf, Step::Work);
     let running = scheduler.start().await.unwrap();
 
-    running.trigger("poll").unwrap();
+    running.trigger("poll").await.unwrap();
     await_flag(&started).await;
     let t_start = Instant::now();
     running.cancel_flow("poll").unwrap();
@@ -502,7 +502,7 @@ async fn cancel_flow_cancels_in_flight_batch_flow() {
     let scheduler = scheduler.manual("batch", wf, Step::Work);
     let running = scheduler.start().await.unwrap();
 
-    running.trigger("batch").unwrap();
+    running.trigger("batch").await.unwrap();
     await_flag(&started).await;
     let t_start = Instant::now();
     running.cancel_flow("batch").unwrap();
@@ -635,7 +635,7 @@ async fn cancel_flow_cancels_checkpointed_stepped_flow() {
     let scheduler = scheduler.manual("stepped", wf, Step::Work);
     let running = scheduler.start().await.unwrap();
 
-    running.trigger("stepped").unwrap();
+    running.trigger("stepped").await.unwrap();
     await_flag(&started).await;
     running.cancel_flow("stepped").unwrap();
     await_not_running(&running, "stepped").await;

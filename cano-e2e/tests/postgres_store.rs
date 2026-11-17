@@ -8,9 +8,10 @@ use std::time::Duration;
 
 use cano::RetryMode;
 use cano::checkpoint::CheckpointStore;
+use cano::scheduler::{CasOutcome, SchedulerStore};
 use cano::store::postgres::PostgresStore;
 use cano::store::postgres::{deadpool_postgres, tokio_postgres};
-use cano::testing::assert_checkpoint_store_contract;
+use cano::testing::{assert_checkpoint_store_contract, assert_scheduler_store_contract};
 use support::{Fault, PgFixture, row};
 
 /// The store the fault scenarios use: short timeout, one connection.
@@ -49,6 +50,113 @@ async fn contract() {
     let pg = PgFixture::start().await;
     let store = PostgresStore::connect(&pg.direct_dsn()).await.unwrap();
     assert_checkpoint_store_contract(&store, "pg").await;
+}
+
+#[tokio::test]
+async fn scheduler_contract() {
+    let pg = PgFixture::start().await;
+    let store = PostgresStore::connect(&pg.direct_dsn()).await.unwrap();
+    assert_scheduler_store_contract(&store, "pg").await;
+}
+
+#[tokio::test]
+async fn scheduler_defaults_and_custom_table() {
+    let pg = PgFixture::start().await;
+    let admin = pg.admin().await;
+    let _default = PostgresStore::connect(&pg.direct_dsn()).await.unwrap();
+    assert!(exists(&admin, "public.cano_scheduler").await);
+    assert!(exists(&admin, "public.cano_scheduler_version_seq").await);
+
+    admin.batch_execute("CREATE SCHEMA sched").await.unwrap();
+    let custom = PostgresStore::builder()
+        .with_schema("sched")
+        .with_scheduler_table("cano_sched_custom")
+        .connect(&pg.direct_dsn())
+        .await
+        .unwrap();
+    assert_eq!(
+        custom
+            .compare_and_swap("f", None, b"{}".to_vec())
+            .await
+            .unwrap(),
+        CasOutcome::Written(
+            custom
+                .load("f")
+                .await
+                .unwrap()
+                .expect("record stored")
+                .version
+        )
+    );
+    assert!(exists(&admin, "sched.cano_sched_custom").await);
+    assert!(exists(&admin, "sched.cano_sched_custom_version_seq").await);
+    let json: String = admin
+        .query_one(
+            "SELECT convert_from(record, 'UTF8')::jsonb::text FROM sched.cano_sched_custom \
+             WHERE flow_id = 'f'",
+            &[],
+        )
+        .await
+        .unwrap()
+        .get(0);
+    assert_eq!(json, "{}");
+}
+
+#[tokio::test]
+async fn scheduler_versions_never_repeat_across_remove() {
+    let pg = PgFixture::start().await;
+    let store = PostgresStore::connect(&pg.direct_dsn()).await.unwrap();
+    let CasOutcome::Written(first) = store
+        .compare_and_swap("v", None, b"a".to_vec())
+        .await
+        .unwrap()
+    else {
+        panic!("first write conflicted");
+    };
+    store.remove("v").await.unwrap();
+    let CasOutcome::Written(second) = store
+        .compare_and_swap("v", None, b"a".to_vec())
+        .await
+        .unwrap()
+    else {
+        panic!("re-create conflicted");
+    };
+    assert_ne!(first, second);
+    assert_eq!(
+        store
+            .compare_and_swap("v", Some(first), b"b".to_vec())
+            .await
+            .unwrap(),
+        CasOutcome::Conflict
+    );
+}
+
+#[tokio::test]
+async fn scheduler_swap_races_have_one_winner() {
+    let pg = PgFixture::start().await;
+    let store = PostgresStore::connect(&pg.direct_dsn()).await.unwrap();
+    let CasOutcome::Written(base) = store
+        .compare_and_swap("race", None, b"0".to_vec())
+        .await
+        .unwrap()
+    else {
+        panic!("seed conflicted");
+    };
+    let outcomes = futures_util::future::join_all((0..16).map(|i| {
+        let store = store.clone();
+        async move {
+            store
+                .compare_and_swap("race", Some(base), format!("w{i}").into_bytes())
+                .await
+                .unwrap()
+        }
+    }))
+    .await;
+    let written = outcomes
+        .iter()
+        .filter(|o| matches!(o, CasOutcome::Written(_)))
+        .count();
+    assert_eq!(written, 1, "{outcomes:?}");
 }
 
 #[tokio::test]
@@ -291,4 +399,65 @@ async fn retry_absorbs_a_lost_ack() {
         .await
         .unwrap();
     support::scenario_retry_absorbs_a_lost_ack(&store, &pg.toxi).await;
+}
+
+#[tokio::test]
+async fn scheduler_retry_absorbs_a_lost_ack() {
+    let pg = PgFixture::start().await;
+    let store = PostgresStore::builder()
+        .with_operation_timeout(Duration::from_secs(1))
+        .with_retry(RetryMode::fixed(40, Duration::from_millis(250)))
+        .connect(&pg.proxied_dsn())
+        .await
+        .unwrap();
+
+    // Create: the insert lands, its reply is lost, the retried insert finds the row.
+    store.load("warm").await.expect("warm the connection");
+    pg.toxi.blackhole_responses().await;
+    let api = pg.toxi.api();
+    let healer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        api.heal().await;
+    });
+    let created = store
+        .compare_and_swap("lost-ack", None, b"first".to_vec())
+        .await
+        .expect("a retried swap must absorb its own lost acknowledgement");
+    healer.await.unwrap();
+    let stored = store
+        .load("lost-ack")
+        .await
+        .unwrap()
+        .expect("record stored");
+    assert_eq!(stored.value, b"first");
+    assert_eq!(created, CasOutcome::Written(stored.version));
+
+    // Update: same loss on an update; the stored bytes equal the bytes sent.
+    pg.toxi.blackhole_responses().await;
+    let api = pg.toxi.api();
+    let healer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        api.heal().await;
+    });
+    let updated = store
+        .compare_and_swap("lost-ack", Some(stored.version), b"second".to_vec())
+        .await
+        .expect("a retried update must absorb its own lost acknowledgement");
+    healer.await.unwrap();
+    let after = store
+        .load("lost-ack")
+        .await
+        .unwrap()
+        .expect("record stored");
+    assert_eq!(after.value, b"second");
+    assert_eq!(updated, CasOutcome::Written(after.version));
+    assert_ne!(after.version, stored.version);
+
+    // A different value from the stale version is still a conflict.
+    let stale = store
+        .compare_and_swap("lost-ack", Some(stored.version), b"third".to_vec())
+        .await
+        .unwrap();
+    assert_eq!(stale, CasOutcome::Conflict);
+    assert_eq!(store.load("lost-ack").await.unwrap(), Some(after));
 }

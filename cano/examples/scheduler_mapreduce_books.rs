@@ -544,7 +544,7 @@ async fn main() -> Result<(), CanoError> {
     println!("🗺️  MAP PHASE: Triggering all batch workflows...\n");
     for (batch_name, _) in get_book_batches() {
         println!("  ⚡ Triggering: {}", batch_name);
-        running.trigger(&batch_name)?;
+        running.trigger(&batch_name).await?;
     }
 
     // Wait for all workflows to complete

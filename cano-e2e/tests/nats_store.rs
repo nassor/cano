@@ -12,7 +12,8 @@ use cano::checkpoint::{CheckpointRow, CheckpointStore};
 use cano::prelude::*;
 use cano::store::nats::NatsStore;
 use cano::store::nats::async_nats;
-use cano::testing::assert_checkpoint_store_contract;
+use cano::testing::{assert_checkpoint_store_contract, assert_scheduler_store_contract};
+use cano::{CasOutcome, SchedulerStore};
 use futures_util::TryStreamExt;
 use support::{Fault, NatsFixture, row};
 
@@ -52,6 +53,66 @@ async fn contract() {
     let nats = NatsFixture::start().await;
     let store = NatsStore::connect(nats.direct_url()).await.unwrap();
     assert_checkpoint_store_contract(&store, "nats").await;
+}
+
+#[tokio::test]
+async fn scheduler_contract() {
+    let nats = NatsFixture::start().await;
+    let store = NatsStore::connect(nats.direct_url()).await.unwrap();
+    assert_scheduler_store_contract(&store, "nats").await;
+}
+
+#[tokio::test]
+async fn scheduler_bucket_defaults_and_keys() {
+    let nats = NatsFixture::start().await;
+    let store = NatsStore::connect(nats.direct_url()).await.unwrap();
+    assert_eq!(store.scheduler_kv().name, "cano_scheduler");
+    nats.jetstream()
+        .await
+        .get_stream("KV_cano_scheduler")
+        .await
+        .expect("the scheduler bucket's stream exists");
+
+    let CasOutcome::Written(first) = store
+        .compare_and_swap("a.b", None, b"v1".to_vec())
+        .await
+        .unwrap()
+    else {
+        panic!("create must write");
+    };
+    let keys: Vec<String> = store
+        .scheduler_kv()
+        .keys()
+        .await
+        .unwrap()
+        .try_collect()
+        .await
+        .unwrap();
+    assert_eq!(keys, ["a=2Eb"]);
+    assert!(
+        sorted_keys(&store).await.is_empty(),
+        "the checkpoint bucket is untouched"
+    );
+
+    // A purged key can be created again, at a revision that never repeats.
+    store.remove("a.b").await.unwrap();
+    assert!(store.load("a.b").await.unwrap().is_none());
+    let CasOutcome::Written(second) = store
+        .compare_and_swap("a.b", None, b"v1".to_vec())
+        .await
+        .unwrap()
+    else {
+        panic!("create after remove must write");
+    };
+    assert!(second > first, "{second} must exceed {first}");
+
+    let err = NatsStore::builder()
+        .with_scheduler_bucket("cano_scheduler_other")
+        .with_create_bucket(false)
+        .connect(nats.direct_url())
+        .await
+        .unwrap_err();
+    assert_eq!(err.category(), "scheduler_store", "{err}");
 }
 
 #[tokio::test]
@@ -301,4 +362,72 @@ async fn retry_absorbs_a_lost_ack() {
     })
     .await;
     support::scenario_retry_absorbs_a_lost_ack(&store, &nats.toxi).await;
+}
+
+#[tokio::test]
+async fn scheduler_retry_absorbs_a_lost_ack() {
+    let nats = NatsFixture::start().await;
+    let store = proxied_store(&nats, |b| {
+        b.with_operation_timeout(Duration::from_secs(1))
+            .with_retry(RetryMode::fixed(40, Duration::from_millis(250)))
+    })
+    .await;
+    store.load("warm").await.expect("warm the connection");
+    store
+        .compare_and_swap("warm", None, b"w".to_vec())
+        .await
+        .unwrap();
+
+    // Create: the first attempt is stored, its acknowledgement is lost, the retry meets
+    // its own bytes.
+    nats.toxi.blackhole_responses().await;
+    let api = nats.toxi.api();
+    let healer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        api.heal().await;
+    });
+    let CasOutcome::Written(created) = store
+        .compare_and_swap("lost-ack", None, b"v1".to_vec())
+        .await
+        .expect("a retried swap must absorb its own lost acknowledgement")
+    else {
+        panic!("a retried create must report Written");
+    };
+    healer.await.unwrap();
+    let record = store.load("lost-ack").await.unwrap().unwrap();
+    assert_eq!(
+        (record.version, record.value.as_slice()),
+        (created, &b"v1"[..])
+    );
+
+    // Swap from the current version, same fault.
+    nats.toxi.blackhole_responses().await;
+    let api = nats.toxi.api();
+    let healer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        api.heal().await;
+    });
+    let CasOutcome::Written(swapped) = store
+        .compare_and_swap("lost-ack", Some(created), b"v2".to_vec())
+        .await
+        .expect("a retried swap must absorb its own lost acknowledgement")
+    else {
+        panic!("a retried swap must report Written");
+    };
+    healer.await.unwrap();
+    assert!(swapped > created);
+    let record = store.load("lost-ack").await.unwrap().unwrap();
+    assert_eq!(
+        (record.version, record.value.as_slice()),
+        (swapped, &b"v2"[..])
+    );
+
+    // Different bytes from a stale version still conflict.
+    assert_eq!(
+        store
+            .compare_and_swap("lost-ack", Some(created), b"other".to_vec())
+            .await
+            .unwrap(),
+        CasOutcome::Conflict
+    );
 }

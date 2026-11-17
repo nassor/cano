@@ -40,6 +40,29 @@
   plus `cano/<executable name>`: `$XDG_STATE_HOME` when it is an absolute path, else
   `~/.local/state`, on Linux and other Unix systems; `~/Library/Application Support` on macOS;
   `%LOCALAPPDATA%` on Windows.
+- Multi-instance scheduling (feature `scheduler`). `SchedulerStore` (also `cano::scheduler::SchedulerStore`
+  and in the prelude) is a versioned compare-and-swap register keyed by flow id: `load`,
+  `compare_and_swap` (returns `CasOutcome::Written(version)` or `Conflict`) and `remove`, with
+  `VersionedRecord`. Implement it with `#[cano::scheduler_store]`. Errors use
+  `CanoError::SchedulerStore` (constructor `CanoError::scheduler_store`, category `scheduler_store`).
+- `Scheduler::with_store(Arc<dyn SchedulerStore>)`, `with_lease_ttl(Duration)` (30 s by default, zero is a
+  configuration error) and `with_instance_id(&str)` (a random `cano-<16 hex digits>` by default, empty is a
+  configuration error), and `RunningScheduler::instance_id()`. Schedulers that share a store run each
+  `every` interval and each `cron` firing once across the cluster. A run holds a lease renewed every third
+  of the TTL, a lost lease cancels the local run, and a crashed instance's lease expires into one counted
+  failure. Backoff, trip state, `run_count` and `last_run` persist, so a restarted cluster does not re-run an
+  `every` flow within its interval. Without `with_store` nothing changes.
+- `Status::RunningElsewhere { owner, lease_expires }`: another instance holds the flow's lease.
+  `trigger` is refused while one does, and the error names the owner.
+- `SchedulerStore` for the built-in stores, each behind `scheduler` plus its store feature:
+  `RedbStore` (tables `cano_scheduler` and `cano_scheduler_version` in the same file; one process holds
+  the file, so it coordinates schedulers inside one process), `PostgresStore` (table `cano_scheduler`,
+  `postgres::DEFAULT_SCHEDULER_TABLE`, `with_scheduler_table`) and `NatsStore` (bucket `cano_scheduler`,
+  `nats::DEFAULT_SCHEDULER_BUCKET`, `with_scheduler_bucket`, `with_scheduler_bucket_config`,
+  `scheduler_kv()`).
+- `cano::testing::InMemorySchedulerStore` and `cano::testing::assert_scheduler_store_contract`.
+- The `scheduler_cluster` example runs two schedulers over one `RedbStore`, and the docs gain a
+  "Several scheduler instances" page.
 
 ### Changed
 
@@ -55,6 +78,8 @@
 - The examples `store_custom_backend` and `workflow_stack_store` are `blackboard_namespaced` and
   `workflow_blackboard`; the benches `store_performance` and `store_shared_performance` are
   `blackboard_performance` and `blackboard_shared_performance`.
+- **Breaking:** `RunningScheduler::trigger` and `RunningScheduler::reset_flow` are `async` for every
+  scheduler, so a call needs `.await`.
 
 ## 0.16.0 - 2026-11-15 - API Simplification
 

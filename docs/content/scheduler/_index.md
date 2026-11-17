@@ -22,6 +22,7 @@ template = "section.html"
 <li class="toc-sub"><a href="#manual-triggering">Manual triggering</a></li>
 <li class="toc-sub"><a href="#mixed-scheduling">Mixed scheduling</a></li>
 <li><a href="#backoff-guide">Backoff and trip state</a></li>
+<li><a href="#several-instances">Several instances</a></li>
 <li><a href="#cancellation">Cancelling a flow</a></li>
 <li><a href="#graceful-shutdown">Graceful shutdown</a></li>
 <li><a href="#multi-level-map-reduce">Multi-level map-reduce</a></li>
@@ -60,6 +61,8 @@ The scheduler has two halves, so a double start cannot compile.
 <li><code>Scheduler</code> is the builder. Every method consumes and returns it, so registration is one chain:
 <code>every</code>, <code>cron</code> and <code>manual</code> register a workflow,
 <code>with_backoff</code> overrides the <a href="backoff-and-trip/"><code>BackoffPolicy</code></a> of one flow,
+<code>with_store</code>, <code>with_lease_ttl</code> and <code>with_instance_id</code> share the flows with other
+<a href="#several-instances">scheduler instances</a>,
 and <code>with_drain_timeout</code> and <code>with_cancel_timeout</code> tune
 <a href="#graceful-shutdown">shutdown</a>. A zero interval, a bad cron expression, a duplicate id, or a
 <code>with_backoff</code> for an unknown id is remembered while you chain, and <code>start()</code> returns
@@ -82,20 +85,20 @@ the error), then spawns one loop per interval or cron flow. Manual flows get no 
 <dd>Blocks until some clone calls <code>stop()</code>, then returns its result. It never stops the scheduler itself.</dd>
 <dt><code>async fn wait_idle(&amp;self, id: &amp;str) -&gt; Option&lt;FlowInfo&gt;</code></dt>
 <dd>Waits until the flow is not <code>Running</code> and returns its <code>FlowInfo</code>, or <code>None</code> for an unknown id. Returns at once for a flow that is not running.</dd>
-<dt><code>fn trigger(&amp;self, id: &amp;str) -&gt; CanoResult&lt;()&gt;</code></dt>
-<dd>Starts a run now. Errors when the id is unknown, the scheduler is stopping or stopped, the flow is already running, or the flow is tripped. A pending backoff window does not block it.</dd>
+<dt><code>async fn trigger(&amp;self, id: &amp;str) -&gt; CanoResult&lt;()&gt;</code></dt>
+<dd>Starts a run now. Errors when the id is unknown, the scheduler is stopping or stopped, the flow is already running, or the flow is tripped. A pending backoff window does not block it. With a store it also errors while another instance runs the flow.</dd>
 <dt><code>fn cancel_flow(&amp;self, id: &amp;str) -&gt; CanoResult&lt;()&gt;</code></dt>
-<dd>Cooperatively cancels the flow's in-flight run. A no-op when the flow is idle; an unknown id is an error.</dd>
-<dt><code>fn reset_flow(&amp;self, id: &amp;str) -&gt; CanoResult&lt;()&gt;</code></dt>
-<dd>Clears the failure streak and the backoff window. A flow that is not running returns to <code>Idle</code>.</dd>
+<dd>Cooperatively cancels the flow's in-flight run on this instance. A no-op when the flow is idle here; an unknown id is an error.</dd>
+<dt><code>async fn reset_flow(&amp;self, id: &amp;str) -&gt; CanoResult&lt;()&gt;</code></dt>
+<dd>Clears the failure streak and the backoff window. A flow that is not running returns to <code>Idle</code>. With a store the reset applies to every instance.</dd>
 <dt><code>fn status(&amp;self, id: &amp;str) -&gt; Option&lt;FlowInfo&gt;</code></dt>
 <dd>Snapshot of one flow, or <code>None</code> for an unknown id.</dd>
 <dt><code>fn list(&amp;self) -&gt; Vec&lt;FlowInfo&gt;</code></dt>
 <dd>Snapshot of every flow, in registration order.</dd>
 </dl>
 <p>
-Only the three waiting methods are <code>async</code>. <code>trigger</code>, <code>cancel_flow</code> and
-<code>reset_flow</code> must be called inside a Tokio runtime, because <code>trigger</code> spawns the run.
+<code>stop</code>, <code>wait</code>, <code>wait_idle</code>, <code>trigger</code> and <code>reset_flow</code> are <code>async</code>.
+<code>trigger</code>, <code>cancel_flow</code> and <code>reset_flow</code> must be called inside a Tokio runtime, because <code>trigger</code> spawns the run.
 Dropping the last clone without calling <code>stop()</code> aborts every loop and run and does not tear
 resources down, so call <code>stop().await</code> for an orderly shutdown.
 </p>
@@ -368,7 +371,7 @@ async fn main() -> Result<(), CanoError> {
 <div class="callout-label">Triggering needs a running scheduler</div>
 <p>
 <code>trigger()</code> lives on <code>RunningScheduler</code>, so the compiler rejects a trigger before
-<code>start()</code>. It is synchronous: it starts the run and returns without waiting for it. Use
+<code>start()</code>. It starts the run and returns without waiting for it. Use
 <code>wait_idle(id)</code> or <code>status(id)</code> to see the outcome.
 </p>
 </div>
@@ -443,16 +446,16 @@ async fn main() -> Result<(), CanoError> {
         .start()
         .await?;
 
-    // trigger() is synchronous: it starts the run and returns.
+    // trigger() starts the run and returns.
     println!("Triggering export...");
-    running.trigger("data_export")?;
+    running.trigger("data_export").await?;
 
     // wait_idle() returns once the run has finished.
     let info = running.wait_idle("data_export").await.expect("flow exists");
     println!("Export finished: {:?}", info.status);
 
     // Can be triggered again later
-    running.trigger("data_export")?;
+    running.trigger("data_export").await?;
     running.wait_idle("data_export").await;
 
     // stop() drains in-flight runs, then tears the resources down.
@@ -607,7 +610,7 @@ async fn main() -> Result<(), CanoError> {
                 }
 
                 // Example: trigger the emergency export if some condition holds.
-                // running.trigger("emergency_export")?;
+                // running.trigger("emergency_export").await?;
             }
         }
     }
@@ -628,6 +631,12 @@ It runs interval, cron, and manual flows side by side and triggers the manual on
 <p>A flow that keeps failing is backed off and can be tripped. The
 <a href="backoff-and-trip/">backoff and trip page</a> covers the policy, the <code>Status</code> variants,
 and how to recover a tripped flow.</p>
+<hr class="section-divider">
+
+<h2 id="several-instances"><a href="#several-instances" class="anchor-link" aria-hidden="true">#</a>Several instances</h2>
+<p>Give several processes the same flows and one shared store, and each tick of each flow runs on exactly one
+of them. <code>Scheduler::with_store</code> turns it on; see
+<a href="several-instances/">Several scheduler instances</a> for leases, failure behaviour and the stores.</p>
 <hr class="section-divider">
 
 <h2 id="cancellation"><a href="#cancellation" class="anchor-link" aria-hidden="true">#</a>Cancelling a flow</h2>
@@ -786,8 +795,8 @@ let running = Scheduler::new()
     .manual("batch-b", batch_workflow(batch_b, results.clone()), State::Process)
     .start()
     .await?;
-running.trigger("batch-a")?;
-running.trigger("batch-b")?;
+running.trigger("batch-a").await?;
+running.trigger("batch-b").await?;
 // Wait for both flows to finish, then reduce across all batch summaries in `results`.
 running.wait_idle("batch-a").await;
 running.wait_idle("batch-b").await;

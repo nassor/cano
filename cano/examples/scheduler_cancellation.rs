@@ -94,7 +94,7 @@ async fn main() -> CanoResult<()> {
         .await?;
 
     // Kick off the saga, then cancel it once Ship is in flight.
-    running.trigger("order")?;
+    running.trigger("order").await?;
     while !ship_started.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }

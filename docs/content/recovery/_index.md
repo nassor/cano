@@ -21,7 +21,9 @@ The trait is backend agnostic: implement it over any storage you run. Three stor
 with the crate, redb on by default, the two network stores each behind a feature:
 <code>RedbStore</code> (an embedded, ACID, daemon-free file),
 <code>PostgresStore</code> (one PostgreSQL table) and <code>NatsStore</code> (a
-NATS JetStream Key/Value bucket). A workflow with no checkpoint store pays nothing.
+NATS JetStream Key/Value bucket). A workflow with no checkpoint store pays nothing. With the
+<code>scheduler</code> feature each of the three also implements <code>SchedulerStore</code>, the shared
+record that lets <a href="../scheduler/several-instances/">several scheduler instances</a> run one set of flows.
 </p>
 
 <nav class="page-toc" aria-label="Table of contents">
@@ -452,6 +454,12 @@ payload holding the other <code>CheckpointRow</code> fields, including <code>kin
 composite keys element by element, so a workflow's rows are range-scanned in ascending
 <code>sequence</code>. The sequence lives in the key, not the value.
 </p>
+<p>
+With the <code>scheduler</code> feature <code>RedbStore</code> also implements
+<code>SchedulerStore</code> in the tables <code>cano_scheduler</code> and <code>cano_scheduler_version</code> of the
+same file. Because one process holds the file, it keeps scheduler state across restarts and coordinates schedulers
+inside that process, not across processes. See <a href="../scheduler/several-instances/">Several scheduler instances</a>.
+</p>
 <hr class="section-divider">
 
 <h2 id="postgres"><a href="#postgres" class="anchor-link" aria-hidden="true">#</a>Built in: <code>PostgresStore</code></h2>
@@ -462,6 +470,11 @@ composite keys element by element, so a workflow's rows are range-scanned in asc
 default (<code>DEFAULT_CHECKPOINT_TABLE</code>), and draws connections from a <a href="https://docs.rs/deadpool-postgres">deadpool-postgres</a>
 pool over <a href="https://docs.rs/tokio-postgres">tokio-postgres</a>. The module
 <code>cano::store::postgres</code> re-exports both crates. Clones share the pool.
+</p>
+<p>
+With the <code>scheduler</code> feature <code>PostgresStore</code> also implements <code>SchedulerStore</code> in a
+second table, <code>cano_scheduler</code> by default (<code>DEFAULT_SCHEDULER_TABLE</code>), renamed with
+<code>with_scheduler_table</code>. See <a href="../scheduler/several-instances/">Several scheduler instances</a>.
 </p>
 
 ```rust
@@ -550,6 +563,12 @@ operators and is not indexed.
 <code>cano_checkpoints</code> by default (<code>DEFAULT_CHECKPOINT_BUCKET</code>, stream <code>KV_cano_checkpoints</code>). The module
 <code>cano::store::nats</code> re-exports <a href="https://docs.rs/async-nats">async-nats</a>.
 Clones share the client.
+</p>
+<p>
+With the <code>scheduler</code> feature <code>NatsStore</code> also implements <code>SchedulerStore</code> in a
+second bucket, <code>cano_scheduler</code> by default (<code>DEFAULT_SCHEDULER_BUCKET</code>), set with
+<code>with_scheduler_bucket</code> and <code>with_scheduler_bucket_config</code>. <code>scheduler_kv()</code> returns
+its handle. See <a href="../scheduler/several-instances/">Several scheduler instances</a>.
 </p>
 
 ```rust

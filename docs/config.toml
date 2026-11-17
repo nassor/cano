@@ -61,6 +61,9 @@ path = "@/scheduler/_index.md"
 [[extra.nav.items.children]]
 title = "Backoff and trip"
 path = "@/scheduler/backoff-and-trip.md"
+[[extra.nav.items.children]]
+title = "Several instances"
+path = "@/scheduler/several-instances.md"
 
 [[extra.nav]]
 label = "Processing models"

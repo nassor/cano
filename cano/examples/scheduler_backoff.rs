@@ -103,7 +103,7 @@ async fn main() -> CanoResult<()> {
 
     if matches!(snap.status, Status::Tripped { .. }) {
         println!("\nFlow tripped — calling reset_flow to give it another chance...");
-        running.reset_flow("flaky")?;
+        running.reset_flow("flaky").await?;
     }
 
     // After reset the flow runs again, hits 1 more failure (run #4), then

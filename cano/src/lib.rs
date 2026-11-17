@@ -332,7 +332,8 @@ pub use observer::MetricsObserver;
 
 #[cfg(feature = "scheduler")]
 pub use scheduler::{
-    BackoffPolicy, FlowInfo, RunningScheduler, Scheduler, Status, shutdown_signal,
+    BackoffPolicy, CasOutcome, FlowInfo, RunningScheduler, Scheduler, SchedulerStore, Status,
+    VersionedRecord, shutdown_signal,
 };
 
 /// Attribute macro applied to `Task` trait definitions and `impl Task` blocks
@@ -367,6 +368,14 @@ pub use cano_macros::resource;
 /// See [`macro@task`] for the rewrite shape; this macro is functionally identical and
 /// differs only in name.
 pub use cano_macros::checkpoint_store;
+
+/// Attribute macro applied to the `SchedulerStore` trait definition and
+/// `impl SchedulerStore` blocks.
+///
+/// See [`macro@task`] for the rewrite shape; this macro is functionally identical and
+/// differs only in name.
+#[cfg(feature = "scheduler")]
+pub use cano_macros::scheduler_store;
 
 /// Derive macro that generates a `from_resources` associated function for a struct.
 ///
@@ -407,7 +416,8 @@ pub mod prelude {
 
     #[cfg(feature = "scheduler")]
     pub use crate::{
-        BackoffPolicy, FlowInfo, RunningScheduler, Scheduler, Status, shutdown_signal,
+        BackoffPolicy, FlowInfo, RunningScheduler, Scheduler, SchedulerStore, Status,
+        scheduler_store, shutdown_signal,
     };
 
     #[cfg(feature = "tracing")]

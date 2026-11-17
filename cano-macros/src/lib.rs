@@ -22,6 +22,7 @@
 //! - `#[cano::saga::task]` — for `impl CompensatableTask`
 //! - `#[cano::resource]` — for `impl Resource` and the `Resource` trait
 //! - `#[cano::checkpoint_store]` — for `impl CheckpointStore` and the `CheckpointStore` trait
+//! - `#[cano::scheduler_store]` — for `impl SchedulerStore` and the `SchedulerStore` trait
 //!
 //! All are functionally identical in the async-rewrite they perform; they differ
 //! only in name. New traits that need async-fn-in-dyn rewriting can ship their
@@ -123,6 +124,15 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// self-documenting at impl sites.
 #[proc_macro_attribute]
 pub fn resource(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    async_rewrite::rewrite(item)
+}
+
+/// Apply to the `SchedulerStore` trait definition or an `impl SchedulerStore for T` block.
+///
+/// Rewrites every `async fn` method into a method returning
+/// `Pin<Box<dyn Future<Output = ...> + Send + 'async_trait>>`, like [`resource`].
+#[proc_macro_attribute]
+pub fn scheduler_store(_attr: TokenStream, item: TokenStream) -> TokenStream {
     async_rewrite::rewrite(item)
 }
 

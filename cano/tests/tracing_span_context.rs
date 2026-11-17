@@ -547,7 +547,7 @@ fn scheduled(id: String) -> Run {
         let scheduler = Scheduler::new();
         let scheduler = scheduler.manual(&id, workflow, S::Start);
         let running = scheduler.start().await?;
-        running.trigger(&id)?;
+        running.trigger(&id).await?;
         let deadline = Instant::now() + Duration::from_secs(30);
         while running.status(&id).map(|info| info.status) != Some(Status::Completed) {
             assert!(

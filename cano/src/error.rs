@@ -258,6 +258,13 @@ pub enum CanoError {
     /// problem, or a row that fails to encode/decode.
     CheckpointStore(String),
 
+    /// A scheduler store operation failed.
+    ///
+    /// Emitted by [`SchedulerStore`](crate::scheduler::SchedulerStore) implementations
+    /// (including the built-in stores in [`crate::store`]) when a load, swap or remove
+    /// cannot complete, and by the scheduler when a stored flow record fails to decode.
+    SchedulerStore(String),
+
     /// A workflow failed and at least one [`compensate`](crate::saga::CompensatableTask::compensate)
     /// run also failed while rolling it back.
     ///
@@ -437,6 +444,11 @@ impl CanoError {
         CanoError::CheckpointStore(msg.into())
     }
 
+    /// Create a new scheduler-store error
+    pub fn scheduler_store<S: Into<String>>(msg: S) -> Self {
+        CanoError::SchedulerStore(msg.into())
+    }
+
     /// Create a new compensation-failed error from the original failure plus the
     /// compensation errors (the convention is `errors[0]` = original failure).
     ///
@@ -552,6 +564,7 @@ impl CanoError {
             CanoError::CircuitHalfOpenBusy(msg) => msg,
             CanoError::RateLimited { .. } => "rate limited",
             CanoError::CheckpointStore(msg) => msg,
+            CanoError::SchedulerStore(msg) => msg,
             CanoError::CompensationFailed { errors } => errors
                 .first()
                 .map_or("compensation failed", CanoError::message),
@@ -641,6 +654,7 @@ impl CanoError {
             CanoError::CircuitHalfOpenBusy(_) => "circuit_half_open_busy",
             CanoError::RateLimited { .. } => "rate_limited",
             CanoError::CheckpointStore(_) => "checkpoint_store",
+            CanoError::SchedulerStore(_) => "scheduler_store",
             CanoError::CompensationFailed { .. } => "compensation_failed",
             CanoError::Generic(_) => "generic",
             CanoError::ResourceNotFound(_) => "resource_not_found",
@@ -678,6 +692,7 @@ impl std::fmt::Display for CanoError {
                 )
             }
             CanoError::CheckpointStore(msg) => write!(f, "Checkpoint store error: {msg}"),
+            CanoError::SchedulerStore(msg) => write!(f, "Scheduler store error: {msg}"),
             CanoError::CompensationFailed { errors } => {
                 write!(f, "Compensation failed ({} error(s))", errors.len())?;
                 for (i, e) in errors.iter().enumerate() {

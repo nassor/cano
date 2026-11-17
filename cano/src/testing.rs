@@ -19,6 +19,8 @@
 //! | [`panic_on_attempt`] | a [`PanicOnAttempt`] task factory that panics on its first *N* attempts — exercises the panic-safety path (panics fail fast, they are not retried) |
 //! | [`assert_compensation_ran`] | a saga assertion that compares the recorded compensation order against an expected sequence |
 //! | [`assert_checkpoint_store_contract`] | runs the [`CheckpointStore`] contract against any implementation, yours included |
+//! | `InMemorySchedulerStore` (with `scheduler`) | a process-local `SchedulerStore`; share one between schedulers to test multi-instance runs |
+//! | `assert_scheduler_store_contract` (with `scheduler`) | runs the `SchedulerStore` contract against any implementation |
 //!
 //! This module is **not** in the [`prelude`](crate::prelude) — import it explicitly with
 //! `use cano::testing::*;` so production code never picks these up by accident.
@@ -64,6 +66,11 @@ use crate::checkpoint::{CheckpointRow, CheckpointStore};
 use crate::error::CanoError;
 use crate::observer::WorkflowObserver;
 use crate::task::{Task, TaskConfig};
+
+#[cfg(feature = "scheduler")]
+mod scheduler_store;
+#[cfg(feature = "scheduler")]
+pub use scheduler_store::{InMemorySchedulerStore, assert_scheduler_store_contract};
 
 /// A single event captured by [`RecordingObserver`].
 ///

@@ -1,6 +1,6 @@
 +++
 title = "Testing"
-description = "Test fixtures for Cano workflows: a recording observer, an in-memory checkpoint store, a panicking task factory, and a saga assertion."
+description = "Test fixtures for Cano workflows: a recording observer, in-memory checkpoint and scheduler stores, store contract suites, a panicking task factory, and a saga assertion."
 template = "section.html"
 +++
 
@@ -29,6 +29,8 @@ The module is not in the <a href="../"><code>prelude</code></a>. Import it expli
 <li><a href="#recording-observer">RecordingObserver</a></li>
 <li><a href="#in-memory-store">InMemoryCheckpointStore</a></li>
 <li><a href="#store-contract">assert_checkpoint_store_contract</a></li>
+<li><a href="#in-memory-scheduler-store">InMemorySchedulerStore</a></li>
+<li><a href="#scheduler-store-contract">assert_scheduler_store_contract</a></li>
 <li><a href="#panic-on-attempt">panic_on_attempt</a></li>
 <li><a href="#assert-compensation">assert_compensation_ran</a></li>
 </ol>
@@ -286,6 +288,69 @@ use cano::testing::{InMemoryCheckpointStore, assert_checkpoint_store_contract};
 async fn my_store_meets_the_contract() {
     let store = InMemoryCheckpointStore::new(); // your store here
     assert_checkpoint_store_contract(&store, "contract-test").await;
+}
+```
+
+<h2 id="in-memory-scheduler-store"><a href="#in-memory-scheduler-store" class="anchor-link" aria-hidden="true">#</a>InMemorySchedulerStore</h2>
+<p class="feature-tag">Also needs the <code>scheduler</code> feature.</p>
+
+<p>
+A process-local <a href="../scheduler/several-instances/"><code>SchedulerStore</code></a>. Share one
+<code>Arc&lt;InMemorySchedulerStore&gt;</code> between several schedulers in one test to exercise
+multi-instance coordination without a database. It honors the full trait contract, and its versions count
+up from 1 across the whole store. <code>record(flow_id)</code> returns the stored
+<code>VersionedRecord</code> for a flow, if any.
+</p>
+
+```rust
+use cano::prelude::*;
+use cano::testing::InMemorySchedulerStore;
+use std::sync::Arc;
+use std::time::Duration;
+
+let store = Arc::new(InMemorySchedulerStore::new());
+let node_a = Scheduler::new()
+    .every("fetch", workflow_a, State::Start, Duration::from_secs(60))
+    .with_store(store.clone())
+    .with_instance_id("node-a")
+    .start()
+    .await?;
+let node_b = Scheduler::new()
+    .every("fetch", workflow_b, State::Start, Duration::from_secs(60))
+    .with_store(store.clone())
+    .with_instance_id("node-b")
+    .start()
+    .await?;
+// Each tick of "fetch" now runs on exactly one of the two.
+```
+
+<h2 id="scheduler-store-contract"><a href="#scheduler-store-contract" class="anchor-link" aria-hidden="true">#</a>assert_scheduler_store_contract</h2>
+<p class="feature-tag">Also needs the <code>scheduler</code> feature.</p>
+
+<p>
+Runs the <a href="../scheduler/several-instances/#custom-store"><code>SchedulerStore</code> contract</a> against
+any store and panics with the name of the first clause it breaks. Use it on your own backend, or on a
+built-in one pointed at a real server. It writes only flow ids of the form <code>namespace/case</code> and
+removes them before and after, so it can share a table or bucket with live scheduler records. Pick a
+<code>namespace</code> no scheduler uses.
+</p>
+
+<p>
+It checks that an unknown id loads <code>None</code> and removes as a no-op, that a create writes once and
+conflicts afterwards, that a swap from the current version writes and changes the version while a stale or
+wrong version conflicts and leaves the record alone, that a removed id can be created again with a new
+version, that ids sharing a prefix stay isolated, that awkward ids (spaces, wildcards, non-ASCII, 200+
+characters) work, that concurrent creates and concurrent swaps from one version have exactly one winner, and
+that a 64 KiB value round-trips.
+</p>
+
+```rust
+use cano::testing::{InMemorySchedulerStore, assert_scheduler_store_contract};
+
+#[tokio::test]
+async fn my_scheduler_store_meets_the_contract() {
+    let store = InMemorySchedulerStore::new(); // your store here
+    assert_scheduler_store_contract(&store, "contract-test").await;
 }
 ```
 

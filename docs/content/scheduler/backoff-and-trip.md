@@ -196,6 +196,8 @@ The variants, with the fields they carry:
 <dd>The last run failed. The flow waits until <code>until</code> before its next dispatch, per its <code>BackoffPolicy</code>.</dd>
 <dt><code>Tripped</code> <small>fields <code>streak</code>, <code>last_error</code></small></dt>
 <dd>The streak reached <code>streak_limit</code>. The scheduler does not dispatch the flow again until <code>reset_flow</code> is called.</dd>
+<dt><code>RunningElsewhere</code> <small>fields <code>owner</code>, <code>lease_expires</code></small></dt>
+<dd>Another scheduler instance sharing the store holds the flow's lease. Only a scheduler built with <code>with_store</code> reports it; see <a href="../several-instances/">Several scheduler instances</a>.</dd>
 </dl>
 <div class="diagram-frame">
 <p class="diagram-label">Flow status: backoff, trip and recovery</p>
@@ -257,9 +259,10 @@ ends with <code>CompensationFailed</code>, which counts as a failure. <code>Flow
 
 <h2 id="recovery"><a href="#recovery" class="anchor-link" aria-hidden="true">#</a>Recovery with <code>reset_flow</code></h2>
 <p>
-A <code>Tripped</code> flow stays parked until you reset it. <code>RunningScheduler::reset_flow(id)</code>
+A <code>Tripped</code> flow stays parked until you reset it. <code>RunningScheduler::reset_flow(id).await</code>
 clears the failure streak and <code>next_eligible</code>, and sets the status to <code>Idle</code> unless the
-flow is running. It is synchronous; call it inside a Tokio runtime.
+flow is running. Call it inside a Tokio runtime. With a <a href="../several-instances/">shared store</a> the
+reset is written to the shared record and applies to every instance.
 </p>
 <p>
 A manual <code>trigger()</code> ignores an active <code>Backoff</code> window but is rejected on a tripped
@@ -270,7 +273,7 @@ at 1, so reset after you observe <code>Tripped</code> or <code>Idle</code>.
 ```rust
 let snap = running.status("flaky").expect("flow exists");
 if matches!(snap.status, Status::Tripped { .. }) {
-    running.reset_flow("flaky")?;
+    running.reset_flow("flaky").await?;
 }
 
 ```

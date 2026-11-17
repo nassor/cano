@@ -134,7 +134,7 @@ async fn main() -> CanoResult<()> {
 
     // Example 6: Trigger manual workflow
     println!("🔄 Triggering manual workflow...");
-    running.trigger("manual_task_1")?;
+    running.trigger("manual_task_1").await?;
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 

@@ -244,11 +244,11 @@ async fn main() -> CanoResult<()> {
 
     // Manually trigger the setup task
     println!("Manually triggering system setup...");
-    running.trigger("system_setup")?;
+    running.trigger("system_setup").await?;
 
     // Manually trigger the migration task
     println!("Manually triggering data migration...");
-    running.trigger("manual_migration")?;
+    running.trigger("manual_migration").await?;
 
     // Let the scheduler run for a while to see scheduled executions
     println!("Running scheduler for 20 seconds to see concurrent executions...");

@@ -1,4 +1,5 @@
-//! [`PostgresStore`]: a [`CheckpointStore`] backed by one PostgreSQL table.
+//! [`PostgresStore`]: a [`CheckpointStore`] and, with the `scheduler` feature, a
+//! `SchedulerStore`, backed by PostgreSQL tables.
 //!
 //! Compiled with the `store-postgres` feature. Connections come from a
 //! [`deadpool_postgres`] pool over [`tokio_postgres`]; both crates are re-exported here so
@@ -35,6 +36,30 @@
 //! [`schema_sql`](PostgresStoreBuilder::schema_sql) yourself. The store never
 //! creates a schema.
 //!
+//! ## Scheduler table
+//!
+//! With the `scheduler` feature the store also implements `SchedulerStore`, the shared
+//! record that lets several scheduler instances run one set of flows, each tick on exactly
+//! one instance. It lives in a second table, `cano_scheduler` by default, beside a
+//! sequence named `<table>_version_seq` that hands out record versions:
+//!
+//! ```sql
+//! CREATE TABLE IF NOT EXISTS "cano_scheduler" (
+//!     flow_id    text        PRIMARY KEY,
+//!     version    bigint      NOT NULL,
+//!     record     bytea       NOT NULL,
+//!     updated_at timestamptz NOT NULL DEFAULT now()
+//! );
+//! CREATE SEQUENCE IF NOT EXISTS "cano_scheduler_version_seq";
+//! ```
+//!
+//! `record` is the scheduler's JSON document as UTF-8 bytes; read it with
+//! `SELECT flow_id, convert_from(record, 'UTF8')::jsonb FROM cano_scheduler`. Every
+//! write takes its `version` from the sequence, so a version never repeats for one flow,
+//! even after the flow is removed and created again. Instances that share a scheduler
+//! table form one cluster. `with_scheduler_table` renames the table; the migration, the
+//! operation timeout and the retry policy apply to it as they do to the checkpoint table.
+//!
 //! ## Failures
 //!
 //! Every call is bounded by the operation timeout (10 s by default). With
@@ -47,6 +72,11 @@
 //! have committed after the client gave up. A retried `append` treats a byte-identical row
 //! already stored at its sequence as its own earlier write and returns `Ok`; a different
 //! row there is a conflict.
+//!
+//! A retried `compare_and_swap` likewise accepts a stored record whose bytes equal the
+//! ones it sent: the scheduler's records carry the writer's identity and a timestamp, so
+//! equal bytes mean an earlier attempt landed, and the call returns `Written` with the
+//! stored version.
 //!
 //! ## Example
 //!
@@ -84,7 +114,11 @@ use super::retry::{self, Failure};
 use crate::RetryMode;
 use crate::checkpoint::{CheckpointRow, CheckpointStore, RowKind};
 use crate::error::CanoError;
+#[cfg(feature = "scheduler")]
+use crate::scheduler::{CasOutcome, SchedulerStore, VersionedRecord};
 use cano_macros::checkpoint_store;
+#[cfg(feature = "scheduler")]
+use cano_macros::scheduler_store;
 
 pub use deadpool_postgres;
 pub use tokio_postgres;
@@ -92,6 +126,11 @@ pub use tokio_postgres;
 /// The table name used unless [`with_checkpoint_table`](PostgresStoreBuilder::with_checkpoint_table)
 /// sets another.
 pub const DEFAULT_CHECKPOINT_TABLE: &str = "cano_checkpoints";
+
+/// The scheduler table name used unless
+/// [`with_scheduler_table`](PostgresStoreBuilder::with_scheduler_table) sets another.
+#[cfg(feature = "scheduler")]
+pub const DEFAULT_SCHEDULER_TABLE: &str = "cano_scheduler";
 
 /// The `application_name` reported to the server when the connection config sets none.
 pub const DEFAULT_APPLICATION_NAME: &str = "cano";
@@ -104,23 +143,39 @@ pub const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 /// `0x63616e6f636b7074`, `"canockpt"`: serializes concurrent first connects in the migration.
 const MIGRATION_LOCK: i64 = 7161126307184210036;
 
-/// A [`CheckpointStore`] that keeps every run in one PostgreSQL table.
+/// Postgres cuts identifiers at 63 bytes. The version sequence is `<table>_version_seq`, so
+/// the table name's part of it is cut short enough that the suffix survives and the
+/// sequence never truncates onto the table's own name.
+#[cfg(feature = "scheduler")]
+const SEQUENCE_STEM_MAX: usize = 63 - "_version_seq".len();
+
+/// A [`CheckpointStore`] that keeps every run in one PostgreSQL table and, with the
+/// `scheduler` feature, a `SchedulerStore` that keeps every flow's record in a second one.
+///
+/// The checkpoint table is `cano_checkpoints` and the scheduler table is `cano_scheduler`
+/// by default. The scheduler record is the scheduler's JSON in a `bytea` column; query it
+/// with `convert_from(record, 'UTF8')::jsonb`.
 ///
 /// Cheap to clone: clones share the connection pool. Build one with
 /// [`builder`](Self::builder), or [`connect`](Self::connect) for the defaults. See the
-/// [module docs](self) for the table layout and the failure semantics.
+/// [module docs](self) for the table layouts and the failure semantics.
 #[derive(Clone)]
 pub struct PostgresStore {
     pool: Pool,
     sql: Arc<Statements>,
+    #[cfg(feature = "scheduler")]
+    scheduler: Arc<SchedulerStatements>,
     operation_timeout: Duration,
     retry: RetryMode,
 }
 
 impl fmt::Debug for PostgresStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PostgresStore")
-            .field("table", &self.sql.table)
+        let mut debug = f.debug_struct("PostgresStore");
+        debug.field("table", &self.sql.table);
+        #[cfg(feature = "scheduler")]
+        debug.field("scheduler_table", &self.scheduler.table);
+        debug
             .field("operation_timeout", &self.operation_timeout)
             .field("retry", &self.retry)
             .finish_non_exhaustive()
@@ -134,7 +189,8 @@ impl PostgresStore {
         PostgresStoreBuilder::default()
     }
 
-    /// Connect with the default settings, creating `cano_checkpoints` if it is missing.
+    /// Connect with the default settings, creating `cano_checkpoints` (and, with the
+    /// `scheduler` feature, `cano_scheduler`) if it is missing.
     ///
     /// `config` is a libpq-style connection string, as a URL
     /// (`postgres://user:pass@host/db`) or as `key=value` pairs.
@@ -277,6 +333,158 @@ impl CheckpointStore for PostgresStore {
     }
 }
 
+#[cfg(feature = "scheduler")]
+impl PostgresStore {
+    async fn scheduler_load_once(&self, flow_id: &str) -> Result<Option<VersionedRecord>, Failure> {
+        let client = Checkout::get(&self.pool, "scheduler load").await?;
+        let result = async {
+            let select = client.prepare_cached(&self.scheduler.select).await?;
+            client.query_opt(&select, &[&flow_id]).await
+        }
+        .await;
+        client.release();
+        let stored = result.map_err(|e| statement_failure("scheduler load", &e))?;
+        stored
+            .as_ref()
+            .map(|stored| decode_record(flow_id, stored))
+            .transpose()
+    }
+
+    async fn scheduler_swap_once(
+        &self,
+        flow_id: &str,
+        expected: Option<u64>,
+        value: &[u8],
+        attempt: usize,
+    ) -> Result<CasOutcome, Failure> {
+        let expected = expected
+            .map(|version| {
+                i64::try_from(version).map_err(|_| {
+                    Failure::fatal(CanoError::scheduler_store(format!(
+                        "postgres scheduler swap: version {version} exceeds the Postgres bigint range"
+                    )))
+                })
+            })
+            .transpose()?;
+        let client = Checkout::get(&self.pool, "scheduler swap").await?;
+        let result = self
+            .swap_or_verify(&client, flow_id, expected, value, attempt)
+            .await;
+        client.release();
+        result
+    }
+
+    async fn swap_or_verify(
+        &self,
+        client: &Object,
+        flow_id: &str,
+        expected: Option<i64>,
+        value: &[u8],
+        attempt: usize,
+    ) -> Result<CasOutcome, Failure> {
+        let fail = |e: tokio_postgres::Error| statement_failure("scheduler swap", &e);
+        let swapped = match expected {
+            None => {
+                let insert = client
+                    .prepare_cached(&self.scheduler.insert)
+                    .await
+                    .map_err(fail)?;
+                client
+                    .query_opt(&insert, &[&flow_id, &value])
+                    .await
+                    .map_err(fail)?
+            }
+            Some(version) => {
+                let update = client
+                    .prepare_cached(&self.scheduler.update)
+                    .await
+                    .map_err(fail)?;
+                client
+                    .query_opt(&update, &[&flow_id, &version, &value])
+                    .await
+                    .map_err(fail)?
+            }
+        };
+        if let Some(written) = swapped {
+            return Ok(CasOutcome::Written(version_from_db(flow_id, &written, 0)?));
+        }
+        if attempt > 0 {
+            // An earlier attempt may have committed before its reply was lost.
+            let select = client
+                .prepare_cached(&self.scheduler.select)
+                .await
+                .map_err(fail)?;
+            let stored = client.query_opt(&select, &[&flow_id]).await.map_err(fail)?;
+            if let Some(stored) = stored {
+                let record = decode_record(flow_id, &stored)?;
+                if record.value == value {
+                    return Ok(CasOutcome::Written(record.version));
+                }
+            }
+        }
+        Ok(CasOutcome::Conflict)
+    }
+
+    async fn scheduler_remove_once(&self, flow_id: &str) -> Result<(), Failure> {
+        let client = Checkout::get(&self.pool, "scheduler remove").await?;
+        let result = async {
+            let delete = client.prepare_cached(&self.scheduler.delete).await?;
+            client.execute(&delete, &[&flow_id]).await
+        }
+        .await;
+        client.release();
+        result
+            .map(drop)
+            .map_err(|e| statement_failure("scheduler remove", &e))
+    }
+}
+
+#[cfg(feature = "scheduler")]
+#[scheduler_store]
+impl SchedulerStore for PostgresStore {
+    async fn load(&self, flow_id: &str) -> Result<Option<VersionedRecord>, CanoError> {
+        retry::run(&self.retry, |_| {
+            retry::bounded(
+                "postgres scheduler load",
+                self.operation_timeout,
+                self.scheduler_load_once(flow_id),
+            )
+        })
+        .await
+        .map_err(scheduler_error)
+    }
+
+    async fn compare_and_swap(
+        &self,
+        flow_id: &str,
+        expected: Option<u64>,
+        value: Vec<u8>,
+    ) -> Result<CasOutcome, CanoError> {
+        let value = value.as_slice();
+        retry::run(&self.retry, move |n| {
+            retry::bounded(
+                "postgres scheduler swap",
+                self.operation_timeout,
+                self.scheduler_swap_once(flow_id, expected, value, n),
+            )
+        })
+        .await
+        .map_err(scheduler_error)
+    }
+
+    async fn remove(&self, flow_id: &str) -> Result<(), CanoError> {
+        retry::run(&self.retry, |_| {
+            retry::bounded(
+                "postgres scheduler remove",
+                self.operation_timeout,
+                self.scheduler_remove_once(flow_id),
+            )
+        })
+        .await
+        .map_err(scheduler_error)
+    }
+}
+
 /// Settings for a [`PostgresStore`]; start from
 /// [`PostgresStore::builder`].
 #[derive(Debug, Clone)]
@@ -289,6 +497,8 @@ pub struct PostgresStoreBuilder {
     recycling_method: RecyclingMethod,
     operation_timeout: Duration,
     retry: RetryMode,
+    #[cfg(feature = "scheduler")]
+    scheduler_table: String,
 }
 
 impl Default for PostgresStoreBuilder {
@@ -302,6 +512,8 @@ impl Default for PostgresStoreBuilder {
             recycling_method: RecyclingMethod::Fast,
             operation_timeout: DEFAULT_OPERATION_TIMEOUT,
             retry: RetryMode::None,
+            #[cfg(feature = "scheduler")]
+            scheduler_table: DEFAULT_SCHEDULER_TABLE.to_owned(),
         }
     }
 }
@@ -312,6 +524,17 @@ impl PostgresStoreBuilder {
     #[must_use]
     pub fn with_checkpoint_table(mut self, table: impl Into<String>) -> Self {
         self.table = table.into();
+        self
+    }
+
+    /// The scheduler table name. Default [`DEFAULT_SCHEDULER_TABLE`]. Same naming rule and
+    /// schema as [`with_checkpoint_table`](Self::with_checkpoint_table). The version sequence
+    /// is created beside it as `<name>_version_seq`. Instances that share a table form one
+    /// scheduler cluster.
+    #[cfg(feature = "scheduler")]
+    #[must_use]
+    pub fn with_scheduler_table(mut self, table: impl Into<String>) -> Self {
+        self.scheduler_table = table.into();
         self
     }
 
@@ -357,7 +580,8 @@ impl PostgresStoreBuilder {
         self
     }
 
-    /// The bound on each attempt of `append`, `load_run` and `clear`, connection checkout
+    /// The bound on each attempt of a store call (`append`, `load_run`, `clear`, and the
+    /// scheduler `load`, `compare_and_swap` and `remove`), connection checkout
     /// included, and on the table migration. Default [`DEFAULT_OPERATION_TIMEOUT`].
     #[must_use]
     pub fn with_operation_timeout(mut self, timeout: Duration) -> Self {
@@ -367,7 +591,7 @@ impl PostgresStoreBuilder {
 
     /// Retry policy for transient failures. Default [`RetryMode::None`]. Conflicts and
     /// malformed rows are never retried. See the [module docs](self) for how a retried
-    /// `append` handles its own earlier write.
+    /// `append` and a retried `compare_and_swap` handle their own earlier write.
     #[must_use]
     pub fn with_retry(mut self, retry: RetryMode) -> Self {
         self.retry = retry;
@@ -375,9 +599,10 @@ impl PostgresStoreBuilder {
     }
 
     /// The `CREATE TABLE IF NOT EXISTS` statement for the configured schema and table,
-    /// for operators who run DDL themselves.
+    /// for operators who run DDL themselves. With the `scheduler` feature it also holds the
+    /// scheduler table and its version sequence.
     pub fn schema_sql(&self) -> Result<String, CanoError> {
-        Ok(create_table_sql(&self.qualified_table()?))
+        self.ddl()
     }
 
     /// Parse `config` as a libpq-style connection string and connect without TLS.
@@ -410,7 +635,7 @@ impl PostgresStoreBuilder {
         T::TlsConnect: Sync + Send,
         <T::TlsConnect as TlsConnect<Socket>>::Future: Send,
     {
-        self.qualified_table()?;
+        self.ddl()?;
         apply_default_application_name(&mut config);
         let manager = Manager::from_config(
             config,
@@ -434,10 +659,12 @@ impl PostgresStoreBuilder {
     /// Use a pool you built. The pool settings on this builder do not apply.
     pub async fn build_with_pool(self, pool: Pool) -> Result<PostgresStore, CanoError> {
         let table = self.qualified_table()?;
+        #[cfg(feature = "scheduler")]
+        let (scheduler_table, scheduler_sequence) = self.scheduler_names()?;
         if self.create_table {
             let migration = format!(
                 "SELECT pg_advisory_xact_lock({MIGRATION_LOCK});\n{}",
-                create_table_sql(&table)
+                self.ddl()?
             );
             retry::bounded("postgres migrate", self.operation_timeout, async {
                 let client = Checkout::get(&pool, "migrate").await?;
@@ -451,17 +678,48 @@ impl PostgresStoreBuilder {
         Ok(PostgresStore {
             pool,
             sql: Arc::new(Statements::new(table)),
+            #[cfg(feature = "scheduler")]
+            scheduler: Arc::new(SchedulerStatements::new(
+                scheduler_table,
+                &scheduler_sequence,
+            )),
             operation_timeout: self.operation_timeout,
             retry: self.retry,
         })
     }
 
+    /// The DDL for every table the enabled features use.
+    fn ddl(&self) -> Result<String, CanoError> {
+        let sql = create_table_sql(&self.qualified_table()?);
+        #[cfg(feature = "scheduler")]
+        let sql = {
+            let (table, sequence) = self.scheduler_names()?;
+            format!("{sql}\n{}", create_scheduler_sql(&table, &sequence))
+        };
+        Ok(sql)
+    }
+
     /// `"table"` or `"schema"."table"`, after validating both names.
     fn qualified_table(&self) -> Result<String, CanoError> {
-        let table = quote_identifier(&self.table)?;
+        self.qualify(&self.table)
+    }
+
+    /// The qualified scheduler table and its qualified version sequence.
+    #[cfg(feature = "scheduler")]
+    fn scheduler_names(&self) -> Result<(String, String), CanoError> {
+        let table = self.qualify(&self.scheduler_table)?;
+        // `qualify` validated the name as ASCII, so cutting at a byte index is safe.
+        let stem = &self.scheduler_table[..self.scheduler_table.len().min(SEQUENCE_STEM_MAX)];
+        let sequence = self.qualify(&format!("{stem}_version_seq"))?;
+        Ok((table, sequence))
+    }
+
+    /// `"name"` or `"schema"."name"`, after validating both names.
+    fn qualify(&self, name: &str) -> Result<String, CanoError> {
+        let name = quote_identifier(name)?;
         Ok(match &self.schema {
-            Some(schema) => format!("{}.{table}", quote_identifier(schema)?),
-            None => table,
+            Some(schema) => format!("{}.{name}", quote_identifier(schema)?),
+            None => name,
         })
     }
 }
@@ -505,6 +763,19 @@ fn create_table_sql(table: &str) -> String {
     )
 }
 
+#[cfg(feature = "scheduler")]
+fn create_scheduler_sql(table: &str, sequence: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {table} (
+    flow_id    text        PRIMARY KEY,
+    version    bigint      NOT NULL,
+    record     bytea       NOT NULL,
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE SEQUENCE IF NOT EXISTS {sequence};"
+    )
+}
+
 /// The four statements, rendered once for the configured table.
 struct Statements {
     table: String,
@@ -530,6 +801,36 @@ impl Statements {
                  WHERE workflow_id = $1 AND sequence = $2"
             ),
             delete: format!("DELETE FROM {table} WHERE workflow_id = $1"),
+            table,
+        }
+    }
+}
+
+/// The scheduler statements, rendered once for the configured table and sequence.
+#[cfg(feature = "scheduler")]
+struct SchedulerStatements {
+    table: String,
+    select: String,
+    insert: String,
+    update: String,
+    delete: String,
+}
+
+#[cfg(feature = "scheduler")]
+impl SchedulerStatements {
+    fn new(table: String, sequence: &str) -> Self {
+        Self {
+            select: format!("SELECT version, record FROM {table} WHERE flow_id = $1"),
+            insert: format!(
+                "INSERT INTO {table} (flow_id, version, record) \
+                 VALUES ($1, nextval('{sequence}'), $2) \
+                 ON CONFLICT (flow_id) DO NOTHING RETURNING version"
+            ),
+            update: format!(
+                "UPDATE {table} SET version = nextval('{sequence}'), record = $3, updated_at = now() \
+                 WHERE flow_id = $1 AND version = $2 RETURNING version"
+            ),
+            delete: format!("DELETE FROM {table} WHERE flow_id = $1"),
             table,
         }
     }
@@ -691,6 +992,45 @@ fn decode_row(workflow_id: &str, stored: &tokio_postgres::Row) -> Result<Checkpo
     })
 }
 
+/// Retag a failure the shared helpers built as a checkpoint store error.
+#[cfg(feature = "scheduler")]
+fn scheduler_error(error: CanoError) -> CanoError {
+    match error {
+        CanoError::CheckpointStore(message) => CanoError::scheduler_store(message),
+        other => other,
+    }
+}
+
+/// The `bigint` version at column `index`; a negative or missing one is a fatal failure.
+#[cfg(feature = "scheduler")]
+fn version_from_db(
+    flow_id: &str,
+    stored: &tokio_postgres::Row,
+    index: usize,
+) -> Result<u64, Failure> {
+    stored
+        .try_get::<_, i64>(index)
+        .map_err(|e| e.to_string())
+        .and_then(|version| u64::try_from(version).map_err(|e| e.to_string()))
+        .map_err(|reason| {
+            Failure::fatal(CanoError::scheduler_store(format!(
+                "postgres scheduler: invalid version at flow_id={flow_id:?}: {reason}"
+            )))
+        })
+}
+
+/// Map a `select` row of the scheduler table.
+#[cfg(feature = "scheduler")]
+fn decode_record(flow_id: &str, stored: &tokio_postgres::Row) -> Result<VersionedRecord, Failure> {
+    let version = version_from_db(flow_id, stored, 0)?;
+    let value: Vec<u8> = stored.try_get(1).map_err(|e| {
+        Failure::fatal(CanoError::scheduler_store(format!(
+            "postgres scheduler load: invalid record at flow_id={flow_id:?}: {e}"
+        )))
+    })?;
+    Ok(VersionedRecord { version, value })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -785,5 +1125,128 @@ mod tests {
         config.application_name("my-app");
         apply_default_application_name(&mut config);
         assert_eq!(config.get_application_name(), Some("my-app"));
+    }
+
+    #[cfg(feature = "scheduler")]
+    #[test]
+    fn schema_sql_adds_the_scheduler_table_and_sequence() {
+        let default = PostgresStore::builder().schema_sql().unwrap();
+        assert!(
+            default.contains("CREATE TABLE IF NOT EXISTS \"cano_scheduler\" ("),
+            "{default}"
+        );
+        assert!(
+            default.contains("flow_id    text        PRIMARY KEY"),
+            "{default}"
+        );
+        assert!(
+            default.contains("record     bytea       NOT NULL"),
+            "{default}"
+        );
+        assert!(
+            default.contains("CREATE SEQUENCE IF NOT EXISTS \"cano_scheduler_version_seq\";"),
+            "{default}"
+        );
+        assert!(default.contains("\"cano_checkpoints\""), "{default}");
+
+        let custom = PostgresStore::builder()
+            .with_schema("wf")
+            .with_scheduler_table("sched")
+            .schema_sql()
+            .unwrap();
+        assert!(
+            custom.contains("CREATE TABLE IF NOT EXISTS \"wf\".\"sched\" ("),
+            "{custom}"
+        );
+        assert!(
+            custom.contains("CREATE SEQUENCE IF NOT EXISTS \"wf\".\"sched_version_seq\";"),
+            "{custom}"
+        );
+    }
+
+    #[cfg(feature = "scheduler")]
+    #[test]
+    fn scheduler_table_names_are_validated() {
+        for name in ["x; DROP TABLE y", "Cano", "1abc", "", &"a".repeat(64)] {
+            let err = PostgresStore::builder()
+                .with_scheduler_table(name)
+                .schema_sql()
+                .unwrap_err();
+            assert_eq!(err.category(), "configuration", "{name:?}");
+        }
+        for name in ["cano_scheduler", "_t", "t9", &"a".repeat(63)] {
+            PostgresStore::builder()
+                .with_scheduler_table(name)
+                .schema_sql()
+                .unwrap();
+        }
+    }
+
+    #[cfg(feature = "scheduler")]
+    #[tokio::test]
+    async fn invalid_scheduler_table_fails_before_any_io() {
+        let err = PostgresStore::builder()
+            .with_scheduler_table("Bad")
+            .connect("postgres://u:p@127.0.0.1:1/db")
+            .await
+            .unwrap_err();
+        assert_eq!(err.category(), "configuration");
+    }
+
+    #[cfg(feature = "scheduler")]
+    #[test]
+    fn a_long_table_name_keeps_its_sequence_distinct() {
+        let long = "a".repeat(63);
+        let builder = PostgresStore::builder().with_scheduler_table(long.clone());
+        let (table, sequence) = builder.scheduler_names().unwrap();
+        assert_eq!(table, format!("\"{long}\""));
+        let bare = sequence.trim_matches('"');
+        assert_eq!(bare.len(), 63, "{sequence}");
+        assert!(bare.ends_with("_version_seq"), "{sequence}");
+        assert_ne!(sequence, table);
+
+        let (_, short) = PostgresStore::builder().scheduler_names().unwrap();
+        assert_eq!(short, "\"cano_scheduler_version_seq\"");
+    }
+
+    #[cfg(feature = "scheduler")]
+    #[test]
+    fn scheduler_statements_swap_on_the_version_column() {
+        let sql = SchedulerStatements::new(
+            "\"wf\".\"cano_scheduler\"".to_owned(),
+            "\"wf\".\"cano_scheduler_version_seq\"",
+        );
+        assert_eq!(
+            sql.select,
+            "SELECT version, record FROM \"wf\".\"cano_scheduler\" WHERE flow_id = $1"
+        );
+        assert!(
+            sql.insert.contains(
+                "VALUES ($1, nextval('\"wf\".\"cano_scheduler_version_seq\"'), $2) \
+                 ON CONFLICT (flow_id) DO NOTHING RETURNING version"
+            ),
+            "{}",
+            sql.insert
+        );
+        assert!(
+            sql.update.contains("SET version = nextval('\"wf\".\"cano_scheduler_version_seq\"'), record = $3, updated_at = now() WHERE flow_id = $1 AND version = $2 RETURNING version"),
+            "{}",
+            sql.update
+        );
+        assert_eq!(
+            sql.delete,
+            "DELETE FROM \"wf\".\"cano_scheduler\" WHERE flow_id = $1"
+        );
+    }
+
+    #[cfg(feature = "scheduler")]
+    #[test]
+    fn scheduler_errors_are_retagged() {
+        let retagged = scheduler_error(CanoError::checkpoint_store("postgres scheduler load: x"));
+        assert_eq!(retagged.category(), "scheduler_store");
+        assert_eq!(
+            scheduler_error(CanoError::configuration("c")).category(),
+            "configuration"
+        );
     }
 }

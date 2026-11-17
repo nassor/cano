@@ -3,7 +3,8 @@
 //! [`redb`](https://docs.rs/redb) is an embedded, ACID, pure-Rust key-value store
 //! with no background daemon, a good fit for state that lives in the same process as
 //! the workflow engine. Compiled with the `store-redb` feature, on by default.
-//! [`RedbStore`] implements [`CheckpointStore`].
+//! [`RedbStore`] implements [`CheckpointStore`] and, with the `scheduler` feature,
+//! `SchedulerStore`.
 //!
 //! ## Checkpoint layout
 //!
@@ -20,23 +21,56 @@
 //! composite keys element by element, so within one `workflow_id` the rows are
 //! stored — and range-scanned — in ascending `sequence` order, which is exactly
 //! what [`CheckpointStore::load_run`] returns.
+//!
+//! ## Scheduler layout
+//!
+//! With the `scheduler` feature, two more tables hold the scheduler's flow records.
+//! `cano_scheduler` maps a flow id to `(version, value)`. `cano_scheduler_version` has a
+//! single row with the last version handed out, so a version is never reused for an id,
+//! even after the record is removed and created again. A compare-and-swap is one write
+//! transaction: it reads the record, compares its version with the expected one, bumps the
+//! counter, writes the record and commits.
+//!
+//! A redb file is held by one process. A `RedbStore` therefore coordinates schedulers
+//! inside one process and keeps their state across restarts, but it cannot coordinate
+//! several processes; that needs `PostgresStore` or `NatsStore`.
 
 use std::ffi::{OsStr, OsString};
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+#[cfg(feature = "scheduler")]
+use redb::ReadableTable;
 use redb::{Database, ReadableDatabase, TableDefinition};
 
 use super::codec::{self, ROW_TAG_V1, StoredRow};
 use super::conflict_error;
 use crate::checkpoint::{CheckpointRow, CheckpointStore, RowKind};
 use crate::error::CanoError;
+#[cfg(feature = "scheduler")]
+use crate::scheduler::{CasOutcome, SchedulerStore, VersionedRecord};
 use cano_macros::checkpoint_store;
+#[cfg(feature = "scheduler")]
+use cano_macros::scheduler_store;
 
 /// `(workflow_id, sequence) -> [ROW_TAG_V1][postcard(StoredRow)]` (or an untagged
 /// legacy payload for databases written before version tagging).
 const CHECKPOINTS: TableDefinition<(&str, u64), &[u8]> = TableDefinition::new("cano_checkpoints");
+
+/// `flow_id -> (version, value)`: the scheduler's flow records.
+#[cfg(feature = "scheduler")]
+const SCHEDULER: TableDefinition<&str, (u64, &[u8])> = TableDefinition::new("cano_scheduler");
+
+/// One row, [`SCHEDULER_VERSION_KEY`] -> the last version handed out. Never reset, so
+/// versions stay unique per flow id across remove and re-create.
+#[cfg(feature = "scheduler")]
+const SCHEDULER_VERSION: TableDefinition<&str, u64> =
+    TableDefinition::new("cano_scheduler_version");
+
+/// The key of the single row in [`SCHEDULER_VERSION`].
+#[cfg(feature = "scheduler")]
+const SCHEDULER_VERSION_KEY: &str = "last";
 
 /// Pre-versioning on-disk shape. Kept solely as a decode fallback so existing
 /// redb databases written before `workflow_version` was added still load.
@@ -57,6 +91,12 @@ fn workflow_range(workflow_id: &str) -> RangeInclusive<(&str, u64)> {
 /// [`CanoError::CheckpointStore`].
 fn redb_err(e: impl std::fmt::Display) -> CanoError {
     CanoError::CheckpointStore(format!("redb: {e}"))
+}
+
+/// Wrap any `redb` error as a [`CanoError::SchedulerStore`].
+#[cfg(feature = "scheduler")]
+fn scheduler_err(e: impl std::fmt::Display) -> CanoError {
+    CanoError::scheduler_store(format!("redb: {e}"))
 }
 
 /// Assemble a [`CheckpointRow`] from the decoded stored fields.
@@ -83,7 +123,13 @@ fn stored_to_row(
     }
 }
 
-/// The embedded store: one `redb` database file. Implements [`CheckpointStore`].
+/// The embedded store: one `redb` database file. Implements [`CheckpointStore`] and, with
+/// the `scheduler` feature, `SchedulerStore` (tables `cano_checkpoints` and
+/// `cano_scheduler`).
+///
+/// A redb file is held by one process, so the scheduler side coordinates schedulers inside
+/// one process and persists their state across restarts; it cannot coordinate several
+/// processes. Use `PostgresStore` or `NatsStore` for that.
 ///
 /// Cheap to clone — the database handle is held behind an `Arc`, so every clone
 /// shares the same file and write lock. Construct one with [`new`](Self::new) at a path you
@@ -103,14 +149,20 @@ impl RedbStore {
     pub const DATA_DIR_ENV: &str = "CANO_DATA_DIR";
 
     /// Open (creating if necessary) the `redb` database at `path` and ensure the
-    /// checkpoint table exists. The parent directory must exist.
+    /// checkpoint table (and, with the `scheduler` feature, the scheduler tables) exists.
+    /// The parent directory must exist.
     pub fn new(path: impl AsRef<Path>) -> Result<Self, CanoError> {
         let db = Database::create(path).map_err(redb_err)?;
-        // Materialize the table up front so `begin_read` + `open_table` in
-        // `load_run` cannot fail on a freshly created database.
+        // Materialize the tables up front so `begin_read` + `open_table` in
+        // `load_run` and `load` cannot fail on a freshly created database.
         let tx = db.begin_write().map_err(redb_err)?;
         {
             let _ = tx.open_table(CHECKPOINTS).map_err(redb_err)?;
+            #[cfg(feature = "scheduler")]
+            {
+                let _ = tx.open_table(SCHEDULER).map_err(redb_err)?;
+                let _ = tx.open_table(SCHEDULER_VERSION).map_err(redb_err)?;
+            }
         }
         tx.commit().map_err(redb_err)?;
         Ok(Self { db: Arc::new(db) })
@@ -375,6 +427,94 @@ impl CheckpointStore for RedbStore {
         })
         .await
         .map_err(|e| CanoError::CheckpointStore(format!("checkpoint clear task panicked: {e}")))?
+    }
+}
+
+#[cfg(feature = "scheduler")]
+#[scheduler_store]
+impl SchedulerStore for RedbStore {
+    async fn load(&self, flow_id: &str) -> Result<Option<VersionedRecord>, CanoError> {
+        // Blocking redb read on a blocking thread, as in `load_run`.
+        let db = Arc::clone(&self.db);
+        let id = flow_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<Option<VersionedRecord>, CanoError> {
+            let tx = db.begin_read().map_err(scheduler_err)?;
+            let table = tx.open_table(SCHEDULER).map_err(scheduler_err)?;
+            let record = table.get(id.as_str()).map_err(scheduler_err)?.map(|guard| {
+                let (version, value) = guard.value();
+                VersionedRecord {
+                    version,
+                    value: value.to_vec(),
+                }
+            });
+            Ok(record)
+        })
+        .await
+        .map_err(|e| CanoError::scheduler_store(format!("scheduler load task panicked: {e}")))?
+    }
+
+    async fn compare_and_swap(
+        &self,
+        flow_id: &str,
+        expected: Option<u64>,
+        value: Vec<u8>,
+    ) -> Result<CasOutcome, CanoError> {
+        // Read, compare, bump the counter, write and commit in one write transaction.
+        // redb allows one writer at a time, so of concurrent swaps from one version
+        // exactly one sees the expected version.
+        let db = Arc::clone(&self.db);
+        let id = flow_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<CasOutcome, CanoError> {
+            let tx = db.begin_write().map_err(scheduler_err)?;
+            let next = {
+                let mut records = tx.open_table(SCHEDULER).map_err(scheduler_err)?;
+                let current = records
+                    .get(id.as_str())
+                    .map_err(scheduler_err)?
+                    .map(|guard| guard.value().0);
+                if current != expected {
+                    // Nothing was written; the transaction rolls back when `tx` drops.
+                    return Ok(CasOutcome::Conflict);
+                }
+                let mut counter = tx.open_table(SCHEDULER_VERSION).map_err(scheduler_err)?;
+                let last = counter
+                    .get(SCHEDULER_VERSION_KEY)
+                    .map_err(scheduler_err)?
+                    .map_or(0, |guard| guard.value());
+                let next = last
+                    .checked_add(1)
+                    .ok_or_else(|| scheduler_err("version counter exhausted"))?;
+                counter
+                    .insert(SCHEDULER_VERSION_KEY, next)
+                    .map_err(scheduler_err)?;
+                records
+                    .insert(id.as_str(), (next, value.as_slice()))
+                    .map_err(scheduler_err)?;
+                next
+            };
+            tx.commit().map_err(scheduler_err)?;
+            Ok(CasOutcome::Written(next))
+        })
+        .await
+        .map_err(|e| CanoError::scheduler_store(format!("scheduler swap task panicked: {e}")))?
+    }
+
+    async fn remove(&self, flow_id: &str) -> Result<(), CanoError> {
+        // Only the record goes; the version counter stays so a re-created record never
+        // reuses an earlier version.
+        let db = Arc::clone(&self.db);
+        let id = flow_id.to_string();
+        tokio::task::spawn_blocking(move || -> Result<(), CanoError> {
+            let tx = db.begin_write().map_err(scheduler_err)?;
+            {
+                let mut table = tx.open_table(SCHEDULER).map_err(scheduler_err)?;
+                table.remove(id.as_str()).map_err(scheduler_err)?;
+            }
+            tx.commit().map_err(scheduler_err)?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| CanoError::scheduler_store(format!("scheduler remove task panicked: {e}")))?
     }
 }
 
@@ -1062,5 +1202,65 @@ mod tests {
             Err(err) => err,
         };
         assert_eq!(err.category(), "checkpoint_store");
+    }
+
+    #[cfg(feature = "scheduler")]
+    #[tokio::test]
+    async fn scheduler_store_contract() {
+        let dir = tempdir().unwrap();
+        let store = RedbStore::new(dir.path().join("sched.redb")).unwrap();
+        crate::testing::assert_scheduler_store_contract(&store, "redb").await;
+    }
+
+    #[cfg(feature = "scheduler")]
+    #[tokio::test]
+    async fn scheduler_records_survive_reopen() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("sched.redb");
+
+        let store = RedbStore::new(&path).unwrap();
+        let CasOutcome::Written(v1) = store
+            .compare_and_swap("flow", None, b"first".to_vec())
+            .await
+            .unwrap()
+        else {
+            panic!("first write must succeed");
+        };
+        drop(store);
+
+        let store = RedbStore::new(&path).unwrap();
+        let record = store.load("flow").await.unwrap().unwrap();
+        assert_eq!(record.version, v1);
+        assert_eq!(record.value, b"first");
+
+        let CasOutcome::Written(v2) = store
+            .compare_and_swap("flow", Some(v1), b"second".to_vec())
+            .await
+            .unwrap()
+        else {
+            panic!("swap from the persisted version must succeed");
+        };
+        assert_ne!(v1, v2);
+        assert_eq!(
+            store
+                .compare_and_swap("flow", Some(v1), b"stale".to_vec())
+                .await
+                .unwrap(),
+            CasOutcome::Conflict
+        );
+
+        // The counter survives too: remove + re-create never repeats a version.
+        store.remove("flow").await.unwrap();
+        drop(store);
+        let store = RedbStore::new(&path).unwrap();
+        assert!(store.load("flow").await.unwrap().is_none());
+        let CasOutcome::Written(v3) = store
+            .compare_and_swap("flow", None, b"third".to_vec())
+            .await
+            .unwrap()
+        else {
+            panic!("re-create must succeed");
+        };
+        assert!(v3 != v1 && v3 != v2);
     }
 }

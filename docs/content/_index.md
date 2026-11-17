@@ -60,7 +60,7 @@ It fits work where state transitions matter:
 <div class="feature-card animate-in">
 <div class="feature-icon" aria-hidden="true">&#9202;</div>
 <h3>Scheduling</h3>
-<p>Intervals, cron schedules and manual triggers, with a bounded graceful stop.</p>
+<p>Intervals, cron schedules and manual triggers, with a bounded graceful stop. Several instances can share one <a href="scheduler/several-instances/">store</a> so each tick runs once.</p>
 </div>
 <div class="feature-card animate-in">
 <div class="feature-icon secondary" aria-hidden="true">&#9881;</div>
@@ -188,13 +188,13 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 Cano enables one feature by default, <code>store-redb</code>. <code>features = ["all"]</code> turns on all seven optional features:
 </p>
 <ul>
-<li><code>scheduler</code>: the <a href="scheduler/"><code>Scheduler</code></a> (cron, interval and manual triggers)</li>
+<li><code>scheduler</code>: the <a href="scheduler/"><code>Scheduler</code></a> (cron, interval and manual triggers), and with a store feature <a href="scheduler/several-instances/">several instances sharing one set of flows</a></li>
 <li><code>tracing</code>: <a href="tracing/"><code>tracing</code>-crate spans</a> and the <code>TracingObserver</code></li>
 <li><code>store-redb</code> (default): <a href="recovery/#redb"><code>RedbStore</code></a>, a checkpoint store in an embedded redb file. <code>default-features = false</code> drops redb from the build</li>
-<li><code>store-postgres</code>: <a href="recovery/#postgres"><code>PostgresStore</code></a>, a checkpoint store in one PostgreSQL table</li>
-<li><code>store-nats</code>: <a href="recovery/#nats"><code>NatsStore</code></a>, a checkpoint store in a NATS JetStream Key/Value bucket</li>
+<li><code>store-postgres</code>: <a href="recovery/#postgres"><code>PostgresStore</code></a>, a checkpoint and scheduler store in PostgreSQL tables</li>
+<li><code>store-nats</code>: <a href="recovery/#nats"><code>NatsStore</code></a>, a checkpoint and scheduler store in NATS JetStream Key/Value buckets</li>
 <li><code>metrics</code>: <a href="metrics/"><code>metrics</code>-crate counters, histograms and gauges</a> and the <code>MetricsObserver</code></li>
-<li><code>testing</code>: <a href="testing/">test fixtures</a> (recording observer, in-memory checkpoint store, checkpoint store contract suite, panic and saga helpers), usually enabled under <code>[dev-dependencies]</code></li>
+<li><code>testing</code>: <a href="testing/">test fixtures</a> (recording observer, in-memory checkpoint and scheduler stores, store contract suites, panic and saga helpers), usually enabled under <code>[dev-dependencies]</code></li>
 </ul>
 <p>
 Enable only what you need, for example <code>features = ["scheduler"]</code>, or omit <code>features</code>

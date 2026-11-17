@@ -10,10 +10,13 @@ use tokio::time::Duration;
 use crate::error::{CanoError, CanoResult};
 use crate::workflow::Workflow;
 
+use super::lease::Coordinator;
 use super::{
-    BackoffPolicy, FlowCell, FlowInfo, FlowRuntime, ParsedSchedule, RunningScheduler, Status,
-    WorkflowFlow,
+    BackoffPolicy, FlowCell, FlowInfo, FlowRuntime, ParsedSchedule, RunningScheduler,
+    SchedulerStore, Status, WorkflowFlow,
 };
+
+const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
 
 /// Scheduler builder: register workflows, then [`start`](Self::start).
 ///
@@ -22,6 +25,11 @@ use super::{
 /// Registration problems (a zero interval, a bad cron expression, a duplicate id,
 /// a backoff override for an unknown id) are remembered and returned by `start`
 /// before anything is validated or set up; the first one wins.
+///
+/// Without [`with_store`](Self::with_store) the scheduler keeps every flow's state in
+/// memory and runs alone. With a shared [`SchedulerStore`], several processes can run
+/// the same configuration and each tick of each flow runs on exactly one of them; see
+/// the [module docs](crate::scheduler) and [`with_lease_ttl`](Self::with_lease_ttl).
 ///
 /// ```rust
 /// # use cano::prelude::*;
@@ -44,7 +52,7 @@ use super::{
 ///     .with_drain_timeout(Duration::from_secs(20))
 ///     .start()
 ///     .await?;
-/// running.trigger("on_demand")?;
+/// running.trigger("on_demand").await?;
 /// running.stop().await?;
 /// # Ok(())
 /// # }
@@ -57,6 +65,9 @@ pub struct Scheduler {
     error: Option<CanoError>,
     drain_timeout: Duration,
     cancel_timeout: Duration,
+    store: Option<Arc<dyn SchedulerStore>>,
+    lease_ttl: Duration,
+    instance_id: Arc<str>,
 }
 
 impl Default for Scheduler {
@@ -74,6 +85,9 @@ impl Scheduler {
             error: None,
             drain_timeout: Duration::from_secs(20),
             cancel_timeout: Duration::from_secs(5),
+            store: None,
+            lease_ttl: DEFAULT_LEASE_TTL,
+            instance_id: Arc::from(format!("cano-{:016x}", rand::random::<u64>())),
         }
     }
 
@@ -159,14 +173,73 @@ impl Scheduler {
         self
     }
 
+    /// Share the flows with other scheduler instances through `store`.
+    ///
+    /// Run the same configuration (the same flow ids, schedules and backoff policies) in
+    /// every process against one store, and each tick runs on exactly one instance:
+    ///
+    /// - An instance claims a flow with a compare-and-swap on its stored record before
+    ///   each run, and holds a lease on the record while the run is in flight. The
+    ///   record also carries the run count, last run, failure streak, backoff window and
+    ///   trip state, so `every` intervals, `cron` firings, backoff and
+    ///   [`Status::Tripped`](super::Status::Tripped) survive restarts and apply to the
+    ///   cluster as a whole.
+    /// - `every` and `cron` flows start dispatching as soon as the scheduler starts; the
+    ///   record decides whether a run is due.
+    /// - A run that loses its lease (this instance could not renew it for a whole TTL, or
+    ///   another instance took it over) is cancelled and its outcome is not written.
+    /// - If the store fails while claiming, the tick is skipped and the scheduler keeps
+    ///   running; the error is logged with the `tracing` feature.
+    ///
+    /// Instances that share a store form one cluster, so give unrelated clusters their own
+    /// table, bucket or file. Instance clocks must agree to well within the lease TTL, and
+    /// instance ids must be unique (see [`with_instance_id`](Self::with_instance_id)).
+    pub fn with_store(mut self, store: Arc<dyn SchedulerStore>) -> Self {
+        self.store = Some(store);
+        self
+    }
+
+    /// How long a run's lease lasts without renewal. Default 30 s; a zero TTL is a
+    /// configuration error returned by [`start`](Self::start).
+    ///
+    /// The running instance renews every third of the TTL. When an instance crashes, the
+    /// flow is blocked for at most one TTL before another instance counts the lost run as
+    /// a failure and takes over. Pick a TTL several times longer than the worst store
+    /// latency; an instance that cannot reach the store for a whole TTL cancels the run.
+    /// It only matters with [`with_store`](Self::with_store).
+    pub fn with_lease_ttl(mut self, ttl: Duration) -> Self {
+        self.lease_ttl = ttl;
+        self
+    }
+
+    /// The name this instance writes into leases and shows to the others in
+    /// [`Status::RunningElsewhere`](super::Status::RunningElsewhere). Default
+    /// `cano-` plus 16 random hex digits. An empty id is a configuration error returned
+    /// by [`start`](Self::start).
+    ///
+    /// Instances that share a store must have distinct ids: two instances with one id
+    /// would treat each other's lease as their own. Set a stable id (a pod or host name)
+    /// to make logs and statuses readable. It only matters with
+    /// [`with_store`](Self::with_store).
+    pub fn with_instance_id(mut self, id: &str) -> Self {
+        self.instance_id = Arc::from(id);
+        self
+    }
+
     /// Validate every workflow and its initial state, set up every workflow's
     /// resources in registration order, and spawn the scheduling loops.
+    ///
+    /// With a store, every flow's shared record is read once before the loops start, so
+    /// [`status`](RunningScheduler::status) shows the cluster's state (a store failure
+    /// there is logged and skipped, not an error).
     ///
     /// Must be called inside a Tokio runtime.
     ///
     /// # Errors
     ///
     /// - The first registration error (see the type docs).
+    /// - [`CanoError::Configuration`]: the lease TTL is zero or the instance id is
+    ///   empty.
     /// - [`CanoError::Configuration`] — a workflow failed `validate()` or
     ///   `validate_initial_state()`; nothing has been set up.
     /// - A resource setup error; the flows set up before it are torn down in
@@ -174,6 +247,16 @@ impl Scheduler {
     pub async fn start(self) -> CanoResult<RunningScheduler> {
         if let Some(e) = self.error {
             return Err(e);
+        }
+        if self.lease_ttl.is_zero() {
+            return Err(CanoError::configuration(
+                "Scheduler lease TTL must be non-zero",
+            ));
+        }
+        if self.instance_id.is_empty() {
+            return Err(CanoError::configuration(
+                "Scheduler instance id must not be empty",
+            ));
         }
         for (_, rt) in &self.flows {
             rt.flow.validate()?;
@@ -186,8 +269,20 @@ impl Scheduler {
                 return Err(e);
             }
         }
+        let coordinator = self.store.map(|store| {
+            Arc::new(Coordinator::new(
+                store,
+                Arc::clone(&self.instance_id),
+                self.lease_ttl,
+            ))
+        });
+        if let Some(coord) = &coordinator {
+            coord.preload(&self.flows).await;
+        }
         Ok(RunningScheduler::launch(
             self.flows,
+            self.instance_id,
+            coordinator,
             self.drain_timeout,
             self.cancel_timeout,
         ))
@@ -224,6 +319,7 @@ impl Scheduler {
                 next_eligible: None,
             },
             run_token: None,
+            claiming: false,
         };
         let runtime = FlowRuntime {
             flow: Arc::new(WorkflowFlow {
@@ -233,6 +329,7 @@ impl Scheduler {
             schedule,
             policy: BackoffPolicy::default(),
             cell: tokio::sync::watch::Sender::new(cell),
+            coordinator: None,
         };
         self.flows.push((id, runtime));
         self

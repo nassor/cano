@@ -1,14 +1,15 @@
 //! # Stores: the persistence backends
 //!
 //! A store is one storage backend. Each store implements the persistence traits cano
-//! defines, today [`CheckpointStore`](crate::checkpoint::CheckpointStore), and each is
-//! behind its own feature:
+//! defines, [`CheckpointStore`](crate::checkpoint::CheckpointStore) and, with the
+//! `scheduler` feature, `SchedulerStore` (the shared record behind several scheduler
+//! instances), and each is behind its own feature:
 //!
 //! | Store | Feature | Backend |
 //! |---|---|---|
-//! | `RedbStore` | `store-redb`, on by default | an embedded, ACID, daemon-free [`redb`](https://docs.rs/redb) file, `cano.redb` by default |
-//! | `PostgresStore` (module `postgres`) | `store-postgres` | PostgreSQL; checkpoints in one table, `cano_checkpoints` by default |
-//! | `NatsStore` (module `nats`) | `store-nats` | NATS JetStream Key/Value; checkpoints in one bucket, `cano_checkpoints` by default |
+//! | `RedbStore` | `store-redb`, on by default | an embedded, ACID, daemon-free [`redb`](https://docs.rs/redb) file, `cano.redb` by default; tables `cano_checkpoints`, `cano_scheduler` |
+//! | `PostgresStore` (module `postgres`) | `store-postgres` | PostgreSQL; checkpoints in one table, `cano_checkpoints` by default, scheduler records in `cano_scheduler` |
+//! | `NatsStore` (module `nats`) | `store-nats` | NATS JetStream Key/Value; checkpoints in one bucket, `cano_checkpoints` by default, scheduler records in `cano_scheduler` |
 //!
 //! To use another backend, implement the trait yourself: see
 //! [`crate::checkpoint`].

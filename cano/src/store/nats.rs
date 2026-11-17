@@ -1,5 +1,5 @@
-//! [`NatsStore`]: a [`CheckpointStore`] backed by a NATS JetStream Key/Value
-//! bucket.
+//! [`NatsStore`]: a [`CheckpointStore`] and, with the `scheduler` feature, a
+//! `SchedulerStore`, both backed by NATS JetStream Key/Value buckets.
 //!
 //! Compiled with the `store-nats` feature. [`async_nats`] is re-exported here so you can
 //! build [`ConnectOptions`](async_nats::ConnectOptions), a client or a JetStream context
@@ -7,7 +7,7 @@
 //!
 //! ## Bucket layout
 //!
-//! One bucket, `cano_checkpoints` by default (its stream is `KV_cano_checkpoints`), holds
+//! The checkpoint bucket, `cano_checkpoints` by default (its stream is `KV_cano_checkpoints`), holds
 //! every run. Each row is one key, `{workflow_id}.{sequence}` with the sequence in decimal,
 //! whose value is the same tagged [postcard](https://docs.rs/postcard) encoding
 //! `RedbStore` writes. Workflow id bytes outside `[A-Za-z0-9_-]` are written as
@@ -21,11 +21,25 @@
 //!   consumer, skipping delete markers.
 //! - `clear` purges the run's subjects from the stream in one request.
 //!
-//! By default the store creates the bucket on connect with `history: 1`. Use
-//! [`with_checkpoint_bucket_config`](NatsStoreBuilder::with_checkpoint_bucket_config) to set storage,
-//! replicas, placement, compression or a mirror, and
-//! [`with_create_bucket(false)`](NatsStoreBuilder::with_create_bucket) when an
-//! operator provisions it.
+//! By default the store creates each bucket on connect with `history: 1`. Use
+//! [`with_checkpoint_bucket_config`](NatsStoreBuilder::with_checkpoint_bucket_config) (and
+//! `with_scheduler_bucket_config`) to set storage, replicas, placement, compression or a
+//! mirror, and [`with_create_bucket(false)`](NatsStoreBuilder::with_create_bucket) when an
+//! operator provisions the buckets.
+//!
+//! ## Scheduler bucket
+//!
+//! With the `scheduler` feature the store also implements `SchedulerStore`. Its records
+//! live in a second bucket, `cano_scheduler` by default (stream `KV_cano_scheduler`), one
+//! key per flow, named by the flow id under the same encoding as above. Schedulers that
+//! share one bucket form one cluster.
+//!
+//! - A record's version is its key's revision. JetStream numbers revisions from one
+//!   stream-wide counter, so a version never repeats for one flow, even after `remove`.
+//! - `compare_and_swap` with `None` writes with an expected revision of `0`, or over the
+//!   delete or purge marker left by an earlier `remove`; with `Some(version)` it writes
+//!   with that expected revision. A mismatch is a conflict.
+//! - `remove` purges the key, so it can be created again.
 //!
 //! ## Failures
 //!
@@ -38,6 +52,10 @@
 //! have stored it after the client gave up, and `async-nats` sends a buffered publish once
 //! it reconnects. A retried `append` treats a byte-identical row already stored at its key
 //! as its own earlier write and returns `Ok`; a different row there is a conflict.
+//!
+//! A retried `compare_and_swap` that meets a conflict reads the key; stored bytes equal to
+//! the bytes it sent count as its own earlier write and return `Written` with the stored
+//! revision.
 //!
 //! ## Example
 //!
@@ -75,13 +93,23 @@ use super::{codec, conflict_error};
 use crate::RetryMode;
 use crate::checkpoint::{CheckpointRow, CheckpointStore};
 use crate::error::CanoError;
+#[cfg(feature = "scheduler")]
+use crate::scheduler::{CasOutcome, SchedulerStore, VersionedRecord};
 use cano_macros::checkpoint_store;
+#[cfg(feature = "scheduler")]
+use cano_macros::scheduler_store;
 
 pub use async_nats;
 
 /// The bucket name used unless [`with_checkpoint_bucket`](NatsStoreBuilder::with_checkpoint_bucket)
 /// sets another.
 pub const DEFAULT_CHECKPOINT_BUCKET: &str = "cano_checkpoints";
+
+/// The scheduler bucket name used unless
+/// [`with_scheduler_bucket`](NatsStoreBuilder::with_scheduler_bucket) sets another.
+/// Instances that share a bucket form one scheduler cluster.
+#[cfg(feature = "scheduler")]
+pub const DEFAULT_SCHEDULER_BUCKET: &str = "cano_scheduler";
 
 /// The client connection name set by [`NatsStoreBuilder::connect`].
 pub const DEFAULT_CONNECTION_NAME: &str = "cano";
@@ -91,7 +119,8 @@ pub const DEFAULT_CONNECTION_NAME: &str = "cano";
 /// another.
 pub const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// A [`CheckpointStore`] that keeps every run in one NATS JetStream Key/Value bucket.
+/// A [`CheckpointStore`], and with the `scheduler` feature a `SchedulerStore`, that keeps
+/// its data in NATS JetStream Key/Value buckets.
 ///
 /// Cheap to clone: clones share the client. Build one with [`builder`](Self::builder), or
 /// [`connect`](Self::connect) for the defaults. See the [module docs](self) for the key
@@ -100,14 +129,19 @@ pub const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 pub struct NatsStore {
     client: async_nats::Client,
     kv: kv::Store,
+    #[cfg(feature = "scheduler")]
+    scheduler_kv: kv::Store,
     operation_timeout: Duration,
     retry: RetryMode,
 }
 
 impl fmt::Debug for NatsStore {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("NatsStore")
-            .field("bucket", &self.kv.name)
+        let mut debug = f.debug_struct("NatsStore");
+        debug.field("bucket", &self.kv.name);
+        #[cfg(feature = "scheduler")]
+        debug.field("scheduler_bucket", &self.scheduler_kv.name);
+        debug
             .field("operation_timeout", &self.operation_timeout)
             .field("retry", &self.retry)
             .finish_non_exhaustive()
@@ -134,6 +168,12 @@ impl NatsStore {
     /// The Key/Value bucket handle.
     pub fn kv(&self) -> &kv::Store {
         &self.kv
+    }
+
+    /// The Key/Value bucket handle of the scheduler records.
+    #[cfg(feature = "scheduler")]
+    pub fn scheduler_kv(&self) -> &kv::Store {
+        &self.scheduler_kv
     }
 
     /// The NATS client.
@@ -244,6 +284,71 @@ impl NatsStore {
     }
 }
 
+#[cfg(feature = "scheduler")]
+impl NatsStore {
+    async fn load_flow_once(&self, key: &str) -> Result<Option<VersionedRecord>, Failure> {
+        let entry = self
+            .scheduler_kv
+            .entry(key)
+            .await
+            .map_err(|e| scheduler_transient("load", e))?;
+        Ok(entry.and_then(|entry| live_record(entry.operation, entry.revision, &entry.value)))
+    }
+
+    async fn swap_once(
+        &self,
+        key: &str,
+        expected: Option<u64>,
+        value: &Bytes,
+        attempt: usize,
+    ) -> Result<CasOutcome, Failure> {
+        // Revision 0 means "the subject has no message". `kv.create` is not used for the
+        // same reason as in `append_once`. A deleted or purged key has a marker message,
+        // whose revision then stands in for "absent".
+        let mut revision = expected.unwrap_or(0);
+        loop {
+            match self.scheduler_kv.update(key, value.clone(), revision).await {
+                Ok(written) => return Ok(CasOutcome::Written(written)),
+                Err(error) => match error.kind() {
+                    UpdateErrorKind::WrongLastRevision => {}
+                    UpdateErrorKind::InvalidKey => {
+                        return Err(Failure::fatal(CanoError::scheduler_store(format!(
+                            "nats swap: {error}"
+                        ))));
+                    }
+                    _ => return Err(scheduler_transient("swap", error)),
+                },
+            }
+            let current = self
+                .scheduler_kv
+                .entry(key)
+                .await
+                .map_err(|e| scheduler_transient("swap", e))?;
+            match current {
+                Some(entry) if expected.is_none() && entry.operation != kv::Operation::Put => {
+                    revision = entry.revision;
+                }
+                Some(entry)
+                    if attempt > 0
+                        && entry.operation == kv::Operation::Put
+                        && entry.value == *value =>
+                {
+                    // An earlier attempt may have been stored before its ack was lost.
+                    return Ok(CasOutcome::Written(entry.revision));
+                }
+                _ => return Ok(CasOutcome::Conflict),
+            }
+        }
+    }
+
+    async fn remove_once(&self, key: &str) -> Result<(), Failure> {
+        self.scheduler_kv
+            .purge(key)
+            .await
+            .map_err(|e| scheduler_transient("remove", e))
+    }
+}
+
 #[checkpoint_store]
 impl CheckpointStore for NatsStore {
     async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
@@ -284,6 +389,54 @@ impl CheckpointStore for NatsStore {
     }
 }
 
+#[cfg(feature = "scheduler")]
+#[scheduler_store]
+impl SchedulerStore for NatsStore {
+    async fn load(&self, flow_id: &str) -> Result<Option<VersionedRecord>, CanoError> {
+        let key = encode_id(flow_id);
+        let key = key.as_str();
+        retry::run(&self.retry, |_| {
+            scheduler_bounded(
+                "nats scheduler load",
+                self.operation_timeout,
+                self.load_flow_once(key),
+            )
+        })
+        .await
+    }
+
+    async fn compare_and_swap(
+        &self,
+        flow_id: &str,
+        expected: Option<u64>,
+        value: Vec<u8>,
+    ) -> Result<CasOutcome, CanoError> {
+        let key = encode_id(flow_id);
+        let (key, value) = (key.as_str(), &Bytes::from(value));
+        retry::run(&self.retry, move |n| {
+            scheduler_bounded(
+                "nats scheduler swap",
+                self.operation_timeout,
+                self.swap_once(key, expected, value, n),
+            )
+        })
+        .await
+    }
+
+    async fn remove(&self, flow_id: &str) -> Result<(), CanoError> {
+        let key = encode_id(flow_id);
+        let key = key.as_str();
+        retry::run(&self.retry, |_| {
+            scheduler_bounded(
+                "nats scheduler remove",
+                self.operation_timeout,
+                self.remove_once(key),
+            )
+        })
+        .await
+    }
+}
+
 /// Settings for a [`NatsStore`]; start from [`NatsStore::builder`].
 #[derive(Debug, Clone)]
 pub struct NatsStoreBuilder {
@@ -293,6 +446,8 @@ pub struct NatsStoreBuilder {
     api_prefix: Option<String>,
     operation_timeout: Duration,
     retry: RetryMode,
+    #[cfg(feature = "scheduler")]
+    scheduler_config: kv::Config,
 }
 
 impl Default for NatsStoreBuilder {
@@ -309,6 +464,13 @@ impl Default for NatsStoreBuilder {
             api_prefix: None,
             operation_timeout: DEFAULT_OPERATION_TIMEOUT,
             retry: RetryMode::None,
+            #[cfg(feature = "scheduler")]
+            scheduler_config: kv::Config {
+                bucket: DEFAULT_SCHEDULER_BUCKET.to_owned(),
+                description: "cano scheduler flow records".to_owned(),
+                history: 1,
+                ..Default::default()
+            },
         }
     }
 }
@@ -336,7 +498,33 @@ impl NatsStoreBuilder {
         self
     }
 
-    /// Whether to create the bucket on connect when it is missing. Default `true`.
+    /// The scheduler bucket name. Default [`DEFAULT_SCHEDULER_BUCKET`]. Must be one or more
+    /// of `[A-Za-z0-9_-]` and differ from the checkpoint bucket. Instances that share a
+    /// scheduler bucket form one scheduler cluster.
+    #[cfg(feature = "scheduler")]
+    #[must_use]
+    pub fn with_scheduler_bucket(mut self, bucket: impl Into<String>) -> Self {
+        self.scheduler_config.bucket = bucket.into();
+        self
+    }
+
+    /// The full configuration used when the store creates the scheduler bucket: storage,
+    /// replicas, `max_age`, placement, compression, mirror. An empty `bucket` keeps the
+    /// name already set ([`DEFAULT_SCHEDULER_BUCKET`] unless
+    /// [`with_scheduler_bucket`](Self::with_scheduler_bucket) ran). Default: `history: 1`, a
+    /// description, everything else at the server's defaults.
+    #[cfg(feature = "scheduler")]
+    #[must_use]
+    pub fn with_scheduler_bucket_config(mut self, config: kv::Config) -> Self {
+        let bucket = std::mem::take(&mut self.scheduler_config.bucket);
+        self.scheduler_config = config;
+        if self.scheduler_config.bucket.is_empty() {
+            self.scheduler_config.bucket = bucket;
+        }
+        self
+    }
+
+    /// Whether to create the buckets on connect when they are missing. Default `true`.
     #[must_use]
     pub fn with_create_bucket(mut self, create_bucket: bool) -> Self {
         self.create_bucket = create_bucket;
@@ -361,8 +549,9 @@ impl NatsStoreBuilder {
         self
     }
 
-    /// The bound on each attempt of `append`, `load_run` and `clear`, and on opening the
-    /// bucket. Default [`DEFAULT_OPERATION_TIMEOUT`].
+    /// The bound on each attempt of `append`, `load_run` and `clear` (and, with the
+    /// `scheduler` feature, of the scheduler calls), and on opening a bucket. Default
+    /// [`DEFAULT_OPERATION_TIMEOUT`].
     #[must_use]
     pub fn with_operation_timeout(mut self, timeout: Duration) -> Self {
         self.operation_timeout = timeout;
@@ -423,45 +612,55 @@ impl NatsStoreBuilder {
         self,
         context: async_nats::jetstream::Context,
     ) -> Result<NatsStore, CanoError> {
-        validate_bucket(&self.config.bucket)?;
-        let bucket = self.config.bucket.clone();
-        let create_bucket = self.create_bucket;
-        let config = self.config;
-        let kv = retry::bounded("nats open bucket", self.operation_timeout, async {
-            let get_err = match context.get_key_value(bucket.as_str()).await {
-                Ok(kv) => return Ok(kv),
-                Err(e) => e,
-            };
-            if !create_bucket {
-                return Err(Failure::fatal(CanoError::checkpoint_store(format!(
-                    "nats bucket {bucket:?} unavailable and bucket creation is disabled: {get_err}"
-                ))));
-            }
-            context
-                .create_key_value(config)
-                .await
-                .map_err(|create_err| {
-                    Failure::fatal(CanoError::checkpoint_store(format!(
-                        "nats open bucket {bucket:?}: {get_err}; create: {create_err}"
-                    )))
-                })
-        })
-        .await
-        .map_err(|failure| failure.error)?;
+        self.validate_buckets()?;
+        let kv = open_bucket(
+            &context,
+            self.config,
+            self.create_bucket,
+            self.operation_timeout,
+            CanoError::checkpoint_store::<String>,
+        )
+        .await?;
+        #[cfg(feature = "scheduler")]
+        let scheduler_kv = open_bucket(
+            &context,
+            self.scheduler_config,
+            self.create_bucket,
+            self.operation_timeout,
+            CanoError::scheduler_store::<String>,
+        )
+        .await?;
         Ok(NatsStore {
             client: context.client(),
             kv,
+            #[cfg(feature = "scheduler")]
+            scheduler_kv,
             operation_timeout: self.operation_timeout,
             retry: self.retry,
         })
     }
 
     fn validate(&self) -> Result<(), CanoError> {
-        validate_bucket(&self.config.bucket)?;
+        self.validate_buckets()?;
         if self.domain.is_some() && self.api_prefix.is_some() {
             return Err(CanoError::configuration(
                 "set either a JetStream domain or an API prefix, not both",
             ));
+        }
+        Ok(())
+    }
+
+    fn validate_buckets(&self) -> Result<(), CanoError> {
+        validate_bucket(&self.config.bucket)?;
+        #[cfg(feature = "scheduler")]
+        {
+            validate_bucket(&self.scheduler_config.bucket)?;
+            if self.scheduler_config.bucket == self.config.bucket {
+                return Err(CanoError::configuration(format!(
+                    "the checkpoint and scheduler buckets must differ, both are {:?}",
+                    self.config.bucket
+                )));
+            }
         }
         Ok(())
     }
@@ -481,8 +680,70 @@ fn validate_bucket(bucket: &str) -> Result<(), CanoError> {
     }
 }
 
+/// Opens `config`'s bucket, creating it when missing and `create_bucket` is set. `error`
+/// builds the store's error for a failure.
+async fn open_bucket(
+    context: &async_nats::jetstream::Context,
+    config: kv::Config,
+    create_bucket: bool,
+    timeout: Duration,
+    error: fn(String) -> CanoError,
+) -> Result<kv::Store, CanoError> {
+    let bucket = config.bucket.clone();
+    retry::bounded("nats open bucket", timeout, async {
+        let get_err = match context.get_key_value(bucket.as_str()).await {
+            Ok(kv) => return Ok(kv),
+            Err(e) => e,
+        };
+        if !create_bucket {
+            return Err(Failure::fatal(error(format!(
+                "nats bucket {bucket:?} unavailable and bucket creation is disabled: {get_err}"
+            ))));
+        }
+        context
+            .create_key_value(config)
+            .await
+            .map_err(|create_err| {
+                Failure::fatal(error(format!(
+                    "nats open bucket {bucket:?}: {get_err}; create: {create_err}"
+                )))
+            })
+    })
+    .await
+    .map_err(|failure| failure.error)
+}
+
 fn transient(op: &str, e: impl fmt::Display) -> Failure {
     Failure::transient(CanoError::checkpoint_store(format!("nats {op}: {e}")))
+}
+
+#[cfg(feature = "scheduler")]
+fn scheduler_transient(op: &str, e: impl fmt::Display) -> Failure {
+    Failure::transient(CanoError::scheduler_store(format!("nats {op}: {e}")))
+}
+
+/// [`retry::bounded`] with the scheduler store's error for an elapsed limit.
+#[cfg(feature = "scheduler")]
+async fn scheduler_bounded<T>(
+    what: &str,
+    limit: Duration,
+    fut: impl Future<Output = Result<T, Failure>>,
+) -> Result<T, Failure> {
+    match tokio::time::timeout(limit, fut).await {
+        Ok(result) => result,
+        Err(_) => Err(Failure::transient(CanoError::scheduler_store(format!(
+            "{what}: timed out after {limit:?}"
+        )))),
+    }
+}
+
+/// The record of a key's latest entry; a delete or purge marker means no record.
+#[cfg(feature = "scheduler")]
+fn live_record(operation: kv::Operation, revision: u64, value: &Bytes) -> Option<VersionedRecord> {
+    (operation == kv::Operation::Put).then(|| VersionedRecord {
+        version: revision,
+        value: value.to_vec(),
+    })
 }
 
 /// A delete or purge marker, or a server marker such as a TTL expiry.
@@ -598,6 +859,83 @@ mod tests {
             .with_checkpoint_bucket("custom")
             .with_checkpoint_bucket_config(kv::Config::default());
         assert_eq!(builder.config.bucket, "custom");
+    }
+
+    #[cfg(feature = "scheduler")]
+    #[test]
+    fn scheduler_bucket_defaults_and_config() {
+        let builder = NatsStore::builder();
+        assert_eq!(builder.scheduler_config.bucket, DEFAULT_SCHEDULER_BUCKET);
+        assert_eq!(DEFAULT_SCHEDULER_BUCKET, "cano_scheduler");
+        assert_eq!(builder.scheduler_config.history, 1);
+        builder.validate().unwrap();
+
+        let builder = NatsStore::builder().with_scheduler_bucket_config(kv::Config {
+            history: 3,
+            ..Default::default()
+        });
+        assert_eq!(builder.scheduler_config.bucket, DEFAULT_SCHEDULER_BUCKET);
+        assert_eq!(builder.scheduler_config.history, 3);
+        let builder = NatsStore::builder()
+            .with_scheduler_bucket("custom")
+            .with_scheduler_bucket_config(kv::Config::default());
+        assert_eq!(builder.scheduler_config.bucket, "custom");
+        assert_eq!(builder.config.bucket, DEFAULT_CHECKPOINT_BUCKET);
+    }
+
+    #[cfg(feature = "scheduler")]
+    #[test]
+    fn scheduler_buckets_are_validated() {
+        for builder in [
+            NatsStore::builder().with_scheduler_bucket("a.b"),
+            NatsStore::builder().with_scheduler_bucket(""),
+            NatsStore::builder().with_scheduler_bucket(DEFAULT_CHECKPOINT_BUCKET),
+            NatsStore::builder().with_checkpoint_bucket(DEFAULT_SCHEDULER_BUCKET),
+        ] {
+            assert_eq!(builder.validate().unwrap_err().category(), "configuration");
+        }
+    }
+
+    #[cfg(feature = "scheduler")]
+    #[test]
+    fn flow_ids_become_one_subject_token() {
+        // The scheduler key is `encode_id` alone: no `.`, so a flow id never forms a
+        // wildcard-matchable multi-token subject, and ids that differ stay distinct.
+        let ids = ["a", "a.b", "a/b", "ab", "x y", "wild*", "é", ""];
+        let keys: Vec<String> = ids.iter().map(|id| encode_id(id)).collect();
+        for (i, a) in keys.iter().enumerate() {
+            assert!(!a.is_empty() && !a.contains('.'), "{a}");
+            for b in &keys[i + 1..] {
+                assert_ne!(a, b);
+            }
+        }
+        assert_eq!(encode_id(&"x".repeat(200)).len(), 200);
+    }
+
+    #[cfg(feature = "scheduler")]
+    #[test]
+    fn markers_are_not_records() {
+        let value = Bytes::from_static(b"v");
+        assert_eq!(
+            live_record(kv::Operation::Put, 7, &value),
+            Some(VersionedRecord {
+                version: 7,
+                value: b"v".to_vec()
+            })
+        );
+        assert_eq!(live_record(kv::Operation::Delete, 8, &value), None);
+        assert_eq!(live_record(kv::Operation::Purge, 9, &value), None);
+    }
+
+    #[cfg(feature = "scheduler")]
+    #[tokio::test]
+    async fn scheduler_bucket_name_is_checked_before_connecting() {
+        let err = NatsStore::builder()
+            .with_scheduler_bucket("a.b")
+            .connect("nats://127.0.0.1:1")
+            .await
+            .unwrap_err();
+        assert_eq!(err.category(), "configuration");
     }
 
     #[tokio::test]

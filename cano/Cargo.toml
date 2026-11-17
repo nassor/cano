@@ -143,6 +143,11 @@ path = "examples/scheduler_backoff.rs"
 required-features = ["scheduler"]
 
 [[example]]
+name = "scheduler_cluster"
+path = "examples/scheduler_cluster.rs"
+required-features = ["scheduler", "store-redb"]
+
+[[example]]
 name = "tracing_demo"
 path = "examples/tracing_demo.rs"
 required-features = ["tracing", "scheduler"]
