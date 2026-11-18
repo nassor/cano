@@ -104,36 +104,50 @@ This page explains when resources are set up and torn down and how they behave u
 
 ```rust
 use cano::prelude::*;
+use std::sync::{Arc, Mutex};
 
-#[derive(Resource)] struct ServiceA;
-#[derive(Resource)] struct ServiceB;
-#[derive(Resource)] struct ServiceD;
-
-struct ServiceC;
-
-impl ServiceA { fn new() -> Self { Self } }
-impl ServiceB { fn new() -> Self { Self } }
-impl ServiceC { fn new() -> Self { Self } }
-impl ServiceD { fn new() -> Self { Self } }
+struct TrackedService {
+    name: &'static str,
+    fail_setup: bool,
+    events: Arc<Mutex<Vec<String>>>,
+}
 
 #[resource]
-impl Resource for ServiceC {
+impl Resource for TrackedService {
     async fn setup(&self) -> Result<(), CanoError> {
-        Err(CanoError::Configuration("ServiceC failed".into()))
+        self.events.lock().unwrap().push(format!("setup:{}", self.name));
+        if self.fail_setup {
+            // Failing setup stops initialization and skips teardown for this resource.
+            return Err(CanoError::configuration(format!("{} failed setup", self.name)));
+        }
+        Ok(())
+    }
+
+    async fn teardown(&self) -> Result<(), CanoError> {
+        self.events.lock().unwrap().push(format!("teardown:{}", self.name));
+        Ok(())
     }
 }
 
 #[tokio::main]
 async fn main() {
-    let resources = Resources::new()
-        .insert(ServiceA::new())  // position 0: setup OK
-        .insert(ServiceB::new())  // position 1: setup OK
-        .insert(ServiceC::new())  // position 2: setup FAILS
-        .insert(ServiceD::new()); // position 3: never reached
+    let events = Arc::new(Mutex::new(Vec::new()));
 
-    // setup_all() returns the error from C; teardown runs for B, then A
+    // Insert named instances so all four share the same type in insertion order.
+    let resources = Resources::new()
+        .insert_named("A", TrackedService { name: "A", fail_setup: false, events: events.clone() }) // position 0: setup OK
+        .insert_named("B", TrackedService { name: "B", fail_setup: false, events: events.clone() }) // position 1: setup OK
+        .insert_named("C", TrackedService { name: "C", fail_setup: true,  events: events.clone() }) // position 2: setup FAILS
+        .insert_named("D", TrackedService { name: "D", fail_setup: false, events: events.clone() }); // position 3: never reached
+
+    // Workflow::orchestrate runs setup_all() automatically before starting the FSM.
+    // When C fails, setup_all() tears down already-initialized entries in reverse order (B, then A).
     let result = resources.setup_all().await;
     assert!(result.is_err());
+    assert_eq!(
+        *events.lock().unwrap(),
+        ["setup:A", "setup:B", "setup:C", "teardown:B", "teardown:A"]
+    );
 }
 ```
 </div>
@@ -191,8 +205,8 @@ resource instances, so a DB pool opens once and serves every run.
 <div class="callout-label">Per-run state under the scheduler</div>
 <p>
 Resources persist across runs, so anything accumulated in one carries forward: counters, cached state, the contents
-of a <code>MemoryStore</code>. To reset per run, clear it at the start of the workflow, for example with
-<code>store.clear()</code> in the initial task.
+of a <code>Blackboard</code>. To reset per run, clear it at the start of the workflow, for example with
+<code>board.clear()</code> in the initial task.
 </p>
 </div>
 

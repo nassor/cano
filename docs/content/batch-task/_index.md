@@ -34,21 +34,21 @@ struct Crunch;
 
 #[task::batch(state = Stage)]
 impl Crunch {
-    async fn load(&self, _res: &Resources) -> Result<Vec<u32>, CanoError> {
+    // Resource-free load and finish omit `res: &Resources`.
+    async fn load(&self) -> Result<Vec<u32>, CanoError> {
         Ok((1..=100).collect())
     }
-    // Returning Err here does not fail the batch. It lands in that slot of `finish`'s `outputs`.
+    // Returning Err here does not fail the batch; it lands in that item's slot of `outputs`.
     async fn process_item(&self, n: &u32) -> Result<u64, CanoError> {
         Ok((*n as u64) * (*n as u64))
     }
-    async fn finish(&self, _res: &Resources, outputs: Vec<Result<u64, CanoError>>)
-        -> Result<Stage, CanoError>
-    {
+    // Aggregates per-item results in input order and picks the next FSM state.
+    async fn finish(&self, outputs: Vec<Result<u64, CanoError>>) -> Result<Stage, CanoError> {
         let total: u64 = outputs.into_iter().flatten().sum();
         println!("sum of squares = {total}");
         Ok(Stage::Done)
     }
-    fn concurrency(&self) -> usize { 8 }                  // up to 8 process_item in flight
+    fn concurrency(&self) -> usize { 8 } // up to 8 process_item futures in flight
     fn item_retry(&self) -> RetryMode { RetryMode::fixed(2, std::time::Duration::from_millis(50)) }
 }
 ```
@@ -169,12 +169,13 @@ impl FetchUrls {
     fn item_retry(&self) -> RetryMode { RetryMode::fixed(2, Duration::from_millis(50)) }
 
     async fn load(&self, res: &Resources) -> Result<Vec<String>, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        Ok(store.get("urls")?)
+        let board = res.get::<Blackboard>()?;
+        let urls: Vec<String> = board.get("urls")?;
+        Ok(urls)
     }
 
     async fn process_item(&self, url: &String) -> Result<usize, CanoError> {
-        // pretend to fetch; return the byte count
+        // Pretend to fetch; return the response byte count.
         Ok(url.len() * 100)
     }
 
@@ -183,9 +184,9 @@ impl FetchUrls {
     {
         let ok = outputs.iter().filter(|r| r.is_ok()).count();
         let total: usize = outputs.iter().filter_map(|r| r.as_ref().ok()).sum();
-        let store = res.get::<MemoryStore>()?;
-        store.put("total_bytes", total);
-        if ok * 2 >= outputs.len() {                 // partial-failure policy: ≥ 50% must succeed
+        let board = res.get::<Blackboard>()?;
+        board.put("total_bytes", total);
+        if ok * 2 >= outputs.len() {                 // partial-failure policy: >= 50% must succeed
             Ok(Step::Summarise)
         } else {
             Err(CanoError::task_execution("too many fetch failures"))
@@ -294,17 +295,20 @@ impl BatchTask<Step> for FetchUrls {
     fn concurrency(&self) -> usize { 8 }
 
     async fn load(&self, res: &Resources) -> Result<Vec<String>, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        Ok(store.get("urls")?)
+        let board = res.get::<Blackboard>()?;
+        let urls: Vec<String> = board.get("urls")?;
+        Ok(urls)
     }
 
     async fn process_item(&self, url: &String) -> Result<usize, CanoError> {
+        // Each item runs up to concurrency() at once; errors map into finish's outputs Vec.
         Ok(url.len() * 100)
     }
 
     async fn finish(&self, _res: &Resources, outputs: Vec<Result<usize, CanoError>>)
         -> Result<Step, CanoError>
     {
+        // Enforce partial-failure threshold before advancing.
         let ok = outputs.iter().filter(|r| r.is_ok()).count();
         if ok * 2 >= outputs.len() {
             Ok(Step::Summarise)

@@ -23,7 +23,7 @@
 //! | Error Type | When It Occurs | How to Fix |
 //! |------------|----------------|------------|
 //! | `TaskExecution` | `Task::run` fails | Check your `run` method logic |
-//! | `Store` | Store operations fail | Check store state and keys |
+//! | `Blackboard` | Blackboard operations fail | Check blackboard state and keys |
 //! | `Workflow` | Workflow orchestration fails | Verify task registration and routing |
 //! | `Configuration` | Invalid task/workflow config | Check parameters and settings |
 //! | `RetryExhausted` | All retries exhausted | Inspect `source` for the underlying cause; increase retries if transient |
@@ -32,6 +32,11 @@
 //! | `CircuitOpen` | Circuit breaker rejected the call while open | Wait for the breaker's `reset_timeout` or fix the upstream dependency |
 //! | `CircuitHalfOpenBusy` | Breaker is probing the dependency but every trial slot is occupied | Retry shortly — a slot frees when an in-flight trial completes |
 //! | `CheckpointStore` | Checkpoint persistence failed | Check the recovery store backend (disk, permissions, encoding) |
+//! | `SchedulerStore` | Scheduler coordination store failed | Check the scheduler store backend (connectivity, table/bucket, encoding) |
+//! | `WorkflowVersionMismatch` | Stored checkpoint version differs from `with_workflow_version` | Deploy matching workflow version or migrate stored checkpoints |
+//! | `Cancelled` | Cooperative `CancellationToken` fired | Expected on cancel; inspect with `CanoError::is_cancelled()` |
+//! | `RateLimited` | A `MultiRateLimiter` tier rejected `try_acquire` | Wait `retry_after` or use `acquire()` |
+//! | `OrphanedCompensation` | Compensation skipped due to missing compensator or elapsed deadline | Decode `output_blob` for `task_id` to undo manually |
 //! | `CompensationFailed` | A `compensate` run failed during rollback | Inspect the aggregated errors; the original failure is `errors[0]` |
 //! | `WithStateContext` | A task failed during `Workflow::orchestrate` / `resume_from` | Read `state`, `attempt`, and `transitions_so_far`; inspect `source` for the underlying cause |
 //! | `Generic` | General errors | Check the specific error message |
@@ -40,20 +45,20 @@
 //!
 //! In your custom tasks, return specific error types for different failures.
 //! Use `CanoError::TaskExecution` for errors from a `Task::run` implementation,
-//! and `CanoError::Store` for store-access failures.
+//! and `CanoError::Blackboard` for blackboard-access failures.
 //!
-//! ## Store Error Integration
+//! ## Blackboard Error Integration
 //!
-//! `CanoError` automatically converts `StoreError` instances via the `From` impl.
-//! Store operations propagate seamlessly into the broader error system:
+//! `CanoError` automatically converts `BlackboardError` instances via the `From` impl.
+//! Blackboard operations propagate seamlessly into the broader error system:
 //!
 //! ```rust
-//! use cano::{CanoResult, MemoryStore};
+//! use cano::{CanoResult, Blackboard};
 //!
 //! fn example_function() -> CanoResult<String> {
-//!     let store = MemoryStore::new();
-//!     // StoreError is automatically converted to CanoError::Store via From
-//!     let value: String = store.get("key")?;
+//!     let board = Blackboard::new();
+//!     // BlackboardError is automatically converted to CanoError::Blackboard via From
+//!     let value: String = board.get("key")?;
 //!     Ok(value)
 //! }
 //! ```
@@ -70,21 +75,21 @@
 /// Something went wrong during a [`Task::run`](crate::task::Task::run) implementation.
 ///
 /// **Common causes:**
-/// - Failed store write
+/// - Failed blackboard write
 /// - Business-logic validation rejected an input
 /// - External API call failed
 ///
-/// **How to fix:** Check your task's `run` method logic and store writes.
+/// **How to fix:** Check your task's `run` method logic and blackboard writes.
 ///
-/// ### Store
-/// Store operations failed (get, put, remove, etc.).
+/// ### Blackboard
+/// Blackboard operations failed (get, put, remove, etc.).
 ///
 /// **Common causes:**
 /// - Type mismatches when retrieving data
-/// - Store backend issues
+/// - Blackboard issues
 /// - Concurrent access problems
 ///
-/// **How to fix:** Check store keys and ensure type consistency.
+/// **How to fix:** Check blackboard keys and ensure type consistency.
 ///
 /// ### Workflow
 /// Workflow orchestration problems.
@@ -119,7 +124,7 @@
 /// ## 💡 Usage Examples
 ///
 /// Create specific error types with helpful messages. Use the appropriate
-/// error variant (TaskExecution, Configuration, Store, etc.) and provide
+/// error variant (TaskExecution, Configuration, Blackboard, etc.) and provide
 /// clear, actionable error messages that help users understand what went wrong.
 ///
 /// ## 🔄 Converting from Other Errors
@@ -142,11 +147,11 @@ pub enum CanoError {
     /// execution.
     TaskExecution(String),
 
-    /// Error in store operations (get/put/remove)
+    /// Error in blackboard operations (get/put/remove)
     ///
-    /// Use this for store-related failures like missing keys, type mismatches,
-    /// or store backend issues.
-    Store(String),
+    /// Use this for blackboard-related failures like missing keys, type mismatches,
+    /// or other blackboard issues.
+    Blackboard(String),
 
     /// Error in workflow orchestration (routing/registration)
     ///
@@ -252,11 +257,18 @@ pub enum CanoError {
 
     /// A checkpoint store operation failed.
     ///
-    /// Emitted by [`crate::recovery::CheckpointStore`] implementations (including the
-    /// built-in `RedbCheckpointStore`, behind the `recovery` feature) when an append,
+    /// Emitted by [`crate::checkpoint::CheckpointStore`] implementations (including the
+    /// built-in stores in [`crate::store`]) when an append,
     /// load, or clear cannot complete — for example a disk error, a permission
     /// problem, or a row that fails to encode/decode.
     CheckpointStore(String),
+
+    /// A scheduler store operation failed.
+    ///
+    /// Emitted by [`SchedulerStore`](crate::scheduler::SchedulerStore) implementations
+    /// (including the built-in stores in [`crate::store`]) when a load, swap or remove
+    /// cannot complete, and by the scheduler when a stored flow record fails to decode.
+    SchedulerStore(String),
 
     /// A workflow failed and at least one [`compensate`](crate::saga::CompensatableTask::compensate)
     /// run also failed while rolling it back.
@@ -374,9 +386,9 @@ impl CanoError {
         CanoError::TaskExecution(msg.into())
     }
 
-    /// Create a new store error
-    pub fn store<S: Into<String>>(msg: S) -> Self {
-        CanoError::Store(msg.into())
+    /// Create a new blackboard error
+    pub fn blackboard<S: Into<String>>(msg: S) -> Self {
+        CanoError::Blackboard(msg.into())
     }
 
     /// Create a new workflow error
@@ -435,6 +447,11 @@ impl CanoError {
     /// Create a new checkpoint-store error
     pub fn checkpoint_store<S: Into<String>>(msg: S) -> Self {
         CanoError::CheckpointStore(msg.into())
+    }
+
+    /// Create a new scheduler-store error
+    pub fn scheduler_store<S: Into<String>>(msg: S) -> Self {
+        CanoError::SchedulerStore(msg.into())
     }
 
     /// Create a new compensation-failed error from the original failure plus the
@@ -541,7 +558,7 @@ impl CanoError {
     pub fn message(&self) -> &str {
         match self {
             CanoError::TaskExecution(msg) => msg,
-            CanoError::Store(msg) => msg,
+            CanoError::Blackboard(msg) => msg,
             CanoError::Workflow(msg) => msg,
             CanoError::Configuration(msg) => msg,
             CanoError::RetryExhausted { source, .. } => source.message(),
@@ -552,6 +569,7 @@ impl CanoError {
             CanoError::CircuitHalfOpenBusy(msg) => msg,
             CanoError::RateLimited { .. } => "rate limited",
             CanoError::CheckpointStore(msg) => msg,
+            CanoError::SchedulerStore(msg) => msg,
             CanoError::CompensationFailed { errors } => errors
                 .first()
                 .map_or("compensation failed", CanoError::message),
@@ -630,7 +648,7 @@ impl CanoError {
     pub fn outer_category(&self) -> &'static str {
         match self {
             CanoError::TaskExecution(_) => "task_execution",
-            CanoError::Store(_) => "store",
+            CanoError::Blackboard(_) => "blackboard",
             CanoError::Workflow(_) => "workflow",
             CanoError::Configuration(_) => "configuration",
             CanoError::RetryExhausted { .. } => "retry_exhausted",
@@ -641,6 +659,7 @@ impl CanoError {
             CanoError::CircuitHalfOpenBusy(_) => "circuit_half_open_busy",
             CanoError::RateLimited { .. } => "rate_limited",
             CanoError::CheckpointStore(_) => "checkpoint_store",
+            CanoError::SchedulerStore(_) => "scheduler_store",
             CanoError::CompensationFailed { .. } => "compensation_failed",
             CanoError::Generic(_) => "generic",
             CanoError::ResourceNotFound(_) => "resource_not_found",
@@ -657,7 +676,7 @@ impl std::fmt::Display for CanoError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CanoError::TaskExecution(msg) => write!(f, "Task execution error: {msg}"),
-            CanoError::Store(msg) => write!(f, "Store error: {msg}"),
+            CanoError::Blackboard(msg) => write!(f, "Blackboard error: {msg}"),
             CanoError::Workflow(msg) => write!(f, "Workflow error: {msg}"),
             CanoError::Configuration(msg) => write!(f, "Configuration error: {msg}"),
             CanoError::RetryExhausted { attempts, source } => {
@@ -678,6 +697,7 @@ impl std::fmt::Display for CanoError {
                 )
             }
             CanoError::CheckpointStore(msg) => write!(f, "Checkpoint store error: {msg}"),
+            CanoError::SchedulerStore(msg) => write!(f, "Scheduler store error: {msg}"),
             CanoError::CompensationFailed { errors } => {
                 write!(f, "Compensation failed ({} error(s))", errors.len())?;
                 for (i, e) in errors.iter().enumerate() {
@@ -763,9 +783,9 @@ impl From<std::io::Error> for CanoError {
     }
 }
 
-impl From<crate::store::error::StoreError> for CanoError {
-    fn from(err: crate::store::error::StoreError) -> Self {
-        CanoError::store(err.to_string())
+impl From<crate::blackboard::error::BlackboardError> for CanoError {
+    fn from(err: crate::blackboard::error::BlackboardError) -> Self {
+        CanoError::blackboard(err.to_string())
     }
 }
 
@@ -836,36 +856,39 @@ mod tests {
             CanoError::TaskExecution("".to_string()).category(),
             "task_execution"
         );
-        assert_eq!(CanoError::store("".to_string()).category(), "store");
+        assert_eq!(
+            CanoError::blackboard("".to_string()).category(),
+            "blackboard"
+        );
         assert_eq!(CanoError::Workflow("".to_string()).category(), "workflow");
     }
 
     #[test]
-    fn test_store_error_conversion() {
-        use crate::store::error::StoreError;
+    fn test_blackboard_error_conversion() {
+        use crate::blackboard::error::BlackboardError;
 
-        // Test conversion from StoreError to CanoError
-        let store_error = StoreError::key_not_found("test_key");
-        let cano_error: CanoError = store_error.into();
+        // Test conversion from BlackboardError to CanoError
+        let blackboard_error = BlackboardError::key_not_found("test_key");
+        let cano_error: CanoError = blackboard_error.into();
 
-        // Should be converted to store variant
+        // Should be converted to blackboard variant
         match cano_error {
-            CanoError::Store(msg) => {
+            CanoError::Blackboard(msg) => {
                 assert!(msg.contains("test_key"));
                 assert!(msg.contains("not found"));
             }
-            _ => panic!("Expected store error variant"),
+            _ => panic!("Expected blackboard error variant"),
         }
 
         // Test that the category is correct
-        let store_error = StoreError::type_mismatch("type error");
-        let cano_error: CanoError = store_error.into();
-        assert_eq!(cano_error.category(), "store");
+        let blackboard_error = BlackboardError::type_mismatch("type error");
+        let cano_error: CanoError = blackboard_error.into();
+        assert_eq!(cano_error.category(), "blackboard");
 
         // Test conversion via From trait
-        let store_error = StoreError::append_type_mismatch("lock failed");
-        let cano_error: CanoError = store_error.into();
-        assert_eq!(cano_error.category(), "store");
+        let blackboard_error = BlackboardError::append_type_mismatch("lock failed");
+        let cano_error: CanoError = blackboard_error.into();
+        assert_eq!(cano_error.category(), "blackboard");
         assert!(cano_error.message().contains("lock failed"));
     }
 

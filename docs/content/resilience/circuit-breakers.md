@@ -149,22 +149,26 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step { Call, Done }
 
-#[derive(Clone)]
-struct CallUpstream { breaker: CircuitBreaker }
+struct CallUpstream {
+    breaker: CircuitBreaker,
+}
 
 #[task(state = Step)]
 impl CallUpstream {
     fn config(&self) -> TaskConfig {
+        // Consults the breaker before each attempt; an open breaker short-circuits without retrying.
         TaskConfig::new()
             .with_fixed_retry(2, Duration::from_millis(50))
             .with_circuit_breaker(self.breaker.clone())
     }
+
     async fn run(&self) -> Result<Step, CanoError> {
-        // ... call the dependency; an Err here counts against the breaker ...
+        // Returning Err counts against the breaker's failure_threshold.
         Ok(Step::Done)
     }
 }
 
+// Clones share one state machine, so a trip from any caller protects every caller.
 let breaker = CircuitBreaker::new(CircuitPolicy {
     failure_threshold: 3,
     reset_timeout: Duration::from_secs(5),
@@ -195,8 +199,10 @@ yourself:
 </p>
 
 ```rust
+// Borrow the shared CircuitBreaker registered in Resources.
 let breaker = res.get::<CircuitBreaker>()?;
-let permit = breaker.try_acquire()?;        // CircuitOpen or CircuitHalfOpenBusy when it refuses
+let permit = breaker.try_acquire()?; // Err(CircuitOpen) or Err(CircuitHalfOpenBusy) when refused
+// Consume the RAII permit explicitly; dropping an unconsumed permit counts as a failure.
 match do_the_call().await {
     Ok(v)  => { breaker.record_success(permit); Ok(v) }
     Err(e) => { breaker.record_failure(permit); Err(e) }

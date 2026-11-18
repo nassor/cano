@@ -74,18 +74,18 @@ async fn main() -> CanoResult<()> {
     println!("====================================");
 
     let scheduler = Scheduler::new();
-    let store = MemoryStore::new();
+    let board = Blackboard::new();
 
     // Create workflows with different durations
-    let daily_flow = Workflow::new(Resources::new().insert(store.clone()))
+    let daily_flow = Workflow::new(Resources::new().insert(board.clone()))
         .register(TaskState::Start, DailyTask)
         .add_exit_state(TaskState::Complete);
 
-    let hourly_flow = Workflow::new(Resources::new().insert(store.clone()))
+    let hourly_flow = Workflow::new(Resources::new().insert(board.clone()))
         .register(TaskState::Start, HourlyTask)
         .add_exit_state(TaskState::Complete);
 
-    let frequent_flow = Workflow::new(Resources::new().insert(store.clone()))
+    let frequent_flow = Workflow::new(Resources::new().insert(board.clone()))
         .register(TaskState::Start, FrequentTask)
         .add_exit_state(TaskState::Complete);
 

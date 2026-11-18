@@ -100,11 +100,11 @@ use cano::prelude::*;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum State { Start, Process, Complete }
 
-struct MyTask;
+struct StartTask;
 struct ProcessTask;
 
 #[task(state = State)]
-impl MyTask {
+impl StartTask {
     async fn run(&self) -> Result<State, CanoError> {
         Ok(State::Process)
     }
@@ -119,18 +119,20 @@ impl ProcessTask {
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let workflow = Workflow::new(Resources::new().insert(MemoryStore::new()))
-        .register(State::Start, MyTask)
+    // Use Workflow::bare() when tasks take no Resources.
+    let workflow = Workflow::bare()
+        .register(State::Start, StartTask)
         .register(State::Process, ProcessTask)
         .add_exit_state(State::Complete);
 
-    // Structure: handlers and exit states exist
+    // Check structural wiring eagerly at startup (orchestrate caches this check too).
     workflow.validate()?;
 
-    // The initial state has a handler
+    // Verify State::Start is a registered handler or an exit state before running.
     workflow.validate_initial_state(&State::Start)?;
 
-    let _result = workflow.orchestrate(State::Start).await?;
+    let final_state = workflow.orchestrate(State::Start).await?;
+    assert_eq!(final_state, State::Complete);
     Ok(())
 }
 ```
@@ -220,11 +222,14 @@ its error is the one returned; a <code>teardown</code> error is returned only wh
 <dt><code>CanoError::CircuitOpen</code></dt>
 <dd>An open <code>CircuitBreaker</code> attached to the <code>TaskConfig</code> rejected the call. The retry loop stops at once and no attempt is consumed. Wait for the breaker's <code>reset_timeout</code> or fix the upstream dependency.</dd>
 
+<dt><code>CanoError::CheckpointStore</code></dt>
+<dd>A checkpoint write or load failed (after any configured store retries). A failed <code>append</code> stops the run before the incoming state's task executes, drains any completed saga compensations in memory, and surfaces under <code>CanoError::WithStateContext</code> (or as <code>errors[0]</code> of <code>CanoError::CompensationFailed</code> on a dirty rollback). A failed final <code>clear</code> keeps the run's own result and fires <code>on_checkpoint_clear_failed</code>. See <a href="../../recovery/checkpoint-stores/#network-failures">Connection failures, retries and outages</a>.</dd>
+
 <dt><code>CanoError::TaskExecution</code> <small>panic</small></dt>
 <dd>A single task panicked. The message starts with <code>"panic:"</code> and carries the panic payload. Fix the broken invariant in the task body.</dd>
 
 <dt>Any other <code>CanoError</code> <small>task error</small></dt>
-<dd>Whatever the task returned, such as <code>TaskExecution</code> or <code>Store</code>. Check the task's own logic.</dd>
+<dd>Whatever the task returned, such as <code>TaskExecution</code> or <code>Blackboard</code>. Check the task's own logic.</dd>
 </dl>
 
 <div class="callout callout-info">
@@ -238,14 +243,33 @@ A single task runs under <code>catch_unwind</code>, so a panic surfaces as
 
 ```rust
 match workflow.orchestrate(State::Start).await {
-    Ok(final_state) => println!("Completed: {:?}", final_state),
-    Err(e) => match e.inner() {
-        CanoError::Workflow(msg) => eprintln!("Workflow error: {}", msg),
-        CanoError::Configuration(msg) => eprintln!("Config error: {}", msg),
-        CanoError::Timeout(msg) => eprintln!("Attempt timed out: {}", msg),
-        CanoError::RetryExhausted { .. } => eprintln!("Retries exhausted: {}", e),
-        _ => eprintln!("Task error: {}", e),
-    },
+    Ok(final_state) => println!("Completed: {final_state:?}"),
+    Err(e) => {
+        // orchestrate() wraps runtime failures in CanoError::WithStateContext.
+        // e.inner() peels that wrapper while returning pre-run errors as-is;
+        // printing `{e}` keeps the state, attempt, and transition path.
+        match e.inner() {
+            CanoError::Configuration(msg) => eprintln!("Config error: {msg}"),
+            CanoError::Workflow(msg) => eprintln!("Workflow error: {msg} ({e})"),
+            CanoError::Timeout(msg) => eprintln!("Attempt timed out: {msg} ({e})"),
+            CanoError::RetryExhausted { attempts, source } => {
+                eprintln!("Retries exhausted after {attempts} attempts: {source} ({e})");
+            }
+            CanoError::WorkflowTimeout { elapsed, limit } => {
+                eprintln!("Total timeout exceeded ({elapsed:?} > {limit:?}): {e}");
+            }
+            CanoError::Cancelled => eprintln!("Run cancelled: {e}"),
+            CanoError::CircuitOpen(msg) => eprintln!("Circuit breaker open: {msg} ({e})"),
+            CanoError::CheckpointStore(msg) => eprintln!("Checkpoint store error: {msg} ({e})"),
+            CanoError::CompensationFailed { errors } => {
+                // CompensationFailed is not wrapped in WithStateContext at the top level;
+                // errors[0] holds the wrapped original failure.
+                eprintln!("Rollback incomplete ({} errors): {e}", errors.len());
+            }
+            // CanoError is #[non_exhaustive], so a wildcard arm is required.
+            _ => eprintln!("Workflow error: {e}"),
+        }
+    }
 }
 ```
 </div>

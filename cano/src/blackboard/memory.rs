@@ -1,18 +1,18 @@
-use super::{StoreResult, error::StoreError};
+use super::{BlackboardResult, error::BlackboardError};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Thread-safe in-memory HashMap-based store
+/// Thread-safe in-memory typed key-value blackboard
 ///
-/// `MemoryStore` provides a thread-safe store solution using
-/// a `HashMap` wrapped in `Arc<parking_lot::RwLock<_>>` as the backing store.
-/// This is the default store implementation used throughout Cano workflows.
+/// `Blackboard` provides a thread-safe shared map using
+/// a `HashMap` wrapped in `Arc<parking_lot::RwLock<_>>` as the backing storage.
+/// This is the default blackboard implementation used throughout Cano workflows.
 ///
 /// ## Thread Safety
 ///
-/// The store is fully thread-safe using `Arc<parking_lot::RwLock<_>>` for interior
-/// mutability. Multiple readers can access the store concurrently, while writers get
+/// The blackboard is fully thread-safe using `Arc<parking_lot::RwLock<_>>` for interior
+/// mutability. Multiple readers can access the blackboard concurrently, while writers get
 /// exclusive access. `parking_lot::RwLock` is used instead of `std::sync::RwLock` for
 /// faster lock acquisition and an infallible (non-poisonable) API.
 ///
@@ -23,28 +23,28 @@ use std::sync::Arc;
 /// - **Memory**: HashMap grows dynamically
 /// - **Concurrency**: Optimized for read-heavy workloads
 #[derive(Default, Clone)]
-pub struct MemoryStore {
+pub struct Blackboard {
     /// Internal HashMap storing the key-value pairs, wrapped in Arc<RwLock<_>> for thread safety
     data: Arc<RwLock<HashMap<String, Arc<dyn std::any::Any + Send + Sync>>>>,
 }
 
-impl MemoryStore {
-    /// Create a new empty MemoryStore instance
+impl Blackboard {
+    /// Create a new empty Blackboard instance
     ///
-    /// Creates a new thread-safe store instance with an empty HashMap.
-    /// This is the most common way to initialize store for workflows.
+    /// Creates a new thread-safe blackboard instance with an empty HashMap.
+    /// This is the most common way to initialize a blackboard for workflows.
     ///
     /// # Returns
-    /// A new, empty `MemoryStore` instance
+    /// A new, empty `Blackboard` instance
     pub fn new() -> Self {
         Self {
             data: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    /// Get a shared reference to a value in the store (Zero-Copy)
+    /// Get a shared reference to a value in the blackboard (Zero-Copy)
     ///
-    /// This method returns an `Arc<T>` pointing to the data in the store.
+    /// This method returns an `Arc<T>` pointing to the data in the blackboard.
     /// This avoids cloning the data, making it much more efficient for large objects.
     ///
     /// # Type Parameters
@@ -55,18 +55,21 @@ impl MemoryStore {
     ///
     /// # Returns
     /// - `Ok(Arc<TState>)` if the key exists and the type matches
-    /// - `Err(StoreError::KeyNotFound)` if the key doesn't exist
-    /// - `Err(StoreError::TypeMismatch)` if the value is not of type `TState`
-    pub fn get_shared<TState: 'static + Send + Sync>(&self, key: &str) -> StoreResult<Arc<TState>> {
+    /// - `Err(BlackboardError::KeyNotFound)` if the key doesn't exist
+    /// - `Err(BlackboardError::TypeMismatch)` if the value is not of type `TState`
+    pub fn get_shared<TState: 'static + Send + Sync>(
+        &self,
+        key: &str,
+    ) -> BlackboardResult<Arc<TState>> {
         let data = self.data.read();
 
         match data.get(key) {
             Some(value) => value.clone().downcast::<TState>().map_err(|_| {
-                StoreError::type_mismatch(format!(
+                BlackboardError::type_mismatch(format!(
                     "Cannot downcast value for key '{key}' to requested type"
                 ))
             }),
-            None => Err(StoreError::key_not_found(key)),
+            None => Err(BlackboardError::key_not_found(key)),
         }
     }
     /// Retrieve a typed value by key.
@@ -74,16 +77,16 @@ impl MemoryStore {
     /// Returns a clone of the stored value if the key exists and the value can be
     /// downcast to `TState`.
     #[inline]
-    pub fn get<TState: 'static + Clone>(&self, key: &str) -> StoreResult<TState> {
+    pub fn get<TState: 'static + Clone>(&self, key: &str) -> BlackboardResult<TState> {
         let data = self.data.read();
 
         match data.get(key) {
             Some(value) => value.downcast_ref::<TState>().cloned().ok_or_else(|| {
-                StoreError::type_mismatch(format!(
+                BlackboardError::type_mismatch(format!(
                     "Cannot downcast value for key '{key}' to requested type"
                 ))
             }),
-            None => Err(StoreError::key_not_found(key)),
+            None => Err(BlackboardError::key_not_found(key)),
         }
     }
 
@@ -112,7 +115,7 @@ impl MemoryStore {
         &self,
         key: &str,
         item: TState,
-    ) -> StoreResult<()> {
+    ) -> BlackboardResult<()> {
         // Acquire write lock once and perform all operations under it to avoid TOCTOU race
         let mut data = self.data.write();
 
@@ -138,7 +141,7 @@ impl MemoryStore {
                 Err(other) => {
                     // Type mismatch — restore the original Arc, return a non-destructive error.
                     *existing = other;
-                    Err(StoreError::append_type_mismatch(key))
+                    Err(BlackboardError::append_type_mismatch(key))
                 }
             }
         } else {
@@ -147,7 +150,7 @@ impl MemoryStore {
         }
     }
 
-    /// Check whether the store contains the given key.
+    /// Check whether the blackboard contains the given key.
     pub fn contains_key(&self, key: &str) -> bool {
         self.data.read().contains_key(key)
     }
@@ -161,23 +164,23 @@ impl MemoryStore {
             .collect()
     }
 
-    /// Get the number of key-value pairs in the store.
+    /// Get the number of key-value pairs in the blackboard.
     pub fn len(&self) -> usize {
         self.data.read().len()
     }
 
-    /// Check whether the store is empty.
+    /// Check whether the blackboard is empty.
     pub fn is_empty(&self) -> bool {
         self.data.read().is_empty()
     }
 
-    /// Clear all data from the store.
+    /// Clear all data from the blackboard.
     pub fn clear(&self) {
         self.data.write().clear();
     }
 }
 
-impl crate::resource::Resource for MemoryStore {}
+impl crate::resource::Resource for Blackboard {}
 
 #[cfg(test)]
 mod tests {
@@ -188,59 +191,59 @@ mod tests {
     use std::time::Duration;
 
     #[tokio::test]
-    async fn test_memory_store_resource_lifecycle() {
-        let store = MemoryStore::new();
-        assert!(store.setup().await.is_ok());
-        assert!(store.teardown().await.is_ok());
+    async fn test_blackboard_resource_lifecycle() {
+        let board = Blackboard::new();
+        assert!(board.setup().await.is_ok());
+        assert!(board.teardown().await.is_ok());
     }
 
     #[test]
-    fn test_new_store() {
-        let store = MemoryStore::new();
-        assert_eq!(store.len(), 0);
-        assert!(store.is_empty());
+    fn test_new_blackboard() {
+        let board = Blackboard::new();
+        assert_eq!(board.len(), 0);
+        assert!(board.is_empty());
     }
 
     #[test]
-    fn test_default_store() {
-        let store = MemoryStore::default();
-        assert_eq!(store.len(), 0);
-        assert!(store.is_empty());
+    fn test_default_blackboard() {
+        let board = Blackboard::default();
+        assert_eq!(board.len(), 0);
+        assert!(board.is_empty());
     }
 
     #[test]
     fn test_put_and_get_string() {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
         let key = "test_string";
         let value = "Hello, World!".to_string();
 
         // Put value
-        store.put(key, value.clone());
+        board.put(key, value.clone());
 
         // Get value
-        let retrieved: String = store.get(key).unwrap();
+        let retrieved: String = board.get(key).unwrap();
         assert_eq!(retrieved, value);
     }
 
     #[test]
     fn test_put_and_get_integer() {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
         let key = "test_int";
         let value = 42i32;
 
-        store.put(key, value);
-        let retrieved: i32 = store.get(key).unwrap();
+        board.put(key, value);
+        let retrieved: i32 = board.get(key).unwrap();
         assert_eq!(retrieved, value);
     }
 
     #[test]
     fn test_put_and_get_vector() {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
         let key = "test_vec";
         let value = vec![1, 2, 3, 4, 5];
 
-        store.put(key, value.clone());
-        let retrieved: Vec<i32> = store.get(key).unwrap();
+        board.put(key, value.clone());
+        let retrieved: Vec<i32> = board.get(key).unwrap();
         assert_eq!(retrieved, value);
     }
 
@@ -252,27 +255,27 @@ mod tests {
             name: String,
         }
 
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
         let key = "test_struct";
         let value = TestData {
             id: 123,
             name: "Test".to_string(),
         };
 
-        store.put(key, value.clone());
-        let retrieved: TestData = store.get(key).unwrap();
+        board.put(key, value.clone());
+        let retrieved: TestData = board.get(key).unwrap();
         assert_eq!(retrieved, value);
     }
 
     #[test]
     fn test_get_nonexistent_key() {
-        let store = MemoryStore::new();
-        let result: Result<String, StoreError> = store.get("nonexistent");
+        let board = Blackboard::new();
+        let result: Result<String, BlackboardError> = board.get("nonexistent");
 
         assert!(result.is_err());
         match result.unwrap_err() {
-            StoreError::KeyNotFound(msg) => {
-                assert_eq!(msg, "Key 'nonexistent' not found in store")
+            BlackboardError::KeyNotFound(msg) => {
+                assert_eq!(msg, "Key 'nonexistent' not found in blackboard")
             }
             _ => panic!("Expected KeyNotFound error"),
         }
@@ -280,72 +283,72 @@ mod tests {
 
     #[test]
     fn test_type_mismatch() {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
         let key = "test_type";
 
         // Store as string
-        store.put(key, "hello".to_string());
+        board.put(key, "hello".to_string());
 
         // Try to retrieve as integer
-        let result: Result<i32, StoreError> = store.get(key);
+        let result: Result<i32, BlackboardError> = board.get(key);
         assert!(result.is_err());
         match result.unwrap_err() {
-            StoreError::TypeMismatch(_) => (),
+            BlackboardError::TypeMismatch(_) => (),
             _ => panic!("Expected TypeMismatch error"),
         }
     }
 
     #[test]
     fn test_remove_existing_key() {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
         let key = "test_remove";
         let value = "to_be_removed".to_string();
 
         // Put and verify
-        store.put(key, value);
-        assert!(store.get::<String>(key).is_ok());
+        board.put(key, value);
+        assert!(board.get::<String>(key).is_ok());
 
         // Remove and verify
-        store.remove(key);
-        assert!(store.get::<String>(key).is_err());
+        board.remove(key);
+        assert!(board.get::<String>(key).is_err());
     }
 
     #[test]
     fn test_remove_nonexistent_key() {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
         // Removing a missing key is a silent no-op
-        store.remove("nonexistent");
-        assert!(store.is_empty());
+        board.remove("nonexistent");
+        assert!(board.is_empty());
     }
 
     #[test]
     fn test_append_to_new_key() {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
         let key = "test_append_new";
         let item = "first_item".to_string();
 
         // Append to non-existent key should create new Vec
-        store.append(key, item.clone()).unwrap();
+        board.append(key, item.clone()).unwrap();
 
-        let retrieved: Vec<String> = store.get(key).unwrap();
+        let retrieved: Vec<String> = board.get(key).unwrap();
         assert_eq!(retrieved, vec![item]);
     }
 
     #[test]
     fn test_append_to_existing_vector() {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
         let key = "test_append_existing";
         let initial_vec = vec!["first".to_string(), "second".to_string()];
 
         // Put initial vector
-        store.put(key, initial_vec.clone());
+        board.put(key, initial_vec.clone());
 
         // Append new item
         let new_item = "third".to_string();
-        store.append(key, new_item.clone()).unwrap();
+        board.append(key, new_item.clone()).unwrap();
 
         // Verify the vector was updated
-        let retrieved: Vec<String> = store.get(key).unwrap();
+        let retrieved: Vec<String> = board.get(key).unwrap();
         let expected = vec![
             "first".to_string(),
             "second".to_string(),
@@ -356,17 +359,17 @@ mod tests {
 
     #[test]
     fn test_append_to_non_vector() {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
         let key = "test_append_error";
 
         // Store a non-vector value
-        store.put(key, "not_a_vector".to_string());
+        board.put(key, "not_a_vector".to_string());
 
         // Try to append to it
-        let result = store.append(key, "item".to_string());
+        let result = board.append(key, "item".to_string());
         assert!(result.is_err());
         match result.unwrap_err() {
-            StoreError::AppendTypeMismatch(msg) => assert_eq!(
+            BlackboardError::AppendTypeMismatch(msg) => assert_eq!(
                 msg,
                 "Cannot append to key 'test_append_error': existing value is not a Vec<TState>"
             ),
@@ -376,19 +379,19 @@ mod tests {
 
     #[test]
     fn test_append_non_destructive_on_type_mismatch() {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
         let key = "test_non_destructive";
         let original_value = "original".to_string();
 
         // Store a non-vector value
-        store.put(key, original_value.clone());
+        board.put(key, original_value.clone());
 
         // Try to append with wrong type — should fail
-        let result = store.append::<String>(key, "item".to_string());
+        let result = board.append::<String>(key, "item".to_string());
         assert!(result.is_err());
 
         // Verify the original value is still in the store (non-destructive error)
-        let retrieved: String = store
+        let retrieved: String = board
             .get(key)
             .expect("Value should still exist after append error");
         assert_eq!(
@@ -398,22 +401,22 @@ mod tests {
     }
 
     #[test]
-    fn test_keys_empty_store() {
-        let store = MemoryStore::new();
-        let keys = store.keys();
+    fn test_keys_empty_blackboard() {
+        let board = Blackboard::new();
+        let keys = board.keys();
         assert!(keys.is_empty());
     }
 
     #[test]
     fn test_keys_with_data() {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
 
         // Add some data
-        store.put("key1", "value1".to_string());
-        store.put("key2", 42i32);
-        store.put("key3", vec![1, 2, 3]);
+        board.put("key1", "value1".to_string());
+        board.put("key2", 42i32);
+        board.put("key3", vec![1, 2, 3]);
 
-        let keys = store.keys();
+        let keys = board.keys();
         assert_eq!(keys.len(), 3);
 
         // Check that all keys are present (order might vary).
@@ -425,122 +428,122 @@ mod tests {
 
     #[test]
     fn test_len_and_is_empty() {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
 
         // Initially empty
-        assert_eq!(store.len(), 0);
-        assert!(store.is_empty());
+        assert_eq!(board.len(), 0);
+        assert!(board.is_empty());
 
         // Add one item
-        store.put("key1", "value1".to_string());
-        assert_eq!(store.len(), 1);
-        assert!(!store.is_empty());
+        board.put("key1", "value1".to_string());
+        assert_eq!(board.len(), 1);
+        assert!(!board.is_empty());
 
         // Add more items
-        store.put("key2", 42i32);
-        store.put("key3", vec![1, 2, 3]);
-        assert_eq!(store.len(), 3);
-        assert!(!store.is_empty());
+        board.put("key2", 42i32);
+        board.put("key3", vec![1, 2, 3]);
+        assert_eq!(board.len(), 3);
+        assert!(!board.is_empty());
 
         // Remove one item
-        store.remove("key2");
-        assert_eq!(store.len(), 2);
-        assert!(!store.is_empty());
+        board.remove("key2");
+        assert_eq!(board.len(), 2);
+        assert!(!board.is_empty());
     }
 
     #[test]
     fn test_clear() {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
 
         // Add some data
-        store.put("key1", "value1".to_string());
-        store.put("key2", 42i32);
-        store.put("key3", vec![1, 2, 3]);
-        assert_eq!(store.len(), 3);
+        board.put("key1", "value1".to_string());
+        board.put("key2", 42i32);
+        board.put("key3", vec![1, 2, 3]);
+        assert_eq!(board.len(), 3);
 
         // Clear the store
-        store.clear();
-        assert_eq!(store.len(), 0);
-        assert!(store.is_empty());
+        board.clear();
+        assert_eq!(board.len(), 0);
+        assert!(board.is_empty());
 
         // Verify data is actually gone
-        assert!(store.get::<String>("key1").is_err());
-        assert!(store.get::<i32>("key2").is_err());
-        assert!(store.get::<Vec<i32>>("key3").is_err());
+        assert!(board.get::<String>("key1").is_err());
+        assert!(board.get::<i32>("key2").is_err());
+        assert!(board.get::<Vec<i32>>("key3").is_err());
     }
 
     #[test]
     fn test_overwrite_existing_key() {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
         let key = "test_overwrite";
 
         // Store initial value
-        store.put(key, "initial".to_string());
-        assert_eq!(store.get::<String>(key).unwrap(), "initial");
+        board.put(key, "initial".to_string());
+        assert_eq!(board.get::<String>(key).unwrap(), "initial");
 
         // Overwrite with new value
-        store.put(key, "overwritten".to_string());
-        assert_eq!(store.get::<String>(key).unwrap(), "overwritten");
+        board.put(key, "overwritten".to_string());
+        assert_eq!(board.get::<String>(key).unwrap(), "overwritten");
 
         // Verify length didn't change
-        assert_eq!(store.len(), 1);
+        assert_eq!(board.len(), 1);
     }
 
     #[test]
     fn test_overwrite_with_different_type() {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
         let key = "test_type_overwrite";
 
         // Store string value
-        store.put(key, "string_value".to_string());
-        assert_eq!(store.get::<String>(key).unwrap(), "string_value");
+        board.put(key, "string_value".to_string());
+        assert_eq!(board.get::<String>(key).unwrap(), "string_value");
 
         // Overwrite with integer value
-        store.put(key, 42i32);
-        assert_eq!(store.get::<i32>(key).unwrap(), 42);
+        board.put(key, 42i32);
+        assert_eq!(board.get::<i32>(key).unwrap(), 42);
 
         // Verify old type no longer accessible
-        assert!(store.get::<String>(key).is_err());
-        assert_eq!(store.len(), 1);
+        assert!(board.get::<String>(key).is_err());
+        assert_eq!(board.len(), 1);
     }
 
     #[test]
-    fn test_clone_store() {
-        let store1 = MemoryStore::new();
-        store1.put("key1", "value1".to_string());
+    fn test_clone_blackboard() {
+        let board1 = Blackboard::new();
+        board1.put("key1", "value1".to_string());
 
         // Clone the store
-        let store2 = store1.clone();
+        let board2 = board1.clone();
 
         // Both stores should share the same data
-        assert_eq!(store2.get::<String>("key1").unwrap(), "value1");
+        assert_eq!(board2.get::<String>("key1").unwrap(), "value1");
 
         // Modifying one should affect the other (shared Arc)
-        store2.put("key2", "value2".to_string());
-        assert_eq!(store1.get::<String>("key2").unwrap(), "value2");
-        assert_eq!(store1.len(), 2);
-        assert_eq!(store2.len(), 2);
+        board2.put("key2", "value2".to_string());
+        assert_eq!(board1.get::<String>("key2").unwrap(), "value2");
+        assert_eq!(board1.len(), 2);
+        assert_eq!(board2.len(), 2);
     }
 
     #[test]
     fn test_thread_safety_concurrent_reads() {
-        let store = Arc::new(MemoryStore::new());
+        let board = Arc::new(Blackboard::new());
 
         // Pre-populate store
-        store.put("shared_key", "shared_value".to_string());
+        board.put("shared_key", "shared_value".to_string());
 
         let mut handles = vec![];
 
         // Spawn multiple reader threads
         for i in 0..10 {
-            let store_clone = Arc::clone(&store);
+            let board_clone = Arc::clone(&board);
             let handle = thread::spawn(move || {
                 for _ in 0..100 {
-                    let value: String = store_clone.get("shared_key").unwrap();
+                    let value: String = board_clone.get("shared_key").unwrap();
                     assert_eq!(value, "shared_value");
 
                     // Also test len() for concurrent reads
-                    let len = store_clone.len();
+                    let len = board_clone.len();
                     assert!(len > 0);
                 }
                 i
@@ -556,17 +559,17 @@ mod tests {
 
     #[test]
     fn test_thread_safety_concurrent_writes() {
-        let store = Arc::new(MemoryStore::new());
+        let board = Arc::new(Blackboard::new());
         let mut handles = vec![];
 
         // Spawn multiple writer threads
         for i in 0..10 {
-            let store_clone = Arc::clone(&store);
+            let board_clone = Arc::clone(&board);
             let handle = thread::spawn(move || {
                 for j in 0..10 {
                     let key = format!("key_{i}_{j}");
                     let value = format!("value_{i}_{j}");
-                    store_clone.put(&key, value);
+                    board_clone.put(&key, value);
                 }
                 i
             });
@@ -579,31 +582,31 @@ mod tests {
         }
 
         // Verify all values were written
-        assert_eq!(store.len(), 100); // 10 threads * 10 writes each
+        assert_eq!(board.len(), 100); // 10 threads * 10 writes each
 
         // Verify some values
-        assert_eq!(store.get::<String>("key_0_0").unwrap(), "value_0_0");
-        assert_eq!(store.get::<String>("key_5_7").unwrap(), "value_5_7");
-        assert_eq!(store.get::<String>("key_9_9").unwrap(), "value_9_9");
+        assert_eq!(board.get::<String>("key_0_0").unwrap(), "value_0_0");
+        assert_eq!(board.get::<String>("key_5_7").unwrap(), "value_5_7");
+        assert_eq!(board.get::<String>("key_9_9").unwrap(), "value_9_9");
     }
 
     #[test]
     fn test_thread_safety_mixed_operations() {
-        let store = Arc::new(MemoryStore::new());
+        let board = Arc::new(Blackboard::new());
 
         // Pre-populate with some data
         for i in 0..50 {
-            store.put(&format!("initial_{i}"), i);
+            board.put(&format!("initial_{i}"), i);
         }
 
         let mut handles = vec![];
 
         // Spawn reader threads
         for _ in 0..5 {
-            let store_clone = Arc::clone(&store);
+            let board_clone = Arc::clone(&board);
             let handle = thread::spawn(move || {
                 for i in 0..50 {
-                    if let Ok(value) = store_clone.get::<i32>(&format!("initial_{i}")) {
+                    if let Ok(value) = board_clone.get::<i32>(&format!("initial_{i}")) {
                         assert_eq!(value, i);
                     }
                     thread::sleep(Duration::from_millis(1));
@@ -614,12 +617,12 @@ mod tests {
 
         // Spawn writer threads
         for thread_id in 0..3 {
-            let store_clone = Arc::clone(&store);
+            let board_clone = Arc::clone(&board);
             let handle = thread::spawn(move || {
                 for i in 0..20 {
                     let key = format!("new_{thread_id}_{i}");
                     let value = format!("new_value_{thread_id}_{i}");
-                    store_clone.put(&key, value);
+                    board_clone.put(&key, value);
                     thread::sleep(Duration::from_millis(1));
                 }
             });
@@ -632,22 +635,22 @@ mod tests {
         }
 
         // Verify the store is in a consistent state
-        let final_len = store.len();
+        let final_len = board.len();
         assert_eq!(final_len, 110); // 50 initial + 60 new (3 threads * 20 each)
     }
 
     #[test]
     fn test_append_thread_safety() {
-        let store = Arc::new(MemoryStore::new());
+        let board = Arc::new(Blackboard::new());
         let mut handles = vec![];
 
         // Spawn multiple threads that append to the same vector
         for thread_id in 0..5 {
-            let store_clone = Arc::clone(&store);
+            let board_clone = Arc::clone(&board);
             let handle = thread::spawn(move || {
                 for i in 0..10 {
                     let value = format!("thread_{thread_id}_item_{i}");
-                    store_clone.append("shared_vector", value).unwrap();
+                    board_clone.append("shared_vector", value).unwrap();
                 }
             });
             handles.push(handle);
@@ -659,7 +662,7 @@ mod tests {
         }
 
         // Verify the final vector contains all items
-        let final_vec: Vec<String> = store.get("shared_vector").unwrap();
+        let final_vec: Vec<String> = board.get("shared_vector").unwrap();
         assert_eq!(final_vec.len(), 50); // 5 threads * 10 items each
 
         // Verify all expected items are present
@@ -681,7 +684,7 @@ mod tests {
             nested: std::collections::HashMap<String, i32>,
         }
 
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
         let mut nested = std::collections::HashMap::new();
         nested.insert("nested_key".to_string(), 42);
 
@@ -693,54 +696,54 @@ mod tests {
         };
 
         // Store and retrieve complex data
-        store.put("complex", complex_data.clone());
-        let retrieved: ComplexData = store.get("complex").unwrap();
+        board.put("complex", complex_data.clone());
+        let retrieved: ComplexData = board.get("complex").unwrap();
         assert_eq!(retrieved, complex_data);
     }
 
     #[test]
     fn test_large_data_handling() {
-        let store = MemoryStore::new();
+        let board = Blackboard::new();
 
         // Create a large vector
         let large_vec: Vec<i32> = (0..10000).collect();
 
         // Store and retrieve large data
-        store.put("large_data", large_vec.clone());
-        let retrieved: Vec<i32> = store.get("large_data").unwrap();
+        board.put("large_data", large_vec.clone());
+        let retrieved: Vec<i32> = board.get("large_data").unwrap();
         assert_eq!(retrieved, large_vec);
         assert_eq!(retrieved.len(), 10000);
     }
 
     #[test]
     fn test_contains_key_present() {
-        let store = MemoryStore::new();
-        store.put("exists", 42i32);
-        assert!(store.contains_key("exists"));
+        let board = Blackboard::new();
+        board.put("exists", 42i32);
+        assert!(board.contains_key("exists"));
     }
 
     #[test]
     fn test_contains_key_absent() {
-        let store = MemoryStore::new();
-        assert!(!store.contains_key("missing"));
+        let board = Blackboard::new();
+        assert!(!board.contains_key("missing"));
     }
 
     #[test]
     fn test_contains_key_after_remove() {
-        let store = MemoryStore::new();
-        store.put("key", "val".to_string());
-        assert!(store.contains_key("key"));
-        store.remove("key");
-        assert!(!store.contains_key("key"));
+        let board = Blackboard::new();
+        board.put("key", "val".to_string());
+        assert!(board.contains_key("key"));
+        board.remove("key");
+        assert!(!board.contains_key("key"));
     }
 
     #[test]
     fn test_get_shared_returns_arc() {
-        let store = MemoryStore::new();
-        store.put("msg", "hello".to_string());
+        let board = Blackboard::new();
+        board.put("msg", "hello".to_string());
 
-        let arc1: Arc<String> = store.get_shared("msg").unwrap();
-        let arc2: Arc<String> = store.get_shared("msg").unwrap();
+        let arc1: Arc<String> = board.get_shared("msg").unwrap();
+        let arc2: Arc<String> = board.get_shared("msg").unwrap();
 
         assert_eq!(*arc1, "hello");
         assert!(
@@ -751,11 +754,11 @@ mod tests {
 
     #[test]
     fn test_get_shared_missing_key() {
-        let store = MemoryStore::new();
-        let result: StoreResult<Arc<String>> = store.get_shared("nope");
+        let board = Blackboard::new();
+        let result: BlackboardResult<Arc<String>> = board.get_shared("nope");
         assert!(result.is_err());
         match result.unwrap_err() {
-            StoreError::KeyNotFound(_) => (),
+            BlackboardError::KeyNotFound(_) => (),
             _ => panic!("Expected KeyNotFound error"),
         }
     }
@@ -763,16 +766,16 @@ mod tests {
     #[test]
     fn test_get_shared_and_put_do_not_require_clone() {
         // Positive path: store and retrieve a Clone type through the zero-copy API.
-        let store = MemoryStore::new();
-        store.put("n", 42u32);
-        let got: Arc<u32> = store.get_shared("n").unwrap();
+        let board = Blackboard::new();
+        board.put("n", 42u32);
+        let got: Arc<u32> = board.get_shared("n").unwrap();
         assert_eq!(*got, 42);
 
         // Explicit non-`Clone` type: proves `put` and `get_shared` only require
         // values that can safely be shared across tasks.
         struct NotClone(#[allow(dead_code)] u32);
-        store.put("not_clone", NotClone(7));
-        let got: Arc<NotClone> = store.get_shared("not_clone").unwrap();
+        board.put("not_clone", NotClone(7));
+        let got: Arc<NotClone> = board.get_shared("not_clone").unwrap();
         assert_eq!(got.0, 7);
     }
 }

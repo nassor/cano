@@ -119,7 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("-- (a) Type-keyed and named lookups --");
     {
         let resources = Resources::new()
-            .insert(MemoryStore::new())
+            .insert(Blackboard::new())
             .insert(Cache { label: "L1".into() })
             .insert(AppConfig {
                 max_connections: 32,
@@ -127,16 +127,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .insert_named("l2", Cache { label: "L2".into() });
 
         // `get` looks a resource up by its type; no key string to mistype.
-        let store = resources.get::<MemoryStore>()?;
+        let board = resources.get::<Blackboard>()?;
         let cache = resources.get::<Cache>()?;
         let config = resources.get::<AppConfig>()?;
         // A second `Cache` needs a name.
         let l2 = resources.get_named::<Cache>("l2")?;
 
-        store.put("ping", "pong".to_string());
-        let pong: String = store.get("ping")?;
+        board.put("ping", "pong".to_string());
+        let pong: String = board.get("ping")?;
 
-        println!("  MemoryStore        -> ping='{pong}'");
+        println!("  Blackboard         -> ping='{pong}'");
         println!("  Cache              -> label='{}'", cache.label);
         println!("  Cache named \"l2\"   -> label='{}'", l2.label);
         println!(

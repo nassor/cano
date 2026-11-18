@@ -1,6 +1,6 @@
 +++
 title = "Testing"
-description = "Test fixtures for Cano workflows: a recording observer, an in-memory checkpoint store, a panicking task factory, and a saga assertion."
+description = "Test fixtures for Cano workflows: a recording observer, in-memory checkpoint and scheduler stores, store contract suites, a panicking task factory, and a saga assertion."
 template = "section.html"
 +++
 
@@ -28,6 +28,9 @@ The module is not in the <a href="../"><code>prelude</code></a>. Import it expli
 <li><a href="#enabling">Enabling the feature</a></li>
 <li><a href="#recording-observer">RecordingObserver</a></li>
 <li><a href="#in-memory-store">InMemoryCheckpointStore</a></li>
+<li><a href="#store-contract">assert_checkpoint_store_contract</a></li>
+<li><a href="#in-memory-scheduler-store">InMemorySchedulerStore</a></li>
+<li><a href="#scheduler-store-contract">assert_scheduler_store_contract</a></li>
 <li><a href="#panic-on-attempt">panic_on_attempt</a></li>
 <li><a href="#assert-compensation">assert_compensation_ran</a></li>
 </ol>
@@ -43,7 +46,7 @@ helpers compile only for tests and never ship in a release build:
 
 ```toml
 [dev-dependencies]
-cano = { version = "0.16", features = ["testing"] }
+cano = { version = "@CANO_MINOR@", features = ["testing"] }
 ```
 
 <p>The <code>testing</code> feature pulls in no extra dependencies.</p>
@@ -103,6 +106,7 @@ impl Task<S> for OkTask {
 
 #[tokio::test]
 async fn recording_observer_captures_the_path() {
+    // Keep an Arc clone outside the workflow to inspect recorded events after orchestrate().
     let observer = Arc::new(RecordingObserver::new());
     let wf = Workflow::bare()
         .register(S::Start, OkTask)
@@ -111,7 +115,7 @@ async fn recording_observer_captures_the_path() {
 
     assert_eq!(wf.orchestrate(S::Start).await.unwrap(), S::Done);
 
-    // Assert the whole path, or inspect events directly.
+    // Assert the full state sequence, or inspect individual RecordedEvent variants.
     observer.assert_path(&["Start", "Done"]);
     observer.assert_completed_with("Done");
     assert!(observer.events().iter().any(|e| matches!(e, RecordedEvent::TaskSucceeded { .. })));
@@ -185,7 +189,6 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum S { Start, Worker, Done }
 
-#[derive(Clone)]
 struct Go(S);
 #[task]
 impl Task<S> for Go {
@@ -204,11 +207,13 @@ async fn every_registered_state_is_reached() {
         .with_observer(observer.clone());
     wf.orchestrate(S::Start).await.unwrap();
 
-    // Every registered handler was reached: no dead states.
+    // Every registered handler was reached (exit-only S::Done has no handler, so it is excluded).
     observer.assert_registered_states_entered(&wf).expect("no dead states");
 
-    // Or assert an explicit set; Err lists what was never entered.
-    observer.assert_all_states_entered(&[S::Start, S::Worker, S::Done]).unwrap();
+    // Or assert an explicit set; Err lists any missing state labels.
+    observer
+        .assert_all_states_entered(&[S::Start, S::Worker, S::Done])
+        .expect("all states entered");
 }
 ```
 
@@ -216,7 +221,7 @@ async fn every_registered_state_is_reached() {
 
 <p>
 A process-local <a href="../recovery/"><code>CheckpointStore</code></a> for resume and recovery tests.
-It needs neither the <code>recovery</code> feature nor an on-disk file. Share one
+It needs no on-disk file. Share one
 <code>Arc&lt;InMemoryCheckpointStore&gt;</code> between an <code>orchestrate</code> run and a later
 <code>resume_from</code> to exercise crash recovery entirely in memory. It honors the full trait
 contract: a duplicate <code>(workflow_id, sequence)</code> is rejected, <code>load_run</code> returns
@@ -261,6 +266,104 @@ async fn checkpoints_run_in_memory() {
 }
 ```
 
+<h2 id="store-contract"><a href="#store-contract" class="anchor-link" aria-hidden="true">#</a>assert_checkpoint_store_contract</h2>
+
+<p>
+Runs the <a href="../recovery/checkpoint-stores/#trait"><code>CheckpointStore</code> contract</a> against any store and
+panics with the name of the first clause it breaks. Use it on your own backend, or on a built-in one
+pointed at a real server. It writes only workflow ids that start with <code>namespace/</code> and
+clears them before and after, so it can share a database with other data.
+</p>
+
+<p>
+It checks that an unknown id loads empty, that every field and <code>RowKind</code> round-trips, that
+rows load sorted by sequence, that a duplicate sequence is rejected and changes nothing, that ids
+sharing a prefix stay isolated under <code>clear</code>, that awkward ids (spaces, wildcards,
+non-ASCII, 200+ characters) work, that concurrent appends of one sequence have exactly one winner, and
+that a 256 KiB blob round-trips.
+</p>
+
+```rust
+use cano::testing::{InMemoryCheckpointStore, assert_checkpoint_store_contract};
+
+#[tokio::test]
+async fn my_store_meets_the_contract() {
+    let store = InMemoryCheckpointStore::new(); // your store here
+    // Only touches workflow ids prefixed with "contract-test/" and cleans them up before and after.
+    assert_checkpoint_store_contract(&store, "contract-test").await;
+}
+```
+
+<h2 id="in-memory-scheduler-store"><a href="#in-memory-scheduler-store" class="anchor-link" aria-hidden="true">#</a>InMemorySchedulerStore</h2>
+<p class="feature-tag">Also needs the <code>scheduler</code> feature.</p>
+
+<p>
+A process-local <a href="../scheduler/several-instances/"><code>SchedulerStore</code></a>. Share one
+<code>Arc&lt;InMemorySchedulerStore&gt;</code> between several schedulers in one test to exercise
+multi-instance coordination without a database. It honors the full trait contract, and its versions count
+up from 1 across the whole store. <code>record(flow_id)</code> returns the stored
+<code>VersionedRecord</code> for a flow, if any.
+</p>
+
+```rust
+use cano::prelude::*;
+use cano::testing::InMemorySchedulerStore;
+use std::sync::Arc;
+use std::time::Duration;
+
+// Share one store handle across scheduler instances to test lease coordination in memory.
+let store = Arc::new(InMemorySchedulerStore::new());
+let node_a = Scheduler::new()
+    .every("fetch", workflow_a, State::Start, Duration::from_secs(60))
+    .with_store(store.clone())
+    .with_instance_id("node-a")
+    .start()
+    .await?;
+let node_b = Scheduler::new()
+    .every("fetch", workflow_b, State::Start, Duration::from_secs(60))
+    .with_store(store.clone())
+    .with_instance_id("node-b")
+    .start()
+    .await?;
+
+// Each tick of "fetch" now claims a lease and runs on exactly one of the two.
+// Shut both down cleanly at the end of the test: node_a.stop().await?; node_b.stop().await?;
+```
+
+<h2 id="scheduler-store-contract"><a href="#scheduler-store-contract" class="anchor-link" aria-hidden="true">#</a>assert_scheduler_store_contract</h2>
+<p class="feature-tag">Also needs the <code>scheduler</code> feature.</p>
+
+<p>
+Runs the <a href="../scheduler/several-instances/#custom-store"><code>SchedulerStore</code> contract</a> against
+any store and panics with the name of the first clause it breaks. Use it on your own backend, or on a
+built-in one pointed at a real server. It writes only flow ids of the form <code>namespace/case</code> and
+removes them before and after, so it can share a table or bucket with live scheduler records. Pick a
+<code>namespace</code> no scheduler uses.
+</p>
+
+<p>
+It checks that an unknown id loads <code>None</code> and removes as a no-op, that a create writes once and
+conflicts afterwards, that a swap from the current version writes and changes the version while a stale or
+wrong version conflicts and leaves the record alone, that a removed id can be created again with a new
+version and stale pre-remove versions still conflict after recreate, that ids sharing a prefix stay
+isolated, that awkward ids (spaces, wildcards, non-ASCII, 200+ characters) work, that concurrent creates
+(including post-remove tombstone recreate races with equal bytes) and concurrent swaps from one version have
+exactly one winner whose payload matches the stored record, that concurrent <code>load</code>,
+<code>compare_and_swap</code> and <code>remove</code> calls stay linearizable, and that an empty value, an
+identical-value version bump and a 256 KiB payload round-trip.
+</p>
+
+```rust
+use cano::testing::{InMemorySchedulerStore, assert_scheduler_store_contract};
+
+#[tokio::test]
+async fn my_scheduler_store_meets_the_contract() {
+    let store = InMemorySchedulerStore::new(); // your store here
+    // Exercises CAS, prefix isolation, recreate races, and 256 KiB values under "contract-test/*".
+    assert_scheduler_store_contract(&store, "contract-test").await;
+}
+```
+
 <h2 id="panic-on-attempt"><a href="#panic-on-attempt" class="anchor-link" aria-hidden="true">#</a>panic_on_attempt</h2>
 
 <p>
@@ -286,9 +389,11 @@ enum S { Start, Done }
 #[tokio::test]
 async fn panicking_task_fails_fast() {
     let wf = Workflow::bare()
+        // Panics on attempt 1; catch_unwind fails fast without retrying.
         .register(S::Start, panic_on_attempt(1, S::Done))
         .add_exit_state(S::Done);
 
+    // Caught panics become CanoError::TaskExecution("panic: ..."), wrapped in WithStateContext.
     let err = wf.orchestrate(S::Start).await.unwrap_err();
     assert!(err.to_string().contains("panic"));
 }
@@ -307,8 +412,9 @@ expected sequence. Have each <code>compensate</code> push its identifier into a 
 ```rust
 use cano::testing::assert_compensation_ran;
 
-// Charge ran last, so it compensates first; then Reserve.
+// Charge ran last, so LIFO rollback undoes Charge first, then Reserve.
 let ran = vec!["charge".to_string(), "reserve".to_string()];
+// Panics with a diff if the recorded rollback order differs from expected.
 assert_compensation_ran(&ran, &["charge", "reserve"]);
 ```
 <hr class="section-divider">

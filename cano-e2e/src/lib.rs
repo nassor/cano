@@ -1,9 +1,8 @@
 //! Building blocks for the Docker-based end-to-end hardening tests:
 //!
-//! - [`PostgresCheckpointStore`] — a `cano::CheckpointStore` backed by Postgres
-//!   (`tokio-postgres`). It demonstrates the pluggable storage contract and is what the
-//!   e2e workflow uses, so a crashed app container can be restarted against the *same*
-//!   Postgres and resume.
+//! - [`connect`]: cano's [`PostgresStore`] plus a plain client for the side-effect
+//!   tables. A crashed app container restarted against the *same* Postgres resumes from
+//!   the store.
 //! - A small saga workflow ([`build_workflow`]): `Reserve` (compensatable) → `Ship`
 //!   (plain) → `Done`, with `fail_at` / `pause_at` knobs for fault injection. All side
 //!   effects go to Postgres tables (`ledger`, `events`) so they survive an app crash and
@@ -18,6 +17,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use cano::prelude::*;
+use cano::store::postgres::PostgresStore;
 use serde::{Deserialize, Serialize};
 use tokio_postgres::{Client, NoTls};
 
@@ -25,45 +25,19 @@ use tokio_postgres::{Client, NoTls};
 pub const UNITS: i64 = 5;
 
 // ---------------------------------------------------------------------------
-// Postgres-backed CheckpointStore
+// Connection
 // ---------------------------------------------------------------------------
 
-/// A [`CheckpointStore`] over a single Postgres table.
-///
-/// Table layout: `cano_checkpoints(workflow_id text, sequence bigint, state text,
-/// task_id text, output_blob bytea, kind smallint NOT NULL DEFAULT 0,
-/// PRIMARY KEY(workflow_id, sequence))`. The primary key enforces the
-/// no-duplicate-`(workflow_id, sequence)` contract at the database level — a second run
-/// that tries to share a workflow id fails its first `append` with a conflict.
-///
-/// The `kind` column maps [`cano::recovery::RowKind`] to a `SMALLINT`:
-/// `0 = StateEntry`, `1 = CompensationCompletion`, `2 = StepCursor`. Pre-existing rows
-/// (written before this column existed) read back as `StateEntry` via `DEFAULT 0`.
-///
-/// The `workflow_version` column is stored as `bigint` in Postgres and loaded back as
-/// `u32`. Values exceeding `u32::MAX` produce a `CanoError::CheckpointStore` on load.
-/// The `u32` range is more than sufficient for workflow definition versioning.
-#[derive(Clone)]
-pub struct PostgresCheckpointStore {
-    client: Arc<Client>,
-}
-
-impl PostgresCheckpointStore {
-    /// Connect to `dsn`, drive the connection on a background task, and ensure the schema
-    /// (the checkpoint table plus the `ledger` / `events` side-effect tables) exists.
-    pub async fn connect(dsn: &str) -> anyhow::Result<Self> {
-        let client = connect_raw(dsn).await?;
-        migrate(&client).await?;
-        Ok(Self {
-            client: Arc::new(client),
-        })
-    }
-
-    /// The shared client, so the workflow tasks can write their side effects through the
-    /// same connection.
-    pub fn client(&self) -> Arc<Client> {
-        Arc::clone(&self.client)
-    }
+/// Connect to `dsn`: create the `ledger` / `events` side-effect tables, then open cano's
+/// [`PostgresStore`], which creates `cano_checkpoints`. Returns the store and a
+/// client the workflow tasks write their side effects through.
+pub async fn connect(dsn: &str) -> anyhow::Result<(PostgresStore, Arc<Client>)> {
+    let client = connect_raw(dsn).await?;
+    migrate(&client).await?;
+    let store = PostgresStore::connect(dsn)
+        .await
+        .context("opening the checkpoint store")?;
+    Ok((store, Arc::new(client)))
 }
 
 async fn connect_raw(dsn: &str) -> anyhow::Result<Client> {
@@ -79,30 +53,7 @@ async fn connect_raw(dsn: &str) -> anyhow::Result<Client> {
 }
 
 async fn migrate(client: &Client) -> anyhow::Result<()> {
-    // Run each statement separately so a partial migration is still valid
-    // if one statement fails (e.g. a future schema change). A single
-    // `batch_execute` would abort the entire set on the first failure.
-    client
-        .batch_execute(
-            "CREATE TABLE IF NOT EXISTS cano_checkpoints (
-                  workflow_id      text     NOT NULL,
-                  sequence         bigint   NOT NULL,
-                  state            text     NOT NULL,
-                  task_id          text     NOT NULL,
-                  output_blob      bytea,
-                  kind             smallint NOT NULL DEFAULT 0,
-                  PRIMARY KEY (workflow_id, sequence)
-              );",
-        )
-        .await
-        .context("creating cano_checkpoints table")?;
-    client
-        .batch_execute(
-            "ALTER TABLE cano_checkpoints
-                  ADD COLUMN IF NOT EXISTS workflow_version bigint NOT NULL DEFAULT 0;",
-        )
-        .await
-        .context("adding workflow_version column")?;
+    // One statement per table, so a failure names the table it hit.
     client
         .batch_execute(
             "CREATE TABLE IF NOT EXISTS ledger (
@@ -126,124 +77,6 @@ async fn migrate(client: &Client) -> anyhow::Result<()> {
         .await
         .context("creating events table")?;
     Ok(())
-}
-
-/// Map [`cano::recovery::RowKind`] to the integer stored in the `kind` column.
-///
-/// Encoding: `0 = StateEntry`, `1 = CompensationCompletion`, `2 = StepCursor`,
-/// `3 = Suspended`, `4 = ResumeInput`.
-/// Because `RowKind` is `#[non_exhaustive]`, the match needs a catch-all arm — unknown
-/// future variants are stored as `0` (StateEntry), which is harmless for the e2e harness.
-fn row_kind_to_db(k: &cano::recovery::RowKind) -> i16 {
-    match k {
-        cano::recovery::RowKind::StateEntry => 0,
-        cano::recovery::RowKind::CompensationCompletion => 1,
-        cano::recovery::RowKind::StepCursor => 2,
-        cano::recovery::RowKind::Suspended => 3,
-        cano::recovery::RowKind::ResumeInput => 4,
-        // unknown future RowKind variant — store as StateEntry; harmless in the e2e harness
-        _ => 0,
-    }
-}
-
-/// Map the integer from the `kind` column back to [`cano::recovery::RowKind`].
-///
-/// Unknown integers (from a future schema version read by an older binary) fall back to
-/// `StateEntry`, which is harmless for the e2e harness.
-fn row_kind_from_db(i: i16) -> cano::recovery::RowKind {
-    match i {
-        0 => cano::recovery::RowKind::StateEntry,
-        1 => cano::recovery::RowKind::CompensationCompletion,
-        2 => cano::recovery::RowKind::StepCursor,
-        3 => cano::recovery::RowKind::Suspended,
-        4 => cano::recovery::RowKind::ResumeInput,
-        // unknown integer from a future schema version — treat as StateEntry; harmless
-        _ => cano::recovery::RowKind::StateEntry,
-    }
-}
-
-#[cano::checkpoint_store]
-impl CheckpointStore for PostgresCheckpointStore {
-    async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
-        let seq = row.sequence as i64;
-        let kind = row_kind_to_db(&row.kind);
-        let workflow_version = row.workflow_version as i64;
-        let res = self
-            .client
-            .execute(
-                "INSERT INTO cano_checkpoints \
-                     (workflow_id, sequence, state, task_id, output_blob, kind, workflow_version) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7)",
-                &[
-                    &workflow_id,
-                    &seq,
-                    &row.state,
-                    &row.task_id,
-                    &row.output_blob,
-                    &kind,
-                    &workflow_version,
-                ],
-            )
-            .await;
-        match res {
-            Ok(_) => Ok(()),
-            Err(e) if is_unique_violation(&e) => Err(CanoError::checkpoint_store(format!(
-                "checkpoint conflict: workflow {workflow_id:?} already has a row at sequence \
-                 {}; resume the existing run or clear it first",
-                row.sequence
-            ))),
-            Err(e) => Err(CanoError::checkpoint_store(format!("append: {e}"))),
-        }
-    }
-
-    async fn load_run(&self, workflow_id: &str) -> Result<Vec<CheckpointRow>, CanoError> {
-        let rows = self
-            .client
-            .query(
-                "SELECT sequence, state, task_id, output_blob, kind, workflow_version \
-                 FROM cano_checkpoints WHERE workflow_id = $1 ORDER BY sequence ASC",
-                &[&workflow_id],
-            )
-            .await
-            .map_err(|e| CanoError::checkpoint_store(format!("load_run: {e}")))?;
-        rows.iter()
-            .map(|r| {
-                let seq: i64 = r.get(0);
-                let kind_int: i16 = r.get(4);
-                let workflow_version_i64: i64 = r.get(5);
-                let workflow_version: u32 = workflow_version_i64.try_into().map_err(|_| {
-                    CanoError::checkpoint_store(format!(
-                        "workflow_version {workflow_version_i64} out of u32 range"
-                    ))
-                })?;
-                Ok(CheckpointRow {
-                    sequence: seq as u64,
-                    state: r.get(1),
-                    task_id: r.get(2),
-                    output_blob: r.get(3),
-                    kind: row_kind_from_db(kind_int),
-                    workflow_version,
-                })
-            })
-            .collect()
-    }
-
-    async fn clear(&self, workflow_id: &str) -> Result<(), CanoError> {
-        self.client
-            .execute(
-                "DELETE FROM cano_checkpoints WHERE workflow_id = $1",
-                &[&workflow_id],
-            )
-            .await
-            .map_err(|e| CanoError::checkpoint_store(format!("clear: {e}")))?;
-        Ok(())
-    }
-}
-
-fn is_unique_violation(e: &tokio_postgres::Error) -> bool {
-    e.as_db_error()
-        .map(|db| db.code() == &tokio_postgres::error::SqlState::UNIQUE_VIOLATION)
-        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -421,13 +254,15 @@ async fn maybe_pause(faults: &Faults, here: Phase, db: &Db, wf: &str) {
     }
 }
 
-/// Build the saga workflow for `workflow_id`, checkpointing to `store`, with `faults`.
+/// Build the saga workflow for `workflow_id`, checkpointing to `store` and writing side
+/// effects through `db`, with `faults`.
 pub fn build_workflow(
-    store: PostgresCheckpointStore,
+    store: PostgresStore,
+    db: Arc<Client>,
     workflow_id: &str,
     faults: Faults,
 ) -> Workflow<Phase> {
-    let resources = Resources::new().insert(Db(store.client()));
+    let resources = Resources::new().insert(Db(db));
     Workflow::new(resources)
         .register(
             Phase::Reserve,
@@ -489,53 +324,4 @@ fn emit(line: &str) {
 /// Sleep helper for the app's startup back-off when Postgres isn't ready yet.
 pub async fn sleep(ms: u64) {
     tokio::time::sleep(Duration::from_millis(ms)).await;
-}
-
-// ---------------------------------------------------------------------------
-// Unit tests for the RowKind ↔ DB integer mapping (no Docker required)
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::{row_kind_from_db, row_kind_to_db};
-    use cano::recovery::RowKind;
-
-    #[test]
-    fn row_kind_to_db_known_variants() {
-        assert_eq!(row_kind_to_db(&RowKind::StateEntry), 0);
-        assert_eq!(row_kind_to_db(&RowKind::CompensationCompletion), 1);
-        assert_eq!(row_kind_to_db(&RowKind::StepCursor), 2);
-    }
-
-    #[test]
-    fn row_kind_from_db_known_values() {
-        assert_eq!(row_kind_from_db(0), RowKind::StateEntry);
-        assert_eq!(row_kind_from_db(1), RowKind::CompensationCompletion);
-        assert_eq!(row_kind_from_db(2), RowKind::StepCursor);
-    }
-
-    #[test]
-    fn row_kind_from_db_unknown_falls_back_to_state_entry() {
-        assert_eq!(row_kind_from_db(99), RowKind::StateEntry);
-        assert_eq!(row_kind_from_db(-1), RowKind::StateEntry);
-    }
-
-    #[test]
-    fn row_kind_round_trip_all_variants() {
-        for (variant, expected_int) in [
-            (RowKind::StateEntry, 0i16),
-            (RowKind::CompensationCompletion, 1i16),
-            (RowKind::StepCursor, 2i16),
-            (RowKind::Suspended, 3i16),
-            (RowKind::ResumeInput, 4i16),
-        ] {
-            let db_int = row_kind_to_db(&variant);
-            assert_eq!(db_int, expected_int, "to_db mismatch for {variant:?}");
-            assert_eq!(
-                row_kind_from_db(db_int),
-                variant,
-                "from_db round-trip mismatch for {variant:?}"
-            );
-        }
-    }
 }

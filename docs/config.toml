@@ -16,6 +16,8 @@ output_dir = "public"
 render_emoji = false
 
 [extra]
+# Single source of truth for the docs version: drives the header badge (`vX.Y.Z`)
+# and substitutes `@CANO_MINOR@` (`X.Y`) and `@CANO_VERSION@` (`X.Y.Z`) in page bodies.
 version = "0.16.0"
 github_url = "https://github.com/nassor/cano"
 crates_url = "https://crates.io/crates/cano"
@@ -47,8 +49,8 @@ path = "@/resources/_index.md"
 title = "Lifecycle and concurrency"
 path = "@/resources/lifecycle-and-concurrency.md"
 [[extra.nav.items.children]]
-title = "MemoryStore"
-path = "@/store/_index.md"
+title = "Blackboard"
+path = "@/blackboard/_index.md"
 [[extra.nav.items]]
 title = "Workflows"
 path = "@/workflows/_index.md"
@@ -61,6 +63,9 @@ path = "@/scheduler/_index.md"
 [[extra.nav.items.children]]
 title = "Backoff and trip"
 path = "@/scheduler/backoff-and-trip.md"
+[[extra.nav.items.children]]
+title = "Several instances"
+path = "@/scheduler/several-instances.md"
 
 [[extra.nav]]
 label = "Processing models"
@@ -109,6 +114,9 @@ path = "@/resilience/rate-limiting.md"
 [[extra.nav.items]]
 title = "Recovery"
 path = "@/recovery/_index.md"
+[[extra.nav.items.children]]
+title = "Checkpoint stores"
+path = "@/recovery/checkpoint-stores.md"
 [[extra.nav.items]]
 title = "Saga"
 path = "@/saga/_index.md"

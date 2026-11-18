@@ -73,9 +73,9 @@ A task runs once by default: a failed attempt fails the task. Opt in to retries 
 <span class="code-block-label">Fixed retry config</span>
 
 ```rust
+// 1 initial attempt + up to 3 retries (4 attempts max), sleeping 1 s between failures.
 TaskConfig::new()
     .with_fixed_retry(3, Duration::from_secs(1))
-
 ```
 </div>
 </div>
@@ -86,9 +86,9 @@ TaskConfig::new()
 <span class="code-block-label">Exponential backoff config</span>
 
 ```rust
+// Defaults: 100 ms base, 2.0x multiplier, 30 s cap, 10% jitter (up to 6 attempts).
 TaskConfig::new()
     .with_exponential_retry(5)
-
 ```
 </div>
 </div>
@@ -99,8 +99,8 @@ TaskConfig::new()
 <span class="code-block-label">Default config</span>
 
 ```rust
+// 1 attempt, no retries, no timeout, no circuit breaker.
 TaskConfig::new()
-
 ```
 </div>
 </div>
@@ -114,10 +114,10 @@ TaskConfig::new()
 <span class="code-block-label">Attempt timeout config</span>
 
 ```rust
+// Each of the 4 attempts gets its own fresh 2 s deadline.
 TaskConfig::new()
     .with_exponential_retry(3)
     .with_attempt_timeout(Duration::from_secs(2))
-
 ```
 </div>
 <h4>How attempt timeouts compose with retries</h4>
@@ -142,10 +142,26 @@ Attach a <code>CircuitBreaker</code> with <code>TaskConfig::with_circuit_breaker
 <span class="code-block-label">Attaching a breaker to a task config</span>
 
 ```rust
-fn build_config(breaker: CircuitBreaker) -> TaskConfig {
-    TaskConfig::new()
-        .with_exponential_retry(3)
-        .with_circuit_breaker(breaker)
+use cano::prelude::*;
+
+struct UpstreamTask {
+    // CircuitBreaker is Arc-backed; clones share state across tasks.
+    breaker: CircuitBreaker,
+}
+
+#[task(state = State)]
+impl UpstreamTask {
+    fn config(&self) -> TaskConfig {
+        // Consulted before each attempt; an open breaker fails fast with
+        // CanoError::CircuitOpen without consuming retries.
+        TaskConfig::new()
+            .with_exponential_retry(3)
+            .with_circuit_breaker(self.breaker.clone())
+    }
+
+    async fn run(&self) -> Result<State, CanoError> {
+        Ok(State::Complete)
+    }
 }
 ```
 </div>
@@ -161,6 +177,7 @@ The breaker's Closed, Open and HalfOpen states, <code>CircuitPolicy</code>, and 
 
 ```rust
 use cano::prelude::*;
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum State { Call, Complete }
@@ -169,25 +186,31 @@ struct ApiClientTask {
     endpoint: String,
 }
 
+async fn fetch_endpoint(endpoint: &str) -> Result<String, CanoError> {
+    if endpoint.is_empty() {
+        // Returning Err lets the retry loop apply exponential backoff.
+        return Err(CanoError::task_execution("empty endpoint"));
+    }
+    Ok(format!("ok from {endpoint}"))
+}
+
 #[task(state = State)]
 impl ApiClientTask {
     fn config(&self) -> TaskConfig {
-        // Exponential backoff for API rate limiting
+        // Read once at registration: up to 6 attempts, 5 s deadline per attempt.
         TaskConfig::new()
             .with_exponential_retry(5)
+            .with_attempt_timeout(Duration::from_secs(5))
     }
 
     async fn run(&self, res: &Resources) -> Result<State, CanoError> {
-        println!("Calling API: {}", self.endpoint);
+        let board = res.get::<Blackboard>()?;
 
-        let store = res.get::<MemoryStore>()?;
+        // Any Err returned here triggers a retry until retries are exhausted,
+        // after which orchestrate surfaces CanoError::RetryExhausted.
+        let data = fetch_endpoint(&self.endpoint).await?;
 
-        // Replace this with your HTTP client of choice (reqwest, hyper, etc.)
-        let data = String::new();
-
-        store.put("api_response", data);
-        println!("API call successful");
-
+        board.put("api_response", data);
         Ok(State::Complete)
     }
 }

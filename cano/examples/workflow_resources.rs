@@ -3,7 +3,7 @@
 //! Demonstrates the `Resources` abstraction in Cano workflows with three
 //! distinct resource styles:
 //!
-//! 1. **`MemoryStore`** — Cano's built-in in-process scratch space for
+//! 1. **`Blackboard`** — Cano's built-in in-process scratch space for
 //!    passing values between tasks within one workflow run.
 //! 2. **`CounterResource`** — a custom resource with non-trivial
 //!    `setup` / `teardown` lifecycle and interior mutability.
@@ -18,7 +18,7 @@
 //! Init  -> Process -> Persist -> Verify -> Done
 //! ```
 //!
-//! - `Init`: read params, write a derived value into `MemoryStore`
+//! - `Init`: read params, write a derived value into `Blackboard`
 //! - `Process`: combine the stored value with the counter's setup count
 //! - `Persist`: write the final value into redb (ACID-committed transaction)
 //! - `Verify`: open a redb read transaction and confirm the value round-trips
@@ -168,17 +168,17 @@ enum Step {
 // Tasks
 // ============================================================================
 
-/// Reads `WorkflowParams` and writes an initial value to the in-memory store.
+/// Reads `WorkflowParams` and writes an initial value to the in-memory blackboard.
 struct InitTask;
 
 #[task(state = Step)]
 impl InitTask {
     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         let params = res.get::<WorkflowParams>()?;
 
         let value = 10u32 * params.multiplier;
-        store.put("value", value);
+        board.put("value", value);
         println!("InitTask: stored value = {value}");
 
         Ok(Step::Process)
@@ -186,18 +186,18 @@ impl InitTask {
 }
 
 /// Reads the value written by `InitTask`, adds the counter's setup count,
-/// and stores the combined result back into the in-memory store.
+/// and stores the combined result back into the in-memory blackboard.
 struct ProcessTask;
 
 #[task(state = Step)]
 impl ProcessTask {
     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         let counter = res.get::<CounterResource>()?;
 
-        let value: u32 = store.get("value")?;
+        let value: u32 = board.get("value")?;
         let result = value + counter.get_setup_count();
-        store.put("result", result);
+        board.put("result", result);
         println!("ProcessTask: result = {result}");
 
         Ok(Step::Persist)
@@ -210,10 +210,10 @@ struct PersistTask;
 #[task(state = Step)]
 impl PersistTask {
     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         let redb = res.get::<RedbResource>()?;
 
-        let result: u32 = store.get("result")?;
+        let result: u32 = board.get("result")?;
         let db = redb.db()?;
 
         let write_tx = db
@@ -273,7 +273,7 @@ async fn main() -> Result<(), CanoError> {
     println!("==========================");
     println!();
 
-    let store = MemoryStore::new();
+    let board = Blackboard::new();
     let counter = CounterResource::new();
 
     // Keep a second handle to the same Arc so we can inspect it after the
@@ -291,7 +291,7 @@ async fn main() -> Result<(), CanoError> {
     }
 
     let resources = Resources::new()
-        .insert(store.clone())
+        .insert(board.clone())
         .insert(counter)
         .insert(WorkflowParams { multiplier: 3 })
         .insert(RedbResource::new(db_path));
@@ -307,7 +307,7 @@ async fn main() -> Result<(), CanoError> {
     let final_state = workflow.orchestrate(Step::Init).await?;
     assert_eq!(final_state, Step::Done);
 
-    let result: u32 = store.get("result")?;
+    let result: u32 = board.get("result")?;
     println!("In-memory result: {result}");
 
     // The orchestrator called setup() once before running tasks.
@@ -323,7 +323,7 @@ async fn main() -> Result<(), CanoError> {
     println!("  - Custom Resource with setup/teardown lifecycle (CounterResource)");
     println!("  - Persistent ACID resource (RedbResource) with file lifecycle");
     println!("  - Plain config resource (WorkflowParams) with no-op lifecycle");
-    println!("  - In-memory hand-off store (MemoryStore) shared across tasks");
+    println!("  - In-memory hand-off blackboard (Blackboard) shared across tasks");
     println!("  - Arc-based sharing for post-workflow inspection");
 
     Ok(())

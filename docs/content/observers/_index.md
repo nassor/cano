@@ -56,7 +56,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step { Start, Done }
 
-#[derive(Clone)]
 struct DoWork;
 
 #[task(state = Step)]
@@ -69,6 +68,7 @@ impl DoWork {
 #[derive(Default)]
 struct TaskCounter(AtomicUsize);
 
+// Override only the hooks you care about; the remaining eleven default to no-ops.
 impl WorkflowObserver for TaskCounter {
     fn on_task_success(&self, task_id: &str) {
         let n = self.0.fetch_add(1, Ordering::Relaxed) + 1;
@@ -80,6 +80,7 @@ impl WorkflowObserver for TaskCounter {
 async fn main() -> Result<(), CanoError> {
     let counter = Arc::new(TaskCounter::default());
 
+    // Keep an Arc clone so main can read the counter after orchestrate() completes.
     let workflow = Workflow::bare()
         .register(Step::Start, DoWork)
         .add_exit_state(Step::Done)
@@ -252,11 +253,11 @@ use std::borrow::Cow;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step { Start, Done }
 
-#[derive(Clone)]
 struct FetchOrders;
 
 #[task(state = Step)]
 impl FetchOrders {
+    // Stable identifier passed as task_id to observer hooks, checkpoints, and metrics.
     fn name(&self) -> Cow<'static, str> {
         "fetch-orders".into()
     }
@@ -281,24 +282,31 @@ channel and process it elsewhere:
 
 ```rust
 use cano::prelude::*;
-use std::sync::mpsc::{Sender, channel};
+use std::sync::Arc;
+use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 
 struct ChannelObserver {
-    tx: Sender<String>,
+    tx: UnboundedSender<String>,
 }
 
 impl WorkflowObserver for ChannelObserver {
     fn on_task_failure(&self, task_id: &str, err: &CanoError) {
-        // Push and return. A separate task drains the receiver.
+        // Enqueue non-blockingly and return immediately; the async consumer handles I/O.
         let _ = self.tx.send(format!("{task_id} failed: {err}"));
     }
 }
 
-fn main() {
-    let (tx, _rx) = channel();
-    let observer: std::sync::Arc<dyn WorkflowObserver> =
-        std::sync::Arc::new(ChannelObserver { tx });
-    let _ = observer;
+#[tokio::main]
+async fn main() {
+    let (tx, mut rx) = unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            eprintln!("alert sink: {msg}");
+        }
+    });
+
+    // Attach this Arc<dyn WorkflowObserver> to any Workflow via .with_observer(observer).
+    let _observer: Arc<dyn WorkflowObserver> = Arc::new(ChannelObserver { tx });
 }
 ```
 <hr class="section-divider">
@@ -321,7 +329,6 @@ use std::sync::Arc;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step { Start, Done }
 
-#[derive(Clone)]
 struct DoWork;
 
 #[task(state = Step)]
@@ -333,6 +340,8 @@ impl DoWork {
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
+    // Install a tracing subscriber in main() (e.g. tracing_subscriber::fmt::init()).
+    // TracingObserver emits flat events under the `cano::observer` target.
     let workflow = Workflow::bare()
         .register(Step::Start, DoWork)
         .add_exit_state(Step::Done)
@@ -400,8 +409,8 @@ struct ReadReplica;
 
 #[resource]
 impl Resource for ReadReplica {
+    // setup() and teardown() keep their no-op defaults; health() runs only when queried.
     async fn health(&self) -> HealthStatus {
-        // ... measure replication lag ...
         let lag_secs = 8;
         if lag_secs > 30 {
             HealthStatus::Unhealthy(format!("replication lag {lag_secs}s"))
@@ -431,17 +440,22 @@ after another.
 ```rust
 use cano::prelude::*;
 
-// PrimaryDb and ReadReplica are Resource impls (see ReadReplica above).
+#[derive(Resource)]
+struct PrimaryDb;
+
+// ReadReplica is defined above with a custom health() check.
 #[tokio::main]
 async fn main() {
     let resources = Resources::new()
         .insert(PrimaryDb)
         .insert(ReadReplica);
 
+    // Sequential per-resource report in insertion order.
     for (label, status) in resources.check_all_health().await {
         println!("{label}: {status:?}");
     }
 
+    // Worst status across all resources: Healthy < Degraded < Unhealthy.
     match resources.aggregate_health().await {
         HealthStatus::Healthy => println!("all good"),
         other => println!("attention needed: {other:?}"),
@@ -492,16 +506,20 @@ impl WorkflowObserver for PrintingObserver {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step { Load, Done }
 
-struct FlakyLoad { remaining_failures: Arc<AtomicUsize> }
+struct FlakyLoad {
+    attempts: AtomicUsize,
+}
 
 #[task(state = Step)]
 impl FlakyLoad {
     fn config(&self) -> TaskConfig {
+        // 1 initial attempt + up to 3 retries, 20 ms apart.
         TaskConfig::new().with_fixed_retry(3, Duration::from_millis(20))
     }
     fn name(&self) -> Cow<'static, str> { "load".into() }
     async fn run(&self) -> Result<Step, CanoError> {
-        if self.remaining_failures.fetch_sub(1, Ordering::SeqCst) > 0 {
+        // Fail the first 2 attempts, succeed on attempt 3 without underflowing the counter.
+        if self.attempts.fetch_add(1, Ordering::SeqCst) < 2 {
             return Err(CanoError::task_execution("upstream not ready yet"));
         }
         Ok(Step::Done)
@@ -513,10 +531,11 @@ async fn main() -> Result<(), CanoError> {
     let observer = Arc::new(PrintingObserver::default());
 
     let workflow = Workflow::bare()
-        .register(Step::Load, FlakyLoad { remaining_failures: Arc::new(AtomicUsize::new(2)) })
+        .register(Step::Load, FlakyLoad { attempts: AtomicUsize::new(0) })
         .add_exit_state(Step::Done)
         .with_observer(observer.clone());
 
+    // Attempts 1 & 2 fire on_retry; attempt 3 recovers and fires on_task_success (not on_task_failure).
     workflow.orchestrate(Step::Load).await?;
     assert_eq!(observer.failures.load(Ordering::Relaxed), 0);
     Ok(())

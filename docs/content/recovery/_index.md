@@ -7,7 +7,7 @@ template = "section.html"
 <div class="content-wrapper">
 <h1>Crash recovery</h1>
 <p class="subtitle">Persist every state transition, then resume a crashed run from the last checkpoint.</p>
-<p class="feature-tag">The <code>CheckpointStore</code> trait is always available. <code>RedbCheckpointStore</code>, used in the examples below, is behind the <code>recovery</code> feature gate (<code>features = ["recovery"]</code>).</p>
+<p class="feature-tag">The <code>CheckpointStore</code> trait is always available. <code>RedbStore</code> is behind <code>store-redb</code>, which is on by default. <code>PostgresStore</code> is behind <code>store-postgres</code> and <code>NatsStore</code> behind <code>store-nats</code>.</p>
 
 <p>
 Attach a <code>CheckpointStore</code> to a <a href="../workflows/">Workflow</a> and the engine
@@ -17,9 +17,13 @@ checkpointed state and continues forward.
 </p>
 
 <p>
-The trait is backend agnostic: implement it over Postgres, an HTTP service, a file, anything. With
-the <code>recovery</code> feature, <code>RedbCheckpointStore</code> is an embedded, ACID, daemon-free
-implementation. A workflow with no checkpoint store pays nothing.
+The trait is backend agnostic: implement it over any storage you run. Three stores ship
+with the crate, redb on by default, the two network stores each behind a feature:
+<code>RedbStore</code> (an embedded, ACID, daemon-free file),
+<code>PostgresStore</code> (one PostgreSQL table) and <code>NatsStore</code> (a
+NATS JetStream Key/Value bucket). A workflow with no checkpoint store pays nothing. With the
+<code>scheduler</code> feature each of the three also implements <code>SchedulerStore</code>, the shared
+record that lets <a href="../scheduler/several-instances/">several scheduler instances</a> run one set of flows.
 </p>
 
 <nav class="page-toc" aria-label="Table of contents">
@@ -30,8 +34,7 @@ implementation. A workflow with no checkpoint store pays nothing.
 <li><a href="#resuming">Resuming a run</a></li>
 <li><a href="#versioning">Workflow versioning</a></li>
 <li><a href="#idempotency">The idempotency contract</a></li>
-<li><a href="#trait">The <code>CheckpointStore</code> trait</a></li>
-<li><a href="#redb">Built in: <code>RedbCheckpointStore</code></a></li>
+<li><a href="#stores">Checkpoint stores</a></li>
 <li><a href="#observer-events">Observer events</a></li>
 <li><a href="#full-example">Full example</a></li>
 </ol>
@@ -52,14 +55,13 @@ Two builders opt a workflow into checkpointing:
 
 ```rust
 use cano::prelude::*;
-use cano::RedbCheckpointStore;            // behind the `recovery` feature
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step { Start, Work, Done }
 
-#[derive(Clone)] struct StartTask;
-#[derive(Clone)] struct WorkTask;
+struct StartTask;
+struct WorkTask;
 
 #[task(state = Step)]
 impl StartTask {
@@ -76,8 +78,10 @@ impl WorkTask {
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let checkpoint_store = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
+    // Opens cano.redb in the platform's persistent state directory, creating parent dirs.
+    let checkpoint_store = Arc::new(RedbStore::open_default()?);
 
+    // Persist each state entry under "run-42" before running its task; cleared on exit.
     let workflow = Workflow::bare()
         .register(Step::Start, StartTask)
         .register(Step::Work, WorkTask)
@@ -135,7 +139,10 @@ which is what <code>CheckpointStore::load_run</code> returns.</p>
 <p>
 <code>Workflow::resume_from(workflow_id)</code> loads the run with <code>load_run</code> and
 re-enters the FSM from the highest-sequence row. <code>resume_from_with_token(workflow_id, &amp;token)</code>
-makes the resumed run cancellable.
+makes the resumed run cancellable. When a workflow runs under the
+<a href="../scheduler/#checkpoint-resume">scheduler</a>, the scheduler defaults <code>workflow_id</code> to
+the flow id when unset, clears stale completed exit logs, and automatically resumes unfinished runs
+on the next tick or failover.
 </p>
 
 <div class="diagram-frame">
@@ -200,17 +207,17 @@ the run had already finished and <code>resume_from</code> returns that state imm
 
 ```rust
 use cano::prelude::*;
-use cano::RedbCheckpointStore;
 use std::sync::Arc;
 
 // Step, StartTask and WorkTask are the ones from the first example.
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let checkpoint_store = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
+    let checkpoint_store = Arc::new(RedbStore::open_default()?);
     let workflow = Workflow::bare()
         .register(Step::Start, StartTask)
         .register(Step::Work, WorkTask)
         .add_exit_state(Step::Done)
+        // No with_workflow_id needed on the builder when only calling resume_from().
         .with_checkpoint_store(checkpoint_store);
 
     // An earlier process crashed mid-run; pick up where it left off.
@@ -254,6 +261,7 @@ let workflow = Workflow::new(resources)
     .add_exit_state(MyState::Done)
     .with_checkpoint_store(checkpoint_store)
     .with_workflow_id("orders-v2")
+    // Stamp version 2 on every row; resume_from returns WorkflowVersionMismatch if stored != 2.
     .with_workflow_version(2);
 ```
 
@@ -304,7 +312,7 @@ new states added after the current exit state.
 
 <p>
 A workflow that never calls <code>with_workflow_version</code> uses <code>0</code> on both sides, so
-the check always passes. <code>RedbCheckpointStore</code> decodes rows stored without a version as
+the check always passes. <code>RedbStore</code> decodes rows stored without a version as
 <code>0</code>, so an existing database resumes under a workflow at version 0 with no migration.
 </p>
 <hr class="section-divider">
@@ -320,98 +328,16 @@ conditional writes. States before the resume point never re-run.</p>
 </div>
 <hr class="section-divider">
 
-<h2 id="trait"><a href="#trait" class="anchor-link" aria-hidden="true">#</a>The <code>CheckpointStore</code> trait</h2>
+<h2 id="stores"><a href="#stores" class="anchor-link" aria-hidden="true">#</a>Checkpoint stores</h2>
 <p>
-The trait has three methods and no feature flag. Implement it over any storage:
-</p>
-
-```rust
-use cano::recovery::{CheckpointRow, CheckpointStore};
-use cano::CanoError;
-use std::collections::HashMap;
-use std::sync::Mutex;
-
-#[derive(Default)]
-struct InMemoryStore(Mutex<HashMap<String, Vec<CheckpointRow>>>);
-
-// `#[cano::checkpoint_store]` on an inherent `impl` builds the `impl CheckpointStore for ...`
-// header for you and rewrites the `async fn`s. You can also write the header yourself:
-// `#[cano::checkpoint_store] impl CheckpointStore for InMemoryStore { ... }`.
-#[cano::checkpoint_store]
-impl InMemoryStore {
-    async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
-        self.0.lock().unwrap().entry(workflow_id.to_string()).or_default().push(row);
-        Ok(())
-    }
-    async fn load_run(&self, workflow_id: &str) -> Result<Vec<CheckpointRow>, CanoError> {
-        let mut rows = self.0.lock().unwrap().get(workflow_id).cloned().unwrap_or_default();
-        rows.sort_by_key(|r| r.sequence);   // load_run must return rows in ascending sequence
-        Ok(rows)
-    }
-    async fn clear(&self, workflow_id: &str) -> Result<(), CanoError> {
-        self.0.lock().unwrap().remove(workflow_id);
-        Ok(())
-    }
-}
-```
-
-<p>The contract for an implementation:</p>
-<dl class="key-list">
-<dt><code>append(workflow_id, row)</code></dt>
-<dd>Durably persists the row with its <code>kind</code>, <code>output_blob</code> and <code>workflow_version</code>. It must reject a duplicate <code>(workflow_id, sequence)</code> with an <code>Err</code> instead of overwriting: a collision means two runs share a workflow id. <code>RedbCheckpointStore</code> enforces this with its composite key, and the Postgres store in <code>cano-e2e</code> with its primary key. The sample above skips the check for brevity; <code>custom_checkpoint_store</code> includes it.</dd>
-
-<dt><code>load_run(workflow_id)</code></dt>
-<dd>Returns every row ever appended for the id, sorted ascending by <code>sequence</code>, or an empty <code>Vec</code> for an unknown id.</dd>
-
-<dt><code>clear(workflow_id)</code></dt>
-<dd>Removes the run's rows and touches no other id. Clearing an unknown id is a no-op.</dd>
-</dl>
-<p>
-A store that maps rows to columns needs one for <code>kind</code> and one for
-<code>workflow_version</code>; the sample stores whole rows, so it has both. Implementations must be
-<code>Send + Sync + 'static</code> so one store can be shared, typically as
-<code>Arc&lt;dyn CheckpointStore&gt;</code>, across concurrent workflows.
-</p>
-<p>
-The engine calls <code>clear</code> when a run reaches an exit state, and after a fully successful
-<a href="../saga/">compensation rollback</a>, so a finished run leaves no log behind. A failed run
-with nothing to compensate keeps its log, so it can be resumed. A <code>clear</code> failure is not
-fatal: the engine fires <code>on_checkpoint_clear_failed</code> and returns the run's own result.
-</p>
-
-<div class="callout callout-tip">
-<p>Runnable example: <code>cargo run --example custom_checkpoint_store</code>. A complete in-memory
-<code>CheckpointStore</code> built with <code>#[cano::checkpoint_store]</code>, including the
-duplicate <code>(workflow_id, sequence)</code> rejection, wired into a workflow with a
-<code>resume_from</code> walk-through. It needs no feature flag. The <code>cano-e2e</code> crate has a
-Postgres-backed implementation for the database case.</p>
-</div>
-<hr class="section-divider">
-
-<h2 id="redb"><a href="#redb" class="anchor-link" aria-hidden="true">#</a>Built in: <code>RedbCheckpointStore</code></h2>
-<p class="feature-tag">Behind the <code>recovery</code> feature gate (<code>features = ["recovery"]</code>). The <code>CheckpointStore</code> trait and <code>CheckpointRow</code> are always available.</p>
-
-<p>
-<code>RedbCheckpointStore</code> is an embedded, ACID, pure-Rust key-value store
-(<a href="https://docs.rs/redb">redb</a>) with no background daemon, which suits a recovery log that
-lives in the same process as the engine. <code>RedbCheckpointStore::new(path)</code> creates the
-database file if absent and the checkpoint table. Clones share one handle behind an
-<code>Arc</code>.
-</p>
-
-```rust
-use cano::RedbCheckpointStore;
-use std::sync::Arc;
-
-let checkpoint_store: Arc<RedbCheckpointStore> = Arc::new(RedbCheckpointStore::new("workflow.redb")?);
-// pass it to the workflow: .with_checkpoint_store(checkpoint_store)
-```
-
-<p>
-One table maps <code>(workflow_id, sequence)</code> to a <a href="https://docs.rs/postcard"><code>postcard</code></a>-encoded
-payload holding the other <code>CheckpointRow</code> fields, including <code>kind</code>. redb orders
-composite keys element by element, so a workflow's rows are range-scanned in ascending
-<code>sequence</code>. The sequence lives in the key, not the value.
+The log lives in a <code>CheckpointStore</code>: the built-in <code>RedbStore</code>,
+<code>PostgresStore</code> or <code>NatsStore</code>, or your own implementation of the trait's three
+methods (<code>append</code>, <code>load_run</code>, <code>clear</code>).
+<a href="checkpoint-stores/">Checkpoint stores</a> compares the built-in stores, lists their settings,
+and walks through writing and testing your own. For <code>PostgresStore</code> and
+<code>NatsStore</code>, <a href="checkpoint-stores/#network-failures">Connection failures, retries and outages</a>
+covers automatic reconnection, per-call retry policies, and how runs, sagas and stranded logs behave
+when the store stays unreachable.
 </p>
 <hr class="section-divider">
 
@@ -444,7 +370,7 @@ A <code>Start</code>, <code>Process</code>, <code>Finalize</code>, <code>Done</c
 <code>Process</code> task fails on its first attempt, standing in for a crash, so <code>orchestrate</code>
 returns an error. A follow-up <code>resume_from</code> completes the run. This is the
 <code>workflow_recovery</code> example shipped with the crate: run it with
-<code>cargo run --example workflow_recovery --features recovery</code>. For a real crash (SIGKILL
+<code>cargo run --example workflow_recovery</code>. For a real crash (SIGKILL
 mid-flight, then restart and resume in a fresh process), see the integration tests
 <code>tests/recovery_e2e.rs</code> and <code>tests/stepped_resume_e2e.rs</code>, the
 <code>stepped_task</code> example, and the Docker and Postgres suite in the <code>cano-e2e</code>
@@ -453,7 +379,6 @@ workspace member.
 
 ```rust
 use cano::prelude::*;
-use cano::RedbCheckpointStore;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -462,11 +387,13 @@ enum Step { Start, Process, Finalize, Done }
 
 // Shared across runs through Resources: the first Process attempt errors, later ones succeed.
 #[derive(Resource)]
-struct CrashOnce { attempts: AtomicU32 }
+struct CrashOnce {
+    attempts: AtomicU32,
+}
 
-#[derive(Clone)] struct StartTask;
-#[derive(Clone)] struct ProcessTask;
-#[derive(Clone)] struct FinalizeTask;
+struct StartTask;
+struct ProcessTask;
+struct FinalizeTask;
 
 #[task(state = Step)]
 impl StartTask {
@@ -477,7 +404,7 @@ impl StartTask {
 
 #[task(state = Step)]
 impl ProcessTask {
-    // No retries by default, so the first failure leaves `orchestrate`, like a real crash.
+    // No retries by default, so the first failure exits `orchestrate`, like a real crash.
     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
         let crash = res.get::<CrashOnce>()?;
         if crash.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -496,8 +423,10 @@ impl FinalizeTask {
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let checkpoint_store = Arc::new(RedbCheckpointStore::new("recovery.redb")?);
-    let resources = Resources::new().insert(CrashOnce { attempts: AtomicU32::new(0) });
+    let checkpoint_store = Arc::new(RedbStore::new("recovery.redb")?);
+    let resources = Resources::new().insert(CrashOnce {
+        attempts: AtomicU32::new(0),
+    });
     let workflow = Workflow::new(resources)
         .register(Step::Start, StartTask)
         .register(Step::Process, ProcessTask)
@@ -506,14 +435,15 @@ async fn main() -> Result<(), CanoError> {
         .with_checkpoint_store(checkpoint_store.clone())
         .with_workflow_id("demo-run");
 
-    // Run 1 fails inside ProcessTask. The Start and Process rows are already durable.
-    let _ = workflow.orchestrate(Step::Start).await;
+    // Run 1 fails inside ProcessTask; Start and Process rows are already durable.
+    let crash_err = workflow.orchestrate(Step::Start).await.unwrap_err();
+    println!("first run aborted: {crash_err}");
 
-    // Run 2 resumes: ProcessTask runs again (and now succeeds), then the run finishes at Done.
+    // Run 2 resumes: ProcessTask runs again and succeeds, then the workflow reaches Done.
     let final_state = workflow.resume_from("demo-run").await?;
     assert_eq!(final_state, Step::Done);
 
-    // Reaching Done cleared the log, so nothing is left to print here.
+    // Reaching an exit state clears the run's checkpoint log.
     assert!(checkpoint_store.load_run("demo-run").await?.is_empty());
     Ok(())
 }

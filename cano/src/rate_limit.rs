@@ -628,8 +628,10 @@ impl WindowedRateLimiter {
         park_until_admitted(cost, || {
             let mut st = self.inner.lock();
             self.roll_locked(&mut st);
-            if st.used.saturating_add(cost) <= self.policy.limit {
-                st.used += cost;
+            if let Some(next) = st.used.checked_add(cost)
+                && next <= self.policy.limit
+            {
+                st.used = next;
                 Ok(WindowPermit { _private: () })
             } else if cost > self.policy.limit {
                 Err(Duration::MAX)
@@ -674,7 +676,11 @@ impl WindowedRateLimiter {
         }
         let mut st = self.inner.lock();
         self.roll_locked(&mut st);
-        if st.used.saturating_add(cost) <= self.policy.limit {
+        if st
+            .used
+            .checked_add(cost)
+            .is_some_and(|next| next <= self.policy.limit)
+        {
             Duration::ZERO
         } else if cost > self.policy.limit {
             Duration::MAX
@@ -691,8 +697,10 @@ impl WindowedRateLimiter {
         if cost == 0 {
             return Some(st.generation);
         }
-        if st.used.saturating_add(cost) <= self.policy.limit {
-            st.used += cost;
+        if let Some(next) = st.used.checked_add(cost)
+            && next <= self.policy.limit
+        {
+            st.used = next;
             Some(st.generation)
         } else {
             None
@@ -1766,6 +1774,23 @@ mod tests {
         )));
         assert!(w.try_acquire_n(u64::MAX).is_none());
         assert_eq!(w.time_until(u64::MAX), Duration::MAX);
+    }
+
+    #[test]
+    fn windowed_limiter_u64_max_limit_does_not_overflow_or_wrap() {
+        let w = Arc::new(WindowedRateLimiter::new(WindowPolicy::new(
+            u64::MAX,
+            Duration::from_secs(60),
+        )));
+        assert!(w.try_acquire_n(1).is_some());
+        assert_eq!(w.used(), 1);
+        // `1 + u64::MAX` would overflow u64 without `checked_add`: must reject cleanly.
+        assert!(w.try_acquire_n(u64::MAX).is_none());
+        assert!(w.time_until(u64::MAX) > Duration::ZERO);
+        assert_eq!(w.used(), 1);
+        assert!(w.try_acquire_n(u64::MAX - 1).is_some());
+        assert_eq!(w.used(), u64::MAX);
+        assert!(w.try_acquire_n(1).is_none());
     }
 }
 

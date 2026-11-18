@@ -60,6 +60,8 @@
 {%- set here = current_url | default(value="") | trim_end(pat="/") -%}
 {%- set home = get_url(path='/') -%}
 {%- set home_key = home | trim_end(pat="/") -%}
+{%- set ver_parts = config.extra.version | split(pat=".") -%}
+{%- set cano_minor = ver_parts[0] ~ "." ~ ver_parts[1] -%}
 {%- set_global nav_group = "" -%}
 {%- set_global nav_prev = false -%}
 {%- set_global nav_prev_group = "" -%}
@@ -176,7 +178,13 @@
             </nav>
             {% endif %}
 
-            {% block content %}{% endblock content %}
+            {% block content %}
+            {%- if page is defined -%}
+            {{ page.content | replace(from="@CANO_MINOR@", to=cano_minor) | replace(from="@CANO_VERSION@", to=config.extra.version) | safe }}
+            {%- elif section is defined -%}
+            {{ section.content | replace(from="@CANO_MINOR@", to=cano_minor) | replace(from="@CANO_VERSION@", to=config.extra.version) | safe }}
+            {%- endif -%}
+            {% endblock content %}
 
             {% if nav_prev or nav_next %}
             <nav class="pager" aria-label="Pagination">

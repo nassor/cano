@@ -1,8 +1,8 @@
 //! # Crash Recovery — checkpoint a workflow and resume after a "crash"
 //!
-//! Run with: `cargo run --example workflow_recovery --features recovery`
+//! Run with: `cargo run --example workflow_recovery`
 //!
-//! A `Start → Process → Finalize → Done` workflow with a [`RedbCheckpointStore`](cano::RedbCheckpointStore)
+//! A `Start → Process → Finalize → Done` workflow with a [`RedbStore`](cano::RedbStore)
 //! attached. `Process` fails the first time it runs (standing in for a crash), so the
 //! initial `orchestrate` returns an error — but the checkpoint log already has a `Process`
 //! row (state entries are checkpointed *before* their task runs), so
@@ -14,7 +14,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-use cano::RedbCheckpointStore;
+use cano::RedbStore;
 use cano::prelude::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -93,7 +93,7 @@ impl FinalizeTask {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
-    let checkpoint_store = Arc::new(RedbCheckpointStore::new(dir.path().join("recovery.redb"))?);
+    let checkpoint_store = Arc::new(RedbStore::new(dir.path().join("recovery.redb"))?);
     let run_id = "demo-run-42";
 
     // One workflow definition, one checkpoint store — reused across both calls below.

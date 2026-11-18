@@ -10,7 +10,7 @@ template = "section.html"
 
 <p>
 A <code>RouterTask</code> reads <a href="../resources/">Resources</a> and returns the next state
-(<code>Result&lt;TState, CanoError&gt;</code>). It writes to no store and calls no external system.
+(<code>Result&lt;TState, CanoError&gt;</code>). It writes to no blackboard and calls no external system.
 Because re-running a router costs nothing, the engine records no checkpoint row for it (see
 <a href="../recovery/">Crash recovery</a>). It is one of the <a href="../task/">Task</a> family of
 processing models, alongside <a href="../poll-task/">PollTask</a>, <a href="../timer-task/">TimerTask</a>,
@@ -102,14 +102,17 @@ use cano::prelude::*;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step { Classify, FastPath, SlowPath, Done }
 
-struct Config { use_fast_path: bool }
-#[resource]
-impl Resource for Config {}
+// Stateless resources derive Resource for default lifecycle hooks.
+#[derive(Resource)]
+struct Config {
+    use_fast_path: bool,
+}
 
 struct Classifier;
 
 #[task::router(state = Step)]
 impl Classifier {
+    // Dispatched once without writing a StateEntry checkpoint row.
     async fn route(&self, res: &Resources) -> Result<Step, CanoError> {
         let config = res.get::<Config>()?;
         if config.use_fast_path {
@@ -215,18 +218,21 @@ use cano::prelude::*;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step { Classify, FastPath, SlowPath, Done }
 
-struct Config { use_fast_path: bool }
-#[resource]
-impl Resource for Config {}
+#[derive(Resource)]
+struct Config {
+    use_fast_path: bool,
+}
 
 struct Classifier;
 
 #[task::router]
 impl RouterTask<Step> for Classifier {
+    // Stable label used in observer events and traces.
     fn name(&self) -> std::borrow::Cow<'static, str> {
         "classifier".into()
     }
 
+    // Read-only decision: no side effects and no checkpoint row written.
     async fn route(&self, res: &Resources) -> Result<Step, CanoError> {
         let config = res.get::<Config>()?;
         Ok(if config.use_fast_path {
@@ -248,7 +254,7 @@ already-loaded data, a feature toggle. The branch then leaves no checkpoint row 
 number.
 </p>
 <p>
-If the branching logic also does work, such as writing to the store or calling an external system,
+If the branching logic also does work, such as writing to the blackboard or calling an external system,
 use a plain <a href="../task/">Task</a> and return the next state from <code>run</code>. That is the
 "Conditional Routing Task" pattern on the <a href="../task/#patterns">Tasks</a> page, and its side
 effects need a checkpoint.

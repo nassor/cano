@@ -22,6 +22,7 @@
 //! - `#[cano::saga::task]` — for `impl CompensatableTask`
 //! - `#[cano::resource]` — for `impl Resource` and the `Resource` trait
 //! - `#[cano::checkpoint_store]` — for `impl CheckpointStore` and the `CheckpointStore` trait
+//! - `#[cano::scheduler_store]` — for `impl SchedulerStore` and the `SchedulerStore` trait
 //!
 //! All are functionally identical in the async-rewrite they perform; they differ
 //! only in name. New traits that need async-fn-in-dyn rewriting can ship their
@@ -60,9 +61,9 @@ mod timer_task_impl;
 ///
 /// #[derive(FromResources)]
 /// struct Deps {
-///     store: Arc<MemoryStore>,
+///     board: Arc<Blackboard>,
 ///     #[res("audit")]
-///     audit: Arc<MemoryStore>,
+///     audit: Arc<Blackboard>,
 /// }
 /// ```
 #[proc_macro_derive(FromResources, attributes(res))]
@@ -122,8 +123,33 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// identical to [`task`]; the separate name makes the attribute
 /// self-documenting at impl sites.
 #[proc_macro_attribute]
-pub fn resource(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    async_rewrite::rewrite(item)
+pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
+    async_rewrite::rewrite(attr, item, "resource")
+}
+
+/// Apply to the `SchedulerStore` trait definition, an
+/// `impl SchedulerStore for T` block, or an inherent `impl T { ... }` block.
+///
+/// Two surface forms on impl blocks:
+///
+/// 1. **Trait-impl form:** `#[scheduler_store] impl SchedulerStore for T { ... }`.
+/// 2. **Inherent-impl form:** `#[scheduler_store] impl T { async fn load(..); async fn
+///    compare_and_swap(..); async fn remove(..); }` — the macro builds the
+///    `impl SchedulerStore for T` header and enforces that all three methods are present.
+#[proc_macro_attribute]
+pub fn scheduler_store(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if let Ok(item_impl) = syn::parse::<syn::ItemImpl>(item.clone())
+        && item_impl.trait_.is_none()
+    {
+        return checkpoint_store_impl::expand(
+            &checkpoint_store_impl::SCHEDULER_STORE,
+            attr.into(),
+            item.into(),
+        )
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into();
+    }
+    async_rewrite::rewrite(attr, item, "scheduler_store")
 }
 
 /// Apply to the `CheckpointStore` trait definition, an
@@ -143,15 +169,19 @@ pub fn resource(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// `Pin<Box<dyn Future<Output = ...> + Send + 'async_trait>>`. On the trait definition the macro
 /// just performs that rewrite.
 #[proc_macro_attribute]
-pub fn checkpoint_store(_attr: TokenStream, item: TokenStream) -> TokenStream {
+pub fn checkpoint_store(attr: TokenStream, item: TokenStream) -> TokenStream {
     if let Ok(item_impl) = syn::parse::<syn::ItemImpl>(item.clone())
         && item_impl.trait_.is_none()
     {
-        return checkpoint_store_impl::expand(item.into())
-            .unwrap_or_else(syn::Error::into_compile_error)
-            .into();
+        return checkpoint_store_impl::expand(
+            &checkpoint_store_impl::CHECKPOINT_STORE,
+            attr.into(),
+            item.into(),
+        )
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into();
     }
-    async_rewrite::rewrite(item)
+    async_rewrite::rewrite(attr, item, "checkpoint_store")
 }
 
 /// Apply to the `CompensatableTask` trait definition, an
@@ -406,4 +436,177 @@ pub fn derive_resource(input: TokenStream) -> TokenStream {
     resource_derive::expand(input.into())
         .unwrap_or_else(syn::Error::into_compile_error)
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use quote::quote;
+
+    #[test]
+    fn duplicate_state_argument_is_rejected() {
+        let Err(err) = attr_args::AttrArgs::parse(quote!(state = A, state = B)) else {
+            panic!("expected duplicate state error");
+        };
+        assert!(err.to_string().contains("duplicate `state`"), "{err}");
+    }
+
+    #[test]
+    fn non_empty_args_on_store_macros_are_rejected() {
+        let err = checkpoint_store_impl::expand(
+            &checkpoint_store_impl::CHECKPOINT_STORE,
+            quote!(bad = 1),
+            quote!(
+                impl Foo {}
+            ),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("#[cano::checkpoint_store]"),
+            "{err}"
+        );
+
+        let err = checkpoint_store_impl::expand(
+            &checkpoint_store_impl::SCHEDULER_STORE,
+            quote!(bad = 1),
+            quote!(
+                impl Foo {}
+            ),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("#[cano::scheduler_store]"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn owned_self_receiver_is_rejected_with_clear_error() {
+        let trait_def: syn::ItemTrait = syn::parse2(quote!(
+            trait Bad {
+                async fn take(self);
+            }
+        ))
+        .unwrap();
+        let err = async_rewrite::rewrite_trait(trait_def).unwrap_err();
+        assert!(err.to_string().contains("owned `self`"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_methods_consts_and_assoc_types_are_rejected_in_inherent_impls() {
+        let dup_task = task_impl::expand(
+            quote!(state = S),
+            quote!(
+                impl MyTask {
+                    async fn run(&self) -> Result<S, CanoError> {
+                        todo!()
+                    }
+                    async fn run(&self) -> Result<S, CanoError> {
+                        todo!()
+                    }
+                }
+            ),
+        )
+        .unwrap_err();
+        assert!(
+            dup_task.to_string().contains("duplicate method `run`"),
+            "{dup_task}"
+        );
+
+        let const_in_task = task_impl::expand(
+            quote!(state = S),
+            quote!(
+                impl MyTask {
+                    const X: usize = 1;
+                    async fn run(&self) -> Result<S, CanoError> {
+                        todo!()
+                    }
+                }
+            ),
+        )
+        .unwrap_err();
+        assert!(
+            const_in_task
+                .to_string()
+                .contains("unsupported item in inherent"),
+            "{const_in_task}"
+        );
+
+        let dup_assoc = batch_task_impl::expand(
+            quote!(state = S),
+            quote!(
+                impl MyBatch {
+                    type Item = u32;
+                    type Item = u64;
+                }
+            ),
+        )
+        .unwrap_err();
+        assert!(
+            dup_assoc
+                .to_string()
+                .contains("duplicate associated type `Item`"),
+            "{dup_assoc}"
+        );
+
+        let dup_store = checkpoint_store_impl::expand(
+            &checkpoint_store_impl::SCHEDULER_STORE,
+            quote!(),
+            quote!(
+                impl MySchedStore {
+                    async fn load(&self, id: &str) -> Result<Option<VersionedRecord>, CanoError> {
+                        todo!()
+                    }
+                    async fn load(&self, id: &str) -> Result<Option<VersionedRecord>, CanoError> {
+                        todo!()
+                    }
+                    async fn compare_and_swap(
+                        &self,
+                        id: &str,
+                        exp: Option<u64>,
+                        val: Vec<u8>,
+                    ) -> Result<CasOutcome, CanoError> {
+                        todo!()
+                    }
+                    async fn remove(&self, id: &str) -> Result<(), CanoError> {
+                        todo!()
+                    }
+                }
+            ),
+        )
+        .unwrap_err();
+        assert!(
+            dup_store.to_string().contains("duplicate method `load`"),
+            "{dup_store}"
+        );
+    }
+
+    #[test]
+    fn inherent_scheduler_store_expands_to_cano_scheduler_store_impl() {
+        let tokens = checkpoint_store_impl::expand(
+            &checkpoint_store_impl::SCHEDULER_STORE,
+            quote!(),
+            quote!(
+                impl MySchedStore {
+                    async fn load(&self, _id: &str) -> Result<Option<VersionedRecord>, CanoError> {
+                        Ok(None)
+                    }
+                    async fn compare_and_swap(
+                        &self,
+                        _id: &str,
+                        _exp: Option<u64>,
+                        _val: Vec<u8>,
+                    ) -> Result<CasOutcome, CanoError> {
+                        Ok(CasOutcome::Conflict)
+                    }
+                    async fn remove(&self, _id: &str) -> Result<(), CanoError> {
+                        Ok(())
+                    }
+                }
+            ),
+        )
+        .unwrap();
+        let rendered = tokens.to_string();
+        assert!(rendered.contains("SchedulerStore"), "{rendered}");
+    }
 }

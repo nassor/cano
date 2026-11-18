@@ -37,9 +37,12 @@ until you call <code>reset_flow</code>. Each flow starts with <code>BackoffPolic
 <div class="callout-label">The default delay after a failure is about 1s</div>
 <p>
 <code>BackoffPolicy::default()</code> has a 1s initial delay and applies to every flow, so a failed flow
-waits about 1s before its next attempt, even when its base interval is shorter. The <code>Every</code> loop
-sleeps <code>max(interval, next_eligible - now)</code>. To retry a sub-second flow sooner after a failure,
-lower <code>initial</code> with <code>with_backoff</code>.
+waits about 1s before its next attempt, even when its base interval is shorter. On a standalone
+scheduler the <code>Every</code> loop sleeps <code>max(interval, next_eligible - now)</code> after a run
+finishes; with <a href="../several-instances/"><code>with_store</code></a> it waits until
+<code>max(last_run + interval, next_eligible)</code>, where <code>last_run</code> is when the previous run
+started. To retry a sub-second flow sooner after a failure, lower <code>initial</code> with
+<code>with_backoff</code>.
 </p>
 </div>
 
@@ -67,50 +70,55 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum FlowState { Start, Done }
 
-#[derive(Clone)]
-struct NoopTask;
+struct FlakySyncTask;
 
 #[task(state = FlowState)]
-impl NoopTask {
+impl FlakySyncTask {
+    // Tasks default to TaskConfig::new() (no retries), so each failure increments failure_streak.
     async fn run(&self) -> Result<FlowState, CanoError> {
-        Ok(FlowState::Done)
+        Err(CanoError::task_execution("upstream 503"))
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     let workflow = Workflow::bare()
-        .register(FlowState::Start, NoopTask)
+        .register(FlowState::Start, FlakySyncTask)
         .add_exit_state(FlowState::Done);
 
+    // Call with_backoff after registering the matching flow id.
     let running = Scheduler::new()
         .every("flaky", workflow, FlowState::Start, Duration::from_millis(200))
         .with_backoff(
             "flaky",
             BackoffPolicy {
+                // Delay after the first failure (streak == 1).
                 initial: Duration::from_millis(300),
+                // Growth factor per consecutive failure.
                 multiplier: 2.0,
+                // Upper bound on the computed backoff delay.
                 max_delay: Duration::from_secs(2),
+                // Multiplicative jitter in 1.0 +/- 0.1 to spread synchronized retries.
                 jitter: 0.1,
+                // Transition to Status::Tripped after 3 consecutive failures (None = never trip).
                 streak_limit: Some(3),
             },
         )
         .start()
         .await?;
 
-    // Block until Ctrl-C (or SIGTERM on Unix), then shut down.
-    cano::scheduler::shutdown_signal().await?;
+    // Block until Ctrl-C (or SIGTERM on Unix), then drain and tear down.
+    shutdown_signal().await?;
     running.stop().await?;
     Ok(())
 }
-
 ```
 
 <p>
 The delay after a failure is <code>initial * multiplier^(streak-1)</code>, capped at <code>max_delay</code>,
 then multiplied by a random factor in <code>1 ± jitter</code> and capped again. The <code>Every</code> loop
-sleeps <code>max(interval, next_eligible - now)</code>, and the <code>Cron</code> loop skips ticks that fall
-inside the backoff window.
+waits for the later of its next interval tick (see the callout above) and <code>next_eligible</code>, and the
+<code>Cron</code> loop skips ticks that fall inside the backoff window.
 </p>
 <p>
 <code>BackoffPolicy::default()</code> is a 1s initial delay, a 2.0 multiplier, a 5 minute cap, 0.1 jitter,
@@ -196,70 +204,94 @@ The variants, with the fields they carry:
 <dd>The last run failed. The flow waits until <code>until</code> before its next dispatch, per its <code>BackoffPolicy</code>.</dd>
 <dt><code>Tripped</code> <small>fields <code>streak</code>, <code>last_error</code></small></dt>
 <dd>The streak reached <code>streak_limit</code>. The scheduler does not dispatch the flow again until <code>reset_flow</code> is called.</dd>
+<dt><code>RunningElsewhere</code> <small>fields <code>owner</code>, <code>lease_expires</code></small></dt>
+<dd>Another scheduler instance sharing the store holds a live lease on the flow. Only a scheduler built with <code>with_store</code> reports it. Once <code>lease_expires</code> has passed, <code>status()</code> and <code>list()</code> show the stored state instead. See <a href="../several-instances/">Several scheduler instances</a>.</dd>
 </dl>
 <div class="diagram-frame">
-<p class="diagram-label">Flow status: backoff, trip and recovery</p>
+<p class="diagram-label">Flow status: backoff, trip, leases and recovery</p>
 <div class="cd-wrap">
-<svg class="cd" viewBox="0 0 780 356" role="img" aria-labelledby="backoff-status-title backoff-status-desc">
+<svg class="cd cd-anim" viewBox="0 0 780 380" role="img" aria-labelledby="backoff-status-title backoff-status-desc">
 <title id="backoff-status-title">Flow status transitions</title>
-<desc id="backoff-status-desc">State machine for one scheduled flow. An Idle flow is dispatched and becomes Running. A run that reaches an exit state makes the flow Completed, with the failure streak set to 0 and next_eligible cleared, and the next tick runs it again. A run that fails while the streak stays below streak_limit parks the flow in Backoff until the delay elapses, then the next dispatch runs it again. A run that fails with the streak at streak_limit makes the flow Tripped, and the scheduler stops dispatching it. A run that is cancelled and rolls back cleanly returns the flow to Idle without changing the streak; a failed rollback counts as a failure. Calling reset_flow clears the streak and returns a Tripped flow to Idle.</desc>
+<desc id="backoff-status-desc">State machine for one scheduled flow. An Idle flow is dispatched and becomes Running. A run that reaches an exit state makes the flow Completed with the streak reset to 0, and the next tick runs it again. A failure while the streak stays below streak_limit parks the flow in Backoff until the delay elapses; a failure that brings the streak to streak_limit makes it Tripped. A cancelled run that rolls back cleanly returns to Idle. With a shared store, a flow another instance holds shows as RunningElsewhere until that lease ends; a lease that expires without a release counts as one failure. reset_flow clears the streak and returns a Tripped flow to Idle.</desc>
 <defs><marker id="backoff-status-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
-<path class="e e-dim" d="M636,48 V32 Q636,24 628,24 H374 Q366,24 366,32 V44" marker-end="url(#backoff-status-ah)"/>
-<text class="t-mut" x="496" y="41">next tick</text>
-<path class="e e-dash" d="M300,48 V18 Q300,10 292,10 H108 Q100,10 100,18 V44" marker-end="url(#backoff-status-ah)"/>
-<text class="t-mut" x="200" y="29">cancelled, rolled back</text>
-<circle class="n" cx="20" cy="64" r="5"/>
-<path class="e" d="M27,64 H40" marker-end="url(#backoff-status-ah)"/>
-<path class="e" d="M194,77 H282" marker-end="url(#backoff-status-ah)"/>
-<text class="t-mut" x="238" y="63">dispatch</text>
-<path class="e" d="M446,77 H542" marker-end="url(#backoff-status-ah)"/>
-<text class="t-mut t-ok" x="494" y="63">success</text>
-<path class="e" d="M320,106 V152 Q320,160 312,160 H148 Q140,160 140,168 V228" marker-end="url(#backoff-status-ah)"/>
-<text class="t-mut t-err" x="230" y="134">failure</text>
-<text class="t-mut" x="230" y="150">streak &lt; streak_limit</text>
-<path class="e" d="M180,232 V196 Q180,188 188,188 H392 Q400,188 400,180 V110" marker-end="url(#backoff-status-ah)"/>
-<text class="t-mut" x="300" y="206">until elapsed · next dispatch</text>
-<path class="e" d="M436,106 V202 Q436,210 444,210 H588 Q596,210 596,218 V228" marker-end="url(#backoff-status-ah)"/>
-<text class="t-mut t-err ta-s" x="450" y="176">failure</text>
-<text class="t-mut ta-s" x="450" y="192">streak reaches streak_limit</text>
-<path class="e e-hot" d="M700,308 V330 Q700,338 692,338 H28 Q20,338 20,330 V102 Q20,94 28,94 H40" marker-end="url(#backoff-status-ah)"/>
-<text class="t-code t-hot ta-e" x="316" y="326">reset_flow(id)</text>
-<text class="t-mut t-hot ta-s" x="324" y="326">clears the streak, un-trips the flow</text>
-<rect class="n" x="44" y="48" width="150" height="58" rx="12"/>
-<text class="t-strong" x="119" y="73">Idle</text>
-<text class="t-mut" x="119" y="93">awaiting dispatch</text>
-<rect class="n" x="286" y="48" width="160" height="58" rx="12"/>
-<text class="t-strong" x="366" y="73">Running</text>
-<text class="t-mut" x="366" y="93">workflow executing</text>
-<rect class="n-ok" x="546" y="48" width="180" height="58" rx="12"/>
-<text class="t-strong" x="636" y="73">Completed</text>
-<text class="t-mut" x="636" y="93">reached an exit state</text>
-<text class="t-code t-mut" x="636" y="130">streak = 0 · next_eligible = None</text>
-<rect class="n-warn" x="40" y="232" width="250" height="76" rx="12"/>
-<text class="t-strong" x="165" y="256">Backoff</text>
-<text class="t-code t-mut" x="165" y="276">{ until, streak, last_error }</text>
-<text class="t-mut" x="165" y="295">parked until the delay elapses</text>
-<rect class="n-err" x="476" y="232" width="250" height="76" rx="12"/>
-<text class="t-strong" x="601" y="256">Tripped</text>
-<text class="t-code t-mut" x="601" y="276">{ streak, last_error }</text>
-<text class="t-mut" x="601" y="295">scheduler stops dispatching</text>
+<path class="e e-dash" d="M375,60 V44 Q375,36 367,36 H143 Q135,36 135,44 V56" marker-end="url(#backoff-status-ah)"/>
+<text class="t-mut" x="255" y="26">cancelled, rolled back</text>
+<path class="e e-dim" d="M670,60 V44 Q670,36 662,36 H463 Q455,36 455,44 V56" marker-end="url(#backoff-status-ah)"/>
+<text class="t-mut" x="562" y="26">next tick</text>
+<circle class="n" cx="36" cy="80" r="5"/>
+<path class="e" d="M41,80 H56" marker-end="url(#backoff-status-ah)"/>
+<path class="e" d="M210,80 H331" marker-end="url(#backoff-status-ah)"/>
+<text class="t-mut" x="272" y="68">dispatch</text>
+<path class="e" d="M495,80 H576" marker-end="url(#backoff-status-ah)"/>
+<text class="t-mut t-ok" x="536" y="68">success</text>
+<path class="e" d="M165,118 V246" marker-end="url(#backoff-status-ah)"/>
+<text class="t-mut ta-s" x="173" y="176">peer claims</text>
+<path class="e e-dash" d="M95,250 V122" marker-end="url(#backoff-status-ah)"/>
+<text class="t-mut ta-e" x="87" y="176">lease ends</text>
+<path class="e" d="M385,118 V246" marker-end="url(#backoff-status-ah)"/>
+<text class="t-mut t-err ta-e" x="377" y="170">failure</text>
+<text class="t-mut ta-e" x="377" y="184">streak &lt; limit</text>
+<path class="e" d="M445,250 V122" marker-end="url(#backoff-status-ah)"/>
+<text class="t-mut ta-s" x="453" y="206">delay elapsed</text>
+<text class="t-mut ta-s" x="453" y="220">next dispatch</text>
+<path class="e" d="M495,104 H530 Q538,104 538,112 V170 Q538,178 546,178 H662 Q670,178 670,186 V246" marker-end="url(#backoff-status-ah)"/>
+<text class="t-mut t-err ta-s" x="546" y="140">failure</text>
+<text class="t-mut ta-s" x="546" y="154">streak reaches limit</text>
+<path class="e" d="M204,287 H306" marker-end="url(#backoff-status-ah)"/>
+<text class="t-mut t-err" x="255" y="275">lease expired</text>
+<text class="t-mut" x="255" y="301">one failure</text>
+<path class="e e-hot" d="M670,324 V358 Q670,366 662,366 H22 Q14,366 14,358 V112 Q14,104 22,104 H56" marker-end="url(#backoff-status-ah)"/>
+<text class="t-code t-hot" x="400" y="350">reset_flow(id): clears the streak, un-trips the flow</text>
+<rect class="n" x="60" y="60" width="150" height="58" rx="12"/>
+<text class="t-strong" x="135" y="82">Idle</text>
+<text class="t-mut" x="135" y="102">awaiting dispatch</text>
+<rect class="n-hot" x="335" y="60" width="160" height="58" rx="12"/>
+<text class="t-strong" x="415" y="82">Running</text>
+<text class="t-mut" x="415" y="102">on this instance</text>
+<rect class="n-ok" x="580" y="60" width="180" height="58" rx="12"/>
+<text class="t-strong" x="670" y="82">Completed</text>
+<text class="t-mut t-ok" x="670" y="102">streak reset to 0</text>
+<rect class="n-cop" x="24" y="250" width="180" height="74" rx="12"/>
+<text class="t-strong" x="114" y="272">RunningElsewhere</text>
+<text class="t-code t-mut" x="114" y="291">{ owner, lease_expires }</text>
+<text class="t-mut" x="114" y="309">a peer holds the lease</text>
+<rect class="n-warn" x="310" y="250" width="210" height="74" rx="12"/>
+<text class="t-strong" x="415" y="272">Backoff</text>
+<text class="t-code t-mut" x="415" y="291">{ until, streak, last_error }</text>
+<text class="t-mut" x="415" y="309">parked until the delay elapses</text>
+<rect class="n-err" x="580" y="250" width="180" height="74" rx="12"/>
+<text class="t-strong" x="670" y="272">Tripped</text>
+<text class="t-code t-mut" x="670" y="291">{ streak, last_error }</text>
+<text class="t-mut" x="670" y="309">not dispatched again</text>
+<g class="cd-loop"><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.93;0.99;1" values="1;1;0;0"/>
+<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="10s" repeatCount="indefinite" path="M210,80 H335" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.04;0.12;1"/><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.03;0.04;0.12;0.13;1" values="0;0;1;1;0;0"/></circle>
+<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="10s" repeatCount="indefinite" path="M385,118 V250" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.15;0.27;1"/><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.14;0.15;0.27;0.28;1" values="0;0;1;1;0;0"/></circle>
+<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="10s" repeatCount="indefinite" path="M445,250 V118" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.3;0.42;1"/><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.29;0.3;0.42;0.43;1" values="0;0;1;1;0;0"/></circle>
+<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="10s" repeatCount="indefinite" path="M495,104 H530 Q538,104 538,112 V170 Q538,178 546,178 H662 Q670,178 670,186 V250" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.45;0.6;1"/><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.44;0.45;0.6;0.61;1" values="0;0;1;1;0;0"/></circle>
+<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="10s" repeatCount="indefinite" path="M670,324 V358 Q670,366 662,366 H22 Q14,366 14,358 V112 Q14,104 22,104 H60" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.64;0.84;1"/><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.63;0.64;0.84;0.85;1" values="0;0;1;1;0;0"/></circle>
+</g>
 </svg>
 </div>
 </div>
 <p>
 A single atomic write decides each run's terminal status: <code>Completed</code> on success, otherwise
-<code>Backoff</code> or <code>Tripped</code>. Observers never see a transient intermediate state. A run that
-ends because it was cancelled (<code>cancel_flow</code> or a scheduler shutdown) and rolled back cleanly
-returns the flow to <code>Idle</code> and leaves the streak untouched. If a saga rollback fails, the run
-ends with <code>CompensationFailed</code>, which counts as a failure. <code>FlowInfo</code> exposes
+<code>Backoff</code> or <code>Tripped</code>. Observers never see a transient intermediate state. The stored
+<code>last_error</code> holds at most 4 KiB, cut on a UTF-8 character boundary. With a shared store, a lease
+that expires without a release counts as one failure, dated at the lease's expiry. A run that ends
+because it was cancelled (<code>cancel_flow</code> or a scheduler shutdown) and rolled back cleanly
+leaves the streak untouched and returns the flow to <code>Idle</code>, or to <code>Backoff</code> when an
+earlier backoff window is still open. If a saga rollback fails, the run ends with
+<code>CompensationFailed</code>, which counts as a failure. <code>FlowInfo</code> exposes
 <code>failure_streak</code> and <code>next_eligible</code>.
 </p>
 
 <h2 id="recovery"><a href="#recovery" class="anchor-link" aria-hidden="true">#</a>Recovery with <code>reset_flow</code></h2>
 <p>
-A <code>Tripped</code> flow stays parked until you reset it. <code>RunningScheduler::reset_flow(id)</code>
+A <code>Tripped</code> flow stays parked until you reset it. <code>RunningScheduler::reset_flow(id).await</code>
 clears the failure streak and <code>next_eligible</code>, and sets the status to <code>Idle</code> unless the
-flow is running. It is synchronous; call it inside a Tokio runtime.
+flow is running. Call it inside a Tokio runtime. With a <a href="../several-instances/">shared store</a> the
+reset is written to the shared record and applies to every instance, clearing any expired lease while
+leaving a live in-flight lease intact.
 </p>
 <p>
 A manual <code>trigger()</code> ignores an active <code>Backoff</code> window but is rejected on a tripped
@@ -268,11 +300,13 @@ at 1, so reset after you observe <code>Tripped</code> or <code>Idle</code>.
 </p>
 
 ```rust
+// Read a point-in-time snapshot of the flow's state and failure streak.
 let snap = running.status("flaky").expect("flow exists");
-if matches!(snap.status, Status::Tripped { .. }) {
-    running.reset_flow("flaky")?;
+if let Status::Tripped { streak, last_error } = &snap.status {
+    eprintln!("flaky tripped after {streak} failures: {last_error:?}");
+    // Clears failure_streak and next_eligible (persisted if a store is attached), returning the flow to Idle.
+    running.reset_flow("flaky").await?;
 }
-
 ```
 
 <p>

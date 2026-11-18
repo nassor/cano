@@ -83,10 +83,10 @@ impl Task<TestState> for IOBoundTask {
         // Simulate database connection or file opening (prep phase)
         tokio::time::sleep(self.io_duration / 8).await;
 
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         // Store some metadata about the operation
         let metadata = format!("io_prep_{}", self.operation_type);
-        store.put("io_metadata", metadata);
+        board.put("io_metadata", metadata);
 
         // Simulate the main IO operation (exec phase)
         tokio::time::sleep(self.io_duration).await;
@@ -98,7 +98,7 @@ impl Task<TestState> for IOBoundTask {
         // Simulate cleanup and result storage (post phase)
         tokio::time::sleep(self.io_duration / 16).await;
         let result_key = format!("io_result_{}", self.operation_type);
-        store.put(&result_key, exec_res);
+        board.put(&result_key, exec_res);
 
         Ok(self.next_state.clone())
     }
@@ -110,10 +110,10 @@ impl Task<TestState> for CPUBoundTask {
         // Prepare data for CPU-intensive computation (prep phase)
         let data: Vec<u64> = (0..self.iterations as u64).collect();
 
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         // Store computation metadata
         let metadata = format!("cpu_prep_{}_{}", self.operation_type, self.iterations);
-        store.put("cpu_metadata", metadata);
+        board.put("cpu_metadata", metadata);
 
         // Perform CPU-intensive calculation (exec phase)
         let result: u64 = match self.operation_type.as_str() {
@@ -137,7 +137,7 @@ impl Task<TestState> for CPUBoundTask {
 
         // Store computation result (post phase)
         let result_key = format!("cpu_result_{}", self.operation_type);
-        store.put(&result_key, result);
+        board.put(&result_key, result);
 
         Ok(self.next_state.clone())
     }
@@ -180,7 +180,7 @@ fn bench_task_performance(c: &mut Criterion) {
             &duration,
             |b, &duration| {
                 let task = SimpleTask::new(TestState::Complete, duration);
-                let resources = Resources::new().insert(MemoryStore::new());
+                let resources = Resources::new().insert(Blackboard::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -208,7 +208,7 @@ fn bench_concurrent_task_execution(c: &mut Criterion) {
                 let tasks: Vec<SimpleTask> = (0..count)
                     .map(|_| SimpleTask::new(TestState::Complete, duration))
                     .collect();
-                let resources = Resources::new().insert(MemoryStore::new());
+                let resources = Resources::new().insert(Blackboard::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -232,7 +232,7 @@ fn bench_concurrent_task_execution(c: &mut Criterion) {
                 let tasks: Vec<SimpleTask> = (0..count)
                     .map(|_| SimpleTask::new(TestState::Complete, duration))
                     .collect();
-                let resources = Resources::new().insert(MemoryStore::new());
+                let resources = Resources::new().insert(Blackboard::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -259,10 +259,10 @@ fn bench_store_operations(c: &mut Criterion) {
             &count,
             |b, &count| {
                 b.iter(|| {
-                    let store = MemoryStore::new();
+                    let board = Blackboard::new();
                     for i in 0..count {
                         let key = format!("key_{i}");
-                        store.put(&key, i);
+                        board.put(&key, i);
                     }
                 });
             },
@@ -272,17 +272,17 @@ fn bench_store_operations(c: &mut Criterion) {
             BenchmarkId::new("get_operations", count),
             &count,
             |b, &count| {
-                let store = MemoryStore::new();
-                // Pre-populate the store
+                let board = Blackboard::new();
+                // Pre-populate the blackboard
                 for i in 0..count {
                     let key = format!("key_{i}");
-                    store.put(&key, i);
+                    board.put(&key, i);
                 }
 
                 b.iter(|| {
                     for i in 0..count {
                         let key = format!("key_{i}");
-                        let _ = store.get::<i32>(&key);
+                        let _ = board.get::<i32>(&key);
                     }
                 });
             },
@@ -315,7 +315,7 @@ fn bench_memory_patterns(c: &mut Criterion) {
             &size,
             |b, &size| {
                 b.iter(|| {
-                    let _stores: Vec<MemoryStore> = (0..size).map(|_| MemoryStore::new()).collect();
+                    let _stores: Vec<Blackboard> = (0..size).map(|_| Blackboard::new()).collect();
                 });
             },
         );
@@ -355,7 +355,7 @@ fn bench_io_bound_workflows(c: &mut Criterion) {
                             )
                         })
                         .collect();
-                    let resources = Resources::new().insert(MemoryStore::new());
+                    let resources = Resources::new().insert(Blackboard::new());
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
@@ -384,7 +384,7 @@ fn bench_io_bound_workflows(c: &mut Criterion) {
                             )
                         })
                         .collect();
-                    let resources = Resources::new().insert(MemoryStore::new());
+                    let resources = Resources::new().insert(Blackboard::new());
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
@@ -437,7 +437,7 @@ fn bench_cpu_bound_workflows(c: &mut Criterion) {
                             )
                         })
                         .collect();
-                    let resources = Resources::new().insert(MemoryStore::new());
+                    let resources = Resources::new().insert(Blackboard::new());
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
@@ -466,7 +466,7 @@ fn bench_cpu_bound_workflows(c: &mut Criterion) {
                             )
                         })
                         .collect();
-                    let resources = Resources::new().insert(MemoryStore::new());
+                    let resources = Resources::new().insert(Blackboard::new());
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
@@ -505,7 +505,7 @@ fn bench_mixed_workload_workflows(c: &mut Criterion) {
             |b, &(io_duration, cpu_iterations)| {
                 let io_task = IOBoundTask::new(TestState::Step1, io_duration, "database");
                 let cpu_task = CPUBoundTask::new(TestState::Complete, cpu_iterations, "processing");
-                let resources = Resources::new().insert(MemoryStore::new());
+                let resources = Resources::new().insert(Blackboard::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -525,7 +525,7 @@ fn bench_mixed_workload_workflows(c: &mut Criterion) {
             |b, &(io_duration, cpu_iterations)| {
                 let io_task = IOBoundTask::new(TestState::Complete, io_duration, "api_service");
                 let cpu_task = CPUBoundTask::new(TestState::Complete, cpu_iterations, "analytics");
-                let resources = Resources::new().insert(MemoryStore::new());
+                let resources = Resources::new().insert(Blackboard::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {

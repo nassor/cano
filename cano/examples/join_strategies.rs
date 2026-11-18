@@ -59,7 +59,7 @@ enum Step {
 // ---------------------------------------------------------------------------
 
 /// A single parallel worker. Sleeps for `delay_ms`, then records its completion
-/// in the shared [`MemoryStore`] and returns `Step::Done`.
+/// in the shared [`Blackboard`] and returns `Step::Done`.
 #[derive(Clone)]
 struct Worker {
     id: &'static str,
@@ -75,9 +75,9 @@ impl Worker {
 #[task(state = Step)]
 impl Worker {
     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         sleep(Duration::from_millis(self.delay_ms)).await;
-        store.put(self.id, format!("done after {}ms", self.delay_ms));
+        board.put(self.id, format!("done after {}ms", self.delay_ms));
         println!("  [+] worker {} done ({}ms)", self.id, self.delay_ms);
         Ok(Step::Done)
     }
@@ -102,10 +102,10 @@ fn workers() -> Vec<Worker> {
 
 async fn run_strategy(label: &str, strategy: JoinStrategy) -> CanoResult<()> {
     println!("--- {} ---", label);
-    let store = MemoryStore::new();
+    let board = Blackboard::new();
     let join_config = JoinConfig::new(strategy, Step::Done);
 
-    let workflow = Workflow::new(Resources::new().insert(store.clone()))
+    let workflow = Workflow::new(Resources::new().insert(board.clone()))
         .register_split(Step::Parallel, workers(), join_config)
         .add_exit_state(Step::Done);
 
@@ -116,7 +116,7 @@ async fn run_strategy(label: &str, strategy: JoinStrategy) -> CanoResult<()> {
     // Count how many workers managed to log a result before being cancelled.
     let completed: usize = ["A", "B", "C", "D"]
         .iter()
-        .filter(|&&id| store.get::<String>(id).is_ok())
+        .filter(|&&id| board.get::<String>(id).is_ok())
         .count();
 
     println!(

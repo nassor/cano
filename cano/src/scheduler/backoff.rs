@@ -78,12 +78,18 @@ impl BackoffPolicy {
     /// callers; the scheduler always passes a value `>= 1`.
     pub fn compute_delay(&self, streak: u32) -> Duration {
         let streak = streak.max(1);
-        let exp = self.multiplier.powi((streak - 1) as i32);
+        let mult = if self.multiplier.is_finite() && self.multiplier > 0.0 {
+            self.multiplier
+        } else {
+            1.0
+        };
+        let exp_power = i32::try_from(streak - 1).unwrap_or(i32::MAX);
+        let exp = mult.powi(exp_power);
         let base = self.initial.as_secs_f64() * exp;
         let cap = self.max_delay.as_secs_f64();
-        let capped = base.min(cap);
+        let capped = if base.is_nan() { cap } else { base.min(cap) };
 
-        let jitter_factor = if self.jitter > 0.0 {
+        let jitter_factor = if self.jitter.is_finite() && self.jitter > 0.0 {
             let j = self.jitter.clamp(0.0, 1.0);
             let mut rng = rand::rng();
             let r: f64 = rng.random_range(-1.0..=1.0);
@@ -93,8 +99,11 @@ impl BackoffPolicy {
         };
 
         let delayed = (capped * jitter_factor).max(0.0);
-        // Jitter can push us slightly above max_delay; clamp again.
-        Duration::from_secs_f64(delayed).min(self.max_delay)
+        // Jitter or `u64::MAX as f64` rounding can push `delayed` above `Duration::MAX`;
+        // fall back to `max_delay` on overflow and clamp.
+        Duration::try_from_secs_f64(delayed)
+            .unwrap_or(self.max_delay)
+            .min(self.max_delay)
     }
 
     /// `true` when `failure_streak` has reached `streak_limit`.
@@ -208,5 +217,24 @@ mod tests {
         assert_eq!(p.max_delay, d.max_delay);
         assert_eq!(p.jitter, d.jitter);
         assert_eq!(p.streak_limit, Some(7));
+    }
+
+    #[test]
+    fn compute_delay_handles_extreme_durations_streaks_and_nonfinite_floats() {
+        for mult in [0.0, -2.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 2.0] {
+            for jitter in [0.0, 1.0, -1.0, 5.0, f64::NAN, f64::INFINITY] {
+                let p = BackoffPolicy {
+                    initial: Duration::from_secs(10),
+                    multiplier: mult,
+                    max_delay: Duration::MAX,
+                    jitter,
+                    streak_limit: None,
+                };
+                for streak in [0, 1, 2, i32::MAX as u32, u32::MAX] {
+                    let d = p.compute_delay(streak);
+                    assert!(d <= Duration::MAX);
+                }
+            }
+        }
     }
 }

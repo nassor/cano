@@ -1,4 +1,4 @@
-use cano::MemoryStore;
+use cano::Blackboard;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 fn bench_storage_operations(c: &mut Criterion) {
@@ -12,9 +12,9 @@ fn bench_storage_operations(c: &mut Criterion) {
             &count,
             |b, &count| {
                 b.iter(|| {
-                    let store = MemoryStore::new();
+                    let board = Blackboard::new();
                     for i in 0..count {
-                        store.put(&format!("key_{i}"), format!("value_{i}"));
+                        board.put(&format!("key_{i}"), format!("value_{i}"));
                     }
                 });
             },
@@ -24,15 +24,15 @@ fn bench_storage_operations(c: &mut Criterion) {
             BenchmarkId::new("get_operations", count),
             &count,
             |b, &count| {
-                let store = MemoryStore::new();
+                let board = Blackboard::new();
                 // Pre-populate store
                 for i in 0..count {
-                    store.put(&format!("key_{i}"), format!("value_{i}"));
+                    board.put(&format!("key_{i}"), format!("value_{i}"));
                 }
 
                 b.iter(|| {
                     for i in 0..count {
-                        let _: Result<String, _> = store.get(&format!("key_{i}"));
+                        let _: Result<String, _> = board.get(&format!("key_{i}"));
                     }
                 });
             },
@@ -43,12 +43,12 @@ fn bench_storage_operations(c: &mut Criterion) {
             &count,
             |b, &count| {
                 b.iter(|| {
-                    let store = MemoryStore::new();
+                    let board = Blackboard::new();
                     let mut list_items = Vec::new();
                     for i in 0..count {
                         list_items.push(format!("value_{i}"));
                     }
-                    store.put("list_key", list_items);
+                    board.put("list_key", list_items);
                 });
             },
         );
@@ -63,10 +63,10 @@ fn bench_put_throughput(c: &mut Criterion) {
 
     for n in [10usize, 100, 1000] {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
-            let store = MemoryStore::new();
+            let board = Blackboard::new();
             b.iter(|| {
                 for i in 0..n {
-                    store.put("hot_key", i as u64);
+                    board.put("hot_key", i as u64);
                 }
             });
         });
@@ -82,9 +82,9 @@ fn bench_append_throughput(c: &mut Criterion) {
     for n in [10usize, 100, 1000] {
         group.bench_with_input(BenchmarkId::from_parameter(n), &n, |b, &n| {
             b.iter(|| {
-                let store = MemoryStore::new();
+                let board = Blackboard::new();
                 for i in 0..n {
-                    store.append("hot_key", i as u64).unwrap();
+                    board.append("hot_key", i as u64).unwrap();
                 }
             });
         });
@@ -100,20 +100,20 @@ fn bench_get_clone_vs_owned(c: &mut Criterion) {
     let mut group = c.benchmark_group("get_clone_vs_owned");
 
     group.bench_function("sole_owner", |b| {
-        let store = MemoryStore::new();
-        store.put("k", vec![1u64; 1024]);
+        let board = Blackboard::new();
+        board.put("k", vec![1u64; 1024]);
         b.iter(|| {
-            let _v: Vec<u64> = store.get("k").unwrap();
+            let _v: Vec<u64> = board.get("k").unwrap();
         });
     });
 
     group.bench_function("shared_owner", |b| {
-        let store = MemoryStore::new();
-        store.put("k", vec![1u64; 1024]);
+        let board = Blackboard::new();
+        board.put("k", vec![1u64; 1024]);
         // Hold a separate Arc to the value; this forces try_unwrap to fail and clone.
-        let _holder = store.get_shared::<Vec<u64>>("k").unwrap();
+        let _holder = board.get_shared::<Vec<u64>>("k").unwrap();
         b.iter(|| {
-            let _v: Vec<u64> = store.get("k").unwrap();
+            let _v: Vec<u64> = board.get("k").unwrap();
         });
     });
 

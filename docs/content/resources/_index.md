@@ -10,7 +10,7 @@ template = "section.html"
 
 <p>
 <code>Resources</code> is the typed map every workflow carries. Database pools, HTTP clients, config structs,
-a <a href="../store/">MemoryStore</a> and per-run parameters are all resources, registered once and read from any task.
+a <a href="../blackboard/">Blackboard</a> and per-run parameters are all resources, registered once and read from any task.
 A resource is looked up by its type, so <code>res.get::&lt;R&gt;()?</code> returns a <code>&amp;R</code> with no key to mistype.
 A second instance of the same type goes under a name and is read with <code>get_named</code>.
 </p>
@@ -51,7 +51,7 @@ Define a resource, insert it, and read it by type in any task. The engine runs
 <div class="cd-wrap">
 <svg class="cd" viewBox="0 0 780 316" role="img" aria-labelledby="res-map-title res-map-desc">
 <title id="res-map-title">Resources as a typed map</title>
-<desc id="res-map-desc">Three build-time inserts each store one value under its type: MemoryStore, AppConfig and WorkflowParams. Inside tasks, res.get names a resource type and borrows the stored value. InitTask reads MemoryStore, ProcessTask reads MemoryStore and AppConfig, and ReportTask reads WorkflowParams, so one entry can have several readers.</desc>
+<desc id="res-map-desc">Three build-time inserts each store one value under its type: Blackboard, AppConfig and WorkflowParams. Inside tasks, res.get names a resource type and borrows the stored value. InitTask reads Blackboard, ProcessTask reads Blackboard and AppConfig, and ReportTask reads WorkflowParams, so one entry can have several readers.</desc>
 <defs><marker id="res-map-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
 <text class="t-strong" x="107" y="24">Build time</text>
 <text class="t-code t-mut" x="107" y="43">.insert(value)</text>
@@ -67,8 +67,8 @@ Define a resource, insert it, and read it by type in any task. The engine runs
 <path class="e" d="M506,166 H572" marker-end="url(#res-map-ah)"/>
 <path class="e" d="M506,236 H572" marker-end="url(#res-map-ah)"/>
 <rect class="n" x="14" y="72" width="186" height="48" rx="10"/>
-<text class="t-code" x="107" y="87">insert(store)</text>
-<text class="t-code t-mut" x="107" y="107">MemoryStore::new()</text>
+<text class="t-code" x="107" y="87">insert(board)</text>
+<text class="t-code t-mut" x="107" y="107">Blackboard::new()</text>
 <rect class="n" x="14" y="142" width="186" height="48" rx="10"/>
 <text class="t-code" x="107" y="157">insert(config)</text>
 <text class="t-code t-mut" x="107" y="177">AppConfig { .. }</text>
@@ -77,17 +77,17 @@ Define a resource, insert it, and read it by type in any task. The engine runs
 <text class="t-code t-mut" x="107" y="247">WorkflowParams { .. }</text>
 <rect class="n-ghost" x="266" y="56" width="240" height="216" rx="12"/>
 <rect class="n-hot" x="282" y="76" width="208" height="40" rx="6"/>
-<text class="t-code" x="386" y="97">MemoryStore &rarr; value</text>
+<text class="t-code" x="386" y="97">Blackboard &rarr; value</text>
 <rect class="n" x="282" y="146" width="208" height="40" rx="6"/>
 <text class="t-code" x="386" y="167">AppConfig &rarr; value</text>
 <rect class="n" x="282" y="216" width="208" height="40" rx="6"/>
 <text class="t-code" x="386" y="237">WorkflowParams &rarr; value</text>
 <rect class="n" x="576" y="69" width="186" height="54" rx="10"/>
 <text class="t-strong" x="669" y="86">InitTask</text>
-<text class="t-code t-mut" x="669" y="108">&amp;MemoryStore</text>
+<text class="t-code t-mut" x="669" y="108">&amp;Blackboard</text>
 <rect class="n" x="576" y="133" width="186" height="66" rx="10"/>
 <text class="t-strong" x="669" y="149">ProcessTask</text>
-<text class="t-code t-mut" x="669" y="169">&amp;MemoryStore</text>
+<text class="t-code t-mut" x="669" y="169">&amp;Blackboard</text>
 <text class="t-code t-mut" x="669" y="186">&amp;AppConfig</text>
 <rect class="n" x="576" y="209" width="186" height="54" rx="10"/>
 <text class="t-strong" x="669" y="226">ReportTask</text>
@@ -103,9 +103,11 @@ Define a resource, insert it, and read it by type in any task. The engine runs
 ```rust
 use cano::prelude::*;
 
-// Stateless resource: derive Resource for a no-op setup/teardown impl
+// Stateless resource: derive Resource for default no-op setup/teardown/health impls.
 #[derive(Resource)]
-struct AppConfig { multiplier: u32 }
+struct AppConfig {
+    multiplier: u32,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step { Init, Done }
@@ -115,28 +117,32 @@ struct InitTask;
 #[task(state = Step)]
 impl InitTask {
     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
-        let store  = res.get::<MemoryStore>()?;
+        // Borrow dependencies by concrete type; no string keys needed.
+        let board = res.get::<Blackboard>()?;
         let config = res.get::<AppConfig>()?;
 
-        store.put("value", 10u32 * config.multiplier);
+        board.put("value", 10u32 * config.multiplier);
         Ok(Step::Done)
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
+    // Blackboard::clone() shares the same underlying map so main can read results back.
+    let board = Blackboard::new();
     let resources = Resources::new()
-        .insert(MemoryStore::new())
+        .insert(board.clone())
         .insert(AppConfig { multiplier: 3 });
 
     let workflow = Workflow::new(resources)
         .register(Step::Init, InitTask)
         .add_exit_state(Step::Done);
 
+    // orchestrate runs setup_all() before Step::Init and teardown_all() on exit.
     workflow.orchestrate(Step::Init).await?;
+    assert_eq!(board.get::<u32>("value")?, 30);
     Ok(())
 }
-
 ```
 </div>
 
@@ -161,12 +167,16 @@ so most resources need no manual impl. The engine never calls <code>health()</co
 <span class="code-block-label">Resource trait</span>
 
 ```rust
+// #[resource] rewrites the async methods for dyn Resource compatibility.
+#[resource]
 pub trait Resource: Send + Sync + 'static {
+    // Called in insertion order before tasks run.
     async fn setup(&self) -> Result<(), CanoError> { Ok(()) }
+    // Called in reverse insertion order on exit, even if a task fails.
     async fn teardown(&self) -> Result<(), CanoError> { Ok(()) }
+    // Called only on demand via check_all_health() or aggregate_health().
     async fn health(&self) -> HealthStatus { HealthStatus::Healthy }
 }
-
 ```
 </div>
 
@@ -179,12 +189,14 @@ Generates an empty <code>impl Resource for T {}</code>. Use it for config, param
 <span class="code-block-label">Stateless resource via derive</span>
 
 ```rust
+use cano::prelude::*;
+
+// Expands to an empty Resource impl using default no-op setup, teardown, and health.
 #[derive(Resource)]
 struct WorkflowParams {
     batch_size: usize,
     timeout_ms: u64,
 }
-
 ```
 </div>
 
@@ -200,26 +212,27 @@ Both take <code>&amp;self</code> and resources are shared through <code>Arc</cod
 
 ```rust
 use cano::prelude::*;
+use std::sync::atomic::{AtomicU32, Ordering};
 
-use std::sync::{Arc, Mutex};
-
+// Resources are already wrapped in Arc internally, so atomics or locks suffice.
 struct CounterResource {
-    setup_count: Arc<Mutex<u32>>,
+    setup_count: AtomicU32,
 }
 
+// #[resource] matches the async method signatures of the Resource trait.
 #[resource]
 impl Resource for CounterResource {
     async fn setup(&self) -> Result<(), CanoError> {
-        *self.setup_count.lock().unwrap() += 1;
+        // Runs once before tasks execute; returning Err aborts setup and rolls back prior resources.
+        self.setup_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
     async fn teardown(&self) -> Result<(), CanoError> {
-        // flush, close handles, etc.
+        // Flush buffers or close handles here; errors are logged, not returned on failed runs.
         Ok(())
     }
 }
-
 ```
 </div>
 
@@ -238,15 +251,14 @@ of a type under a name. <code>try_insert</code> and <code>try_insert_named</code
 <span class="code-block-label">insert + try_insert</span>
 
 ```rust
-// One resource per type; a duplicate type indicates buggy wiring, so it panics
+// One resource per type; insert panics on duplicate types because that signals buggy wiring.
 let resources = Resources::new()
-    .insert(MemoryStore::new())
+    .insert(Blackboard::new())
     .insert(AppConfig::default())
-    // A second MemoryStore needs a name
-    .insert_named("replica", MemoryStore::new())
-    // Dynamic input: handle a collision as data
+    // Register a second Blackboard under a distinct name.
+    .insert_named("replica", Blackboard::new())
+    // Returns Err(CanoError::ResourceDuplicateKey(_)) if that type is already registered.
     .try_insert(plugin)?;
-
 ```
 </div>
 
@@ -265,14 +277,14 @@ borrow tied to <code>res</code>. <code>get_arc::&lt;R&gt;()</code> returns an
 <span class="code-block-label">By type, by name, as Arc</span>
 
 ```rust
-let store  = res.get::<MemoryStore>()?;          // &MemoryStore
-let params = res.get::<WorkflowParams>()?;       // &WorkflowParams
+let board = res.get::<Blackboard>()?;           // &Blackboard (by type)
+let params = res.get::<WorkflowParams>()?;      // &WorkflowParams (by type)
 
-let replica = res.get_named::<MemoryStore>("replica")?;
+let replica = res.get_named::<Blackboard>("replica")?; // &Blackboard from the named namespace
 
-let shared: Arc<MemoryStore> = res.get_arc::<MemoryStore>()?;
-let shared_replica = res.get_named_arc::<MemoryStore>("replica")?;
-
+// Owned Arc<Blackboard> handles for moving into spawned tasks or structs.
+let shared = res.get_arc::<Blackboard>()?;
+let shared_replica = res.get_named_arc::<Blackboard>("replica")?;
 ```
 </div>
 
@@ -310,21 +322,34 @@ use cano::prelude::*;
 use std::sync::Arc;
 
 #[derive(Resource)]
-struct AppConfig { multiplier: u32 }
+struct AppConfig {
+    multiplier: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Step { Init, Done }
 
 #[derive(FromResources)]
 struct InitDeps {
-    store: Arc<MemoryStore>,
+    // Plain Arc<T> fields resolve by type via res.get_arc::<T>()?.
+    board: Arc<Blackboard>,
     config: Arc<AppConfig>,
+    // #[res("name")] resolves via res.get_named_arc::<T>("name")?.
     #[res("replica")]
-    replica: Arc<MemoryStore>,
+    replica: Arc<Blackboard>,
 }
 
-fn lookup(res: &Resources) -> Result<(), CanoError> {
-    // In a task:
-    let InitDeps { store, config, replica } = InitDeps::from_resources(res)?;
-    let _ = (store, config, replica);
-    Ok(())
+struct InitTask;
+
+#[task(state = Step)]
+impl InitTask {
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
+        let deps = InitDeps::from_resources(res)?;
+        let value = 10u32 * deps.config.multiplier;
+        deps.board.put("value", value);
+        deps.replica.put("value", value);
+        Ok(Step::Done)
+    }
 }
 ```
 </div>
@@ -335,7 +360,7 @@ fn lookup(res: &Resources) -> Result<(), CanoError> {
 
 <p>
 A <code>Resources</code> holds one value per type. When a workflow needs two instances of one type, such as two
-<code>MemoryStore</code>s or a primary and a replica pool, register the extra one with <code>insert_named</code>
+<code>Blackboard</code>s or a primary and a replica pool, register the extra one with <code>insert_named</code>
 and read it with <code>get_named</code>. Names live in their own namespace: a named resource never collides with the
 by-type entry of the same type, and <code>get</code> never sees named entries.
 A duplicate type or name panics; <code>try_insert</code> and <code>try_insert_named</code> return
@@ -383,11 +408,11 @@ use cano::prelude::*;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step { Compute, Done }
 
-#[derive(Clone)]
 struct PureTask;
 
 #[task(state = Step)]
 impl PureTask {
+    // Resource-free signature: omit `res: &Resources`.
     async fn run(&self) -> Result<Step, CanoError> {
         let answer = 40 + 2;
         println!("Computed: {answer}");
@@ -396,11 +421,11 @@ impl PureTask {
 }
 
 fn build() -> Workflow<Step> {
+    // Workflow::bare() is shorthand for Workflow::new(Resources::new()).
     Workflow::bare()
         .register(Step::Compute, PureTask)
         .add_exit_state(Step::Done)
 }
-
 ```
 </div>
 

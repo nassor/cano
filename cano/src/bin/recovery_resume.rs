@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cano::RedbCheckpointStore;
+use cano::RedbStore;
 use cano::prelude::*;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -109,7 +109,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = args[3].as_str();
     let sidefx = PathBuf::from(&args[4]);
 
-    let store = Arc::new(RedbCheckpointStore::new(db_path)?);
+    let store = Arc::new(RedbStore::new(db_path)?);
     let resources = Resources::new()
         .insert(SideEffects { path: sidefx })
         .insert(PauseAfterWork(mode == "fresh"));

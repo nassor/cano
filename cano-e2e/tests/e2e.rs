@@ -1,7 +1,7 @@
 //! End-to-end hardening of crash recovery + sagas, using Docker via `testcontainers`:
 //!
 //! - a Postgres container is the [`cano::CheckpointStore`] backend
-//!   (`cano_e2e::PostgresCheckpointStore`);
+//!   (`cano::store::postgres::PostgresStore`);
 //! - the workflow runs inside a separate container — the `cano_workflow_app` binary
 //!   (built from `../Dockerfile`) — so we can stop it mid-flight and restart it to resume;
 //! - the test process connects to the Postgres container directly to assert on the
@@ -11,13 +11,15 @@
 //! the app image first; locally it's built on demand (see [`ensure_app_image`]).
 //! Run with `cargo test -p cano-e2e --test e2e -- --test-threads=1`.
 
+mod support;
+
 use std::path::Path;
 use std::process::Command;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use cano_e2e::{UNITS, events, ledger_balance};
+use support::unique;
 use testcontainers::core::{IntoContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
@@ -50,16 +52,6 @@ fn ensure_app_image() {
     });
 }
 
-/// Unique suffix so concurrently-running tests don't collide on container / network names.
-fn unique(prefix: &str) -> String {
-    static N: AtomicU32 = AtomicU32::new(0);
-    format!(
-        "{prefix}-{}-{}",
-        std::process::id(),
-        N.fetch_add(1, Ordering::Relaxed)
-    )
-}
-
 /// A scenario fixture: a Postgres container plus a private network app containers join.
 struct Fixture {
     _pg: ContainerAsync<GenericImage>,
@@ -72,16 +64,10 @@ struct Fixture {
 /// `testcontainers_modules::postgres::Postgres::default()` used to provide (that crate
 /// hard-pins `testcontainers ^0.27`, so it can't come along to 0.28).
 fn postgres_image() -> GenericImage {
-    // The official entrypoint logs this line twice: once for the throwaway server
-    // `initdb` runs (which then shuts down) and again for the real server. Waiting for a
-    // single occurrence would hand us a server that is about to stop, so wait for both —
-    // one per stream, exactly as the modules image did. `with_wait_for` appends to the
-    // list of ready conditions rather than replacing it, so both are honoured.
     const READY: &str = "database system is ready to accept connections";
-    GenericImage::new("postgres", "11-alpine")
+    GenericImage::new("postgres", "18-alpine")
         .with_exposed_port(5432.tcp())
         .with_wait_for(WaitFor::message_on_stderr(READY))
-        .with_wait_for(WaitFor::message_on_stdout(READY))
 }
 
 impl Fixture {
@@ -104,6 +90,14 @@ impl Fixture {
             .get_host_port_ipv4(5432)
             .await
             .expect("postgres host port");
+        let dsn = format!("postgres://postgres:postgres@127.0.0.1:{pg_host_port}/postgres");
+        support::eventually(Duration::from_secs(60), || async {
+            let (client, connection) = tokio_postgres::connect(&dsn, NoTls).await?;
+            tokio::spawn(connection);
+            client.simple_query("SELECT 1").await?;
+            Ok::<_, tokio_postgres::Error>(())
+        })
+        .await;
         Self {
             _pg: pg,
             network,
@@ -247,10 +241,11 @@ async fn crash_mid_flight_then_resume_completes_without_losing_or_duplicating_ef
             "expected at least one CompensationCompletion row (kind=1) for Reserve; \
              got: {kinds:?}"
         );
-        // All rows must have a recognized kind (0, 1, or 2).
+        // All rows must have a recognized kind (0..=4: StateEntry, CompensationCompletion,
+        // StepCursor, Suspended, ResumeInput).
         for (seq, k) in &kinds {
             assert!(
-                matches!(k, 0..=2),
+                matches!(k, 0..=4),
                 "checkpoint row at sequence {seq} has unrecognized kind {k}"
             );
         }

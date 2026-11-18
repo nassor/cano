@@ -1,24 +1,24 @@
-//! # Store Error Types
+//! # Blackboard Error Types
 //!
-//! This module defines error types specific to store operations in Cano workflows.
-//! It provides clear, actionable error messages for common store failures.
+//! This module defines error types specific to blackboard operations in Cano workflows.
+//! It provides clear, actionable error messages for common blackboard failures.
 
 use std::fmt;
 
-/// Comprehensive error type for store operations
+/// Comprehensive error type for blackboard operations
 ///
-/// This enum covers all the different ways store operations can fail.
+/// This enum covers all the different ways blackboard operations can fail.
 /// Each variant provides specific information about what went wrong
 /// and helps users understand how to fix the issue.
 ///
 /// ## Error Categories
 ///
-/// - `KeyNotFound`: The requested key doesn't exist in store
+/// - `KeyNotFound`: The requested key doesn't exist in the blackboard
 /// - `TypeMismatch`: The stored value can't be cast to the requested type
 /// - `AppendTypeMismatch`: Tried to append to a value that isn't a `Vec<TState>`
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StoreError {
-    /// The requested key was not found in store
+pub enum BlackboardError {
+    /// The requested key was not found in the blackboard
     ///
     /// This error occurs when trying to access a key that doesn't exist.
     /// Common causes: typos in key names, accessing data before it's stored,
@@ -39,33 +39,33 @@ pub enum StoreError {
     AppendTypeMismatch(String),
 }
 
-impl StoreError {
+impl BlackboardError {
     /// Create a new key not found error
     pub fn key_not_found<S: Into<String>>(key: S) -> Self {
-        StoreError::KeyNotFound(format!("Key '{}' not found in store", key.into()))
+        BlackboardError::KeyNotFound(format!("Key '{}' not found in blackboard", key.into()))
     }
 
     /// Create a new type mismatch error
     pub fn type_mismatch<S: Into<String>>(msg: S) -> Self {
-        StoreError::TypeMismatch(msg.into())
+        BlackboardError::TypeMismatch(msg.into())
     }
     /// Create a new append type mismatch error
     pub fn append_type_mismatch<S: Into<String>>(key: S) -> Self {
-        StoreError::AppendTypeMismatch(format!(
+        BlackboardError::AppendTypeMismatch(format!(
             "Cannot append to key '{}': existing value is not a Vec<TState>",
             key.into()
         ))
     }
 }
 
-impl fmt::Display for StoreError {
+impl fmt::Display for BlackboardError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            StoreError::KeyNotFound(msg) => write!(f, "Key not found: {msg}"),
-            StoreError::TypeMismatch(msg) => write!(f, "Type mismatch: {msg}"),
-            StoreError::AppendTypeMismatch(msg) => write!(f, "Append type mismatch: {msg}"),
+            BlackboardError::KeyNotFound(msg) => write!(f, "Key not found: {msg}"),
+            BlackboardError::TypeMismatch(msg) => write!(f, "Type mismatch: {msg}"),
+            BlackboardError::AppendTypeMismatch(msg) => write!(f, "Append type mismatch: {msg}"),
         }
     }
 }
 
-impl std::error::Error for StoreError {}
+impl std::error::Error for BlackboardError {}

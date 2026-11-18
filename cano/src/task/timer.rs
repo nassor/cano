@@ -24,7 +24,7 @@
 //! ## Recovery: a timer re-waits from scratch on resume
 //!
 //! A `TimerTask` is an ordinary checkpointed single-task state: the engine writes its
-//! [`CheckpointRow`](crate::recovery::CheckpointRow) **before** running it, so a
+//! [`CheckpointRow`](crate::checkpoint::CheckpointRow) **before** running it, so a
 //! [resumed](crate::workflow::Workflow::resume_from) run **re-runs `wait()` from the start**. A
 //! `Duration(30 min)` timer that crashes at minute 29 sleeps the full 30 minutes again after
 //! resume, and an [`Until`](TimerOutcome::Until) deadline built from

@@ -15,11 +15,11 @@ use std::time::Duration;
 
 use cano_macros::task;
 
+use crate::blackboard::Blackboard;
+use crate::checkpoint::CheckpointRow;
 use crate::error::CanoError;
 use crate::observer::WorkflowObserver;
-use crate::recovery::CheckpointRow;
 use crate::resource::Resources;
-use crate::store::MemoryStore;
 use crate::task::Task;
 
 /// Test workflow states
@@ -63,7 +63,7 @@ impl Task<TestState> for SimpleTask {
     }
 }
 
-/// Task that stores data using a `MemoryStore` from resources
+/// Task that stores data using a `Blackboard` from resources
 #[derive(Clone)]
 pub(crate) struct DataTask {
     key: String,
@@ -84,8 +84,8 @@ impl DataTask {
 #[task]
 impl Task<TestState> for DataTask {
     async fn run(&self, res: &Resources) -> Result<TestState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        store.put(&self.key, self.value.clone());
+        let board = res.get::<Blackboard>()?;
+        board.put(&self.key, self.value.clone());
         Ok(self.next_state.clone())
     }
 }

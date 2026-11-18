@@ -60,7 +60,7 @@ It fits work where state transitions matter:
 <div class="feature-card animate-in">
 <div class="feature-icon" aria-hidden="true">&#9202;</div>
 <h3>Scheduling</h3>
-<p>Intervals, cron schedules and manual triggers, with a bounded graceful stop.</p>
+<p>Intervals, cron schedules and manual triggers, with a bounded graceful stop. Several instances can share one <a href="scheduler/several-instances/">store</a> so each tick runs once.</p>
 </div>
 <div class="feature-card animate-in">
 <div class="feature-icon secondary" aria-hidden="true">&#9881;</div>
@@ -70,7 +70,7 @@ It fits work where state transitions matter:
 <div class="feature-card animate-in">
 <div class="feature-icon" aria-hidden="true">&#128190;</div>
 <h3>Crash recovery</h3>
-<p>A pluggable <code>CheckpointStore</code> records state entries. <code>resume_from</code> rehydrates a crashed run and refuses checkpoints whose <code>workflow_version</code> differs from the workflow's. The embedded <code>RedbCheckpointStore</code> needs the <code>recovery</code> feature.</p>
+<p>A pluggable <code>CheckpointStore</code> records state entries. <code>resume_from</code> rehydrates a crashed run and refuses checkpoints whose <code>workflow_version</code> differs from the workflow's. Built-in stores keep the log in an embedded redb file, a PostgreSQL table or a NATS JetStream Key/Value bucket.</p>
 </div>
 <div class="feature-card animate-in">
 <div class="feature-icon secondary" aria-hidden="true">&#8634;</div>
@@ -126,7 +126,7 @@ It fits work where state transitions matter:
 <text class="t-mut" x="683" y="186">rows per state entry</text>
 <rect class="n-cop" x="16" y="262" width="162" height="54" rx="10"/>
 <text class="t-strong" x="97" y="281">Resources</text>
-<text class="t-code" x="97" y="300">MemoryStore</text>
+<text class="t-code" x="97" y="300">Blackboard</text>
 <rect class="n" x="270" y="262" width="240" height="104" rx="10"/>
 <text class="t-strong" x="390" y="284">Task family</text>
 <text class="t-mut" x="390" y="310">Task &middot; RouterTask &middot; PollTask</text>
@@ -178,24 +178,26 @@ Each of these is opt-in and costs nothing when unused: the FSM dispatch path sta
 
 ```toml
 [dependencies]
-cano = { version = "0.16", features = ["all"] }
+cano = { version = "@CANO_MINOR@", features = ["all"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
 </div>
 
 <p>
-Cano enables no features by default. <code>features = ["all"]</code> turns on all five optional features:
+Cano enables one feature by default, <code>store-redb</code>. <code>features = ["all"]</code> turns on all seven optional features:
 </p>
 <ul>
-<li><code>scheduler</code>: the <a href="scheduler/"><code>Scheduler</code></a> (cron, interval and manual triggers)</li>
+<li><code>scheduler</code>: the <a href="scheduler/"><code>Scheduler</code></a> (cron, interval and manual triggers), and with a store feature <a href="scheduler/several-instances/">several instances sharing one set of flows</a></li>
 <li><code>tracing</code>: <a href="tracing/"><code>tracing</code>-crate spans</a> and the <code>TracingObserver</code></li>
-<li><code>recovery</code>: <a href="recovery/"><code>RedbCheckpointStore</code></a>, the embedded ACID checkpoint store (the <code>CheckpointStore</code> trait is always available)</li>
+<li><code>store-redb</code> (default): <a href="recovery/checkpoint-stores/#redb"><code>RedbStore</code></a>, a checkpoint store in an embedded redb file. <code>default-features = false</code> drops redb from the build</li>
+<li><code>store-postgres</code>: <a href="recovery/checkpoint-stores/#postgres"><code>PostgresStore</code></a>, a checkpoint and scheduler store in PostgreSQL tables</li>
+<li><code>store-nats</code>: <a href="recovery/checkpoint-stores/#nats"><code>NatsStore</code></a>, a checkpoint and scheduler store in NATS JetStream Key/Value buckets</li>
 <li><code>metrics</code>: <a href="metrics/"><code>metrics</code>-crate counters, histograms and gauges</a> and the <code>MetricsObserver</code></li>
-<li><code>testing</code>: <a href="testing/">test fixtures</a> (recording observer, in-memory checkpoint store, panic and saga helpers), usually enabled under <code>[dev-dependencies]</code></li>
+<li><code>testing</code>: <a href="testing/">test fixtures</a> (recording observer, in-memory checkpoint and scheduler stores, store contract suites, panic and saga helpers), usually enabled under <code>[dev-dependencies]</code></li>
 </ul>
 <p>
-Enable only what you need, for example <code>features = ["recovery"]</code>, or omit <code>features</code>
+Enable only what you need, for example <code>features = ["scheduler"]</code>, or omit <code>features</code>
 for the core. Cano runs on Tokio, so <code>tokio</code> is a direct dependency and you start the runtime
 with <code>#[tokio::main]</code> or <code>tokio::runtime::Builder</code>. The two <code>tokio</code> features above are the minimum for that.
 Add <code>"time"</code>, <code>"sync"</code> and others only when your own code uses them, or use <code>"full"</code>.
@@ -207,7 +209,7 @@ Add <code>"time"</code>, <code>"sync"</code> and others only when your own code 
 ```rust
 use cano::prelude::*;
 
-// Workflow states
+// States drive the workflow FSM and require Debug + Clone + Eq + Hash.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum WorkflowState {
     Start,
@@ -215,47 +217,71 @@ enum WorkflowState {
     Complete,
 }
 
-// #[derive(Resource)] implements Resource for a stateless config struct
+// #[derive(Resource)] implements Resource for a stateless config struct.
 #[derive(Resource)]
-struct AppConfig { batch_size: usize }
+struct AppConfig {
+    batch_size: usize,
+}
 
-// #[task] handles the async-trait rewrite, so no async-trait crate is needed
-struct SimpleTask;
+struct StartTask;
 
+// #[task(state = ...)] implements Task<WorkflowState> and Registrable<WorkflowState>
+// directly from an inherent impl, handling the async-trait rewrite automatically.
 #[task(state = WorkflowState)]
-impl SimpleTask {
+impl StartTask {
     async fn run(&self, res: &Resources) -> Result<WorkflowState, CanoError> {
+        // Borrow typed dependencies once; returns ResourceNotFound if absent.
         let config = res.get::<AppConfig>()?;
-        println!("Processing task (batch_size={})...", config.batch_size);
+        println!("Starting batch (size={})...", config.batch_size);
         Ok(WorkflowState::Process)
     }
 }
 
-struct DoneTask;
+struct ProcessTask;
 
-// A task that needs no resources omits the `res` parameter
+// A task that needs no resources omits the `res` parameter.
 #[task(state = WorkflowState)]
-impl DoneTask {
+impl ProcessTask {
     async fn run(&self) -> Result<WorkflowState, CanoError> {
-        println!("Done!");
+        println!("Processing complete.");
         Ok(WorkflowState::Complete)
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let resources = Resources::new()
-        .insert(AppConfig { batch_size: 64 });
+    // Store typed dependencies once for the workflow run.
+    let resources = Resources::new().insert(AppConfig { batch_size: 64 });
 
+    // Map each active state to its task and declare terminal exit states.
     let workflow = Workflow::new(resources)
-        .register(WorkflowState::Start, SimpleTask)
-        .register(WorkflowState::Process, DoneTask)
+        .register(WorkflowState::Start, StartTask)
+        .register(WorkflowState::Process, ProcessTask)
         .add_exit_state(WorkflowState::Complete);
 
-    workflow.orchestrate(WorkflowState::Start).await?;
-    Ok(())
+    // Run setup_all(), drive the FSM to an exit state, and run teardown_all().
+    match workflow.orchestrate(WorkflowState::Start).await {
+        Ok(WorkflowState::Complete) => {
+            println!("Workflow reached Complete.");
+            Ok(())
+        }
+        Ok(other) => {
+            println!("Workflow stopped at {other:?}.");
+            Ok(())
+        }
+        Err(err) => {
+            // err.inner() unwraps CanoError::WithStateContext to match the cause;
+            // `{err}` formats the state, attempt, and transition path.
+            match err.inner() {
+                CanoError::Configuration(msg) => eprintln!("Invalid workflow config: {msg}"),
+                CanoError::ResourceNotFound(msg) => eprintln!("Missing resource: {msg}"),
+                CanoError::TaskExecution(msg) => eprintln!("Task failed: {msg} ({err})"),
+                _ => eprintln!("Workflow failed: {err}"),
+            }
+            Err(err)
+        }
+    }
 }
-
 ```
 
 </div>

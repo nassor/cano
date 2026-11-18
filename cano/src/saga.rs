@@ -16,8 +16,8 @@
 //!   task pushes `(task name, serialized output)`. If a later state's task fails, the
 //!   stack is drained LIFO and every `compensate` runs (errors are collected, the drain
 //!   never stops early).
-//! - With a [`CheckpointStore`](crate::recovery::CheckpointStore) attached, those outputs
-//!   are persisted as [`CheckpointRow::output_blob`](crate::recovery::CheckpointRow::output_blob),
+//! - With a [`CheckpointStore`](crate::checkpoint::CheckpointStore) attached, those outputs
+//!   are persisted as [`CheckpointRow::output_blob`](crate::checkpoint::CheckpointRow::output_blob),
 //!   so a resumed run rehydrates the stack and can still compensate work done in an
 //!   *earlier process*. `compensate` therefore receives only `(res, output)` — it must
 //!   not rely on any state left behind by the original `run`, and the workflow definition

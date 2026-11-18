@@ -221,8 +221,8 @@ impl Task<PipelineState> for MatrixGenerator {
             }
         }
 
-        let store = res.get::<MemoryStore>()?;
-        store.put("matrices", matrices);
+        let board = res.get::<Blackboard>()?;
+        board.put("matrices", matrices);
         println!("Matrix generation complete!");
         Ok(PipelineState::Multiply)
     }
@@ -235,9 +235,9 @@ struct SimdMatrixMultiplier;
 #[cano::task]
 impl Task<PipelineState> for SimdMatrixMultiplier {
     async fn run(&self, res: &Resources) -> Result<PipelineState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         println!("Loading matrices for SIMD multiplication...");
-        let matrices: Vec<SimdMatrix> = store.get("matrices")?;
+        let matrices: Vec<SimdMatrix> = board.get("matrices")?;
 
         println!("Performing SIMD matrix multiplications...");
         let start = Instant::now();
@@ -259,7 +259,7 @@ impl Task<PipelineState> for SimdMatrixMultiplier {
         );
         println!("  Processed {} matrix pairs", results.len());
 
-        store.put("multiplied_matrices", results);
+        board.put("multiplied_matrices", results);
         Ok(PipelineState::Transform)
     }
 }
@@ -279,9 +279,9 @@ impl SimdMatrixTransformer {
 #[cano::task]
 impl Task<PipelineState> for SimdMatrixTransformer {
     async fn run(&self, res: &Resources) -> Result<PipelineState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         println!("Loading matrices for SIMD transformations...");
-        let matrices: Vec<SimdMatrix> = store.get("multiplied_matrices")?;
+        let matrices: Vec<SimdMatrix> = board.get("multiplied_matrices")?;
 
         println!(
             "Applying SIMD transformations (scale factor: {})...",
@@ -312,7 +312,7 @@ impl Task<PipelineState> for SimdMatrixTransformer {
         );
         println!("  Processed {} matrices", matrices.len());
 
-        store.put("transformed_matrices", results);
+        board.put("transformed_matrices", results);
         Ok(PipelineState::Statistics)
     }
 }
@@ -324,9 +324,9 @@ struct SimdStatisticsCalculator;
 #[cano::task]
 impl Task<PipelineState> for SimdStatisticsCalculator {
     async fn run(&self, res: &Resources) -> Result<PipelineState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         println!("Loading matrices for statistics calculation...");
-        let matrices: Vec<SimdMatrix> = store.get("transformed_matrices")?;
+        let matrices: Vec<SimdMatrix> = board.get("transformed_matrices")?;
 
         println!("Calculating matrix statistics using SIMD...");
         let start = Instant::now();
@@ -380,7 +380,7 @@ impl Task<PipelineState> for SimdStatisticsCalculator {
             duration
         );
 
-        store.put("statistics", results.clone());
+        board.put("statistics", results.clone());
 
         for (i, (sum, mean, variance)) in results.iter().enumerate() {
             println!(
@@ -440,10 +440,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let start_time = Instant::now();
 
-    let store = MemoryStore::default();
+    let board = Blackboard::default();
 
     // Create the workflow with SIMD-accelerated tasks
-    let workflow = Workflow::new(Resources::new().insert(store.clone()))
+    let workflow = Workflow::new(Resources::new().insert(board.clone()))
         .register(PipelineState::Generate, MatrixGenerator::new(64, 20)) // 64x64 matrices, 20 of them
         .register(PipelineState::Multiply, SimdMatrixMultiplier)
         .register(PipelineState::Transform, SimdMatrixTransformer::new(1.5))
@@ -460,7 +460,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("\nSIMD Matrix Processing Pipeline completed!");
     println!("Total execution time: {total_duration:?}");
 
-    if let Ok(stats) = store.get::<Vec<(f32, f32, f32)>>("statistics") {
+    if let Ok(stats) = board.get::<Vec<(f32, f32, f32)>>("statistics") {
         println!(
             "Final results: {} statistical summaries generated",
             stats.len()
@@ -473,7 +473,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  SIMD-accelerated element-wise operations");
     println!("  SIMD-accelerated statistical calculations");
     println!("  Processing 8 float32 values simultaneously using f32x8");
-    println!("  Inter-task communication through shared store");
+    println!("  Inter-task communication through shared blackboard");
 
     Ok(())
 }

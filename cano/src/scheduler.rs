@@ -31,24 +31,69 @@
 //! # }
 //! ```
 //!
-//! > **Note:** The scheduler is an optional feature. Enable the `"scheduler"`
-//! > feature in your `Cargo.toml`.
+//! ## Several instances
 //!
-//! ```toml
-//! [dependencies]
-//! cano = { version = "0.15", features = ["scheduler"] }
+//! Give every process the same flows and one shared [`SchedulerStore`] with
+//! [`with_store`](Scheduler::with_store), and each tick of each flow runs on exactly one
+//! of them: an `every` flow runs once per interval across the cluster, a `cron` flow once
+//! per firing, and a [`trigger`](RunningScheduler::trigger) is refused while another
+//! instance runs the flow ([`Status::RunningElsewhere`]). Backoff and trip state live in
+//! the store too, so a restarted process picks up where the cluster left off: a flow that
+//! ran within its interval is not run again at startup, and a tripped flow stays tripped
+//! until [`reset_flow`](RunningScheduler::reset_flow).
+//!
+//! ```rust,no_run
+//! # use cano::prelude::*;
+//! # use std::sync::Arc;
+//! # use std::time::Duration;
+//! # #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+//! # enum Step { Start, Done }
+//! # fn workflow() -> Workflow<Step> { unimplemented!() }
+//! # fn shared_store() -> Arc<dyn SchedulerStore> { unimplemented!() }
+//! # #[tokio::main]
+//! # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! // Every instance runs this same code against the same store.
+//! let running = Scheduler::new()
+//!     .every("fetch", workflow(), Step::Start, Duration::from_secs(60))
+//!     .with_store(shared_store())
+//!     .with_lease_ttl(Duration::from_secs(30))
+//!     .start()
+//!     .await?;
+//! cano::scheduler::shutdown_signal().await?;
+//! running.stop().await?;
+//! # Ok(())
+//! # }
 //! ```
+//!
+//! The running instance holds a lease on the flow's record and renews it every third of
+//! the TTL. When it cannot renew for a whole TTL the run is cancelled and its outcome is
+//! not written. An instance that crashes mid-run leaves its lease to expire; the next
+//! instance to look counts the lost run as one failure (see
+//! [`BackoffPolicy`]) and carries on. A run aborted by the shutdown cancel timeout, or
+//! whose release hits a store outage, is counted the same way.
+//!
+//! Lease expiry compares wall clocks across instances, so keep them synchronised with a
+//! skew well below the TTL, and give every instance a distinct
+//! [`with_instance_id`](Scheduler::with_instance_id) (the default is random). Instances
+//! that share a table, bucket or file form one cluster; the built-in stores name theirs
+//! `cano_scheduler` by default.
+//!
+//! > **Note:** Compiled with the `scheduler` feature. See the
+//! > [Scheduler guide](https://nassor.github.io/cano/scheduler/) for `Cargo.toml` setup and full examples.
 
 mod backoff;
 mod builder;
+mod lease;
 mod loops;
 mod running;
+mod store;
 #[cfg(test)]
 mod test_support;
 
 pub use backoff::BackoffPolicy;
 pub use builder::Scheduler;
 pub use running::RunningScheduler;
+pub use store::{CasOutcome, SchedulerStore, VersionedRecord};
 
 use std::hash::Hash;
 use std::sync::Arc;
@@ -84,6 +129,19 @@ pub enum Status {
     Tripped {
         streak: u32,
         last_error: Arc<str>,
+    },
+    /// Another scheduler instance sharing the same [`SchedulerStore`] holds the flow's
+    /// lease and is running it (or crashed while running it, until the lease expires).
+    ///
+    /// Only a scheduler built with [`Scheduler::with_store`] reports it. The value is
+    /// the shared record as of this instance's last read: it is refreshed at every
+    /// dispatch attempt of an `every` or `cron` flow, on `trigger`, on `reset_flow` and
+    /// at `start`, so it can lag the other instance's run by up to one interval.
+    RunningElsewhere {
+        /// The instance id of the lease holder.
+        owner: Arc<str>,
+        /// When the lease runs out unless its holder renews it.
+        lease_expires: DateTime<Utc>,
     },
 }
 
@@ -140,7 +198,11 @@ trait Flow: Send + Sync + 'static {
     fn setup(&self) -> BoxFuture<'_, CanoResult<()>>;
     fn teardown(&self) -> BoxFuture<'_, ()>;
     /// One run from the initial state under `token` (no resource lifecycle).
-    fn run<'a>(&'a self, token: &'a CancellationToken) -> BoxFuture<'a, CanoResult<()>>;
+    fn run<'a>(
+        &'a self,
+        flow_id: &'a str,
+        token: &'a CancellationToken,
+    ) -> BoxFuture<'a, CanoResult<()>>;
 }
 
 struct WorkflowFlow<TState>
@@ -157,6 +219,11 @@ where
 {
     fn validate(&self) -> CanoResult<()> {
         self.workflow.validate()?;
+        if self.workflow.has_suspend_states() {
+            return Err(crate::error::CanoError::configuration(
+                "a workflow with a suspend state cannot be scheduled: parked runs have no per-run workflow_id or resume_with caller",
+            ));
+        }
         self.workflow.validate_initial_state(&self.initial_state)
     }
 
@@ -168,10 +235,14 @@ where
         Box::pin(self.workflow.resources.teardown_all())
     }
 
-    fn run<'a>(&'a self, token: &'a CancellationToken) -> BoxFuture<'a, CanoResult<()>> {
+    fn run<'a>(
+        &'a self,
+        flow_id: &'a str,
+        token: &'a CancellationToken,
+    ) -> BoxFuture<'a, CanoResult<()>> {
         Box::pin(async move {
             self.workflow
-                .run_once(self.initial_state.clone(), Some(token))
+                .run_once(self.initial_state.clone(), flow_id, Some(token))
                 .await
                 .map(drop)
         })
@@ -183,6 +254,18 @@ where
 struct FlowCell {
     info: FlowInfo,
     run_token: Option<CancellationToken>,
+    /// Last failure error string on a standalone scheduler, kept so cancelling a
+    /// manual trigger during an active backoff window restores `Status::Backoff`.
+    last_error: Option<Arc<str>>,
+    /// Last record mirrored from the shared store, used by `status`/`list` to
+    /// recompute `Status` when a cached `RunningElsewhere` lease expires locally.
+    mirrored: Option<lease::FlowRecord>,
+    /// A store claim is in flight on this instance. It blocks a second local dispatch
+    /// without showing the flow as `Running` before the claim is won.
+    claiming: bool,
+    /// Set if an in-flight run task was aborted during shutdown (including when an
+    /// earlier `stop()` future was dropped mid-sequence).
+    aborted: bool,
 }
 
 /// Everything a running scheduler keeps per flow.
@@ -191,6 +274,11 @@ struct FlowRuntime {
     schedule: ParsedSchedule,
     policy: BackoffPolicy,
     cell: tokio::sync::watch::Sender<FlowCell>,
+    /// Present when the scheduler shares its flows through a [`SchedulerStore`].
+    coordinator: Option<Arc<lease::Coordinator>>,
+    /// Ensures resource teardown runs at most once even if `stop()` is dropped mid-teardown
+    /// and retried.
+    torn_down: std::sync::atomic::AtomicBool,
 }
 
 #[cfg(all(test, feature = "metrics"))]
@@ -222,7 +310,7 @@ mod metrics_tests {
                 .start()
                 .await
                 .unwrap();
-            running.trigger("flow_a").unwrap();
+            running.trigger("flow_a").await.unwrap();
             running.wait_idle("flow_a").await.unwrap();
             running.stop().await.unwrap();
         });
@@ -248,6 +336,52 @@ mod metrics_tests {
                 &rows,
                 "cano_scheduler_flow_backoff_total",
                 &[("flow", "flow_a")]
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn cancelled_flow_run_records_cancelled_outcome() {
+        struct Park(std::sync::Arc<tokio::sync::Notify>);
+        #[crate::task]
+        impl Task<St> for Park {
+            async fn run(&self) -> Result<St, CanoError> {
+                self.0.notify_one();
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                Ok(St::Done)
+            }
+        }
+
+        let ((), rows) = run_with_recorder(|| async {
+            let started = std::sync::Arc::new(tokio::sync::Notify::new());
+            let wf = Workflow::bare()
+                .register(St::Start, Park(std::sync::Arc::clone(&started)))
+                .add_exit_state(St::Done);
+            let running = Scheduler::new()
+                .manual("flow_cancel", wf, St::Start)
+                .start()
+                .await
+                .unwrap();
+            running.trigger("flow_cancel").await.unwrap();
+            started.notified().await;
+            running.cancel_flow("flow_cancel").unwrap();
+            running.wait_idle("flow_cancel").await.unwrap();
+            running.stop().await.unwrap();
+        });
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_scheduler_flow_runs_total",
+                &[("flow", "flow_cancel"), ("outcome", "cancelled")]
+            ),
+            1
+        );
+        assert_eq!(
+            counter_opt(
+                &rows,
+                "cano_scheduler_flow_runs_total",
+                &[("flow", "flow_cancel"), ("outcome", "failed")]
             ),
             None
         );

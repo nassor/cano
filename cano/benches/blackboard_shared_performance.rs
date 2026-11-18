@@ -1,4 +1,4 @@
-use cano::MemoryStore;
+use cano::Blackboard;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::sync::Arc;
 
@@ -23,11 +23,11 @@ fn bench_store_shared_operations(c: &mut Criterion) {
             BenchmarkId::new("get_clone", &size_label),
             &size,
             |b, &_size| {
-                let store = MemoryStore::new();
-                store.put("data", data.clone());
+                let board = Blackboard::new();
+                board.put("data", data.clone());
 
                 b.iter(|| {
-                    let _: Vec<u8> = store.get("data").unwrap();
+                    let _: Vec<u8> = board.get("data").unwrap();
                 });
             },
         );
@@ -36,11 +36,11 @@ fn bench_store_shared_operations(c: &mut Criterion) {
             BenchmarkId::new("get_shared", &size_label),
             &size,
             |b, &_size| {
-                let store = MemoryStore::new();
-                store.put("data", data.clone());
+                let board = Blackboard::new();
+                board.put("data", data.clone());
 
                 b.iter(|| {
-                    let _: Arc<Vec<u8>> = store.get_shared("data").unwrap();
+                    let _: Arc<Vec<u8>> = board.get_shared("data").unwrap();
                 });
             },
         );

@@ -49,22 +49,23 @@ ecosystem, see <a href="../observers/">Observers</a>. Attach
 
 <h2 id="setup"><a href="#setup" class="anchor-link" aria-hidden="true">#</a>Setup</h2>
 <p>Enable the <code>metrics</code> feature in your <code>Cargo.toml</code>. <code>features = ["all"]</code>
-enables every optional feature (<code>scheduler</code>, <code>tracing</code>, <code>recovery</code>,
-<code>metrics</code> and <code>testing</code>).</p>
+enables every optional feature (<code>scheduler</code>, <code>tracing</code>, <code>store-redb</code>,
+<code>store-postgres</code>, <code>store-nats</code>, <code>metrics</code> and <code>testing</code>).</p>
 
 ```toml
 [dependencies]
-cano = { version = "0.16", features = ["metrics"] }
+cano = { version = "@CANO_MINOR@", features = ["metrics"] }
+metrics = "0.24"
 
 # The metrics crate is a facade, so you also need a recorder or exporter:
-metrics-exporter-prometheus = "0.18"  # for production
-# or: metrics-util = "0.20"           # for testing and debugging snapshots
+metrics-exporter-prometheus = "0.18"                                  # for production
+# or: metrics-util = { version = "0.20", features = ["debugging"] }   # for debugging snapshots
 ```
 
 <p>
 Your application picks the concrete recorder: for example
-<code>metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder()</code> for a Prometheus
-scrape endpoint, or <code>metrics_util::debugging::DebuggingRecorder</code> in tests. Call
+<code>metrics_exporter_prometheus::PrometheusBuilder::new().install()</code> for a standalone Prometheus
+scrape endpoint (or <code>.install_recorder()</code> to serve the scrape body from your own HTTP router), or <code>metrics_util::debugging::DebuggingRecorder</code> in tests. Call
 <code>cano::metrics::describe()</code> once, after installing the recorder, so exporters receive help
 text and units.
 </p>
@@ -88,6 +89,7 @@ the <code>TracingObserver</code> bridge.
 use cano::prelude::*;
 use std::sync::Arc;
 
+// Opt into observer-driven lifecycle counters alongside Cano's always-on engine metrics.
 Workflow::bare()
     .register(/* ... */)
     .add_exit_state(/* ... */)
@@ -195,7 +197,7 @@ names follow the <code>metrics</code> crate's underscore convention.
 <div class="card">
 <h3>Workflow</h3>
 <ul>
-<li><code>cano_workflow_runs_total{outcome}</code>: counter; <code>outcome</code> is <code>completed</code> or <code>failed</code>. A run that trips its total timeout counts as <code>failed</code>.</li>
+<li><code>cano_workflow_runs_total{outcome}</code>: counter; <code>outcome</code> is <code>completed</code>, <code>suspended</code>, <code>cancelled</code> or <code>failed</code>. A run that trips its total timeout counts as <code>failed</code>.</li>
 <li><code>cano_workflow_duration_seconds{outcome}</code>: histogram (seconds)</li>
 <li><code>cano_workflow_active</code>: gauge; workflows currently executing</li>
 </ul>
@@ -203,7 +205,7 @@ names follow the <code>metrics</code> crate's underscore convention.
 <div class="card">
 <h3>Task dispatch</h3>
 <ul>
-<li><code>cano_task_duration_seconds{state, kind}</code>: histogram (seconds); <code>kind</code> is <code>single</code>, <code>router</code>, <code>split</code>, <code>compensatable</code>, <code>stepped</code> or <code>stream</code></li>
+<li><code>cano_task_duration_seconds{state, kind}</code>: histogram (seconds); <code>kind</code> is <code>single</code>, <code>router</code>, <code>split</code>, <code>compensatable</code>, <code>stepped</code>, <code>stream</code> or <code>suspend</code></li>
 <li><code>cano_task_attempts_total{outcome}</code>: counter; per attempt inside the retry loop; <code>outcome</code> is <code>completed</code> or <code>failed</code></li>
 <li><code>cano_circuit_rejections_total</code>: counter; attempts short-circuited by an open breaker</li>
 </ul>
@@ -260,7 +262,7 @@ names follow the <code>metrics</code> crate's underscore convention.
 <h3 id="scheduler-metrics"><a href="#scheduler-metrics" class="anchor-link" aria-hidden="true">#</a>Scheduler</h3>
 <p class="feature-tag">Also requires the <code>scheduler</code> feature.</p>
 <ul>
-<li><code>cano_scheduler_flow_runs_total{flow, outcome}</code>: counter; <code>outcome</code> is <code>completed</code> or <code>failed</code></li>
+<li><code>cano_scheduler_flow_runs_total{flow, outcome}</code>: counter; <code>outcome</code> is <code>completed</code>, <code>cancelled</code> or <code>failed</code></li>
 <li><code>cano_scheduler_flow_duration_seconds{flow}</code>: histogram (seconds)</li>
 <li><code>cano_scheduler_flow_backoff_total{flow}</code>: counter</li>
 <li><code>cano_scheduler_flow_tripped_total{flow}</code>: counter</li>
@@ -279,11 +281,12 @@ Call it once, after installing your recorder, so exporters include help text (fo
 </p>
 
 ```rust
-// Install your recorder first, then describe:
+// Install your recorder first (starts the Prometheus scrape listener on :9000 by default).
 metrics_exporter_prometheus::PrometheusBuilder::new()
     .install()
     .expect("install prometheus exporter");
 
+// Register # HELP descriptions and units for every cano_* counter, gauge, and histogram.
 cano::metrics::describe();
 ```
 
@@ -331,7 +334,9 @@ your application. Cano never depends on it, in the same way it never depends on
 
 ```toml
 [dependencies]
-cano = { version = "0.16", features = ["metrics", "tracing"] }
+cano = { version = "@CANO_MINOR@", features = ["metrics", "tracing"] }
+metrics = "0.24"
+metrics-util = "0.20"
 metrics-tracing-context = "0.18"
 tracing-subscriber = "0.3"
 ```
@@ -342,6 +347,7 @@ use metrics_util::layers::Layer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 // 1. Wrap your metrics recorder so it reads the current span's fields.
+//    In production, prefer TracingContextLayer::new(filter) to allow-list span fields.
 let recorder = TracingContextLayer::all().layer(your_recorder);
 metrics::set_global_recorder(recorder).expect("install metrics recorder");
 cano::metrics::describe();
@@ -395,6 +401,7 @@ directly and then under the scheduler, and dumps the captured snapshot. It mirro
 </p>
 
 ```rust
+// Requires features = ["metrics", "scheduler"] on cano.
 use cano::prelude::*;
 use metrics_util::debugging::{DebugValue, DebuggingRecorder};
 use std::sync::Arc;
@@ -424,6 +431,7 @@ impl Task<Step> for ProcessTask {
 }
 
 fn workflow() -> Workflow<Step> {
+    // MetricsObserver adds state-enter and task-outcome counters on top of engine metrics.
     Workflow::bare()
         .with_observer(Arc::new(MetricsObserver::new()))
         .register(Step::Fetch, FetchTask)

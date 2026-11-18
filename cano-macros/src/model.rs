@@ -108,7 +108,7 @@ pub(crate) fn expand(
                 ),
             ));
         }
-        return Ok(async_rewrite::rewrite_trait(trait_def));
+        return async_rewrite::rewrite_trait(trait_def);
     }
 
     let Ok(item_impl) = parse2::<ItemImpl>(item) else {
@@ -133,17 +133,17 @@ pub(crate) fn expand(
                 ));
             }
             let Some(last) = path.segments.last() else {
-                return Ok(async_rewrite::rewrite_impl(item_impl));
+                return async_rewrite::rewrite_impl(item_impl);
             };
             if last.ident != model.trait_ident {
-                return Ok(async_rewrite::rewrite_impl(item_impl));
+                return async_rewrite::rewrite_impl(item_impl);
             }
             let state = trait_state(model, &item_impl, &last.arguments)?;
             let mut item_impl = item_impl;
             insert_res_params(model, &mut item_impl);
             let companion = companion(model, &item_impl, &state);
             let registrable = registrable(model, &item_impl, &state);
-            let rewritten = async_rewrite::rewrite_impl(item_impl);
+            let rewritten = async_rewrite::rewrite_impl(item_impl)?;
             Ok(quote! { #rewritten #companion #registrable })
         }
         None => {
@@ -217,6 +217,8 @@ fn expand_inherent(
 ) -> syn::Result<TokenStream> {
     let attr_name = model.attr;
     let mut errors = Vec::new();
+    let mut seen_methods = std::collections::HashSet::new();
+    let mut seen_types = std::collections::HashSet::new();
     for it in &item_impl.items {
         match it {
             ImplItem::Fn(f) => {
@@ -238,6 +240,11 @@ fn expand_inherent(
                             allowed.join(", ")
                         ),
                     ));
+                } else if !seen_methods.insert(name.clone()) {
+                    errors.push(syn::Error::new_spanned(
+                        &f.sig.ident,
+                        format!("#[cano::{attr_name}]: duplicate method `{name}`"),
+                    ));
                 }
             }
             ImplItem::Type(t) => {
@@ -258,9 +265,21 @@ fn expand_inherent(
                         )
                     };
                     errors.push(syn::Error::new_spanned(&t.ident, msg));
+                } else if !seen_types.insert(name.clone()) {
+                    errors.push(syn::Error::new_spanned(
+                        &t.ident,
+                        format!("#[cano::{attr_name}]: duplicate associated type `{name}`"),
+                    ));
                 }
             }
-            _ => {}
+            other => {
+                errors.push(syn::Error::new_spanned(
+                    other,
+                    format!(
+                        "#[cano::{attr_name}]: unsupported item in inherent impl; only trait methods and associated types are allowed"
+                    ),
+                ));
+            }
         }
     }
     for required in model.required {
@@ -287,7 +306,7 @@ fn expand_inherent(
 
     let companion = companion(model, &item_impl, &state);
     let registrable = registrable(model, &item_impl, &state);
-    let rewritten = async_rewrite::rewrite_impl(item_impl);
+    let rewritten = async_rewrite::rewrite_impl(item_impl)?;
     Ok(quote! { #rewritten #companion #registrable })
 }
 

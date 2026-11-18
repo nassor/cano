@@ -1,4 +1,4 @@
-//! # Recovery — Append-Only Checkpoint Storage
+//! # Checkpoint: append-only checkpoint storage
 //!
 //! This module defines the [`CheckpointStore`] trait: a pluggable, append-only
 //! log of FSM transitions that lets a workflow be resumed after a crash. Each
@@ -13,12 +13,14 @@
 //!   in place. Reconstructing a run is "load every row for this workflow id, in
 //!   sequence order".
 //! - **Pluggable.** Implement [`CheckpointStore`] over any backend (an embedded
-//!   KV store, Postgres, an HTTP service). The trait is intentionally tiny:
+//!   KV store, a database, an HTTP service). The trait is intentionally tiny:
 //!   [`append`](CheckpointStore::append), [`load_run`](CheckpointStore::load_run),
-//!   [`clear`](CheckpointStore::clear).
-//! - **Optional default.** With the `recovery` feature enabled, [`RedbCheckpointStore`]
-//!   provides an embedded, ACID, daemon-free implementation backed by
-//!   [`redb`](https://docs.rs/redb). The default build pulls in no extra dependencies.
+//!   [`clear`](CheckpointStore::clear). With the `testing` feature,
+//!   `cano::testing::assert_checkpoint_store_contract` checks an implementation against
+//!   the contract below.
+//! - **Built-in backends** are the stores in [`crate::store`], each behind its own feature:
+//!   `RedbStore` (`store-redb`, on by default), `PostgresStore` (`store-postgres`) and
+//!   `NatsStore` (`store-nats`).
 //! - **Versioned.** Each [`CheckpointRow`] carries a user-stamped
 //!   [`workflow_version`](CheckpointRow::workflow_version) tag (default `0`); set it via
 //!   [`Workflow::with_workflow_version`](crate::workflow::Workflow::with_workflow_version)
@@ -30,7 +32,7 @@
 //! ## Example
 //!
 //! ```rust
-//! use cano::recovery::{CheckpointRow, CheckpointStore};
+//! use cano::checkpoint::{CheckpointRow, CheckpointStore};
 //! use cano::CanoError;
 //! use std::collections::HashMap;
 //! use std::sync::Mutex;
@@ -78,12 +80,6 @@
 
 use crate::error::CanoError;
 use cano_macros::checkpoint_store;
-
-#[cfg(feature = "recovery")]
-mod redb;
-
-#[cfg(feature = "recovery")]
-pub use redb::RedbCheckpointStore;
 
 /// Why a [`CheckpointRow`] was written — distinguishes ordinary state-entry rows
 /// from saga compensation-completion rows, `SteppedTask` cursor rows and
@@ -351,7 +347,9 @@ mod tests {
             CheckpointRow::new(0, "Start", "t0"), // StateEntry, no blob, version 0
             CheckpointRow::new(1, "Pay", "charge").with_output(vec![1, 2, 3]), // CompensationCompletion
             CheckpointRow::new(2, "Step", "stepper").with_cursor(vec![]), // StepCursor, empty blob
-            CheckpointRow::new(3, "Start", "t0").with_workflow_version(99), // versioned StateEntry
+            CheckpointRow::new(3, "Wait", "gate").suspended(),            // Suspended, no blob
+            CheckpointRow::new(4, "Wait", "gate").with_resume_input(br#"{"ok":true}"#.to_vec()),
+            CheckpointRow::new(5, "Start", "t0").with_workflow_version(99), // versioned StateEntry
         ];
         for row in rows {
             let bytes = serde_json::to_vec(&row).expect("serialize");
@@ -360,16 +358,18 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "recovery")]
+    #[cfg(any(feature = "store-redb", feature = "store-nats"))]
     #[test]
     fn checkpoint_row_postcard_roundtrip_preserves_all_fields() {
-        // postcard is the on-disk format the `RedbCheckpointStore` uses; validate the row types
+        // postcard is the on-disk format `RedbStore` and `NatsStore` use; validate the row types
         // survive it directly (a binary format with stricter expectations than JSON).
         let rows = [
             CheckpointRow::new(0, "Start", "t0"),
             CheckpointRow::new(1, "Pay", "charge").with_output(vec![1, 2, 3]),
             CheckpointRow::new(2, "Step", "stepper").with_cursor(vec![9, 8]),
-            CheckpointRow::new(3, "Start", "t0").with_workflow_version(99),
+            CheckpointRow::new(3, "Wait", "gate").suspended(),
+            CheckpointRow::new(4, "Wait", "gate").with_resume_input(vec![7, 6]),
+            CheckpointRow::new(5, "Start", "t0").with_workflow_version(99),
         ];
         for row in rows {
             let bytes = postcard::to_stdvec(&row).expect("serialize");

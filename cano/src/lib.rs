@@ -28,10 +28,10 @@
 //! impl Task<Step> for FetchTask {
 //!     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
 //!         let config = res.get::<FetchConfig>()?;
-//!         let store = res.get::<MemoryStore>()?;
-//!         // Produce `batch_size` items and store them for the next task.
+//!         let board = res.get::<Blackboard>()?;
+//!         // Produce `batch_size` items and put them on the blackboard for the next task.
 //!         let data: Vec<u32> = (1..=(config.batch_size as u32)).collect();
-//!         store.put("data", data);
+//!         board.put("data", data);
 //!         Ok(Step::Process)
 //!     }
 //! }
@@ -39,19 +39,19 @@
 //! #[task]
 //! impl Task<Step> for ProcessTask {
 //!     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
-//!         let store = res.get::<MemoryStore>()?;
-//!         let data: Vec<u32> = store.get("data")?;
-//!         store.put("sum", data.iter().sum::<u32>());
+//!         let board = res.get::<Blackboard>()?;
+//!         let data: Vec<u32> = board.get("data")?;
+//!         board.put("sum", data.iter().sum::<u32>());
 //!         Ok(Step::Done)
 //!     }
 //! }
 //!
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), CanoError> {
-//! let store = MemoryStore::new();
+//! let board = Blackboard::new();
 //! let resources = Resources::new()
 //!     .insert(FetchConfig { batch_size: 3 })
-//!     .insert(store.clone());
+//!     .insert(board.clone());
 //! let workflow = Workflow::new(resources)
 //!     .register(Step::Fetch, FetchTask)
 //!     .register(Step::Process, ProcessTask)
@@ -61,7 +61,7 @@
 //! assert_eq!(final_state, Step::Done);
 //!
 //! // The sum of 1..=3 is 6.
-//! assert_eq!(store.get::<u32>("sum")?, 6);
+//! assert_eq!(board.get::<u32>("sum")?, 6);
 //! # Ok(())
 //! # }
 //! ```
@@ -149,9 +149,9 @@
 //! strategies: `All`, `Any`, `Quorum(n)`, `Percentage(f64)`, `PartialResults(min)`,
 //! or `PartialTimeout`.
 //!
-//! ### Store
+//! ### Blackboard
 //!
-//! [`MemoryStore`] provides a thread-safe `Arc<RwLock<HashMap>>` for sharing typed data
+//! [`Blackboard`] provides a thread-safe `Arc<RwLock<HashMap>>` for sharing typed data
 //! between states. For custom backends, register a concrete storage resource in [`Resources`].
 //!
 //! ### Observability
@@ -170,9 +170,11 @@
 //! entered — *before* that state's task runs. After a crash, [`Workflow::resume_from`]
 //! reloads the run, re-enters the FSM at the last checkpointed state, and continues
 //! forward; the resumed state's task re-runs, so tasks at and after the resume point must
-//! be idempotent. The trait is backend-agnostic; with the `recovery` feature,
-//! `RedbCheckpointStore` is a ready-made embedded, ACID implementation. Workflows
-//! without a checkpoint store pay nothing. See the `workflow_recovery` example.
+//! be idempotent. The trait is backend-agnostic: implement it yourself, or use one of
+//! the built-in [`store`]s: [`RedbStore`] (feature `store-redb`, on by default, an
+//! embedded file), `PostgresStore` (feature `store-postgres`) or `NatsStore` (feature
+//! `store-nats`, a JetStream Key/Value bucket). Workflows without a checkpoint store pay
+//! nothing. See the `workflow_recovery` example.
 //!
 //! [`Workflow::with_workflow_version`] stamps a `u32` version onto every appended
 //! [`CheckpointRow`] (default `0`); [`Workflow::resume_from`] then refuses to replay a
@@ -251,10 +253,11 @@
 //!   counters / histograms / gauges for workflow, task, retry, split/join, circuit-breaker,
 //!   scheduler, processing-loop, recovery and saga internals — call `cano::metrics::describe()`
 //!   for the full list with help text and units
-//! - [`recovery`]: [`CheckpointStore`] / [`CheckpointRow`] — append-only checkpoint log for crash recovery (and `RedbCheckpointStore`, behind the `recovery` feature)
+//! - [`checkpoint`]: [`CheckpointStore`] / [`CheckpointRow`], the append-only checkpoint log behind crash recovery, suspend and resume
+//! - [`store`]: the storage backends that implement [`CheckpointStore`]: [`RedbStore`] (`store-redb`, on by default), `PostgresStore` (`store-postgres`) and `NatsStore` (`store-nats`)
 //! - [`saga`]: [`CompensatableTask`] — pair a forward step with a compensating action; failures roll back via [`Workflow::register`]
 //! - [`rate_limit`]: [`RateLimiter`] (token bucket) and [`WindowedRateLimiter`] (fixed window) throttles, both implementing [`Meter`] so they compose into a [`MultiRateLimiter`] that enforces several weighted tiers (e.g. a 5h + 7d + per-model limit) at once
-//! - [`store`]: [`MemoryStore`] — a typed in-memory store that implements [`Resource`]
+//! - [`blackboard`]: [`Blackboard`] — a typed in-memory key-value map that implements [`Resource`]
 //! - `testing` (requires `testing` feature): batteries-included test fixtures —
 //!   a `RecordingObserver`, a public `InMemoryCheckpointStore`, a `panic_on_attempt` task factory and an `assert_compensation_ran`
 //!   saga helper. Import explicitly with `use cano::testing::*;` — it is deliberately
@@ -263,18 +266,19 @@
 //!
 //! ## Getting Started
 //!
-//! 1. Run an example: `cargo run --example workflow_simple`
-//! 2. Read the module docs — each module has detailed documentation and examples
+//! 1. Read the [documentation and setup guide](https://nassor.github.io/cano/)
+//! 2. Run an example: `cargo run --example workflow_simple`
 //! 3. Run benchmarks: `cargo bench --bench workflow_performance`
 
 // Lets macro output use `::cano::…` paths inside this crate too.
 extern crate self as cano;
 
+pub mod blackboard;
+pub mod checkpoint;
 pub mod circuit;
 pub mod error;
 pub mod observer;
 pub mod rate_limit;
-pub mod recovery;
 pub mod resource;
 pub mod saga;
 pub mod store;
@@ -291,6 +295,7 @@ pub mod scheduler;
 pub mod testing;
 
 // Core public API - simplified imports
+pub use checkpoint::{CheckpointRow, CheckpointStore, RowKind};
 pub use circuit::{CircuitBreaker, CircuitPolicy, CircuitState, Permit as CircuitPermit};
 pub use error::{CanoError, CanoResult};
 pub use observer::WorkflowObserver;
@@ -298,7 +303,6 @@ pub use rate_limit::{
     Meter, MeterStatus, MultiPermit, MultiRateLimiter, Permit as RateLimiterPermit, RateLimiter,
     RateLimiterPolicy, Reservation, Tier, WindowPermit, WindowPolicy, WindowedRateLimiter,
 };
-pub use recovery::{CheckpointRow, CheckpointStore, RowKind};
 pub use resource::{HealthStatus, Resource, Resources};
 pub use saga::CompensatableTask;
 pub use task::batch::BatchTask;
@@ -310,9 +314,13 @@ pub use task::suspend::SuspendTask;
 pub use task::timer::{TimerOutcome, TimerTask};
 pub use tokio_util::sync::CancellationToken;
 
-#[cfg(feature = "recovery")]
-pub use recovery::RedbCheckpointStore;
-pub use store::MemoryStore;
+pub use blackboard::Blackboard;
+#[cfg(feature = "store-nats")]
+pub use store::NatsStore;
+#[cfg(feature = "store-postgres")]
+pub use store::PostgresStore;
+#[cfg(feature = "store-redb")]
+pub use store::RedbStore;
 pub use task::{RetryMode, Task, TaskConfig};
 pub use workflow::{JoinConfig, JoinStrategy, Workflow};
 
@@ -324,7 +332,8 @@ pub use observer::MetricsObserver;
 
 #[cfg(feature = "scheduler")]
 pub use scheduler::{
-    BackoffPolicy, FlowInfo, RunningScheduler, Scheduler, Status, shutdown_signal,
+    BackoffPolicy, CasOutcome, FlowInfo, RunningScheduler, Scheduler, SchedulerStore, Status,
+    VersionedRecord, shutdown_signal,
 };
 
 /// Attribute macro applied to `Task` trait definitions and `impl Task` blocks
@@ -360,6 +369,14 @@ pub use cano_macros::resource;
 /// differs only in name.
 pub use cano_macros::checkpoint_store;
 
+/// Attribute macro applied to the `SchedulerStore` trait definition and
+/// `impl SchedulerStore` blocks.
+///
+/// See [`macro@task`] for the rewrite shape; this macro is functionally identical and
+/// differs only in name.
+#[cfg(feature = "scheduler")]
+pub use cano_macros::scheduler_store;
+
 /// Derive macro that generates a `from_resources` associated function for a struct.
 ///
 /// See [`FromResources`] for the full specification. Each
@@ -384,9 +401,9 @@ pub mod prelude {
     //! Use `use cano::prelude::*;` to import the most commonly used types and traits.
 
     pub use crate::{
-        BatchTask, CancellationToken, CanoError, CanoResult, CheckpointRow, CheckpointStore,
-        CircuitBreaker, CircuitPermit, CircuitPolicy, CircuitState, CloseReason, CompensatableTask,
-        HealthStatus, JoinConfig, JoinStrategy, MemoryStore, Meter, MeterStatus, MultiPermit,
+        BatchTask, Blackboard, CancellationToken, CanoError, CanoResult, CheckpointRow,
+        CheckpointStore, CircuitBreaker, CircuitPermit, CircuitPolicy, CircuitState, CloseReason,
+        CompensatableTask, HealthStatus, JoinConfig, JoinStrategy, Meter, MeterStatus, MultiPermit,
         MultiRateLimiter, PollErrorPolicy, PollOutcome, PollTask, RateLimiter, RateLimiterPermit,
         RateLimiterPolicy, Reservation, Resource, Resources, RetryMode, RouterTask, RowKind,
         StepOutcome, SteppedTask, StreamErrorPolicy, StreamTask, StreamWindow, SuspendTask, Task,
@@ -394,9 +411,13 @@ pub mod prelude {
         WindowedRateLimiter, Workflow, WorkflowObserver,
     };
 
+    #[cfg(feature = "store-redb")]
+    pub use crate::RedbStore;
+
     #[cfg(feature = "scheduler")]
     pub use crate::{
-        BackoffPolicy, FlowInfo, RunningScheduler, Scheduler, Status, shutdown_signal,
+        BackoffPolicy, CasOutcome, FlowInfo, RunningScheduler, Scheduler, SchedulerStore, Status,
+        VersionedRecord, scheduler_store, shutdown_signal,
     };
 
     #[cfg(feature = "tracing")]
@@ -404,9 +425,6 @@ pub mod prelude {
 
     #[cfg(feature = "metrics")]
     pub use crate::MetricsObserver;
-
-    #[cfg(feature = "recovery")]
-    pub use crate::RedbCheckpointStore;
 
     // Attribute macros kept at the crate root: `#[task]`, `#[resource]`, `#[checkpoint_store]`.
     pub use crate::{checkpoint_store, resource, task};
@@ -424,4 +442,217 @@ pub mod prelude {
     // `Resource` trait imported above.
     pub use crate::FromResources;
     pub use crate::Resource as ResourceDerive;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn collect_files(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) {
+        let mut entries: Vec<_> = fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", dir.display()))
+            .map(|res| res.expect("dir entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                collect_files(&path, ext, out);
+            } else if path.extension().and_then(|s| s.to_str()) == Some(ext) {
+                out.push(path);
+            }
+        }
+    }
+
+    fn parse_semver(version: &str) -> (u64, u64, u64) {
+        let core = version.split(['-', '+']).next().unwrap_or(version);
+        let mut parts = core.split('.');
+        let major = parts
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("invalid major version in {version:?}"));
+        let minor = parts
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("invalid minor version in {version:?}"));
+        let patch = parts
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("invalid patch version in {version:?}"));
+        assert!(
+            parts.next().is_none(),
+            "unexpected extra version segment in {version:?}"
+        );
+        (major, minor, patch)
+    }
+
+    fn extract_quoted_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+        let mut rest = line;
+        while let Some(idx) = rest.find(key) {
+            let prev = idx.checked_sub(1).map(|i| rest.as_bytes()[i]);
+            let before_ok =
+                prev.is_none_or(|b| !b.is_ascii_alphanumeric() && b != b'_' && b != b'-');
+            rest = &rest[idx + key.len()..];
+            if !before_ok {
+                continue;
+            }
+            let after_key = rest.trim_start();
+            if let Some(after_eq) = after_key.strip_prefix('=') {
+                let after_eq = after_eq.trim_start();
+                if let Some(quoted) = after_eq.strip_prefix('"')
+                    && let Some(end) = quoted.find('"')
+                {
+                    return Some(&quoted[..end]);
+                }
+            }
+        }
+        None
+    }
+
+    fn section_line<'a>(toml: &'a str, section: &str, key: &str) -> Option<&'a str> {
+        let mut current = "";
+        for raw in toml.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if line.starts_with('[') && line.ends_with(']') {
+                current = line.trim_matches(|c| c == '[' || c == ']').trim();
+                continue;
+            }
+            if current == section
+                && let Some(after_key) = line.strip_prefix(key)
+                && after_key.trim_start().starts_with('=')
+            {
+                return Some(line);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn version_sources_stay_in_sync() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let Some(root) = manifest_dir.parent() else {
+            return;
+        };
+        let root_cargo_path = root.join("Cargo.toml");
+        let docs_config_path = root.join("docs/config.toml");
+        if !root_cargo_path.exists() || !docs_config_path.exists() {
+            // Standalone `.crate` package tests run outside the workspace checkout.
+            return;
+        }
+
+        let pkg_version = env!("CARGO_PKG_VERSION");
+        let (major, minor, patch) = parse_semver(pkg_version);
+        let pkg_minor = format!("{major}.{minor}");
+
+        // 1. docs/config.toml [extra].version matches CARGO_PKG_VERSION.
+        let docs_config = fs::read_to_string(&docs_config_path).expect("read docs/config.toml");
+        let docs_line = section_line(&docs_config, "extra", "version")
+            .expect("docs/config.toml must define [extra].version");
+        let docs_version = extract_quoted_field(docs_line, "version")
+            .expect("docs/config.toml [extra].version must be a quoted string");
+        assert_eq!(
+            docs_version, pkg_version,
+            "docs/config.toml [extra].version must match CARGO_PKG_VERSION"
+        );
+
+        // 2. Root Cargo.toml [workspace.dependencies].cano-macros matches major.minor
+        //    (or an exact major.minor.m_patch pin with m_patch <= patch), and
+        //    cano/Cargo.toml inherits it via `.workspace = true`.
+        let root_cargo = fs::read_to_string(&root_cargo_path).expect("read root Cargo.toml");
+        let macros_line = section_line(&root_cargo, "workspace.dependencies", "cano-macros")
+            .expect("root Cargo.toml must define [workspace.dependencies].cano-macros");
+        let macros_ver = extract_quoted_field(macros_line, "version")
+            .expect("cano-macros workspace dependency must specify a version")
+            .trim_start_matches('=');
+        if macros_ver != pkg_minor {
+            let (m_major, m_minor, m_patch) = parse_semver(macros_ver);
+            assert!(
+                m_major == major && m_minor == minor && m_patch <= patch,
+                "cano-macros version {macros_ver:?} does not match cano {pkg_version:?}"
+            );
+        }
+
+        let crate_cargo =
+            fs::read_to_string(manifest_dir.join("Cargo.toml")).expect("read cano/Cargo.toml");
+        assert!(
+            crate_cargo
+                .lines()
+                .map(str::trim)
+                .any(|l| !l.starts_with('#') && l == "cano-macros.workspace = true"),
+            "cano/Cargo.toml must declare `cano-macros.workspace = true`"
+        );
+        assert!(
+            !crate_cargo
+                .lines()
+                .map(str::trim)
+                .any(|l| !l.starts_with('#') && l.starts_with("cano-macros = {")),
+            "cano/Cargo.toml must not pin cano-macros inline; use root Cargo.toml"
+        );
+
+        // 3. No hardcoded cano version snippets in cano/src/**/*.rs or README.md.
+        let forbidden = [
+            concat!("cano", " = { version ="),
+            concat!("cano", " = \"0."),
+            concat!("cano", " = \"1."),
+        ];
+        let mut scan_files = Vec::new();
+        collect_files(&manifest_dir.join("src"), "rs", &mut scan_files);
+        let readme = root.join("README.md");
+        if readme.exists() {
+            scan_files.push(readme);
+        }
+        for path in scan_files {
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+            for (idx, line) in text.lines().enumerate() {
+                for pat in forbidden {
+                    assert!(
+                        !line.contains(pat),
+                        "{}:{} contains hardcoded version snippet ({pat})",
+                        path.display(),
+                        idx + 1
+                    );
+                }
+            }
+        }
+
+        // 4. Every `cano =` dependency snippet in docs/content/**/*.md uses a template token.
+        let mut md_files = Vec::new();
+        collect_files(&root.join("docs/content"), "md", &mut md_files);
+        for path in md_files {
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+            for (idx, line) in text.lines().enumerate() {
+                let trimmed = line.trim();
+                let stripped = trimmed.strip_prefix("# ").unwrap_or(trimmed).trim_start();
+                if stripped.starts_with("cano =") {
+                    if let Some(ver) = extract_quoted_field(stripped, "version") {
+                        assert!(
+                            ver == "@CANO_MINOR@" || ver == "@CANO_VERSION@",
+                            "{}:{} must use @CANO_MINOR@ or @CANO_VERSION@, found {ver:?}",
+                            path.display(),
+                            idx + 1
+                        );
+                    } else if let Some(ver) = extract_quoted_field(stripped, "cano") {
+                        assert!(
+                            ver == "@CANO_MINOR@" || ver == "@CANO_VERSION@",
+                            "{}:{} must use @CANO_MINOR@ or @CANO_VERSION@, found {ver:?}",
+                            path.display(),
+                            idx + 1
+                        );
+                    }
+                }
+            }
+        }
+
+        let docs_index =
+            fs::read_to_string(root.join("docs/content/_index.md")).expect("read docs index");
+        assert!(
+            docs_index.contains("@CANO_MINOR@"),
+            "docs/content/_index.md must use @CANO_MINOR@"
+        );
+    }
 }

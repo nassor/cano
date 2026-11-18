@@ -1,6 +1,6 @@
 //! # SuspendTask: a human-in-the-loop rules review
 //!
-//! Run with: `cargo run --example suspend_task --features recovery`
+//! Run with: `cargo run --example suspend_task`
 //!
 //! An AI agent proposes a pricing rule set, a policy gate checks it, a human reviews it, and
 //! the approved set is deployed:
@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 
-use cano::RedbCheckpointStore;
+use cano::RedbStore;
 use cano::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -144,7 +144,7 @@ impl DeployRules {
     }
 }
 
-fn build(db: RulesDb, store: Arc<RedbCheckpointStore>, run_id: &str) -> Workflow<Step> {
+fn build(db: RulesDb, store: Arc<RedbStore>, run_id: &str) -> Workflow<Step> {
     Workflow::new(Resources::new().insert(db))
         .register(Step::Suggest, SuggestRules)
         .register(Step::PolicyGate, PolicyGate)
@@ -158,7 +158,7 @@ fn build(db: RulesDb, store: Arc<RedbCheckpointStore>, run_id: &str) -> Workflow
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
-    let store = Arc::new(RedbCheckpointStore::new(dir.path().join("rules.redb"))?);
+    let store = Arc::new(RedbStore::new(dir.path().join("rules.redb"))?);
     let db = RulesDb::default();
     let run_id = "rules-42";
 

@@ -56,8 +56,8 @@ impl Task<TaskState> for SimpleTask {
 
         let exec_result = format!("{} - Execution #{}", prep_result, count);
 
-        let store = res.get::<MemoryStore>()?;
-        store.put("last_execution", exec_result);
+        let board = res.get::<Blackboard>()?;
+        board.put("last_execution", exec_result);
         Ok(TaskState::Complete)
     }
 }
@@ -68,7 +68,7 @@ async fn main() -> CanoResult<()> {
     println!("==================================\n");
 
     let scheduler = Scheduler::new();
-    let store = MemoryStore::new();
+    let board = Blackboard::new();
 
     // Example 1: Manual workflows
     println!("📊 Setting up Manual Workflows");
@@ -77,7 +77,7 @@ async fn main() -> CanoResult<()> {
     let task1 = SimpleTask::new("ManualTask1");
     let task1_clone = task1.clone();
 
-    let workflow1 = Workflow::new(Resources::new().insert(store.clone()))
+    let workflow1 = Workflow::new(Resources::new().insert(board.clone()))
         .register(TaskState::Start, task1)
         .add_exit_state(TaskState::Complete);
 
@@ -91,7 +91,7 @@ async fn main() -> CanoResult<()> {
     let task2 = SimpleTask::new("ScheduledTask2");
     let task2_clone = task2.clone();
 
-    let workflow2 = Workflow::new(Resources::new().insert(store.clone()))
+    let workflow2 = Workflow::new(Resources::new().insert(board.clone()))
         .register(TaskState::Start, task2)
         .add_exit_state(TaskState::Complete);
 
@@ -105,7 +105,7 @@ async fn main() -> CanoResult<()> {
     let task3 = SimpleTask::new("ScheduledTask3");
     let task3_clone = task3.clone();
 
-    let workflow3 = Workflow::new(Resources::new().insert(store.clone()))
+    let workflow3 = Workflow::new(Resources::new().insert(board.clone()))
         .register(TaskState::Start, task3)
         .add_exit_state(TaskState::Complete);
 
@@ -134,7 +134,7 @@ async fn main() -> CanoResult<()> {
 
     // Example 6: Trigger manual workflow
     println!("🔄 Triggering manual workflow...");
-    running.trigger("manual_task_1")?;
+    running.trigger("manual_task_1").await?;
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 

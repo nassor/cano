@@ -5,6 +5,8 @@
 //! `on_cancelled`, idempotency, precedence over `with_total_timeout`, an uncancellable drain,
 //! pass-through equivalence with `orchestrate`, and resume cancellation.
 
+mod support;
+
 use cano::CancellationToken;
 use cano::prelude::*;
 use std::borrow::Cow;
@@ -992,4 +994,235 @@ async fn resume_from_honors_precancelled_token() {
         1,
         "resumed task must not re-run when cancelled at the boundary"
     );
+}
+
+#[tokio::test]
+async fn cancel_mid_suspend_and_mid_resume_balances_observer_hooks() {
+    struct SlowSuspend {
+        suspend_started: Arc<AtomicBool>,
+        resume_started: Arc<AtomicBool>,
+        hang_suspend: bool,
+    }
+
+    #[task::suspend(state = Step)]
+    impl SlowSuspend {
+        async fn suspend(&self) -> Result<(), CanoError> {
+            self.suspend_started.store(true, Ordering::SeqCst);
+            if self.hang_suspend {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+            Ok(())
+        }
+
+        async fn resume(&self, _input: String) -> Result<Step, CanoError> {
+            self.resume_started.store(true, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            Ok(Step::Done)
+        }
+    }
+
+    // 1. Cancel mid-`suspend()`.
+    let store = Arc::new(support::MemStore::default());
+    let rec = Arc::new(Rec::default());
+    let suspend_started = flag();
+    let wf_suspend = Workflow::bare()
+        .with_observer(rec.clone())
+        .with_checkpoint_store(store.clone())
+        .with_workflow_id("cancel-suspend")
+        .register(
+            Step::Park,
+            SlowSuspend {
+                suspend_started: Arc::clone(&suspend_started),
+                resume_started: flag(),
+                hang_suspend: true,
+            },
+        )
+        .add_exit_state(Step::Done);
+
+    let token = CancellationToken::new();
+    let canceller = cancel_when(Arc::clone(&suspend_started), token.clone());
+    let err = wf_suspend
+        .orchestrate_with_token(Step::Park, &token)
+        .await
+        .unwrap_err();
+    canceller.await.unwrap();
+    assert!(err.is_cancelled());
+    assert_eq!(rec.count_prefix("start:"), 1);
+    assert_eq!(rec.count_prefix("failure:"), 1);
+    assert_eq!(rec.count_prefix("cancelled:"), 1);
+
+    // 2. Park cleanly, then cancel mid-`resume()` via `resume_with_token`.
+    let rec2 = Arc::new(Rec::default());
+    let resume_started = flag();
+    let wf_resume = Workflow::bare()
+        .with_observer(rec2.clone())
+        .with_checkpoint_store(store)
+        .with_workflow_id("cancel-resume")
+        .register(
+            Step::Park,
+            SlowSuspend {
+                suspend_started: flag(),
+                resume_started: Arc::clone(&resume_started),
+                hang_suspend: false,
+            },
+        )
+        .add_exit_state(Step::Done);
+
+    assert_eq!(wf_resume.orchestrate(Step::Park).await.unwrap(), Step::Park);
+    let token2 = CancellationToken::new();
+    let canceller2 = cancel_when(Arc::clone(&resume_started), token2.clone());
+    let err2 = wf_resume
+        .resume_with_token("cancel-resume", &"go", &token2)
+        .await
+        .unwrap_err();
+    canceller2.await.unwrap();
+    assert!(err2.is_cancelled());
+    // 1 start+success for park + 1 start+failure for cancelled resume => 2 starts, 1 failure.
+    assert_eq!(rec2.count_prefix("start:"), 2);
+    assert_eq!(rec2.count_prefix("failure:"), 1);
+    assert_eq!(rec2.count_prefix("cancelled:"), 1);
+}
+
+#[tokio::test]
+async fn cancel_mid_stream_task_flushes_window_and_balances_observer_hooks() {
+    use futures_util::{StreamExt, stream};
+    use std::pin::Pin;
+
+    struct InfiniteStream {
+        item_seen: Arc<AtomicBool>,
+        flushed_windows: Arc<AtomicUsize>,
+    }
+
+    #[task::stream(state = Step)]
+    impl InfiniteStream {
+        fn window(&self) -> StreamWindow {
+            StreamWindow::Count(4)
+        }
+
+        async fn open(
+            &self,
+            _cursor: Option<u64>,
+        ) -> Result<Pin<Box<dyn futures_util::Stream<Item = u64> + Send>>, CanoError> {
+            let seen = Arc::clone(&self.item_seen);
+            let s = stream::unfold(0u64, move |n| {
+                let seen = Arc::clone(&seen);
+                async move {
+                    if n >= 1 {
+                        seen.store(true, Ordering::SeqCst);
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                    }
+                    Some((n + 1, n + 1))
+                }
+            });
+            Ok(s.boxed())
+        }
+
+        async fn process_item(&self, item: u64) -> Result<(u64, u64), CanoError> {
+            Ok((item, item))
+        }
+
+        async fn flush_window(&self, _outputs: Vec<u64>) -> Result<WindowSignal<Step>, CanoError> {
+            self.flushed_windows.fetch_add(1, Ordering::SeqCst);
+            Ok(WindowSignal::Continue)
+        }
+
+        async fn on_close(&self, _reason: CloseReason) -> Result<Step, CanoError> {
+            Ok(Step::Done)
+        }
+    }
+
+    let seen = flag();
+    let flushed = Arc::new(AtomicUsize::new(0));
+    let rec = Arc::new(Rec::default());
+    let wf = Workflow::bare()
+        .with_observer(rec.clone())
+        .register(
+            Step::Ship,
+            InfiniteStream {
+                item_seen: Arc::clone(&seen),
+                flushed_windows: Arc::clone(&flushed),
+            },
+        )
+        .add_exit_state(Step::Done);
+
+    let token = CancellationToken::new();
+    let canceller = cancel_when(seen, token.clone());
+    let err = wf
+        .orchestrate_with_token(Step::Ship, &token)
+        .await
+        .unwrap_err();
+    canceller.await.unwrap();
+
+    assert!(err.is_cancelled());
+    assert_eq!(
+        flushed.load(Ordering::SeqCst),
+        1,
+        "partial in-flight stream window must flush on cancel"
+    );
+    assert_eq!(rec.count_prefix("start:"), 1);
+    assert_eq!(rec.count_prefix("failure:"), 1);
+    assert_eq!(rec.count_prefix("cancelled:"), 1);
+}
+
+#[tokio::test]
+async fn cancel_during_checkpoint_append_does_not_emit_unpaired_task_failure() {
+    struct CancelOnAppendStore {
+        inner: support::MemStore,
+        token: CancellationToken,
+    }
+
+    #[cano::checkpoint_store]
+    impl CheckpointStore for CancelOnAppendStore {
+        async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
+            let res = self.inner.append(workflow_id, row).await;
+            // Cancel AFTER the top-of-loop `is_cancelled()` check has passed, right before
+            // `dispatch_with_budget` runs!
+            self.token.cancel();
+            res
+        }
+
+        async fn load_run(&self, workflow_id: &str) -> Result<Vec<CheckpointRow>, CanoError> {
+            self.inner.load_run(workflow_id).await
+        }
+
+        async fn clear(&self, workflow_id: &str) -> Result<(), CanoError> {
+            self.inner.clear(workflow_id).await
+        }
+    }
+
+    let token = CancellationToken::new();
+    let store = Arc::new(CancelOnAppendStore {
+        inner: support::MemStore::default(),
+        token: token.clone(),
+    });
+    let rec = Arc::new(Rec::default());
+    let started = flag();
+
+    let wf = Workflow::bare()
+        .with_observer(rec.clone())
+        .with_checkpoint_store(store)
+        .with_workflow_id("append-cancel")
+        .register(
+            Step::Ship,
+            LongTask {
+                started: Arc::clone(&started),
+                completed: flag(),
+                next: Step::Done,
+            },
+        )
+        .add_exit_state(Step::Done);
+
+    let err = wf
+        .orchestrate_with_token(Step::Ship, &token)
+        .await
+        .unwrap_err();
+    assert!(err.is_cancelled());
+    assert!(!started.load(Ordering::SeqCst));
+    assert_eq!(rec.count_prefix("start:"), 0);
+    assert_eq!(
+        rec.count_prefix("failure:"),
+        0,
+        "on_task_failure must NOT fire when on_task_start never ran"
+    );
+    assert_eq!(rec.count_prefix("cancelled:"), 1);
 }

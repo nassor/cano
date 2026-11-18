@@ -34,10 +34,12 @@ struct CoolDown;
 
 #[task::timer(state = Stage)]
 impl CoolDown {
-    async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
-        Ok(TimerOutcome::Duration(Duration::from_secs(30))) // one scheduled wake-up
+    // Resource-free methods omit `res: &Resources`.
+    async fn wait(&self) -> Result<TimerOutcome, CanoError> {
+        // Engine schedules one cancellation-aware tokio::time::sleep.
+        Ok(TimerOutcome::Duration(Duration::from_secs(30)))
     }
-    async fn after_wait(&self, _res: &Resources) -> Result<Stage, CanoError> {
+    async fn after_wait(&self) -> Result<Stage, CanoError> {
         Ok(Stage::Done)
     }
 }
@@ -159,15 +161,16 @@ struct CoolDown { delay: Duration }
 #[task::timer(state = Step)]
 impl CoolDown {
     fn config(&self) -> TaskConfig {
-        // cap the whole wait at 5s
+        // Caps the entire wait + after_wait cycle at 5 s.
         TaskConfig::new().with_attempt_timeout(Duration::from_secs(5))
     }
 
-    async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
+    async fn wait(&self) -> Result<TimerOutcome, CanoError> {
+        // Sleeps once (interrupted if attempt_timeout, total_timeout, or cancel fires).
         Ok(TimerOutcome::Duration(self.delay))
     }
 
-    async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {
+    async fn after_wait(&self) -> Result<Step, CanoError> {
         Ok(Step::Process)
     }
 }
@@ -252,6 +255,7 @@ struct CoolDown;
 #[task::timer]
 impl TimerTask<Step> for CoolDown {
     async fn wait(&self, _res: &Resources) -> Result<TimerOutcome, CanoError> {
+        // Explicit trait impl keeps the full signature; sleep runs once before after_wait.
         Ok(TimerOutcome::Duration(Duration::from_secs(30)))
     }
     async fn after_wait(&self, _res: &Resources) -> Result<Step, CanoError> {

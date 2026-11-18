@@ -28,11 +28,11 @@
 //! }
 //! ```
 //!
-//! Take `res: &Resources` when the task needs resources (store, config, HTTP client, etc.):
+//! Take `res: &Resources` when the task needs resources (blackboard, config, HTTP client, etc.):
 //!
-//! ## Using Params and Store as Resources
+//! ## Using Params and Blackboard as Resources
 //!
-//! A common pattern is to pass both a data store and typed configuration as resources:
+//! A common pattern is to pass both a blackboard and typed configuration as resources:
 //!
 //! ```rust
 //! use cano::prelude::*;
@@ -50,19 +50,19 @@
 //! #[task]
 //! impl Task<Step> for FetchTask {
 //!     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
-//!         let store = res.get::<MemoryStore>()?;
+//!         let board = res.get::<Blackboard>()?;
 //!         let params = res.get::<FetchParams>()?;
 //!         let data: Vec<u32> = (0..params.limit as u32).collect();
-//!         store.put("data", data);
+//!         board.put("data", data);
 //!         Ok(Step::Done)
 //!     }
 //! }
 //!
 //! # #[tokio::main]
 //! # async fn main() -> Result<(), CanoError> {
-//! let store = MemoryStore::new();
+//! let board = Blackboard::new();
 //! let resources = Resources::new()
-//!     .insert(store)
+//!     .insert(board)
 //!     .insert(FetchParams { limit: 10 });
 //! let result = Workflow::new(resources)
 //!     .register(Step::Fetch, FetchTask)
@@ -140,15 +140,15 @@ pub use cano_macros::timer_task as timer;
 /// #[task]
 /// impl Task<String> for DataProcessor {
 ///     async fn run(&self, res: &Resources) -> Result<String, CanoError> {
-///         let store = res.get::<MemoryStore>()?;
+///         let board = res.get::<Blackboard>()?;
 ///         // Load data
-///         let input: i32 = store.get("input").unwrap_or(1);
+///         let input: i32 = board.get("input").unwrap_or(1);
 ///
 ///         // Process
 ///         let result = input * self.multiplier;
 ///
-///         // Store result
-///         store.put("output", result);
+///         // Write result
+///         board.put("output", result);
 ///
 ///         // Determine next state
 ///         if result > 100 {

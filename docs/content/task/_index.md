@@ -86,7 +86,7 @@ Every example on this page wires a task into a <code>Workflow</code> and reads d
 
 ```rust
 use cano::prelude::*;
-use rand::RngExt;
+use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Action { Generate, Count, Complete }
@@ -95,30 +95,25 @@ struct GeneratorTask;
 
 #[task(state = Action)]
 impl GeneratorTask {
-    // Optional: opt in to retries (the default is a single attempt)
+    // Read once at registration; 3 retries means up to 4 total attempts.
     fn config(&self) -> TaskConfig {
-        TaskConfig::new().with_fixed_retry(3, std::time::Duration::from_secs(1))
+        TaskConfig::new().with_fixed_retry(3, Duration::from_secs(1))
     }
 
     async fn run(&self, res: &Resources) -> Result<Action, CanoError> {
-        println!("GeneratorTask: creating random numbers...");
+        // Borrow the shared Blackboard by type; returns ResourceNotFound if absent.
+        let board = res.get::<Blackboard>()?;
 
-        // 1. Look up the shared store from resources
-        let store = res.get::<MemoryStore>()?;
+        let numbers: Vec<u32> = (1..=10).map(|i| i * 10).collect();
 
-        // 2. Perform logic
-        let mut rng = rand::rng();
-        let numbers: Vec<u32> = (0..10).map(|_| rng.random_range(1..=100)).collect();
-
-        // 3. Store results
-        store.put("numbers", numbers);
+        // Store typed output in memory for downstream states.
+        board.put("numbers", numbers);
         println!("Stored numbers");
 
-        // 4. Return next state
+        // Transition the workflow FSM to Action::Count.
         Ok(Action::Count)
     }
 }
-
 ```
 </div>
 
@@ -148,14 +143,13 @@ struct PureTask;
 
 #[task(state = Step)]
 impl PureTask {
+    // Omit `res: &Resources` when unused; #[task] inserts the ignored parameter.
     async fn run(&self) -> Result<Step, CanoError> {
-        // No resources needed: pure computation
         let answer = 40 + 2;
-        println!("Computed answer: {}", answer);
+        println!("Computed answer: {answer}");
         Ok(Step::Done)
     }
 }
-
 ```
 </div>
 
@@ -181,7 +175,7 @@ when no task needs shared state, such as pure pipelines or computational benchma
 <span class="pattern-number">1</span>
 <h3>Data transformation</h3>
 </div>
-<p>Read data from the store, transform it, write it back.</p>
+<p>Read data from the blackboard, transform it, write it back.</p>
 <div class="code-block">
 <span class="code-block-label">Data transformation</span>
 
@@ -191,27 +185,27 @@ use cano::prelude::*;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum State { Transform, Complete }
 
-#[derive(Clone)]
 struct DataTransformer;
 
 #[task(state = State)]
 impl DataTransformer {
     async fn run(&self, res: &Resources) -> Result<State, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let raw_data: Vec<i32> = store.get("raw_data")?;
+        let board = res.get::<Blackboard>()?;
+        // Clone the typed input vector; `?` converts BlackboardError into CanoError.
+        let raw_data: Vec<i32> = board.get("raw_data")?;
 
-        // Transform: filter and multiply
+        // Keep positive entries and double them.
         let processed: Vec<i32> = raw_data
             .into_iter()
             .filter(|&x| x > 0)
             .map(|x| x * 2)
             .collect();
 
-        store.put("processed_data", processed);
+        // Store under a distinct key for the next state.
+        board.put("processed_data", processed);
         Ok(State::Complete)
     }
 }
-
 ```
 </div>
 </section>
@@ -231,35 +225,35 @@ use cano::prelude::*;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum State { Validate, Process, ValidationFailed }
 
-#[derive(Clone)]
 struct ValidatorTask;
 
 #[task(state = State)]
 impl ValidatorTask {
     async fn run(&self, res: &Resources) -> Result<State, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let data: Vec<f64> = store.get("processed_data")?;
+        let board = res.get::<Blackboard>()?;
+        let data: Vec<f64> = board.get("processed_data")?;
 
-        let mut errors = Vec::new();
-
+        // Collect all validation errors as Vec<String> so downstream types match.
+        let mut errors: Vec<String> = Vec::new();
         if data.is_empty() {
-            errors.push("Data is empty");
+            errors.push("Data is empty".into());
+        }
+        if data.iter().copied().any(f64::is_nan) {
+            errors.push("Contains NaN values".into());
         }
 
-        if data.iter().any(|&x| x.is_nan()) {
-            errors.push("Contains NaN values");
-        }
+        let is_valid = errors.is_empty();
+        // Store diagnostics for the ValidationFailed handler without cloning the Vec.
+        board.put("validation_errors", errors);
 
-        store.put("validation_errors", errors.clone());
-
-        if errors.is_empty() {
+        // Return a failure state rather than Err(...) so invalid data routes without retrying.
+        if is_valid {
             Ok(State::Process)
         } else {
             Ok(State::ValidationFailed)
         }
     }
 }
-
 ```
 </div>
 </section>
@@ -279,30 +273,28 @@ use cano::prelude::*;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum State { ParallelProcess, FastTrack, BatchProcess, SimpleProcess, Skip }
 
-#[derive(Clone)]
 struct RoutingTask;
 
 #[task(state = State)]
 impl RoutingTask {
     async fn run(&self, res: &Resources) -> Result<State, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let item_count: usize = store.get("item_count")?;
-        let priority: String = store.get("priority")?;
+        let board = res.get::<Blackboard>()?;
+        let item_count: usize = board.get("item_count")?;
+        let priority: String = board.get("priority")?;
 
-        // Dynamic routing based on conditions
+        // Map runtime inputs to a typed State (use #[task::router] to skip checkpointing).
         let next_state = match (item_count, priority.as_str()) {
-            (n, "high") if n > 100 => State::ParallelProcess,
-            (n, "high") if n > 0 => State::FastTrack,
-            (n, _) if n > 50 => State::BatchProcess,
-            (n, _) if n > 0 => State::SimpleProcess,
+            (101.., "high") => State::ParallelProcess,
+            (1..=100, "high") => State::FastTrack,
+            (51.., _) => State::BatchProcess,
+            (1..=50, _) => State::SimpleProcess,
             _ => State::Skip,
         };
 
-        println!("Routing to: {:?}", next_state);
+        println!("Routing to: {next_state:?}");
         Ok(next_state)
     }
 }
-
 ```
 </div>
 </section>
@@ -322,34 +314,32 @@ use cano::prelude::*;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum State { Aggregate, Complete }
 
-#[derive(Clone)]
 struct AggregatorTask;
 
 #[task(state = State)]
 impl AggregatorTask {
     async fn run(&self, res: &Resources) -> Result<State, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        println!("Aggregating results...");
+        let board = res.get::<Blackboard>()?;
 
-        let mut total = 0;
-        let mut count = 0;
+        // Annotate concrete types so downstream board.get::<usize>("count") matches.
+        let mut total = 0i32;
+        let mut count = 0usize;
 
-        // Collect results from parallel tasks
+        // Skip missing branch keys when following a partial join (PartialResults or PartialTimeout).
         for i in 1..=3 {
-            if let Ok(result) = store.get::<i32>(&format!("result_{}", i)) {
+            if let Ok(result) = board.get::<i32>(&format!("result_{i}")) {
                 total += result;
                 count += 1;
             }
         }
 
-        store.put("total", total);
-        store.put("count", count);
+        board.put("total", total);
+        board.put("count", count);
 
-        println!("Aggregated {} results, total: {}", count, total);
+        println!("Aggregated {count} results, total: {total}");
         Ok(State::Complete)
     }
 }
-
 ```
 </div>
 </section>

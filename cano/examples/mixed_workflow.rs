@@ -39,7 +39,7 @@ impl DataGeneratorTask {
 #[task(state = WorkflowState)]
 impl DataGeneratorTask {
     async fn run(&self, res: &Resources) -> CanoResult<WorkflowState> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
 
         println!("DataGeneratorTask: Generating {} data points...", self.size);
 
@@ -54,8 +54,8 @@ impl DataGeneratorTask {
             data.iter().fold(f64::NEG_INFINITY, |a: f64, &b| a.max(b))
         );
 
-        store.put("raw_data", data);
-        store.put("generation_time", std::time::SystemTime::now());
+        board.put("raw_data", data);
+        board.put("generation_time", std::time::SystemTime::now());
 
         Ok(WorkflowState::ProcessData)
     }
@@ -83,14 +83,14 @@ impl ProcessorTask {
 #[task(state = WorkflowState)]
 impl ProcessorTask {
     async fn run(&self, res: &Resources) -> CanoResult<WorkflowState> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
 
         println!(
             "ProcessorTask: Processing data with threshold {}...",
             self.threshold
         );
 
-        let data: Vec<f64> = store.get("raw_data")?;
+        let data: Vec<f64> = board.get("raw_data")?;
         if data.is_empty() {
             return Err(CanoError::task_execution("No data to process".to_string()));
         }
@@ -123,8 +123,8 @@ impl ProcessorTask {
 
         println!("   Processed {} points above threshold", stats.count);
 
-        store.put("processed_data", processed_data);
-        store.put("stats", stats.clone());
+        board.put("processed_data", processed_data);
+        board.put("stats", stats.clone());
 
         if stats.count == 0 {
             println!("   No data survived processing — skipping validation");
@@ -145,12 +145,12 @@ struct ValidatorTask;
 #[task(state = WorkflowState)]
 impl ValidatorTask {
     async fn run(&self, res: &Resources) -> CanoResult<WorkflowState> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
 
         println!("ValidatorTask: Running validation checks...");
 
-        let stats: DataStats = store.get("stats")?;
-        let processed_data: Vec<f64> = store.get("processed_data")?;
+        let stats: DataStats = board.get("stats")?;
+        let processed_data: Vec<f64> = board.get("processed_data")?;
 
         let mut validation_results = Vec::new();
 
@@ -169,7 +169,7 @@ impl ValidatorTask {
             validation_results.push("Invalid values in processed data".to_string());
         }
 
-        store.put("validation_errors", validation_results.clone());
+        board.put("validation_errors", validation_results.clone());
 
         if validation_results.is_empty() {
             println!("   All validation checks passed!");
@@ -190,12 +190,12 @@ struct ReportTask;
 #[task(state = WorkflowState)]
 impl ReportTask {
     async fn run(&self, res: &Resources) -> CanoResult<WorkflowState> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
 
         println!("ReportTask: Generating report...");
 
-        let stats: DataStats = store.get("stats")?;
-        let validation_errors: Vec<String> = store.get("validation_errors")?;
+        let stats: DataStats = board.get("stats")?;
+        let validation_errors: Vec<String> = board.get("validation_errors")?;
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
@@ -219,7 +219,7 @@ impl ReportTask {
             }
         );
 
-        store.put("final_report", report);
+        board.put("final_report", report);
         println!("   Report generated successfully!");
 
         Ok(WorkflowState::Complete)
@@ -230,8 +230,8 @@ impl ReportTask {
 async fn main() -> CanoResult<()> {
     println!("Starting multi-task workflow example\n");
 
-    let store = MemoryStore::new();
-    let resources = Resources::new().insert(store.clone());
+    let board = Blackboard::new();
+    let resources = Resources::new().insert(board.clone());
 
     let workflow = Workflow::new(resources)
         .register(WorkflowState::GenerateData, DataGeneratorTask::new(20))
@@ -244,7 +244,7 @@ async fn main() -> CanoResult<()> {
         Ok(_final_state) => {
             println!("\nWorkflow completed successfully!");
 
-            if let Ok(report) = store.get::<String>("final_report") {
+            if let Ok(report) = board.get::<String>("final_report") {
                 println!("\n{report}");
             }
         }

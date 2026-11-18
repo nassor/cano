@@ -87,7 +87,7 @@ pub trait WorkflowObserver: Send + Sync + 'static {
     /// [`on_task_failure`](Self::on_task_failure) with a [`CanoError::CircuitOpen`].
     fn on_circuit_open(&self, _task_id: &str) {}
 
-    /// Called after a [`CheckpointRow`](crate::recovery::CheckpointRow) is durably
+    /// Called after a [`CheckpointRow`](crate::checkpoint::CheckpointRow) is durably
     /// appended for `workflow_id` at `sequence`. Fires once per state entry on a
     /// workflow configured with [`Workflow::with_checkpoint_store`](crate::workflow::Workflow::with_checkpoint_store);
     /// never fires when no checkpoint store is attached.

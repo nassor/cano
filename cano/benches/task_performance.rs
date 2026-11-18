@@ -49,7 +49,7 @@ impl CpuIntensiveTask {
 #[task]
 impl Task<TestState> for CpuIntensiveTask {
     async fn run(&self, res: &Resources) -> Result<TestState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
 
         // Generate some data to process
         let data: Vec<u64> = (0..self.iterations as u64).collect();
@@ -58,7 +58,7 @@ impl Task<TestState> for CpuIntensiveTask {
         let result: u64 = data.iter().map(|&x| x * x).sum();
 
         // Store the result
-        store.put("cpu_result", result);
+        board.put("cpu_result", result);
         Ok(self.next_state.clone())
     }
 }
@@ -82,7 +82,7 @@ impl IoSimulationTask {
 #[task]
 impl Task<TestState> for IoSimulationTask {
     async fn run(&self, res: &Resources) -> Result<TestState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
 
         // Simulate I/O preparation delay
         tokio::time::sleep(tokio::time::Duration::from_millis(self.delay_ms)).await;
@@ -94,7 +94,7 @@ impl Task<TestState> for IoSimulationTask {
 
         // Simulate final I/O delay
         tokio::time::sleep(tokio::time::Duration::from_millis(self.delay_ms)).await;
-        store.put("io_result", processed_data);
+        board.put("io_result", processed_data);
 
         Ok(self.next_state.clone())
     }
@@ -222,7 +222,7 @@ fn bench_task_execution(c: &mut Criterion) {
                     .collect();
                 // Hoist Resources construction out of the hot loop so the
                 // measurement reflects task dispatch only, not setup overhead.
-                let res = Resources::new().insert(MemoryStore::new());
+                let res = Resources::new().insert(Blackboard::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -238,7 +238,7 @@ fn bench_task_execution(c: &mut Criterion) {
             &task_count,
             |b, &task_count| {
                 let task = DoNothingTask::new(TestState::Complete);
-                let res = Resources::new().insert(MemoryStore::new());
+                let res = Resources::new().insert(Blackboard::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -258,7 +258,7 @@ fn bench_task_execution(c: &mut Criterion) {
                     let tasks: Vec<CpuIntensiveTask> = (0..task_count)
                         .map(|i| CpuIntensiveTask::new(TestState::Task(i), 100))
                         .collect();
-                    let res = Resources::new().insert(MemoryStore::new());
+                    let res = Resources::new().insert(Blackboard::new());
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
@@ -279,7 +279,7 @@ fn bench_task_execution(c: &mut Criterion) {
                     let tasks: Vec<IoSimulationTask> = (0..task_count)
                         .map(|i| IoSimulationTask::new(TestState::Task(i), 1))
                         .collect();
-                    let res = Resources::new().insert(MemoryStore::new());
+                    let res = Resources::new().insert(Blackboard::new());
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
@@ -465,7 +465,7 @@ fn bench_concurrent_task_execution(c: &mut Criterion) {
                 let tasks: Vec<std::sync::Arc<DoNothingTask>> = (0..task_count)
                     .map(|i| std::sync::Arc::new(DoNothingTask::new(TestState::Task(i))))
                     .collect();
-                let res = std::sync::Arc::new(Resources::new().insert(MemoryStore::new()));
+                let res = std::sync::Arc::new(Resources::new().insert(Blackboard::new()));
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -501,7 +501,7 @@ fn bench_concurrent_task_execution(c: &mut Criterion) {
                     let tasks: Vec<std::sync::Arc<CpuIntensiveTask>> = (0..small_count)
                         .map(|i| std::sync::Arc::new(CpuIntensiveTask::new(TestState::Task(i), 50)))
                         .collect();
-                    let res = std::sync::Arc::new(Resources::new().insert(MemoryStore::new()));
+                    let res = std::sync::Arc::new(Resources::new().insert(Blackboard::new()));
 
                     b.to_async(tokio::runtime::Runtime::new().unwrap())
                         .iter(|| async {
@@ -546,7 +546,7 @@ fn bench_task_dispatch(c: &mut Criterion) {
                 let tasks: Vec<DoNothingTask> = (0..size)
                     .map(|i| DoNothingTask::new(TestState::Task(i)))
                     .collect();
-                let res = Resources::new().insert(MemoryStore::new());
+                let res = Resources::new().insert(Blackboard::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -566,7 +566,7 @@ fn bench_task_dispatch(c: &mut Criterion) {
                         Box::new(DoNothingTask::new(TestState::Task(i))) as Box<dyn Task<TestState>>
                     })
                     .collect();
-                let res = Resources::new().insert(MemoryStore::new());
+                let res = Resources::new().insert(Blackboard::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -589,7 +589,7 @@ fn bench_task_dispatch(c: &mut Criterion) {
                         tasks.push(Box::new(CpuIntensiveTask::new(TestState::Task(i), 10)));
                     }
                 }
-                let res = Resources::new().insert(MemoryStore::new());
+                let res = Resources::new().insert(Blackboard::new());
 
                 b.to_async(tokio::runtime::Runtime::new().unwrap())
                     .iter(|| async {
@@ -614,7 +614,7 @@ fn bench_task_config_scenarios(c: &mut Criterion) {
         let tasks: Vec<ConfigurableTask> = (0..task_count)
             .map(|i| ConfigurableTask::new(TestState::Task(i), TaskConfig::new(), false))
             .collect();
-        let res = Resources::new().insert(MemoryStore::new());
+        let res = Resources::new().insert(Blackboard::new());
 
         b.to_async(tokio::runtime::Runtime::new().unwrap())
             .iter(|| async {
@@ -628,7 +628,7 @@ fn bench_task_config_scenarios(c: &mut Criterion) {
         let tasks: Vec<ConfigurableTask> = (0..task_count)
             .map(|i| ConfigurableTask::new(TestState::Task(i), TaskConfig::default(), false))
             .collect();
-        let res = Resources::new().insert(MemoryStore::new());
+        let res = Resources::new().insert(Blackboard::new());
 
         b.to_async(tokio::runtime::Runtime::new().unwrap())
             .iter(|| async {
@@ -648,7 +648,7 @@ fn bench_task_config_scenarios(c: &mut Criterion) {
                 )
             })
             .collect();
-        let res = Resources::new().insert(MemoryStore::new());
+        let res = Resources::new().insert(Blackboard::new());
 
         b.to_async(tokio::runtime::Runtime::new().unwrap())
             .iter(|| async {
@@ -668,7 +668,7 @@ fn bench_task_config_scenarios(c: &mut Criterion) {
                 )
             })
             .collect();
-        let res = Resources::new().insert(MemoryStore::new());
+        let res = Resources::new().insert(Blackboard::new());
 
         b.to_async(tokio::runtime::Runtime::new().unwrap())
             .iter(|| async {

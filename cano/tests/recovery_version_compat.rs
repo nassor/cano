@@ -3,34 +3,34 @@
 //!
 //! These tests construct a *real* redb file by hand and write rows in the legacy
 //! byte format (no `workflow_version` field), then drive the full
-//! [`Workflow::resume_from`] path through [`RedbCheckpointStore`]:
+//! [`Workflow::resume_from`] path through [`RedbStore`]:
 //!
 //! 1. A workflow with the default `workflow_version = 0` resumes such a database
-//!    cleanly — the decode fallback in `RedbCheckpointStore` treats the missing
+//!    cleanly — the decode fallback in `RedbStore` treats the missing
 //!    field as `0`, and the version check passes.
 //! 2. The same database against a workflow that bumped to `with_workflow_version(1)`
 //!    is rejected with [`CanoError::WorkflowVersionMismatch`].
 //!
-//! The unit-level legacy-decode test in `cano/src/recovery/redb.rs` already proves
+//! The unit-level legacy-decode test in `cano/src/store/redb.rs` already proves
 //! that the decode path works; these tests are the integration-level safety net
 //! around `resume_from`.
-#![cfg(feature = "recovery")]
+#![cfg(feature = "store-redb")]
 
 use std::path::Path;
 use std::sync::Arc;
 
+use cano::checkpoint::RowKind;
 use cano::prelude::*;
-use cano::recovery::RowKind;
 use redb::{Database, TableDefinition};
 use tempfile::tempdir;
 
-/// Must mirror the production constant in `cano/src/recovery/redb.rs` byte-for-byte;
+/// Must mirror the production constant in `cano/src/store/redb.rs` byte-for-byte;
 /// the integration test is asserting on-disk binary compatibility, so reach in
 /// through the redb API rather than the public store wrapper.
 const CHECKPOINTS: TableDefinition<(&str, u64), &[u8]> = TableDefinition::new("cano_checkpoints");
 
 /// Pre-versioning on-disk shape (a serializable twin of `StoredRowV0`). Field order
-/// MUST match `cano/src/recovery/redb.rs`'s `StoredRowV0` exactly so postcard emits
+/// MUST match `cano/src/store/redb.rs`'s `StoredRowV0` exactly so postcard emits
 /// the same bytes a real legacy database would contain.
 #[derive(serde::Serialize)]
 struct LegacyWrite {
@@ -85,11 +85,11 @@ async fn legacy_redb_row_resumes_under_default_workflow_version() {
     let wf_id = "legacy-wf";
 
     // Pre-populate the redb file with a single legacy-shape row, then drop the
-    // direct database handle so `RedbCheckpointStore::new` can take its own.
+    // direct database handle so `RedbStore::new` can take its own.
     seed_legacy_row(&path, wf_id);
 
     let store: Arc<dyn CheckpointStore> =
-        Arc::new(RedbCheckpointStore::new(&path).expect("open redb store over seeded file"));
+        Arc::new(RedbStore::new(&path).expect("open redb store over seeded file"));
 
     // Default workflow_version is 0 — matches the legacy row's defaulted version.
     let workflow = Workflow::bare()
@@ -113,7 +113,7 @@ async fn legacy_redb_row_rejected_when_workflow_version_bumped() {
     seed_legacy_row(&path, wf_id);
 
     let store: Arc<dyn CheckpointStore> =
-        Arc::new(RedbCheckpointStore::new(&path).expect("open redb store over seeded file"));
+        Arc::new(RedbStore::new(&path).expect("open redb store over seeded file"));
 
     // Bumping to v1 must surface the stored-vs-expected mismatch as a
     // WorkflowVersionMismatch error (stored = 0 from legacy fallback, expected = 1).

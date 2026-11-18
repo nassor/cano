@@ -34,8 +34,9 @@ struct AwaitJob;
 #[task::poll(state = Stage)]
 impl AwaitJob {
     async fn poll(&self, res: &Resources) -> Result<PollOutcome<Stage>, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        match store.get::<bool>("job_done") {
+        let board = res.get::<Blackboard>()?;
+        // Missing key or false keeps polling without propagating KeyNotFound.
+        match board.get::<bool>("job_done") {
             Ok(true) => Ok(PollOutcome::Ready(Stage::Done)),
             _        => Ok(PollOutcome::Pending { delay_ms: 250 }), // async sleep, then poll again
         }
@@ -284,15 +285,29 @@ use cano::prelude::*;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step { AwaitJob, Process, Done }
 
+#[derive(Resource)]
+struct Job {
+    url: String,
+}
+
+impl Job {
+    async fn is_done(&self) -> Result<bool, CanoError> {
+        // Probe an external endpoint or database using self.url.
+        Ok(!self.url.is_empty())
+    }
+}
+
 struct AwaitJob;
 
 #[task::poll]
 impl PollTask<Step> for AwaitJob {
     async fn poll(&self, res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
         let job = res.get::<Job>()?;
-        if job.is_done() {
+        if job.is_done().await? {
+            // Exits the poll loop and enters Step::Process.
             Ok(PollOutcome::Ready(Step::Process))
         } else {
+            // Sleeps asynchronously without blocking the executor thread.
             Ok(PollOutcome::Pending { delay_ms: 250 })
         }
     }

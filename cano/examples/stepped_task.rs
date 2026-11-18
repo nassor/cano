@@ -1,8 +1,8 @@
 //! # SteppedTask — Resumable-Iterative Processing Model
 //!
-//! Run with: `cargo run --example stepped_task --features recovery`
+//! Run with: `cargo run --example stepped_task`
 //!
-//! Demonstrates [`SteppedTask`] cursor persistence with a [`RedbCheckpointStore`] attached.
+//! Demonstrates [`SteppedTask`] cursor persistence with a [`RedbStore`] attached.
 //! A `Crunch` state processes items in discrete steps; each `StepOutcome::More` persists the cursor
 //! so a crash mid-loop can resume from the last saved position rather than restarting from
 //! the beginning.
@@ -18,7 +18,7 @@
 //! - Each `step` call processes one item, prints progress, and returns `StepOutcome::More(cursor)`
 //!   until all items are done, then `StepOutcome::Done(Stage::Report)`.
 //! - A plain `#[task]` at `Report` summarises the run and transitions to `Done`.
-//! - `RedbCheckpointStore` attached so cursors are persisted to disk after each step.
+//! - `RedbStore` attached so cursors are persisted to disk after each step.
 //!
 //! On a **successful** run the engine clears the checkpoint log. To see cursor resumption
 //! in action (crash mid-loop + restart), see `tests/stepped_resume_e2e.rs` and the
@@ -26,7 +26,7 @@
 
 use std::sync::Arc;
 
-use cano::RedbCheckpointStore;
+use cano::RedbStore;
 use cano::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -129,7 +129,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Create a temporary directory for the checkpoint database.
     let dir = tempfile::tempdir()?;
-    let checkpoint_store = Arc::new(RedbCheckpointStore::new(dir.path().join("stepped.redb"))?);
+    let checkpoint_store = Arc::new(RedbStore::new(dir.path().join("stepped.redb"))?);
 
     println!("=== stepped_task example ({TOTAL} items) ===\n");
 
@@ -157,7 +157,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     println!("\nNote: to observe cursor persistence and mid-loop resumption,");
-    println!("run `cargo test --features recovery --test stepped_resume_e2e`.");
+    println!("run `cargo test --features testing --test stepped_resume_e2e`.");
 
     // The temp directory (and the redb file) is cleaned up when `dir` drops here.
     Ok(())

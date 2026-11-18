@@ -86,8 +86,8 @@ struct ValidateRequestTask;
 #[task(state = AdExchangeState)]
 impl ValidateRequestTask {
     async fn run(&self, res: &Resources) -> Result<AdExchangeState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let request: AdRequest = store.get("ad_request")?;
+        let board = res.get::<Blackboard>()?;
+        let request: AdRequest = board.get("ad_request")?;
 
         println!("🔍 Validating request {}", request.request_id);
 
@@ -122,7 +122,7 @@ enum ContextTask {
 #[task(state = AdExchangeState)]
 impl ContextTask {
     async fn run(&self, res: &Resources) -> Result<AdExchangeState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         match self {
             ContextTask::FetchUser => {
                 println!("  👤 Fetching user profile...");
@@ -130,7 +130,7 @@ impl ContextTask {
 
                 let user = UserContext {};
 
-                store.put("user_context", user);
+                board.put("user_context", user);
                 println!("  ✅ User profile loaded");
                 Ok(AdExchangeState::RequestBids)
             }
@@ -140,7 +140,7 @@ impl ContextTask {
 
                 let geo = GeoContext {};
 
-                store.put("geo_context", geo);
+                board.put("geo_context", geo);
                 println!("  ✅ Geo data loaded");
                 Ok(AdExchangeState::RequestBids)
             }
@@ -150,7 +150,7 @@ impl ContextTask {
 
                 let device = DeviceContext {};
 
-                store.put("device_context", device);
+                board.put("device_context", device);
                 println!("  ✅ Device detected");
                 Ok(AdExchangeState::RequestBids)
             }
@@ -171,7 +171,7 @@ struct ContactDSPTask {
 #[task(state = AdExchangeState)]
 impl ContactDSPTask {
     async fn run(&self, res: &Resources) -> Result<AdExchangeState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         println!("  📡 Requesting bid from {}...", self.partner_id);
 
         // Simulate DSP bid request with varying latency
@@ -191,9 +191,9 @@ impl ContactDSPTask {
         };
 
         // Store bid
-        let mut bids: Vec<BidResponse> = store.get("bids").unwrap_or_default();
+        let mut bids: Vec<BidResponse> = board.get("bids").unwrap_or_default();
         bids.push(bid.clone());
-        store.put("bids", bids);
+        board.put("bids", bids);
 
         println!("  ✅ {} bid: ${:.2}", self.partner_id, bid.price);
         Ok(AdExchangeState::ScoreBids)
@@ -212,8 +212,8 @@ struct ScoreBidTask {
 #[task(state = AdExchangeState)]
 impl ScoreBidTask {
     async fn run(&self, res: &Resources) -> Result<AdExchangeState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let bids: Vec<BidResponse> = store.get("bids")?;
+        let board = res.get::<Blackboard>()?;
+        let bids: Vec<BidResponse> = board.get("bids")?;
 
         if self.bid_index >= bids.len() {
             return Err(CanoError::task_execution("Bid index out of range"));
@@ -243,9 +243,9 @@ impl ScoreBidTask {
         let score_value = scored_bid.score;
 
         // Store scored bid
-        let mut scored_bids: Vec<ScoredBid> = store.get("scored_bids").unwrap_or_default();
+        let mut scored_bids: Vec<ScoredBid> = board.get("scored_bids").unwrap_or_default();
         scored_bids.push(scored_bid);
-        store.put("scored_bids", scored_bids);
+        board.put("scored_bids", scored_bids);
 
         println!("  ✅ Bid scored: ${:.2}", score_value);
         Ok(AdExchangeState::RunAuction)
@@ -262,12 +262,12 @@ struct RunAuctionTask;
 #[task(state = AdExchangeState)]
 impl RunAuctionTask {
     async fn run(&self, res: &Resources) -> Result<AdExchangeState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         println!("\n  🎯 Running auction...");
 
         let start = tokio::time::Instant::now();
-        let mut scored_bids: Vec<ScoredBid> = store.get("scored_bids")?;
-        let request: AdRequest = store.get("ad_request")?;
+        let mut scored_bids: Vec<ScoredBid> = board.get("scored_bids")?;
+        let request: AdRequest = board.get("ad_request")?;
 
         // Filter bids above floor price
         scored_bids.retain(|b| b.score >= request.floor_price);
@@ -279,7 +279,7 @@ impl RunAuctionTask {
                 total_bids: 0,
                 auction_time_ms: start.elapsed().as_millis() as u64,
             };
-            store.put("auction_result", result);
+            board.put("auction_result", result);
             return Ok(AdExchangeState::ErrorTracking);
         }
 
@@ -303,7 +303,7 @@ impl RunAuctionTask {
             auction_time_ms: start.elapsed().as_millis() as u64,
         };
 
-        store.put("auction_result", result);
+        board.put("auction_result", result);
         Ok(AdExchangeState::TrackResults)
     }
 }
@@ -324,13 +324,13 @@ enum TrackingTask {
 #[task(state = AdExchangeState)]
 impl TrackingTask {
     async fn run(&self, res: &Resources) -> Result<AdExchangeState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         match self {
             TrackingTask::LogAnalytics => {
                 println!("  📈 Logging to analytics...");
                 tokio::time::sleep(Duration::from_millis(30)).await;
 
-                let result: AuctionResult = store.get("auction_result")?;
+                let result: AuctionResult = board.get("auction_result")?;
                 println!("  ✅ Analytics logged: {} bids", result.total_bids);
                 Ok(AdExchangeState::BuildResponse)
             }
@@ -344,7 +344,7 @@ impl TrackingTask {
             TrackingTask::NotifyWinner => {
                 println!("  📬 Notifying winner...");
 
-                let result: AuctionResult = store.get("auction_result")?;
+                let result: AuctionResult = board.get("auction_result")?;
                 if let Some(winner) = result.winner {
                     tokio::time::sleep(Duration::from_millis(40)).await;
                     println!("  ✅ Winner {} notified", winner.bid.partner_id);
@@ -373,11 +373,11 @@ struct BuildResponseTask;
 #[task(state = AdExchangeState)]
 impl BuildResponseTask {
     async fn run(&self, res: &Resources) -> Result<AdExchangeState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         println!("\n  📦 Building response...");
 
-        let request: AdRequest = store.get("ad_request")?;
-        let result: AuctionResult = store.get("auction_result")?;
+        let request: AdRequest = board.get("ad_request")?;
+        let result: AuctionResult = board.get("auction_result")?;
 
         println!("\n🎯 Ad Exchange Response Summary:");
         println!("  Request ID: {}", request.request_id);
@@ -442,14 +442,14 @@ enum ErrorTrackingTask {
 #[task(state = AdExchangeState)]
 impl ErrorTrackingTask {
     async fn run(&self, res: &Resources) -> Result<AdExchangeState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         match self {
             ErrorTrackingTask::LogError => {
                 println!("  📝 Logging error...");
                 tokio::time::sleep(Duration::from_millis(20)).await;
 
-                // Determine error type from store or state
-                let error_type = if store.get::<AuctionResult>("auction_result").is_ok() {
+                // Determine error type from blackboard or state
+                let error_type = if board.get::<AuctionResult>("auction_result").is_ok() {
                     "NoFill"
                 } else {
                     "Rejected"
@@ -473,8 +473,8 @@ impl ErrorTrackingTask {
 // Main Workflow Construction
 // ============================================================================
 
-fn create_ad_exchange_workflow(store: MemoryStore) -> Workflow<AdExchangeState> {
-    Workflow::new(Resources::new().insert(store.clone()))
+fn create_ad_exchange_workflow(board: Blackboard) -> Workflow<AdExchangeState> {
+    Workflow::new(Resources::new().insert(board.clone()))
         // Phase 1: Validation
         .register(AdExchangeState::Start, ValidateRequestTask)
         // Invalid Response Handler
@@ -578,7 +578,7 @@ async fn main() -> Result<(), CanoError> {
     println!("🚀 Real-Time Ad Exchange Workflow\n");
     println!("{}", "=".repeat(60));
 
-    let store = MemoryStore::new();
+    let board = Blackboard::new();
 
     // Create ad request
     let request = AdRequest {
@@ -587,10 +587,10 @@ async fn main() -> Result<(), CanoError> {
         floor_price: 1.50,
     };
 
-    store.put("ad_request", request);
+    board.put("ad_request", request);
 
     // Build and execute workflow
-    let workflow = create_ad_exchange_workflow(store.clone());
+    let workflow = create_ad_exchange_workflow(board.clone());
 
     println!("\n🎬 Starting ad exchange workflow...\n");
     let start = tokio::time::Instant::now();
@@ -600,10 +600,10 @@ async fn main() -> Result<(), CanoError> {
         Ok(state) => state,
         Err(e) => {
             // If workflow fails due to split timeout/error, handle as NoFill.
-            // Reuse the original workflow/store so error tracking sees the real
+            // Reuse the original workflow/blackboard so error tracking sees the real
             // request and any context produced before the failure.
             eprintln!("❌ Workflow error: {}", e);
-            store.put("error_reason", e.to_string());
+            board.put("error_reason", e.to_string());
             println!("\n⚠️  Handling as No Fill due to error\n");
 
             workflow.orchestrate(AdExchangeState::ErrorTracking).await?

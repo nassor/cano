@@ -55,10 +55,10 @@ struct GeneratorDeps {
     config: Arc<GeneratorConfig>,
 }
 
-/// Dependencies the store step needs to write the filtered vector.
+/// Dependencies the blackboard step needs to write the filtered vector.
 #[derive(FromResources)]
-struct StoreDeps {
-    store: Arc<MemoryStore>,
+struct BoardDeps {
+    board: Arc<Blackboard>,
 }
 
 // =============================================================================
@@ -86,8 +86,8 @@ impl GeneratorTask {
         println!("Filtered to {} even numbers", evens.len());
 
         // Persist
-        let StoreDeps { store } = StoreDeps::from_resources(res)?;
-        store.put("filtered_numbers", evens);
+        let BoardDeps { board } = BoardDeps::from_resources(res)?;
+        board.put("filtered_numbers", evens);
         println!("Generator task completed");
         Ok(WorkflowAction::Count)
     }
@@ -104,8 +104,8 @@ struct CounterTask;
 #[task(state = WorkflowAction)]
 impl CounterTask {
     async fn run(&self, res: &Resources) -> Result<WorkflowAction, CanoError> {
-        let StoreDeps { store } = StoreDeps::from_resources(res)?;
-        let numbers: Vec<u32> = store.get("filtered_numbers").map_err(|e| {
+        let BoardDeps { board } = BoardDeps::from_resources(res)?;
+        let numbers: Vec<u32> = board.get("filtered_numbers").map_err(|e| {
             CanoError::task_execution(format!("Failed to load filtered numbers: {e}"))
         })?;
         println!("Loaded {} numbers from memory", numbers.len());
@@ -113,8 +113,8 @@ impl CounterTask {
         let count = numbers.len();
         println!("Counted {} even numbers", count);
 
-        store.put("number_count", count);
-        store.remove("filtered_numbers");
+        board.put("number_count", count);
+        board.remove("filtered_numbers");
         println!(
             "Counter task completed — count {} stored, intermediate data cleaned",
             count
@@ -132,15 +132,15 @@ async fn main() -> Result<(), CanoError> {
     println!("Simple Two-Task Workflow");
     println!("===============================================");
 
-    let store = MemoryStore::new();
+    let board = Blackboard::new();
 
-    // Build the resource map: a config struct + the shared store.
+    // Build the resource map: a config struct + the shared blackboard.
     let resources = Resources::new()
         .insert(GeneratorConfig {
             min_size: 25,
             max_size: 150,
         })
-        .insert(store.clone());
+        .insert(board.clone());
 
     let workflow = Workflow::new(resources)
         .register(WorkflowAction::Generate, GeneratorTask)
@@ -150,12 +150,12 @@ async fn main() -> Result<(), CanoError> {
     match workflow.orchestrate(WorkflowAction::Generate).await {
         Ok(WorkflowAction::Complete) => {
             println!("\nWorkflow completed successfully!");
-            match store.get::<usize>("number_count") {
+            match board.get::<usize>("number_count") {
                 Ok(final_count) => {
                     println!("\nFINAL RESULTS");
                     println!("================");
                     println!("Total even numbers found: {final_count}");
-                    if store.get::<Vec<u32>>("filtered_numbers").is_err() {
+                    if board.get::<Vec<u32>>("filtered_numbers").is_err() {
                         println!("Original data successfully cleaned up");
                     }
                 }

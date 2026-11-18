@@ -124,11 +124,11 @@ impl BookDownloadTask {
             }
         };
 
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         if let Some(book) = book_opt {
-            let mut books: Vec<Book> = store.get("books").unwrap_or_else(|_| Vec::new());
+            let mut books: Vec<Book> = board.get("books").unwrap_or_else(|_| Vec::new());
             books.push(book);
-            store.put("books", books);
+            board.put("books", books);
             Ok(WorkflowPhase::Analyze)
         } else {
             Ok(WorkflowPhase::Complete)
@@ -186,8 +186,8 @@ impl PrepositionAnalysisTask {
 #[task(state = WorkflowPhase)]
 impl PrepositionAnalysisTask {
     async fn run(&self, res: &Resources) -> Result<WorkflowPhase, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let books: Vec<Book> = store
+        let board = res.get::<Blackboard>()?;
+        let books: Vec<Book> = board
             .get("books")
             .map_err(|e| CanoError::task_execution(format!("Failed to load books: {}", e)))?;
         println!("Loaded {} books for preposition analysis", books.len());
@@ -201,7 +201,7 @@ impl PrepositionAnalysisTask {
         }
 
         let count = analyses.len();
-        store.put("book_analyses", analyses);
+        board.put("book_analyses", analyses);
         println!("Stored {} book analyses", count);
         Ok(WorkflowPhase::Rank)
     }
@@ -214,8 +214,8 @@ struct BookRankingTask;
 #[task(state = WorkflowPhase)]
 impl BookRankingTask {
     async fn run(&self, res: &Resources) -> Result<WorkflowPhase, CanoError> {
-        let store = res.get::<MemoryStore>()?;
-        let analyses: Vec<BookAnalysis> = store
+        let board = res.get::<Blackboard>()?;
+        let analyses: Vec<BookAnalysis> = board
             .get("book_analyses")
             .map_err(|e| CanoError::task_execution(format!("Failed to load analyses: {}", e)))?;
         println!("Loaded {} book analyses for ranking", analyses.len());
@@ -233,7 +233,7 @@ impl BookRankingTask {
             })
             .collect();
 
-        store.put("book_rankings", rankings.clone());
+        board.put("book_rankings", rankings.clone());
 
         println!("\nBOOK RANKINGS BY PREPOSITION DIVERSITY");
         println!("==========================================");
@@ -260,13 +260,13 @@ async fn main() -> CanoResult<()> {
     println!("Book Preposition Analysis Example");
     println!("=====================================\n");
 
-    let store = MemoryStore::new();
+    let board = Blackboard::new();
 
     // Fetch a few sample books
     println!("Fetching books from the bundled sample corpus...\n");
 
     // Book 1: Pride and Prejudice
-    let workflow1 = Workflow::new(Resources::new().insert(store.clone()))
+    let workflow1 = Workflow::new(Resources::new().insert(board.clone()))
         .register(
             WorkflowPhase::Download,
             BookDownloadTask::new(1342, "Pride and Prejudice by Jane Austen".to_string()),
@@ -276,7 +276,7 @@ async fn main() -> CanoResult<()> {
     let _ = workflow1.orchestrate(WorkflowPhase::Download).await?;
 
     // Book 2: Alice's Adventures in Wonderland
-    let workflow2 = Workflow::new(Resources::new().insert(store.clone()))
+    let workflow2 = Workflow::new(Resources::new().insert(board.clone()))
         .register(
             WorkflowPhase::Download,
             BookDownloadTask::new(11, "Alice's Adventures in Wonderland".to_string()),
@@ -286,7 +286,7 @@ async fn main() -> CanoResult<()> {
     let _ = workflow2.orchestrate(WorkflowPhase::Download).await?;
 
     // Book 3: A Christmas Carol
-    let workflow3 = Workflow::new(Resources::new().insert(store.clone()))
+    let workflow3 = Workflow::new(Resources::new().insert(board.clone()))
         .register(
             WorkflowPhase::Download,
             BookDownloadTask::new(46, "A Christmas Carol by Charles Dickens".to_string()),
@@ -298,7 +298,7 @@ async fn main() -> CanoResult<()> {
     // Analyze and rank the downloaded books
     println!("\nAnalyzing and ranking books...\n");
 
-    let analysis_workflow = Workflow::new(Resources::new().insert(store.clone()))
+    let analysis_workflow = Workflow::new(Resources::new().insert(board.clone()))
         .register(WorkflowPhase::Analyze, PrepositionAnalysisTask)
         .register(WorkflowPhase::Rank, BookRankingTask)
         .add_exit_state(WorkflowPhase::Complete);

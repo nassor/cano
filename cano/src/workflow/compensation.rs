@@ -6,14 +6,14 @@
 //! is the entry point in the other direction: replay a checkpointed run from its
 //! last recorded state, rehydrating the compensation stack from the log.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
 use futures_util::FutureExt;
 
+use crate::checkpoint::{CheckpointRow, RowKind};
 use crate::error::CanoError;
-use crate::recovery::{CheckpointRow, RowKind};
 use crate::saga::{CompensationEntry, ErasedCompensatable};
 use crate::task::{ObserverCtx, TaskConfig, run_with_retries_observed};
 use tokio_util::sync::CancellationToken;
@@ -85,7 +85,7 @@ where
     /// `on_unknown_resume_state` hook can fire inline; the caller does
     /// not need a second pass.
     pub(super) fn from_rows(
-        rows: &[crate::recovery::CheckpointRow],
+        rows: &[crate::checkpoint::CheckpointRow],
         resume_label: &str,
         resume_sequence: u64,
         expected_workflow_version: u32,
@@ -106,6 +106,7 @@ where
         // ascending walk over `rows`.
         let mut state_entries: Vec<(u64, &str)> = Vec::new();
         let mut resume_state_entry_cutoff: Option<u64> = None;
+        let mut active_state: Option<&str> = None;
 
         for r in rows {
             #[cfg(feature = "tracing")]
@@ -120,6 +121,15 @@ where
             }
             match r.kind {
                 RowKind::StateEntry => {
+                    // Clear persisted step cursors whenever the FSM transitions to a
+                    // different state so an earlier completed visit in a looping
+                    // workflow never leaks its stale cursor into a later visit.
+                    // Consecutive `StateEntry` rows for the *same* state (written across
+                    // repeated crash-resumes of that state) preserve `resume_cursors`.
+                    if active_state != Some(r.state.as_str()) {
+                        resume_cursors.clear();
+                        active_state = Some(r.state.as_str());
+                    }
                     if r.state == resume_label {
                         // `rows` is ascending — overwriting with each match
                         // yields the highest-sequence row, which is the cutoff.
@@ -159,14 +169,20 @@ where
                 resume_state = %resume_label,
                 "no StateEntry row found for resume state — using last.sequence + 1 as cutoff for the rehydrated path"
             );
-            resume_sequence + 1
+            resume_sequence.saturating_add(1)
         });
 
-        let mut prior_transitions: Vec<TState> = Vec::new();
+        let mut prior_transitions: VecDeque<TState> =
+            VecDeque::with_capacity(super::execution::MAX_TRANSITION_PATH);
         for (seq, label) in state_entries {
             if seq < cutoff {
                 match resolve_state(label) {
-                    Some(state) => prior_transitions.push(state),
+                    Some(state) => {
+                        if prior_transitions.len() == super::execution::MAX_TRANSITION_PATH {
+                            prior_transitions.pop_front();
+                        }
+                        prior_transitions.push_back(state);
+                    }
                     None => {
                         #[cfg(feature = "tracing")]
                         tracing::warn!(
@@ -186,7 +202,7 @@ where
         Self {
             compensation_stack,
             resume_cursors,
-            prior_transitions,
+            prior_transitions: prior_transitions.into(),
         }
     }
 }
@@ -440,13 +456,13 @@ where
     /// `label_index` construction in `resume_from` — both map checkpoint state
     /// labels (the `Debug` rendering of each state) back to a `TState` and used
     /// to duplicate this exact chain.
-    fn all_states(&self) -> impl Iterator<Item = &TState> {
+    pub(super) fn all_states(&self) -> impl Iterator<Item = &TState> {
         self.states.keys().chain(self.exit_states.iter())
     }
 
     /// Map a checkpoint state label (the `Debug` rendering of a `TState`) back to
     /// the matching registered or exit state, or `None` if no state has that label.
-    fn state_from_label(&self, label: &str) -> Option<TState> {
+    pub(super) fn state_from_label(&self, label: &str) -> Option<TState> {
         self.all_states()
             .find(|s| format!("{s:?}") == label)
             .cloned()
@@ -454,8 +470,8 @@ where
 
     /// Resume a previously checkpointed run.
     ///
-    /// Loads every [`CheckpointRow`](crate::recovery::CheckpointRow) recorded for
-    /// `workflow_id` from the attached [`CheckpointStore`](crate::recovery::CheckpointStore),
+    /// Loads every [`CheckpointRow`](crate::checkpoint::CheckpointRow) recorded for
+    /// `workflow_id` from the attached [`CheckpointStore`](crate::checkpoint::CheckpointStore),
     /// takes the highest-`sequence` row, maps its state label back to a registered (or exit)
     /// state, and re-enters the FSM loop from there — re-running that state's task. **Tasks
     /// at and after the resume point must be idempotent**: the workflow has no way to know
@@ -469,7 +485,7 @@ where
     /// under the same `workflow_id` and continue the sequence.
     ///
     /// The [compensation stack](crate::saga) is rehydrated from the loaded rows: every
-    /// row whose [`kind`](crate::recovery::CheckpointRow::kind) is
+    /// row whose [`kind`](crate::checkpoint::CheckpointRow::kind) is
     /// [`RowKind::CompensationCompletion`] becomes a stack entry (in sequence order), so a
     /// failure after the resume point can still compensate work done before the crash.
     /// Rows with other kinds — ordinary [`RowKind::StateEntry`] rows and
@@ -631,7 +647,7 @@ where
     async fn execute_resume_inner(
         &self,
         workflow_id: Arc<str>,
-        store: Arc<dyn crate::recovery::CheckpointStore>,
+        store: Arc<dyn crate::checkpoint::CheckpointStore>,
         input: Option<Vec<u8>>,
         token: Option<&CancellationToken>,
     ) -> Result<TState, CanoError> {
@@ -645,6 +661,31 @@ where
         // is O(N log N) on an already-sorted log so the overhead for compliant
         // backends is negligible.
         rows.sort_by_key(|r| r.sequence);
+        self.execute_resume_from_rows(workflow_id, rows, input, token)
+            .await
+    }
+
+    /// Resume a scheduled workflow directly from preloaded, sequence-sorted
+    /// checkpoint rows without repeating resource `setup`/`teardown` (owned by
+    /// the scheduler).
+    #[cfg(feature = "scheduler")]
+    pub(super) async fn resume_scheduled_from_rows(
+        &self,
+        workflow_id: Arc<str>,
+        rows: Vec<CheckpointRow>,
+        token: Option<&CancellationToken>,
+    ) -> Result<TState, CanoError> {
+        self.execute_resume_from_rows(workflow_id, rows, None, token)
+            .await
+    }
+
+    async fn execute_resume_from_rows(
+        &self,
+        workflow_id: Arc<str>,
+        rows: Vec<CheckpointRow>,
+        input: Option<Vec<u8>>,
+        token: Option<&CancellationToken>,
+    ) -> Result<TState, CanoError> {
         let last = rows.last().ok_or_else(|| {
             CanoError::checkpoint_store(format!(
                 "no checkpoint rows for workflow id {workflow_id:?}"
@@ -670,7 +711,10 @@ where
                 last.state
             ))
         })?;
-        let mut sequence = last.sequence + 1;
+        let mut sequence = last
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| CanoError::checkpoint_store("checkpoint sequence overflow"))?;
         let resume_sequence = last.sequence;
 
         // Suspend states: the last row's kind decides whether the run is parked
@@ -715,6 +759,33 @@ where
             }
             (_, _, None) => None,
         };
+
+        // Exit-state short-circuit: the run already reached a terminal exit state
+        // before `clear_checkpoint_log` completed. Return immediately after best-effort
+        // cleanup without rehydrating the compensation stack or checking `token`, so a
+        // cancelled token or transient store-append error can never roll back an
+        // already-completed saga.
+        if resume_input.is_none() && self.exit_states.contains(&resume_state) {
+            let started = std::time::Instant::now();
+            #[cfg(feature = "tracing")]
+            info!(
+                workflow_id = %workflow_id,
+                resume_state = ?resume_state,
+                last_sequence = last.sequence,
+                "Workflow already reached exit state; clearing checkpoint log"
+            );
+            notify_observers(&self.observers, |o| {
+                o.on_resume(&workflow_id, last.sequence);
+            });
+            if !self.observers.is_empty() {
+                let label = format!("{resume_state:?}");
+                notify_observers(&self.observers, |o| o.on_state_enter(&label));
+            }
+            self.clear_checkpoint_log(Some(&workflow_id)).await;
+            let result = Ok(resume_state);
+            self.record_run_outcome(&result, started);
+            return result;
+        }
 
         // Resolve checkpoint state labels (the `Debug` rendering of each state)
         // back to a `TState` in O(1). `from_rows` invokes the closure below once
@@ -797,7 +868,7 @@ mod tests {
 
     // ---- Checkpoint / resume ----
 
-    use crate::recovery::{CheckpointRow, CheckpointStore};
+    use crate::checkpoint::{CheckpointRow, CheckpointStore};
     use std::sync::Mutex;
 
     // A task `Output` type whose `Serialize` impl always errors, so the saga
@@ -1421,7 +1492,7 @@ mod tests {
     /// the stack — everything else passes through silently.
     #[tokio::test]
     async fn resume_step_cursor_row_is_not_added_to_compensation_stack() {
-        use crate::recovery::RowKind;
+        use crate::checkpoint::RowKind;
 
         let store = Arc::new(InMemoryCheckpointStore::new());
         let log: CompLog = Arc::new(Mutex::new(Vec::new()));
@@ -2275,7 +2346,7 @@ mod tests {
     #[tokio::test]
     async fn cross_model_chain_router_poll_batch_stepped_interop() {
         use crate::PollOutcome;
-        use crate::recovery::RowKind;
+        use crate::checkpoint::RowKind;
         use crate::task::{BatchTask, PollTask, RouterTask, StepOutcome, SteppedTask};
         use serde::{Deserialize, Serialize};
         use std::sync::atomic::AtomicU32;
@@ -2618,7 +2689,7 @@ mod tests {
 
     // ---- SteppedTask with checkpoint store ----
 
-    use crate::recovery::RowKind;
+    use crate::checkpoint::RowKind;
     use crate::task::stepped::{StepOutcome, SteppedTask};
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
@@ -4010,6 +4081,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_from_exit_state_with_cancelled_token_never_compensates_completed_saga() {
+        let store = Arc::new(InMemoryCheckpointStore::new());
+        let log: CompLog = Arc::new(Mutex::new(Vec::new()));
+        // Simulate a run whose saga committed AND reached the exit state `Complete`,
+        // crashing right before `clear_checkpoint_log` deleted the rows.
+        store
+            .append("done-saga", CheckpointRow::new(0, "Start", "c1"))
+            .await
+            .unwrap();
+        store
+            .append(
+                "done-saga",
+                CheckpointRow::new(1, "Start", "c1")
+                    .with_output(serde_json::to_vec(&99u32).unwrap()),
+            )
+            .await
+            .unwrap();
+        store
+            .append("done-saga", CheckpointRow::new(2, "Complete", ""))
+            .await
+            .unwrap();
+
+        let workflow = Workflow::bare()
+            .register(
+                TestState::Start,
+                CompTask::ok("c1", 99, TestState::Complete, &log),
+            )
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone());
+
+        let token = CancellationToken::new();
+        token.cancel();
+        let out = workflow
+            .resume_from_with_token("done-saga", &token)
+            .await
+            .expect(
+                "already-completed workflow must return Ok(Complete) even with cancelled token",
+            );
+        assert_eq!(out, TestState::Complete);
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "completed saga must NEVER be rolled back on exit-state resume: {:?}",
+            *log.lock().unwrap()
+        );
+        assert!(
+            store.load_run("done-saga").await.unwrap().is_empty(),
+            "exit-state resume should clear the stranded checkpoint log"
+        );
+    }
+
+    #[tokio::test]
     async fn resume_from_accepts_mixed_version_log_with_matching_tail() {
         // F3 follow-up: only the last row's `workflow_version` is
         // authoritative — that determines which workflow definition the
@@ -4059,8 +4181,8 @@ mod tests {
 #[cfg(test)]
 mod rehydrated_run_tests {
     use super::*;
+    use crate::checkpoint::CheckpointRow;
     use crate::observer::WorkflowObserver;
-    use crate::recovery::CheckpointRow;
     use crate::workflow::test_support::{EventLog, TestState};
 
     /// Resolver that matches stored labels back to `TestState`. Returns None
@@ -4284,8 +4406,13 @@ mod rehydrated_run_tests {
             resolve_test_state,
         );
         let elapsed = started.elapsed();
-        // prior_transitions = every row at seq < 9999 → 9999 entries.
-        assert_eq!(rh.prior_transitions.len(), 9_999);
+        // `prior_transitions` is capped inline at `MAX_TRANSITION_PATH` (64) so
+        // rehydrating a long log never allocates O(rows) transient state history.
+        assert_eq!(
+            rh.prior_transitions.len(),
+            super::super::execution::MAX_TRANSITION_PATH
+        );
+        assert_eq!(rh.prior_transitions.last(), Some(&TestState::Start));
         // Smoke check, not a benchmark: the assert exists to catch accidental
         // quadratic regressions (an O(n²) scan over 10k rows would blow far past
         // this), not to time-box legitimate debug-build variance on slow CI

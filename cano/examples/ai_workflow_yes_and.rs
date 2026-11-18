@@ -206,19 +206,19 @@ fn normalize(text: &str) -> String {
         .to_string()
 }
 
-/// Read the rolling chat transcript from the in-memory store.
-fn get_conversation_history(store: &MemoryStore) -> Result<String, CanoError> {
-    let chat_history: Vec<String> = store
+/// Read the rolling chat transcript from the in-memory blackboard.
+fn get_conversation_history(board: &Blackboard) -> Result<String, CanoError> {
+    let chat_history: Vec<String> = board
         .get::<Vec<String>>("chat")
         .unwrap_or_else(|_| Vec::new());
     Ok(chat_history.join("\n"))
 }
 
 /// Increment the per-workflow interaction counter and return the new value.
-fn update_interaction_count(store: &MemoryStore) -> Result<u32, CanoError> {
-    let current_count: u32 = store.get::<u32>("interaction_count").unwrap_or(0);
+fn update_interaction_count(board: &Blackboard) -> Result<u32, CanoError> {
+    let current_count: u32 = board.get::<u32>("interaction_count").unwrap_or(0);
     let new_count = current_count + 1;
-    store.put("interaction_count", new_count);
+    board.put("interaction_count", new_count);
     Ok(new_count)
 }
 
@@ -253,9 +253,9 @@ impl Actor1Task {
 #[task(state = ConversationState)]
 impl Actor1Task {
     async fn run(&self, res: &Resources) -> Result<ConversationState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         let cuca = res.get::<CucaResource>()?;
-        let history = get_conversation_history(store)?;
+        let history = get_conversation_history(board)?;
 
         let subject = Self::pick_subject();
         let is_empty = history.is_empty();
@@ -281,13 +281,13 @@ impl Actor1Task {
             }
         };
 
-        store
+        board
             .append("chat", response.clone())
-            .map_err(|e| CanoError::Store(format!("Failed to append to chat: {e}")))?;
+            .map_err(|e| CanoError::Blackboard(format!("Failed to append to chat: {e}")))?;
 
         println!("Actor1: {response}\n");
 
-        let interaction_count = update_interaction_count(store)?;
+        let interaction_count = update_interaction_count(board)?;
 
         let next = if interaction_count >= MAX_INTERACTIONS {
             ConversationState::End
@@ -326,9 +326,9 @@ impl Actor2Task {
 #[task(state = ConversationState)]
 impl Actor2Task {
     async fn run(&self, res: &Resources) -> Result<ConversationState, CanoError> {
-        let store = res.get::<MemoryStore>()?;
+        let board = res.get::<Blackboard>()?;
         let cuca = res.get::<CucaResource>()?;
-        let history = get_conversation_history(store)?;
+        let history = get_conversation_history(board)?;
 
         let response = match cuca.complete(&history).await {
             Ok(r) => Self::ensure_yes_and_format(&r),
@@ -338,11 +338,11 @@ impl Actor2Task {
             }
         };
 
-        store
+        board
             .append("chat", response.clone())
-            .map_err(|e| CanoError::Store(format!("Failed to append to chat: {e}")))?;
+            .map_err(|e| CanoError::Blackboard(format!("Failed to append to chat: {e}")))?;
 
-        update_interaction_count(store)?;
+        update_interaction_count(board)?;
 
         println!("Actor2: {response}\n");
 
@@ -374,9 +374,9 @@ async fn main() -> Result<(), CanoError> {
     println!("   {MAX_INTERACTIONS} total interactions to create a complete story");
     println!();
 
-    let store = MemoryStore::new();
+    let board = Blackboard::new();
     let resources = Resources::new()
-        .insert(store.clone())
+        .insert(board.clone())
         .insert(CucaResource::new()?);
 
     let workflow = Workflow::new(resources)

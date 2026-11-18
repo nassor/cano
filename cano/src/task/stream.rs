@@ -47,9 +47,9 @@
 //! ## Cursor persistence & resume
 //!
 //! Register with [`Workflow::register`](crate::workflow::Workflow::register)
-//! and attach a [`CheckpointStore`](crate::recovery::CheckpointStore) + a workflow id: the
+//! and attach a [`CheckpointStore`](crate::checkpoint::CheckpointStore) + a workflow id: the
 //! engine persists the cursor returned by the **last item of each flushed window** (as a
-//! [`RowKind::StepCursor`](crate::recovery::RowKind::StepCursor) row), and a resumed run
+//! [`RowKind::StepCursor`](crate::checkpoint::RowKind::StepCursor) row), and a resumed run
 //! re-opens the source from that position. The macro-emitted companion `Task` impl
 //! (used by [`Workflow::register_split`](crate::workflow::Workflow::register_split)) runs
 //! an in-memory loop with **no** persistence and **no** cancellation.
@@ -356,8 +356,11 @@ where
     // absolute deadline never changes. Pinning a single future here and only
     // re-arming it on flush (below) keeps the per-item cost to the stream poll
     // alone. `None` for count windows — the tick branch then never resolves.
-    let mut tick: Option<Pin<Box<tokio::time::Sleep>>> = duration_len
-        .map(|len| Box::pin(tokio::time::sleep_until(tokio::time::Instant::now() + len)));
+    let mut tick: Option<Pin<Box<tokio::time::Sleep>>> = duration_len.map(|len| {
+        Box::pin(tokio::time::sleep_until(crate::workflow::deadline_after(
+            len,
+        )))
+    });
 
     // Resolves when the token fires, or never (no token). Built once and polled by
     // reference so the `select!` below does not re-register a waiter per item.
@@ -414,8 +417,11 @@ where
                 // Duration window elapsed.
                 if buf.is_empty() {
                     // Empty tumbling window: re-arm the deadline and keep waiting.
-                    tick = duration_len
-                        .map(|len| Box::pin(tokio::time::sleep_until(tokio::time::Instant::now() + len)));
+                    tick = duration_len.map(|len| {
+                        Box::pin(tokio::time::sleep_until(crate::workflow::deadline_after(
+                            len,
+                        )))
+                    });
                     continue;
                 }
                 return flush_full_window(task, res, std::mem::take(&mut buf), last_cursor).await;
@@ -452,10 +458,10 @@ where
                                     StreamErrorPolicy::FailFast => return Err(e),
                                     StreamErrorPolicy::SkipAndContinue => {}
                                     StreamErrorPolicy::RetryOnError { max_errors } => {
-                                        *consecutive_errors += 1;
-                                        if *consecutive_errors > *max_errors {
+                                        if *consecutive_errors >= *max_errors {
                                             return Err(e);
                                         }
+                                        *consecutive_errors += 1;
                                     }
                                 }
                             }
@@ -976,7 +982,7 @@ mod tests {
 
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-    use crate::recovery::CheckpointStore;
+    use crate::checkpoint::CheckpointStore;
     use crate::testing::InMemoryCheckpointStore;
 
     struct Forever {
@@ -1112,7 +1118,7 @@ mod tests {
 
     #[tokio::test]
     async fn persists_cursor_and_resumes() {
-        use crate::recovery::{CheckpointStore, RowKind};
+        use crate::checkpoint::{CheckpointStore, RowKind};
         use crate::workflow::Workflow;
 
         let opened = Arc::new(Mutex::new(Vec::new()));
@@ -1651,7 +1657,7 @@ mod tests {
         store
             .history()
             .into_iter()
-            .filter(|(_, row)| row.kind == crate::recovery::RowKind::StepCursor)
+            .filter(|(_, row)| row.kind == crate::checkpoint::RowKind::StepCursor)
             .filter_map(|(_, row)| row.output_blob)
             .map(|blob| serde_json::from_slice::<u64>(&blob).unwrap())
             .collect()
@@ -2687,7 +2693,7 @@ mod tests {
         let rows = store.rows("corrupt");
         store.clear("corrupt").await.unwrap();
         for mut row in rows {
-            if row.kind == crate::recovery::RowKind::StepCursor {
+            if row.kind == crate::checkpoint::RowKind::StepCursor {
                 row.output_blob = Some(b"not-json".to_vec());
             }
             store.append("corrupt", row).await.unwrap();
@@ -2706,13 +2712,13 @@ mod tests {
     struct CursorAppendFails;
 
     #[crate::checkpoint_store]
-    impl crate::recovery::CheckpointStore for CursorAppendFails {
+    impl crate::checkpoint::CheckpointStore for CursorAppendFails {
         async fn append(
             &self,
             _workflow_id: &str,
-            row: crate::recovery::CheckpointRow,
+            row: crate::checkpoint::CheckpointRow,
         ) -> Result<(), CanoError> {
-            if row.kind == crate::recovery::RowKind::StepCursor {
+            if row.kind == crate::checkpoint::RowKind::StepCursor {
                 Err(CanoError::checkpoint_store("disk full"))
             } else {
                 Ok(())
@@ -2721,7 +2727,7 @@ mod tests {
         async fn load_run(
             &self,
             _workflow_id: &str,
-        ) -> Result<Vec<crate::recovery::CheckpointRow>, CanoError> {
+        ) -> Result<Vec<crate::checkpoint::CheckpointRow>, CanoError> {
             Ok(Vec::new())
         }
         async fn clear(&self, _workflow_id: &str) -> Result<(), CanoError> {
@@ -3097,7 +3103,7 @@ mod tests {
 
     #[tokio::test]
     async fn crash_resume_commits_cursor_between_windows() {
-        use crate::recovery::{CheckpointRow, CheckpointStore};
+        use crate::checkpoint::{CheckpointRow, CheckpointStore};
         use crate::workflow::Workflow;
 
         /// A store that returns a pre-existing cursor (simulating a crash after the
