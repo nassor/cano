@@ -112,6 +112,9 @@ path = "@/resilience/rate-limiting.md"
 [[extra.nav.items]]
 title = "Recovery"
 path = "@/recovery/_index.md"
+[[extra.nav.items.children]]
+title = "Checkpoint stores"
+path = "@/recovery/checkpoint-stores.md"
 [[extra.nav.items]]
 title = "Saga"
 path = "@/saga/_index.md"

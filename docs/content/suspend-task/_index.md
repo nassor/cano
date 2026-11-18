@@ -234,10 +234,10 @@ assert_eq!(state, Step::Approved);
 
 <p>
 Where the later call can run depends on the store. A
-<a href="../recovery/#redb"><code>RedbStore</code></a> file is held by one process at
+<a href="../recovery/checkpoint-stores/#redb"><code>RedbStore</code></a> file is held by one process at
 a time, so the input is delivered by the process that parked the run, or by its replacement
-after a restart. With <a href="../recovery/#postgres"><code>PostgresStore</code></a>
-or <a href="../recovery/#nats"><code>NatsStore</code></a>, any process that reaches
+after a restart. With <a href="../recovery/checkpoint-stores/#postgres"><code>PostgresStore</code></a>
+or <a href="../recovery/checkpoint-stores/#nats"><code>NatsStore</code></a>, any process that reaches
 the server can call <code>resume_with</code>, such as a web handler on another host that
 receives the reviewer's decision.
 </p>
@@ -288,7 +288,7 @@ The last checkpoint row decides what a call does. <code>resume_from(workflow_id)
 <dd>Two concurrent calls for one run both append the same sequence number. The store rejects the duplicate, so one input wins and the other call fails. A network store built with <code>with_retry</code> re-sends an append whose acknowledgement was lost and accepts its own row, so that call still returns <code>Ok</code>; a different row from a competing call stays a conflict.</dd>
 
 <dt><code>CanoError::CheckpointStore</code> <small>a network store timed out or lost its connection</small></dt>
-<dd>The <code>ResumeInput</code> row may have been written anyway: see <a href="../recovery/#network-failures">timeouts and retries</a>. Call <code>resume_from</code> next. It delivers a recorded input again, and returns the parked state when nothing was recorded. Send a different input only after it returns the parked state.</dd>
+<dd>The <code>ResumeInput</code> row may have been written anyway: see <a href="../recovery/checkpoint-stores/#network-failures">timeouts and retries</a>. Call <code>resume_from</code> next. It delivers a recorded input again, and returns the parked state when nothing was recorded. Send a different input only after it returns the parked state.</dd>
 
 <dt>the error from <code>resume</code> <small>the task failed</small></dt>
 <dd>With an empty compensation stack the recorded input stays in the log, so <code>resume_from</code> delivers it again. With a non-empty stack the run fails like any other: the stack drains.</dd>

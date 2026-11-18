@@ -190,9 +190,9 @@ Cano enables one feature by default, <code>store-redb</code>. <code>features = [
 <ul>
 <li><code>scheduler</code>: the <a href="scheduler/"><code>Scheduler</code></a> (cron, interval and manual triggers), and with a store feature <a href="scheduler/several-instances/">several instances sharing one set of flows</a></li>
 <li><code>tracing</code>: <a href="tracing/"><code>tracing</code>-crate spans</a> and the <code>TracingObserver</code></li>
-<li><code>store-redb</code> (default): <a href="recovery/#redb"><code>RedbStore</code></a>, a checkpoint store in an embedded redb file. <code>default-features = false</code> drops redb from the build</li>
-<li><code>store-postgres</code>: <a href="recovery/#postgres"><code>PostgresStore</code></a>, a checkpoint and scheduler store in PostgreSQL tables</li>
-<li><code>store-nats</code>: <a href="recovery/#nats"><code>NatsStore</code></a>, a checkpoint and scheduler store in NATS JetStream Key/Value buckets</li>
+<li><code>store-redb</code> (default): <a href="recovery/checkpoint-stores/#redb"><code>RedbStore</code></a>, a checkpoint store in an embedded redb file. <code>default-features = false</code> drops redb from the build</li>
+<li><code>store-postgres</code>: <a href="recovery/checkpoint-stores/#postgres"><code>PostgresStore</code></a>, a checkpoint and scheduler store in PostgreSQL tables</li>
+<li><code>store-nats</code>: <a href="recovery/checkpoint-stores/#nats"><code>NatsStore</code></a>, a checkpoint and scheduler store in NATS JetStream Key/Value buckets</li>
 <li><code>metrics</code>: <a href="metrics/"><code>metrics</code>-crate counters, histograms and gauges</a> and the <code>MetricsObserver</code></li>
 <li><code>testing</code>: <a href="testing/">test fixtures</a> (recording observer, in-memory checkpoint and scheduler stores, store contract suites, panic and saga helpers), usually enabled under <code>[dev-dependencies]</code></li>
 </ul>

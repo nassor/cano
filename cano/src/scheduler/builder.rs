@@ -217,9 +217,9 @@ impl Scheduler {
     /// `cano-` plus 16 random hex digits. An empty id is a configuration error returned
     /// by [`start`](Self::start).
     ///
-    /// Each started scheduler attaches a random per-process `session` token to its leases,
-    /// so restarts or concurrent processes sharing an id do not treat each other's lease as
-    /// their own. Give every instance a distinct id (such as a pod or host name) to keep
+    /// Each [`start`](Self::start) draws a random `session` token for its leases, so a
+    /// restart or a second scheduler sharing an id does not treat the other's lease as its
+    /// own. Give every instance a distinct id (such as a pod or host name) to keep
     /// `RunningElsewhere { owner, .. }` statuses and logs unambiguous. It only matters with
     /// [`with_store`](Self::with_store).
     pub fn with_instance_id(mut self, id: &str) -> Self {

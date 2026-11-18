@@ -9,8 +9,8 @@
 //!
 //! The checkpoint bucket, `cano_checkpoints` by default (its stream is `KV_cano_checkpoints`), holds
 //! every run. Each row is one key, `{workflow_id}.{sequence}` with the sequence in decimal,
-//! whose value is the same tagged [postcard](https://docs.rs/postcard) encoding
-//! `RedbStore` writes. Workflow id bytes outside `[A-Za-z0-9_-]` are written as
+//! whose value is a two-byte `CW` tag, a random 16-byte write id and the
+//! [postcard](https://docs.rs/postcard) encoding of the row. Workflow id bytes outside `[A-Za-z0-9_-]` are written as
 //! `=` and two uppercase hex digits, so `order-1` stays `order-1` and `order.2` becomes
 //! `order=2E2`; the empty id is `=`. Keep ids to a few hundred bytes: a key is a NATS
 //! subject, and the server limits subject length.

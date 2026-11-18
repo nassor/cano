@@ -267,7 +267,7 @@ async fn checkpoints_run_in_memory() {
 <h2 id="store-contract"><a href="#store-contract" class="anchor-link" aria-hidden="true">#</a>assert_checkpoint_store_contract</h2>
 
 <p>
-Runs the <a href="../recovery/#trait"><code>CheckpointStore</code> contract</a> against any store and
+Runs the <a href="../recovery/checkpoint-stores/#trait"><code>CheckpointStore</code> contract</a> against any store and
 panics with the name of the first clause it breaks. Use it on your own backend, or on a built-in one
 pointed at a real server. It writes only workflow ids that start with <code>namespace/</code> and
 clears them before and after, so it can share a database with other data.

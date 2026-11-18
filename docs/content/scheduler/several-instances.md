@@ -139,10 +139,10 @@ record. The loser reads the new record and skips the tick.
 
 <dl class="key-list">
 <dt><code>every</code> <small>interval</small></dt>
-<dd>Runs fixed-rate across the cluster, anchored at <code>last_run + interval</code> (stamped when the lease is claimed). A tick is due when one interval has passed since the last claimed run started and no backoff window is open. When a run takes longer than <code>interval</code>, the next attempt dispatches after the 10 ms minimum poll floor.</dd>
+<dd>Runs at a fixed rate across the cluster. A tick is due once one interval has passed since the last claimed run started (the claim records that start) and no backoff window is open. A run that takes longer than the interval is followed by the next one at once.</dd>
 
 <dt><code>cron</code> <small>expression</small></dt>
-<dd>Runs once per firing in UTC. The first instance to claim a firing records it, and every other instance skips that firing. Missed firings during an outage are skipped without a catch-up flood, and a firing inside a backoff window is skipped. A transient store error on a due tick retries every <code>(ttl / 3).clamp(50ms, 5s)</code> while still strictly before the next firing.</dd>
+<dd>Runs once per firing, in UTC. The first instance to claim a firing records it, and every other instance skips that firing. A firing inside a backoff window is skipped, and firings missed during an outage are skipped rather than replayed. When a store error stops the claim of a due firing, the loop retries every <code>ttl / 3</code> (at least 50 ms, at most 5 s) until the next firing.</dd>
 
 <dt><code>manual</code> <small><code>trigger(id).await</code></small></dt>
 <dd>Claims the flow in the store before it spawns the run. The call returns an error while another instance holds the flow's lease, and the message names that instance. A trigger ignores a backoff window and is refused on a tripped flow, as on a single instance. The claim counts as a run in the record.</dd>
@@ -150,172 +150,254 @@ record. The loser reads the new record and skips the tick.
 
 <h2 id="leases"><a href="#leases" class="anchor-link" aria-hidden="true">#</a>Leases and failures</h2>
 <p>
-Claiming a run writes a fenced lease into the flow's record: the instance id, a per-process random
-<code>session</code>, a monotonic per-claim <code>lease.id</code>, and an expiry one TTL ahead. The
-running instance renews the lease every third of the TTL. When the run ends, an optimistic 1-RTT
-<code>compare_and_swap</code> from the held version commits the outcome and clears the lease, falling back
-to reload-and-verify only on a conflict.
+Claiming a run writes a lease into the flow's record: the instance id, a random session token drawn
+when the scheduler starts, a lease number unique to the claim, and an expiry one TTL ahead. The running
+instance renews the lease every third of the TTL. When the run ends, one compare-and-swap from the
+version it last wrote records the outcome and clears the lease. On a conflict or a store error it reloads
+the record and writes only if the lease there is still its own.
 </p>
 <div class="diagram-frame">
-<p class="diagram-label">Distributed dispatch and store lease lifecycle</p>
+<p class="diagram-label">Lease lifecycle of one run</p>
 <div class="cd-wrap">
-<svg class="cd cd-anim" viewBox="0 0 780 492" role="img" aria-labelledby="sched-lease-title sched-lease-desc">
-<title id="sched-lease-title">Distributed dispatch and store lease lifecycle</title>
-<desc id="sched-lease-desc">Three lifelines: Trigger and Loop, Workflow Runner, and SchedulerStore. A due tick or trigger sends a request to Workflow Runner, which loads v1 and sends a fenced compare-and-swap claim carrying owner, session, lease_id and TTL, receiving Written v2. While Workflow::run_once executes concurrently, keep_alive sends renew compare-and-swap heartbeats every ttl divided by 3, advancing the version from v2 to v3 to v4. When run_once completes, an optimistic 1-RTT release compare-and-swap from v4 commits the outcome at v5 and clears the lease.</desc>
+<svg class="cd cd-anim" viewBox="0 0 780 496" role="img" aria-labelledby="sched-lease-title sched-lease-desc">
+<title id="sched-lease-title">Lease lifecycle of one run</title>
+<desc id="sched-lease-desc">Sequence between a scheduler instance and the SchedulerStore. When the flow is due, the instance loads the record at version v1 and claims it with a compare-and-swap from v1 that writes a lease with its owner id, session, lease number and an expiry one TTL ahead; the store answers Written v2. While the workflow runs, the instance renews the lease every third of the TTL with a compare-and-swap from the version it holds, moving the record to v3 and v4. When the run ends, a compare-and-swap from v4 records the outcome and clears the lease at v5.</desc>
 <defs><marker id="sched-lease-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
-<line class="lifeline" x1="125" y1="52" x2="125" y2="434"/>
-<line class="lifeline" x1="390" y1="52" x2="390" y2="434"/>
-<line class="lifeline" x1="655" y1="52" x2="655" y2="434"/>
-<rect class="n" x="25" y="10" width="200" height="42" rx="8"/>
-<text class="t-strong" x="125" y="25">Trigger &amp; Loop</text>
-<text class="t-mut t-code" x="125" y="42">every &middot; cron &middot; trigger()</text>
-<rect class="n-hot" x="285" y="10" width="210" height="42" rx="8"/>
-<text class="t-strong" x="390" y="25">Workflow Runner</text>
-<text class="t-mut t-code" x="390" y="42">Coordinator + run_reserved</text>
-<rect class="n-cop" x="555" y="10" width="200" height="42" rx="8"/>
-<text class="t-strong" x="655" y="25">SchedulerStore</text>
-<text class="t-mut t-code" x="655" y="42">CAS &middot; FlowRecord</text>
-<path class="e" d="M125,86 H386" marker-end="url(#sched-lease-ah)"/>
-<text class="t-mut t-code" x="255" y="73">due tick / trigger()</text>
-<path class="e" d="M390,124 H651" marker-end="url(#sched-lease-ah)"/>
-<text class="t-mut t-code" x="522" y="111">load(flow_id) -&gt; v1</text>
-<path class="e e-hot" d="M390,162 H651" marker-end="url(#sched-lease-ah)"/>
-<text class="t-code" x="522" y="149">CAS(v1: owner, session, id, +TTL)</text>
-<g class="cd-loop"><animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.9368;0.9895;1" values="1;1;0;0"/>
-<path class="e e-dash" d="M655,196 H394" marker-end="url(#sched-lease-ah)"><animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.2526;0.2947;1" values="0;0;1;1"/></path>
-<text class="t-mut t-ok t-code" x="522" y="183">Written(v2) &middot; HeldLease<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.2526;0.2947;1" values="0;0;1;1"/></text>
-<rect class="band-hot" x="218" y="222" width="158" height="106" rx="8"><animate attributeName="height" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.3053;0.6421;1" values="0;0;106;106"/></rect>
-<text class="t-strong" x="297" y="266">Workflow::run_once<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.3158;0.3579;1" values="0;0;1;1"/></text>
-<text class="t-mut" x="297" y="286">running under lease<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.3158;0.3579;1" values="0;0;1;1"/></text>
-<path class="e" d="M390,248 H651" marker-end="url(#sched-lease-ah)"><animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.3368;0.3684;1" values="0;0;1;1"/></path>
-<text class="t-mut t-code" x="522" y="235">ttl / 3: renew CAS(v2 -&gt; v3)<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.3368;0.3684;1" values="0;0;1;1"/></text>
-<text class="t-mut t-ok t-code" x="522" y="264">v3 (+TTL)<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.4105;0.4526;1" values="0;0;1;1"/></text>
-<path class="e" d="M390,298 H651" marker-end="url(#sched-lease-ah)"><animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.4842;0.5158;1" values="0;0;1;1"/></path>
-<text class="t-mut t-code" x="522" y="285">ttl / 3: renew CAS(v3 -&gt; v4)<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.4842;0.5158;1" values="0;0;1;1"/></text>
-<text class="t-mut t-ok t-code" x="522" y="314">v4 (+TTL)<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.5579;0.6;1" values="0;0;1;1"/></text>
-<path class="e e-hot" d="M390,364 H651" marker-end="url(#sched-lease-ah)"><animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.6421;0.6737;1" values="0;0;1;1"/></path>
-<text class="t-code" x="522" y="351">1-RTT release CAS(v4: Completed)<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.6421;0.6737;1" values="0;0;1;1"/></text>
-<path class="e e-dash" d="M655,402 H394" marker-end="url(#sched-lease-ah)"><animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.7158;0.7684;1" values="0;0;1;1"/></path>
-<text class="t-mut t-ok t-code" x="522" y="389">Written(v5) &middot; schedule advances<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.7158;0.7684;1" values="0;0;1;1"/></text>
-<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="9.5s" repeatCount="indefinite" path="M125,86 H386" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.0421;0.1158;1"/><animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.0316;0.0421;0.1158;0.1263;1" values="0;0;1;1;0;0"/></circle>
-<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="9.5s" repeatCount="indefinite" path="M390,124 H651" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.1263;0.1895;1"/><animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.1158;0.1263;0.1895;0.2;1" values="0;0;1;1;0;0"/></circle>
-<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="9.5s" repeatCount="indefinite" path="M390,162 H651" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.2;0.2632;1"/><animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.1895;0.2;0.2632;0.2737;1" values="0;0;1;1;0;0"/></circle>
-<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="9.5s" repeatCount="indefinite" path="M390,248 H651" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.3474;0.4211;1"/><animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.3368;0.3474;0.4211;0.4316;1" values="0;0;1;1;0;0"/></circle>
-<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="9.5s" repeatCount="indefinite" path="M390,298 H651" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.4947;0.5684;1"/><animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.4842;0.4947;0.5684;0.5789;1" values="0;0;1;1;0;0"/></circle>
-<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="9.5s" repeatCount="indefinite" path="M390,364 H651" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.6526;0.7263;1"/><animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.6421;0.6526;0.7263;0.7368;1" values="0;0;1;1;0;0"/></circle>
-<rect class="n-ok" x="25" y="446" width="730" height="34" rx="10"><animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.7684;0.8211;1" values="0;0;1;1"/></rect>
-<text class="t-strong" x="390" y="463">Fenced lease renewed at ttl/3; optimistic 1-RTT release commits v5 from HeldLease<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.7684;0.8211;1" values="0;0;1;1"/></text>
+<line class="lifeline" x1="200" y1="52" x2="200" y2="430"/>
+<line class="lifeline" x1="600" y1="52" x2="600" y2="430"/>
+<rect class="n" x="100" y="10" width="200" height="42" rx="8"/>
+<text class="t-strong" x="200" y="25">Scheduler instance</text>
+<text class="t-mut t-code" x="200" y="42">every, cron or trigger()</text>
+<rect class="n-cop" x="500" y="10" width="200" height="42" rx="8"/>
+<text class="t-strong" x="600" y="25">SchedulerStore</text>
+<text class="t-mut" x="600" y="42">Postgres, NATS or redb</text>
+<g class="cd-loop"><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.93;0.99;1" values="1;1;0;0"/>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.04;0.08;1" values="0;0;1;1"/>
+<path class="e" d="M200,90 H596" marker-end="url(#sched-lease-ah)"/>
+<text class="t-mut t-code" x="400" y="78">due: load(flow_id)</text>
+</g>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.105;0.145;1" values="0;0;1;1"/>
+<path class="e e-dash" d="M600,122 H204" marker-end="url(#sched-lease-ah)"/>
+<text class="t-mut" x="400" y="110">record at version v1</text>
+</g>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.17;0.21;1" values="0;0;1;1"/>
+<path class="e e-hot" d="M200,166 H596" marker-end="url(#sched-lease-ah)"/>
+<text class="t-code" x="400" y="154">CAS(v1): lease = owner, session, id, now + ttl</text>
+</g>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.235;0.275;1" values="0;0;1;1"/>
+<path class="e e-dash" d="M600,198 H209" marker-end="url(#sched-lease-ah)"/>
+<text class="t-mut t-ok t-code" x="400" y="186">Written(v2)</text>
+</g>
+<rect class="band-hot" x="195" y="198" width="10" height="188" rx="5"><animate attributeName="height" dur="10s" repeatCount="indefinite" keyTimes="0;0.235;0.625;1" values="0;0;188;188"/></rect>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.27;0.31;1" values="0;0;1;1"/>
+<text class="t-strong ta-e" x="184" y="284">workflow runs</text>
+<text class="t-mut ta-e" x="184" y="302">lease held</text>
+</g>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.3;0.34;1" values="0;0;1;1"/>
+<path class="e" d="M205,244 H596" marker-end="url(#sched-lease-ah)"/>
+<text class="t-mut t-code" x="400" y="232">after ttl / 3: renew CAS(v2)</text>
+</g>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.365;0.405;1" values="0;0;1;1"/>
+<path class="e e-dash" d="M600,270 H209" marker-end="url(#sched-lease-ah)"/>
+<text class="t-mut t-ok t-code" x="400" y="258">Written(v3): expiry moved out</text>
+</g>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.43;0.47;1" values="0;0;1;1"/>
+<path class="e" d="M205,314 H596" marker-end="url(#sched-lease-ah)"/>
+<text class="t-mut t-code" x="400" y="302">after ttl / 3: renew CAS(v3)</text>
+</g>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.495;0.535;1" values="0;0;1;1"/>
+<path class="e e-dash" d="M600,340 H209" marker-end="url(#sched-lease-ah)"/>
+<text class="t-mut t-ok t-code" x="400" y="328">Written(v4)</text>
+</g>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.56;0.6;1" values="0;0;1;1"/>
+<path class="e e-hot" d="M205,386 H596" marker-end="url(#sched-lease-ah)"/>
+<text class="t-code" x="400" y="374">release CAS(v4): outcome, lease cleared</text>
+</g>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.625;0.665;1" values="0;0;1;1"/>
+<path class="e e-dash" d="M600,412 H204" marker-end="url(#sched-lease-ah)"/>
+<text class="t-mut t-ok t-code" x="400" y="400">Written(v5)</text>
+</g>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.7;0.76;1" values="0;0;1;1"/>
+<rect class="n-hot" x="20" y="446" width="740" height="34" rx="10"/>
+<text class="t-strong" x="390" y="463">Every write names the version it last saw, so only the lease holder can renew or release</text>
+</g>
 </g>
 </svg>
 </div>
 </div>
 <dl class="key-list">
-<dt>Full fencing <small><code>version</code> + <code>owner</code>, <code>session</code>, <code>lease.id</code>, <code>written_session</code>, <code>write_seq</code></small></dt>
-<dd>Every mutating swap carries <code>expected: Some(version)</code> and verifies <code>(owner, session, lease.id)</code>. A per-process random <code>session</code> ensures a process restarted quickly with the same static <code>with_instance_id</code> does not treat its pre-crash lease as its own. A monotonic per-claim <code>lease.id</code> ensures a thawed zombie or dropped claim cleanup can never renew or release a newer run on the same instance. Each stored <code>FlowRecord</code> also stamps <code>written_by</code>, <code>written_session</code>, <code>written_at</code> and <code>write_seq</code> so two writes never produce identical bytes across processes or within one clock tick.</dd>
+<dt>Fencing <small>record version, owner, session, lease number</small></dt>
+<dd>Every write is a compare-and-swap on the version the instance last read, except the very first claim of a flow, which creates the record. A renewal or a release also checks that the stored lease carries the instance's owner id, session and lease number. The session is drawn again on every <code>start</code>, so a process restarted with the same <code>with_instance_id</code> does not mistake its pre-crash lease for its own. The lease number changes on every claim, so a late renewal or release from an earlier run cannot touch a newer run on the same instance. Each record also carries the writer, its session, a timestamp and a write counter, so no two writes produce identical bytes.</dd>
 
-<dt>Lease lost and crash failover <small>monotonic holder TTL + zombie fencing</small></dt>
-<dd>The lease holder tracks its remaining TTL monotonically from <code>swap_started + ttl</code> via <code>tokio::time::Instant</code>, bounded by <code>wall_remaining</code>, so a backward NTP step cannot stretch its local deadline. When renewals are blocked for a full TTL or a renewal hits its deadline, <code>keep_alive</code> returns <code>Renew::Lost(None)</code>, fires <code>run_token</code>, and drains any saga compensation stack without discarding the running future. On a peer instance, once <code>expires_at &lt;= now</code>, <code>claim</code> records the failure anchored at <code>lease.expires_at</code> (preventing a later wall-clock tick on sparse schedules such as daily crons from opening a fresh backoff window and skipping the next firing) and takes over at a new record version. A thawed zombie attempting a stale <code>CAS(exp=old_version)</code> hits <code>Conflict</code>, reads <code>NotHeld</code>, and discards its outcome.</dd>
+<dt>Lease lost <small>no renewal for a whole TTL, or another instance took the flow over</small></dt>
+<dd>The holder measures its lease on a monotonic clock from the moment it sent the claim or renewal, so a backward wall-clock step cannot extend it. When the lease runs out, or a renewal finds another owner, the local run is cancelled through its token and a saga drains its compensation stack; the run is awaited, never dropped. Its outcome is not written, because the record no longer belongs to this instance.</dd>
 
-<dt>Lost-ACK claim rollback <small><code>abort_claim</code> + pre-claim counters</small></dt>
-<dd>Before bumping <code>run_count</code>, <code>last_run</code> or <code>last_tick</code>, <code>claim</code> saves <code>prev_run_count</code>, <code>prev_last_run</code> and <code>prev_last_tick</code> on the lease. If a claim swap drops its ACK, times out, or is cancelled before execution starts (including dropping a <code>trigger()</code> future mid-claim), <code>abort_claim</code> restores those pre-claim counters, marks a deliberate cancellation instead of a failure, and clears the lease. If <code>abort_claim</code> cannot reach the store, the coordinator keeps the unstarted <code>(flow_id, lease_id)</code> in a bounded set and restores the counters on its next successful read. When a retried <code>claim</code> encounters its own <code>(owner, session, lease.id)</code> after a lost ACK and concurrent <code>reset_flow</code>, it resumes ownership instead of returning <code>NotDue</code>.</dd>
+<dt>Crash <small>the process dies mid-run</small></dt>
+<dd>The lease expires within one TTL. The next instance that looks at the flow counts the lost run as one failure with the error <code>lease expired: ...</code>, dated at the lease's expiry rather than at the moment it noticed. A flow checked rarely, such as a daily cron, therefore does not lose its next firing to a backoff window that starts late. That failure feeds the flow's <a href="../backoff-and-trip/">backoff and trip</a> state like any other, so the flow runs again once the backoff delay has passed.</dd>
 
-<dt>Store outage and bounded calls <small><code>guarded(ttl)</code>, <code>last_error</code> cap, backoff self-healing</small></dt>
-<dd>Every <code>load</code> and <code>compare_and_swap</code> call runs inside <code>guarded(ttl)</code>, which catches custom store panics and caps each call (as well as overall <code>claim</code> and <code>reset</code> CAS loops) by <code>ttl</code>. While <code>remaining &gt; 0</code>, <code>keep_alive</code> tolerates transient renewal errors (<code>Renew::Held</code>) and self-heals on the next <code>ttl / 3</code> heartbeat without dropping the active run. On a claim outage, <code>every</code> loops back off to <code>interval.min((ttl / 3).max(MIN_POLL))</code> and <code>cron</code> loops retry due ticks every <code>(ttl / 3).clamp(50ms, 5s)</code> while before the next firing. Error strings in <code>FlowRecord::last_error</code> are UTF-8-safely truncated to 4 KiB (<code>4096</code> bytes with <code>...</code>) so oversized errors cannot exceed backend payload limits.</dd>
+<dt>Unstarted claim <small>lost acknowledgement, timeout, dropped <code>trigger()</code></small></dt>
+<dd>A claim advances <code>run_count</code>, <code>last_run</code> and <code>last_tick</code> and keeps their previous values on the lease. If the claim's acknowledgement is lost, the claim times out, or the <code>trigger()</code> future is dropped before the run starts, the instance writes those values back and clears the lease; nothing counts as a run or a failure. If the store is unreachable at that moment, the instance remembers the claim and undoes it on its next claim of the flow.</dd>
+
+<dt>Store outage <small>the store errors or times out</small></dt>
+<dd>Every store call is bounded by the TTL, and a store implementation that panics fails the call instead of the scheduler. A failed claim skips the tick and the scheduler stays up (with the <code>tracing</code> feature the error is logged). An <code>every</code> loop then retries after <code>min(interval, ttl / 3)</code>; a <code>cron</code> loop retries a due firing every <code>ttl / 3</code>, clamped to 50 ms to 5 s, until the next firing. A renewal that fails while the lease has time left keeps the run going and is tried again a third of the TTL later; a run that cannot renew for a whole TTL is cancelled as a lost lease. A release that keeps failing is retried a few times, then left to expire and counted as one failure, unless the same instance claims the flow again before the lease expires. A stored <code>last_error</code> holds at most 4 KiB, cut on a UTF-8 character boundary.</dd>
 
 <dt>Shutdown abort <small><code>stop()</code> aborts a run after the cancel timeout</small></dt>
-<dd>The aborted run leaves its lease to expire and is counted as one failure anchored at <code>lease.expires_at</code>, the same as a crash. A run that finishes during the drain or cancel phase releases its lease in 1 RTT as usual.</dd>
+<dd>The aborted run leaves its lease to expire and is counted as one failure, the same as a crash. A run that finishes during the drain or cancel phase writes its outcome as usual.</dd>
 </dl>
 <div class="diagram-frame">
-<p class="diagram-label">Crash or partition failover and zombie fencing</p>
+<p class="diagram-label">Failover after a partition</p>
 <div class="cd-wrap">
-<svg class="cd cd-anim" viewBox="0 0 780 560" role="img" aria-labelledby="sched-failover-title sched-failover-desc">
-<title id="sched-failover-title">Crash or partition failover and zombie fencing</title>
-<desc id="sched-failover-desc">Three lifelines: Instance A (s1), SchedulerStore, and Instance B (s2). Instance A claims v2 and runs while a partition stalls renewals past TTL. Once the monotonic deadline swap_started plus ttl elapses, Instance A cancels its run token and drains any saga compensations. Meanwhile Instance B observes RunningElsewhere until expires_at passes, then records a failure anchored at lease.expires_at and claims v3. When thawed zombie A sends a stale release or renew CAS expecting v2, the store returns Conflict; A sees owner B (NotHeld) and discards its stale outcome.</desc>
+<svg class="cd cd-anim" viewBox="0 0 780 606" role="img" aria-labelledby="sched-failover-title sched-failover-desc">
+<title id="sched-failover-title">Failover after a partition</title>
+<desc id="sched-failover-desc">Sequence between instance A, the SchedulerStore and instance B. A claims the flow with a compare-and-swap from v1 and runs it at v2. A partition cuts A off: its renewal never reaches the store. B loads the record and sees A's lease, valid until expires_at. A goes a whole TTL without a renewal, cancels its run and lets a saga roll back. Once the lease has expired, B's claim from v2 records the lost run as one failure and puts the flow in Backoff at v3. After the backoff delay B claims again from v3 and runs the flow at v4. A late release from A still names v2, so the store answers Conflict and A writes nothing.</desc>
 <defs><marker id="sched-failover-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
-<line class="lifeline" x1="125" y1="52" x2="125" y2="498"/>
-<line class="lifeline" x1="390" y1="52" x2="390" y2="498"/>
-<line class="lifeline" x1="655" y1="52" x2="655" y2="498"/>
-<rect class="n" x="25" y="10" width="200" height="42" rx="8"/>
-<text class="t-strong" x="125" y="25">Instance A (s1)</text>
-<text class="t-mut t-code" x="125" y="42">initial lease holder</text>
-<rect class="n-cop" x="290" y="10" width="200" height="42" rx="8"/>
+<line class="lifeline" x1="130" y1="52" x2="130" y2="540"/>
+<line class="lifeline" x1="390" y1="52" x2="390" y2="540"/>
+<line class="lifeline" x1="650" y1="52" x2="650" y2="540"/>
+<rect class="n" x="40" y="10" width="180" height="42" rx="8"/>
+<text class="t-strong" x="130" y="25">Instance A</text>
+<text class="t-mut" x="130" y="42">first lease holder</text>
+<rect class="n-cop" x="300" y="10" width="180" height="42" rx="8"/>
 <text class="t-strong" x="390" y="25">SchedulerStore</text>
-<text class="t-mut t-code" x="390" y="42">fenced CAS state</text>
-<rect class="n" x="555" y="10" width="200" height="42" rx="8"/>
-<text class="t-strong" x="655" y="25">Instance B (s2)</text>
-<text class="t-mut t-code" x="655" y="42">failover peer</text>
-<g class="cd-loop"><animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.9429;0.9905;1" values="1;1;0;0"/>
-<path class="e e-hot" d="M125,82 H386" marker-end="url(#sched-failover-ah)"><animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.0381;0.0762;1" values="0;0;1;1"/></path>
-<text class="t-code" x="255" y="69">CAS(v1-&gt;v2): owner=A, s1, id=1<animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.0381;0.0762;1" values="0;0;1;1"/></text>
-<rect class="band-hot" x="16" y="96" width="96" height="88" rx="6"><animate attributeName="height" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.1143;0.3619;1" values="0;0;88;88"/></rect>
-<text class="t-strong" x="64" y="130">running<animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.1238;0.1619;1" values="0;0;1;1"/></text>
-<text class="t-mut t-code" x="64" y="148">v2 held<animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.1238;0.1619;1" values="0;0;1;1"/></text>
-<rect class="n-warn" x="150" y="106" width="216" height="60" rx="8"><animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.1905;0.2381;1" values="0;0;1;1"/></rect>
-<text class="t-strong t-warn" x="258" y="126">partition / stall &gt; TTL<animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.1905;0.2381;1" values="0;0;1;1"/></text>
-<text class="t-mut" x="258" y="146">renew(v2) blocked / timed out<animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.1905;0.2381;1" values="0;0;1;1"/></text>
-<path class="e e-dash" d="M655,138 H394" marker-end="url(#sched-failover-ah)"><animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.219;0.2667;1" values="0;0;1;1"/></path>
-<text class="t-mut t-code" x="524" y="125">load -&gt; RunningElsewhere(A)<animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.219;0.2667;1" values="0;0;1;1"/></text>
-<rect class="n-warn" x="16" y="192" width="218" height="54" rx="8"><animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.3619;0.419;1" values="0;0;1;1"/></rect>
-<text class="t-code t-warn" x="125" y="210">swap_started + ttl elapsed<animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.3619;0.419;1" values="0;0;1;1"/></text>
-<text class="t-mut" x="125" y="229">cancel run_token + drain saga<animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.3619;0.419;1" values="0;0;1;1"/></text>
-<path class="e e-hot" d="M655,282 H394" marker-end="url(#sched-failover-ah)"><animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.4571;0.4952;1" values="0;0;1;1"/></path>
-<text class="t-code" x="524" y="269">expired: fail at lease.expires_at<animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.4571;0.4952;1" values="0;0;1;1"/></text>
-<path class="e e-dash" d="M390,318 H651" marker-end="url(#sched-failover-ah)"><animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.5333;0.581;1" values="0;0;1;1"/></path>
-<text class="t-mut t-ok t-code" x="524" y="305">Written(v3) &middot; owner=B, s2<animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.5333;0.581;1" values="0;0;1;1"/></text>
-<rect class="band-hot" x="668" y="324" width="98" height="70" rx="6"><animate attributeName="height" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.5714;0.7143;1" values="0;0;70;70"/></rect>
-<text class="t-strong" x="717" y="359">B runs v3<animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.5905;0.6286;1" values="0;0;1;1"/></text>
-<path class="e e-dash" d="M125,366 H386" marker-end="url(#sched-failover-ah)"><animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.6286;0.6667;1" values="0;0;1;1"/></path>
-<text class="t-err t-code" x="255" y="353">zombie CAS(exp=v2, outcome)<animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.6286;0.6667;1" values="0;0;1;1"/></text>
-<path class="e e-dash" d="M390,402 H129" marker-end="url(#sched-failover-ah)"><animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.7048;0.7429;1" values="0;0;1;1"/></path>
-<text class="t-err t-code" x="255" y="389">Conflict (stored v3 != v2)<animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.7048;0.7429;1" values="0;0;1;1"/></text>
-<rect class="n-err" x="20" y="438" width="210" height="46" rx="8"><animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.7429;0.7905;1" values="0;0;1;1"/></rect>
-<text class="t-code t-err" x="125" y="453">load -&gt; owner=B (NotHeld)<animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.7429;0.7905;1" values="0;0;1;1"/></text>
-<text class="t-mut" x="125" y="470">stale outcome discarded<animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.7429;0.7905;1" values="0;0;1;1"/></text>
-<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="10.5s" repeatCount="indefinite" path="M125,82 H386" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.0381;0.1048;1"/><animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.0286;0.0381;0.1048;0.1143;1" values="0;0;1;1;0;0"/></circle>
-<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="10.5s" repeatCount="indefinite" path="M655,282 H394" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.4571;0.5238;1"/><animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.4476;0.4571;0.5238;0.5333;1" values="0;0;1;1;0;0"/></circle>
-<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="10.5s" repeatCount="indefinite" path="M125,366 H386" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.6286;0.6952;1"/><animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.619;0.6286;0.6952;0.7048;1" values="0;0;1;1;0;0"/></circle>
-<rect class="n-hot" x="20" y="508" width="740" height="36" rx="10"><animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.7905;0.8381;1" values="0;0;1;1"/></rect>
-<text class="t-strong" x="390" y="526">Monotonic TTL bounds the holder; CAS version + (owner, session, lease_id) fence zombies<animate attributeName="opacity" dur="10.5s" repeatCount="indefinite" keyTimes="0;0.7905;0.8381;1" values="0;0;1;1"/></text>
+<text class="t-mut" x="390" y="42">the flow's record</text>
+<rect class="n" x="560" y="10" width="180" height="42" rx="8"/>
+<text class="t-strong" x="650" y="25">Instance B</text>
+<text class="t-mut" x="650" y="42">peer</text>
+<g class="cd-loop"><animate attributeName="opacity" dur="12s" repeatCount="indefinite" keyTimes="0;0.93;0.99;1" values="1;1;0;0"/>
+<g><animate attributeName="opacity" dur="12s" repeatCount="indefinite" keyTimes="0;0.03;0.07;1" values="0;0;1;1"/>
+<path class="e e-hot" d="M130,86 H386" marker-end="url(#sched-failover-ah)"/>
+<text class="t-code" x="260" y="74">claim CAS(v1): owner A, lease 1</text>
+</g>
+<g><animate attributeName="opacity" dur="12s" repeatCount="indefinite" keyTimes="0;0.09;0.13;1" values="0;0;1;1"/>
+<path class="e e-dash" d="M390,112 H139" marker-end="url(#sched-failover-ah)"/>
+<text class="t-mut t-ok t-code" x="260" y="100">Written(v2)</text>
+</g>
+<rect class="band-hot" x="125" y="112" width="10" height="140" rx="5"><animate attributeName="height" dur="12s" repeatCount="indefinite" keyTimes="0;0.11;0.37;1" values="0;0;140;140"/></rect>
+<g><animate attributeName="opacity" dur="12s" repeatCount="indefinite" keyTimes="0;0.16;0.2;1" values="0;0;1;1"/>
+<path class="e e-dash" d="M135,150 H300" marker-end="url(#sched-failover-ah)"/>
+<text class="t-mut t-err t-code" x="218" y="138">renew CAS(v2)</text>
+<text class="t-mut t-warn" x="218" y="164">partition: no answer</text>
+</g>
+<g><animate attributeName="opacity" dur="12s" repeatCount="indefinite" keyTimes="0;0.22;0.26;1" values="0;0;1;1"/>
+<path class="e" d="M650,196 H394" marker-end="url(#sched-failover-ah)"/>
+<text class="t-mut t-code" x="520" y="184">load(flow_id)</text>
+</g>
+<g><animate attributeName="opacity" dur="12s" repeatCount="indefinite" keyTimes="0;0.28;0.32;1" values="0;0;1;1"/>
+<path class="e e-dash" d="M390,222 H646" marker-end="url(#sched-failover-ah)"/>
+<text class="t-mut" x="520" y="210">A holds the lease until expires_at</text>
+</g>
+<g><animate attributeName="opacity" dur="12s" repeatCount="indefinite" keyTimes="0;0.35;0.4;1" values="0;0;1;1"/>
+<rect class="n-warn" x="30" y="252" width="200" height="44" rx="8"/>
+<text class="t-strong" x="130" y="267">no renewal for a TTL</text>
+<text class="t-mut" x="130" y="285">cancel run, roll back saga</text>
+</g>
+<g><animate attributeName="opacity" dur="12s" repeatCount="indefinite" keyTimes="0;0.43;0.47;1" values="0;0;1;1"/>
+<path class="e e-hot" d="M650,326 H394" marker-end="url(#sched-failover-ah)"/>
+<text class="t-code" x="520" y="314">claim CAS(v2): lease expired</text>
+</g>
+<g><animate attributeName="opacity" dur="12s" repeatCount="indefinite" keyTimes="0;0.49;0.53;1" values="0;0;1;1"/>
+<path class="e e-dash" d="M390,352 H646" marker-end="url(#sched-failover-ah)"/>
+<text class="t-mut t-err t-code" x="520" y="340">Written(v3): one failure, Backoff</text>
+</g>
+<g><animate attributeName="opacity" dur="12s" repeatCount="indefinite" keyTimes="0;0.55;0.59;1" values="0;0;1;1"/>
+<path class="e e-hot" d="M650,392 H394" marker-end="url(#sched-failover-ah)"/>
+<text class="t-code" x="520" y="380">after the delay: claim CAS(v3)</text>
+</g>
+<g><animate attributeName="opacity" dur="12s" repeatCount="indefinite" keyTimes="0;0.61;0.65;1" values="0;0;1;1"/>
+<path class="e e-dash" d="M390,418 H641" marker-end="url(#sched-failover-ah)"/>
+<text class="t-mut t-ok t-code" x="520" y="406">Written(v4): owner B</text>
+</g>
+<rect class="band-hot" x="645" y="418" width="10" height="100" rx="5"><animate attributeName="height" dur="12s" repeatCount="indefinite" keyTimes="0;0.63;0.85;1" values="0;0;100;100"/></rect>
+<g><animate attributeName="opacity" dur="12s" repeatCount="indefinite" keyTimes="0;0.67;0.71;1" values="0;0;1;1"/>
+<path class="e e-dash" d="M130,452 H386" marker-end="url(#sched-failover-ah)"/>
+<text class="t-err t-code" x="260" y="440">late release CAS(v2)</text>
+</g>
+<g><animate attributeName="opacity" dur="12s" repeatCount="indefinite" keyTimes="0;0.73;0.77;1" values="0;0;1;1"/>
+<path class="e e-dash" d="M390,478 H134" marker-end="url(#sched-failover-ah)"/>
+<text class="t-mut t-err t-code" x="260" y="466">Conflict: the record is at v4</text>
+</g>
+<g><animate attributeName="opacity" dur="12s" repeatCount="indefinite" keyTimes="0;0.79;0.83;1" values="0;0;1;1"/>
+<rect class="n-err" x="30" y="496" width="200" height="44" rx="8"/>
+<text class="t-strong" x="130" y="511">A stands down</text>
+<text class="t-mut" x="130" y="529">its outcome is not written</text>
+</g>
+<g><animate attributeName="opacity" dur="12s" repeatCount="indefinite" keyTimes="0;0.85;0.9;1" values="0;0;1;1"/>
+<rect class="n-hot" x="20" y="556" width="740" height="34" rx="10"/>
+<text class="t-strong" x="390" y="573">A late write names a version that is gone, so it cannot overwrite the new owner</text>
+</g>
 </g>
 </svg>
 </div>
 </div>
 <div class="diagram-frame">
-<p class="diagram-label">Store-outage tolerance and backoff self-healing</p>
+<p class="diagram-label">A store outage shorter than the TTL</p>
 <div class="cd-wrap">
-<svg class="cd cd-anim" viewBox="0 0 780 340" role="img" aria-labelledby="sched-outage-title sched-outage-desc">
-<title id="sched-outage-title">Store-outage tolerance and backoff self-healing</title>
-<desc id="sched-outage-desc">Two-lane timeline across a transient store outage shorter than the lease TTL. In Lane 1, keep_alive tolerates transient renewal errors while remaining time stays positive, returning Renew::Held so the active run continues and self-heals on the next ttl divided by 3 heartbeat before committing release. In Lane 2, every and cron claim outages back off cleanly (using min of interval and ttl divided by 3, or retrying due cron ticks while before the next firing, with abort_claim restoring last_tick and run_count on a lost ACK) and win claims cleanly once the store recovers.</desc>
+<svg class="cd cd-anim" viewBox="0 0 780 336" role="img" aria-labelledby="sched-outage-title sched-outage-desc">
+<title id="sched-outage-title">A store outage shorter than the TTL</title>
+<desc id="sched-outage-desc">Timeline in thirds of the lease TTL with a store outage from about 0.4 to 0.95 TTL. Top lane: a running flow claims its lease at 0 and renews at one third of the TTL; the renewal at two thirds fails inside the outage, but the lease still has time left, so the run continues; the renewal at one TTL succeeds and the run later releases its lease. Bottom lane: a flow that falls due during the outage fails to claim twice, retrying a third of the TTL later each time, and claims once the store answers again.</desc>
 <defs><marker id="sched-outage-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
-<rect class="n-warn" x="320" y="34" width="170" height="212" rx="8"/>
-<text class="t-warn t-strong" x="405" y="50">outage (&lt; TTL)</text>
-<text class="t-strong ta-e" x="140" y="104">keep_alive</text>
-<text class="t-mut ta-e" x="140" y="122">&lt; TTL outage</text>
-<text class="t-strong ta-e" x="140" y="188">claim &amp; loop</text>
-<text class="t-mut ta-e" x="140" y="206">every / cron</text>
-<line class="axis" x1="150" y1="252" x2="732" y2="252"/>
-<path class="e e-dim" d="M732,252 H750" marker-end="url(#sched-outage-ah)"/>
-<text class="t-mut ta-e" x="748" y="268">time</text>
-<g class="cd-loop"><animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.9368;0.9895;1" values="1;1;0;0"/>
-<rect class="band-hot" x="150" y="94" width="560" height="34" rx="6"><animate attributeName="width" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.0421;0.7158;1" values="0;0;560;560"/></rect>
-<text class="t-mut t-ok t-code" x="220" y="80">ttl/3: renew Ok<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.1263;0.1684;1" values="0;0;1;1"/></text>
-<text class="t-mut t-warn t-code" x="405" y="80">err -&gt; Renew::Held<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.2737;0.3158;1" values="0;0;1;1"/></text>
-<text class="t-strong" x="430" y="111">active run preserved<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.2947;0.3368;1" values="0;0;1;1"/></text>
-<text class="t-mut t-ok t-code" x="575" y="80">self-healed: Ok<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.5263;0.5684;1" values="0;0;1;1"/></text>
-<text class="t-mut t-ok t-code" x="705" y="80">release Ok<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.6947;0.7368;1" values="0;0;1;1"/></text>
-<rect class="n-ok" x="150" y="178" width="70" height="30" rx="6"><animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.0421;0.1263;1" values="0;0;1;1"/></rect>
-<text class="t-mut t-ok" x="185" y="193">ok<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.0842;0.1263;1" values="0;0;1;1"/></text>
-<rect class="n-err" x="320" y="178" width="60" height="30" rx="6"><animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.2632;0.3053;1" values="0;0;1;1"/></rect>
-<text class="t-mut t-err" x="350" y="193">lost-ACK<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.2632;0.3053;1" values="0;0;1;1"/></text>
-<text class="t-mut t-code" x="405" y="226">abort_claim restores last_tick/run_count<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.2842;0.3263;1" values="0;0;1;1"/></text>
-<rect class="band" x="386" y="178" width="104" height="30" rx="6"><animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.3368;0.3895;1" values="0;0;1;1"/></rect>
-<text class="t-mut" x="438" y="193">backoff wait<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.3368;0.3895;1" values="0;0;1;1"/></text>
-<text class="t-mut t-code" x="438" y="164">min(interval, ttl/3) / cron retry<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.3368;0.3895;1" values="0;0;1;1"/></text>
-<rect class="n-ok" x="504" y="178" width="122" height="30" rx="6"><animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.5474;0.6105;1" values="0;0;1;1"/></rect>
-<text class="t-mut t-ok" x="565" y="193">healed: claim<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.5474;0.6105;1" values="0;0;1;1"/></text>
-<line class="e e-dim e-dash" x1="150" y1="64" x2="150" y2="252" opacity="0"><animate attributeName="x1" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.0421;0.7158;1" values="150;150;710;710"/><animate attributeName="x2" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.0421;0.7158;1" values="150;150;710;710"/><animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.0316;0.0421;0.7158;0.7368;1" values="0;0;1;1;0;0"/></line>
-<rect class="n-hot" x="16" y="286" width="748" height="36" rx="10"><animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.7474;0.8;1" values="0;0;1;1"/></rect>
-<text class="t-strong" x="390" y="304">Outages &lt; TTL: active runs self-heal at ttl/3; loops back off and preserve counters<animate attributeName="opacity" dur="9.5s" repeatCount="indefinite" keyTimes="0;0.7474;0.8;1" values="0;0;1;1"/></text>
+<text class="t-strong ta-e" x="160" y="105">running flow</text>
+<text class="t-mut ta-e" x="160" y="123">renews its lease</text>
+<text class="t-strong ta-e" x="160" y="190">due flow</text>
+<text class="t-mut ta-e" x="160" y="208">tries to claim</text>
+<line class="lifeline" x1="180" y1="198" x2="752" y2="198"/>
+<line class="axis" x1="180" y1="250" x2="752" y2="250"/>
+<path class="e e-dim" d="M752,250 H766" marker-end="url(#sched-outage-ah)"/>
+<line class="tick" x1="180" y1="245" x2="180" y2="255"/>
+<line class="tick" x1="320" y1="245" x2="320" y2="255"/>
+<line class="tick" x1="460" y1="245" x2="460" y2="255"/>
+<line class="tick" x1="600" y1="245" x2="600" y2="255"/>
+<line class="tick" x1="740" y1="245" x2="740" y2="255"/>
+<text class="t-mut" x="180" y="268">0</text>
+<text class="t-mut" x="320" y="268">ttl/3</text>
+<text class="t-mut" x="460" y="268">2ttl/3</text>
+<text class="t-mut" x="600" y="268">ttl</text>
+<text class="t-mut" x="740" y="268">4ttl/3</text>
+<g class="cd-loop"><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.93;0.99;1" values="1;1;0;0"/>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.238;0.268;1" values="0;0;1;1"/>
+<rect class="n-warn" x="350" y="58" width="222" height="172" rx="8"/>
+<text class="t-strong t-warn" x="463" y="44">store outage</text>
+</g>
+<rect class="band-hot" x="180" y="98" width="560" height="30" rx="6"><animate attributeName="width" dur="10s" repeatCount="indefinite" keyTimes="0;0.04;0.7;1" values="0;0;560;560"/></rect>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.04;0.07;1" values="0;0;1;1"/>
+<circle class="n-ok" cx="180" cy="113" r="6"/>
+<text class="t-mut t-ok" x="180" y="84">claim</text>
+</g>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.205;0.235;1" values="0;0;1;1"/>
+<circle class="n-ok" cx="320" cy="113" r="6"/>
+<text class="t-mut t-ok" x="320" y="84">renewed</text>
+</g>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.37;0.4;1" values="0;0;1;1"/>
+<circle class="n-err" cx="460" cy="113" r="6"/>
+<text class="t-mut t-err" x="460" y="84">renew fails, lease kept</text>
+</g>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.535;0.565;1" values="0;0;1;1"/>
+<circle class="n-ok" cx="600" cy="113" r="6"/>
+<text class="t-mut t-ok" x="600" y="84">renewed</text>
+</g>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.7;0.73;1" values="0;0;1;1"/>
+<circle class="n-ok" cx="740" cy="113" r="6"/>
+<text class="t-mut t-ok" x="740" y="84">release</text>
+</g>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.288;0.318;1" values="0;0;1;1"/>
+<circle class="n-err" cx="392" cy="198" r="6"/>
+<text class="t-mut t-err" x="392" y="220">store error</text>
+</g>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.452;0.482;1" values="0;0;1;1"/>
+<text class="t-mut" x="459" y="182">retry in ttl/3</text>
+<circle class="n-err" cx="526" cy="198" r="6"/>
+<text class="t-mut t-err" x="526" y="220">store error</text>
+</g>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.618;0.648;1" values="0;0;1;1"/>
+<text class="t-mut ta-s" x="580" y="182">retry in ttl/3</text>
+<circle class="n-ok" cx="660" cy="198" r="6"/>
+<text class="t-mut t-ok" x="660" y="220">claimed</text>
+</g>
+<line class="e e-dim e-dash" x1="180" y1="60" x2="180" y2="250" opacity="0"><animate attributeName="x1" dur="10s" repeatCount="indefinite" keyTimes="0;0.04;0.7;1" values="180;180;740;740"/><animate attributeName="x2" dur="10s" repeatCount="indefinite" keyTimes="0;0.04;0.7;1" values="180;180;740;740"/><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.03;0.04;0.7;0.72;1" values="0;0;1;1;0;0"/></line>
+<g><animate attributeName="opacity" dur="10s" repeatCount="indefinite" keyTimes="0;0.74;0.8;1" values="0;0;1;1"/>
+<rect class="n-hot" x="16" y="284" width="748" height="36" rx="10"/>
+<text class="t-strong" x="390" y="302">A run survives an outage shorter than its lease; claims retry until the store answers</text>
+</g>
 </g>
 </svg>
 </div>
@@ -340,14 +422,13 @@ leaving any live lease in flight intact.
 <h2 id="status"><a href="#status" class="anchor-link" aria-hidden="true">#</a>Status and cancelling</h2>
 <p>
 A flow whose live lease another instance holds reports
-<code>Status::RunningElsewhere { owner, lease_expires }</code>. Once <code>lease_expires &lt;= now</code>,
-<code>status()</code> and <code>list()</code> dynamically normalize the snapshot back to the underlying
-<code>FlowRecord</code> state (<code>Idle</code>, <code>Completed</code>, <code>Backoff</code>, or
-<code>Tripped</code>) instead of reporting an expired <code>RunningElsewhere</code> indefinitely.
-<code>status()</code> mirrors the store as of this instance's last read: <code>every</code> and
-<code>cron</code> flows refresh on <code>start</code>, every dispatch attempt, <code>trigger</code> and
-<code>reset_flow</code>; <code>manual</code>-only flows have no background loop, so their stored snapshot
-refreshes on <code>start</code>, <code>trigger</code> and <code>reset_flow</code>.
+<code>Status::RunningElsewhere { owner, lease_expires }</code>. Once <code>lease_expires</code> has passed,
+<code>status()</code> and <code>list()</code> report the stored state instead (<code>Idle</code>,
+<code>Completed</code>, <code>Backoff</code> or <code>Tripped</code>), so a crashed owner does not show as
+running forever. <code>status()</code> mirrors the store as of this instance's last read. An
+<code>every</code> or <code>cron</code> flow refreshes it at <code>start</code>, at every dispatch attempt,
+and on <code>trigger</code> and <code>reset_flow</code>; a <code>manual</code> flow has no loop, so only
+<code>start</code>, <code>trigger</code> and <code>reset_flow</code> refresh it.
 </p>
 <p>
 <code>cancel_flow(id)</code> only cancels a run on the instance you call it on. On an instance that shows
@@ -367,8 +448,13 @@ match node.status("fetch").map(|info| info.status) {
 
 <h2 id="requirements"><a href="#requirements" class="anchor-link" aria-hidden="true">#</a>Clocks, ids and clusters</h2>
 <ul>
-<li>Cross-host lease expiry (<code>expires_at &lt;= now</code>) compares UTC wall clocks across instances, even though the holder bounds its own TTL monotonically via <code>Instant</code>. Keep host clocks synchronized with NTP skew well below <code>ttl / 3</code>.</li>
-<li>Give every instance a distinct <code>with_instance_id</code>. Per-process random <code>session</code> tokens keep concurrent processes and restarts sharing an id from claiming each other's leases, and distinct stable names (such as a pod or host name) keep logs and <code>Status::RunningElsewhere { owner, .. }</code> unambiguous.</li>
+<li>Lease expiry compares wall clocks across instances: a peer treats a lease as expired once its own clock
+passes <code>expires_at</code>. The holder measures its lease on a monotonic clock. Keep the clocks
+synchronised, with a skew well below the TTL.</li>
+<li>Give every instance a distinct <code>with_instance_id</code>. The session token drawn at each
+<code>start</code> keeps two schedulers that share an id from taking each other's leases, but a distinct,
+stable name such as a pod or host name keeps logs and <code>Status::RunningElsewhere { owner, .. }</code>
+unambiguous.</li>
 <li>Instances that share a table, bucket or file form one cluster. Give every deployment that must not
 share flows its own table or bucket, or two unrelated services with a flow called <code>fetch</code> will
 coordinate with each other.</li>
@@ -390,8 +476,8 @@ beside the checkpoints. The scheduler needs only the store's compare-and-swap, s
 <dd>Coordinates processes that reach one JetStream. One key per flow, versioned by the key's revision. <code>scheduler_kv()</code> returns the bucket handle. Non-zero <code>max_age</code> in bucket configs is rejected with <code>CanoError::Configuration</code> so <code>Backoff</code>, <code>Tripped</code> or checkpoint state cannot silently expire.</dd>
 </dl>
 <p>
-The <a href="../../recovery/#postgres">Postgres</a> and <a href="../../recovery/#nats">NATS</a> sections
-of the recovery guide list the other builder settings (including <code>with_operation_timeout</code> and
+The <a href="../../recovery/checkpoint-stores/#postgres">Postgres</a> and <a href="../../recovery/checkpoint-stores/#nats">NATS</a> sections
+of the checkpoint stores guide list the other builder settings (including <code>with_operation_timeout</code> and
 jittered <code>with_retry</code>), which apply to the scheduler records too.
 </p>
 

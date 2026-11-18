@@ -105,42 +105,41 @@ spawns one loop per interval or cron flow. Manual flows get no loop and run only
 <div class="diagram-frame">
 <p class="diagram-label">Scheduler dispatch lifecycle</p>
 <div class="cd-wrap">
-<svg class="cd cd-anim" viewBox="0 0 780 336" role="img" aria-labelledby="sched-dispatch-title sched-dispatch-desc">
+<svg class="cd cd-anim" viewBox="0 0 780 344" role="img" aria-labelledby="sched-dispatch-title sched-dispatch-desc">
 <title id="sched-dispatch-title">Scheduler dispatch lifecycle</title>
-<desc id="sched-dispatch-desc">An interval tick, cron firing or manual trigger attempts to reserve the flow locally and, when a SchedulerStore is configured, via compare-and-swap. Refused attempts skip the tick or return an error. A won reservation runs Workflow::run_once under a run token and optional lease renewal. When a CheckpointStore is attached, unfinished checkpoint rows auto-resume and stale completed exit rows are cleared before starting fresh. Completion commits Completed, Idle on clean cancellation, or Backoff or Tripped on failure.</desc>
+<desc id="sched-dispatch-desc">An interval tick, a cron firing or a manual trigger tries to reserve the flow: one run per flow at a time, plus a compare-and-swap on the shared record when a SchedulerStore is configured. A refused reservation skips the tick or makes trigger return an error; it never queues. A won reservation runs the workflow once. With a CheckpointStore attached, the scheduler first loads the flow's log: an empty log starts fresh, an unfinished one resumes, a finished one is cleared first. The run ends Completed with the streak at 0, Idle after a clean cancellation, or Backoff or Tripped after a failure.</desc>
 <defs><marker id="sched-dispatch-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
 <rect class="n" x="14" y="28" width="142" height="40" rx="8"/>
 <text class="t-code" x="85" y="48">every(interval)</text>
 <rect class="n" x="14" y="86" width="142" height="40" rx="8"/>
 <text class="t-code" x="85" y="106">cron(expr)</text>
-<rect class="n-cop" x="14" y="144" width="142" height="40" rx="8"/>
+<rect class="n" x="14" y="144" width="142" height="40" rx="8"/>
 <text class="t-code" x="85" y="164">trigger(id)</text>
 <path class="e" d="M156,48 H178 Q186,48 186,56 V106"/>
 <path class="e" d="M156,106 H206" marker-end="url(#sched-dispatch-ah)"/>
 <path class="e" d="M156,164 H178 Q186,164 186,156 V106"/>
 <rect class="n-hot" x="210" y="58" width="154" height="96" rx="10"/>
-<text class="t-strong" x="287" y="84">Reserve flow</text>
-<text class="t-mut t-code" x="287" y="106">local cell / CAS</text>
-<text class="t-mut" x="287" y="126">allocates run_token</text>
+<text class="t-strong" x="287" y="84">Reserve the flow</text>
+<text class="t-mut" x="287" y="108">one run per flow</text>
+<text class="t-mut" x="287" y="126">store CAS if shared</text>
 <path class="e e-dash" d="M287,154 V192" marker-end="url(#sched-dispatch-ah)"/>
 <text class="t-mut ta-s" x="295" y="173">refused</text>
-<rect class="n-ghost" x="210" y="196" width="154" height="48" rx="8"/>
-<text class="t-strong" x="287" y="212">Skip / Err</text>
-<text class="t-mut" x="287" y="230">busy &middot; not due &middot; tripped</text>
+<rect class="n-ghost" x="198" y="196" width="178" height="48" rx="8"/>
+<text class="t-strong" x="287" y="212">Skip or Err</text>
+<text class="t-mut" x="287" y="230">busy, not due, tripped</text>
 <path class="e" d="M364,106 H412" marker-end="url(#sched-dispatch-ah)"/>
 <text class="t-mut t-ok" x="388" y="93">won</text>
 <rect class="n" x="416" y="54" width="172" height="104" rx="10"/>
-<text class="t-strong" x="502" y="76">Workflow::run_once</text>
-<text class="t-mut" x="502" y="96">runs FSM to exit</text>
-<text class="t-mut" x="502" y="114">optional lease renewal</text>
-<rect class="n-cop" x="416" y="196" width="172" height="64" rx="8"/>
+<text class="t-strong" x="502" y="76">Run the workflow</text>
+<text class="t-mut t-code" x="502" y="96">run_once</text>
+<text class="t-mut" x="502" y="114">lease renewed (store)</text>
+<rect class="n-cop" x="404" y="196" width="196" height="80" rx="8"/>
 <text class="t-strong" x="502" y="214">CheckpointStore</text>
-<text class="t-mut" x="502" y="232">unfinished: auto-resume</text>
-<text class="t-mut" x="502" y="248">exit row: clear &amp; fresh</text>
-<path class="e e-dash" d="M482,158 V192" marker-end="url(#sched-dispatch-ah)"/>
-<path class="e e-dash" d="M522,196 V162" marker-end="url(#sched-dispatch-ah)"/>
-<text class="t-mut ta-e" x="474" y="177">load</text>
-<text class="t-mut ta-s" x="530" y="177">clear</text>
+<text class="t-mut" x="502" y="232">empty log: start fresh</text>
+<text class="t-mut" x="502" y="248">unfinished: resume</text>
+<text class="t-mut" x="502" y="264">finished: clear first</text>
+<path class="e e-dash" d="M502,162 V192" marker-start="url(#sched-dispatch-ah)" marker-end="url(#sched-dispatch-ah)"/>
+<text class="t-mut t-code ta-s" x="510" y="177">load_run</text>
 <path class="e" d="M588,84 H606 Q614,84 614,76 V58 Q614,50 622,50 H630" marker-end="url(#sched-dispatch-ah)"/>
 <path class="e e-dash" d="M588,116 H630" marker-end="url(#sched-dispatch-ah)"/>
 <path class="e" d="M588,136 H606 Q614,136 614,144 V174 Q614,182 622,182 H630" marker-end="url(#sched-dispatch-ah)"/>
@@ -151,17 +150,16 @@ spawns one loop per interval or cron flow. Manual flows get no loop and run only
 <text class="t-strong" x="700" y="108">Idle</text>
 <text class="t-mut" x="700" y="126">clean cancel</text>
 <rect class="n-err" x="634" y="158" width="132" height="48" rx="8"/>
-<text class="t-strong" x="700" y="174">Backoff / Tripped</text>
+<text class="t-strong" x="700" y="174">Backoff, Tripped</text>
 <text class="t-mut t-err" x="700" y="192">streak + 1</text>
-<g class="cd-loop"><animate attributeName="opacity" dur="9.0s" repeatCount="indefinite" keyTimes="0;0.9333;0.9889;1" values="1;1;0;0"/>
-<rect class="band-hot" x="430" y="132" width="144" height="12" rx="4"><animate attributeName="width" dur="9.0s" repeatCount="indefinite" keyTimes="0;0.3111;0.6111;1" values="0;0;144;144"/></rect>
-<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="9.0s" repeatCount="indefinite" path="M156,48 H178 Q186,48 186,56 V98 Q186,106 194,106 H210" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.0333;0.1556;1"/><animate attributeName="opacity" dur="9.0s" repeatCount="indefinite" keyTimes="0;0.0222;0.0333;0.1556;0.1667;1" values="0;0;1;1;0;0"/></circle>
-<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="9.0s" repeatCount="indefinite" path="M364,106 H416" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.1667;0.2778;1"/><animate attributeName="opacity" dur="9.0s" repeatCount="indefinite" keyTimes="0;0.1556;0.1667;0.2778;0.2889;1" values="0;0;1;1;0;0"/></circle>
-<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="9.0s" repeatCount="indefinite" path="M482,158 V196" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.2889;0.3778;1"/><animate attributeName="opacity" dur="9.0s" repeatCount="indefinite" keyTimes="0;0.2778;0.2889;0.3778;0.3889;1" values="0;0;1;1;0;0"/></circle>
-<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="9.0s" repeatCount="indefinite" path="M522,196 V158" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.3889;0.4778;1"/><animate attributeName="opacity" dur="9.0s" repeatCount="indefinite" keyTimes="0;0.3778;0.3889;0.4778;0.4889;1" values="0;0;1;1;0;0"/></circle>
-<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="9.0s" repeatCount="indefinite" path="M588,84 H606 Q614,84 614,76 V58 Q614,50 622,50 H634" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.6111;0.7222;1"/><animate attributeName="opacity" dur="9.0s" repeatCount="indefinite" keyTimes="0;0.6;0.6111;0.7222;0.7333;1" values="0;0;1;1;0;0"/></circle>
-<rect class="n-hot" x="14" y="282" width="752" height="36" rx="10"><animate attributeName="opacity" dur="9.0s" repeatCount="indefinite" keyTimes="0;0.7222;0.7778;1" values="0;0;1;1"/></rect>
-<text class="t-strong" x="390" y="300">Triggers reserve a flow, execute run_once (auto-resuming checkpoints), and commit status<animate attributeName="opacity" dur="9.0s" repeatCount="indefinite" keyTimes="0;0.7222;0.7778;1" values="0;0;1;1"/></text>
+<g class="cd-loop"><animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0;0.93;0.99;1" values="1;1;0;0"/>
+<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="9s" repeatCount="indefinite" path="M156,48 H178 Q186,48 186,56 V98 Q186,106 194,106 H210" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.03;0.15;1"/><animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0;0.02;0.03;0.15;0.16;1" values="0;0;1;1;0;0"/></circle>
+<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="9s" repeatCount="indefinite" path="M364,106 H416" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.17;0.27;1"/><animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0;0.16;0.17;0.27;0.28;1" values="0;0;1;1;0;0"/></circle>
+<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="9s" repeatCount="indefinite" path="M502,158 V196 V158" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.29;0.42;1"/><animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0;0.28;0.29;0.42;0.43;1" values="0;0;1;1;0;0"/></circle>
+<rect class="band-hot" x="430" y="132" width="144" height="12" rx="4"><animate attributeName="width" dur="9s" repeatCount="indefinite" keyTimes="0;0.43;0.62;1" values="0;0;144;144"/></rect>
+<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="9s" repeatCount="indefinite" path="M588,84 H606 Q614,84 614,76 V58 Q614,50 622,50 H634" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.63;0.73;1"/><animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0;0.62;0.63;0.73;0.74;1" values="0;0;1;1;0;0"/></circle>
+<rect class="n-hot" x="14" y="294" width="752" height="36" rx="10"><animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0;0.74;0.8;1" values="0;0;1;1"/></rect>
+<text class="t-strong" x="390" y="312">A refused reservation never queues: the tick is skipped, trigger() returns an error<animate attributeName="opacity" dur="9s" repeatCount="indefinite" keyTimes="0;0.74;0.8;1" values="0;0;1;1"/></text>
 </g>
 </svg>
 </div>
@@ -181,19 +179,18 @@ a loop cannot start a second run while one is in progress. A tick that finds the
 manual trigger is skipped, and a <code>trigger()</code> on a running flow returns an error.
 </p>
 <p>
-On a standalone scheduler (without a store), an interval flow is fixed-delay: if a workflow is set to run
+On a standalone scheduler an interval flow waits a full interval after each run: if a workflow is set to run
 every 30 seconds and one execution takes 45 seconds, the next run starts 30 seconds after that execution
-finishes. With <a href="several-instances/"><code>with_store</code></a>, an interval flow is fixed-rate
-anchored at <code>last_run + interval</code> (stamped when the lease is claimed), so after a 45 second
-execution on a 30 second interval the next tick is already due and dispatches after the 10 ms minimum
-poll floor.
+finishes. With <a href="several-instances/"><code>with_store</code></a>, an interval flow runs at a fixed
+rate instead: the next run is due one interval after the previous run started, so after a 45 second
+execution on a 30 second interval the next run starts at once.
 </p>
 <p>
-A cron loop advances from <code>prev.max(now)</code> after each run or outage, skipping missed firings
-rather than replaying a catch-up flood. On waking from sleep, it re-checks <code>Utc::now()</code> in a
-loop so a backward NTP clock step cannot fire a cron expression early. With <code>with_store</code>, if a
-due cron tick hits a transient store error, the loop retries after <code>(ttl / 3).clamp(50ms, 5s)</code>
-while still strictly before the next scheduled firing.
+A cron loop computes the next firing from the later of its previous firing and the current time, so firings
+that fell inside a run or an outage are skipped, not replayed. After sleeping it checks the clock again, so
+a clock stepped backwards cannot fire an expression early. With <code>with_store</code>, a due firing whose
+claim fails on a store error is retried every <code>ttl / 3</code> (at least 50 ms, at most 5 s) until the
+next firing.
 </p>
 <hr class="section-divider">
 
@@ -236,10 +233,10 @@ while still strictly before the next scheduled firing.
 <p>Each strategy has a complete example below.</p>
 
 <h3 id="interval-scheduling"><a href="#interval-scheduling" class="anchor-link" aria-hidden="true">#</a>Interval scheduling</h3>
-<p>Runs a workflow at a fixed interval. The first run starts as soon as the scheduler starts. Standalone, each later run starts one interval after the previous run finishes (fixed-delay); with <code>with_store</code>, cadence anchors at <code>last_run + interval</code> (fixed-rate). After a failure the wait stretches to the flow's <a href="backoff-and-trip/">backoff window</a> when that is longer.</p>
+<p>Runs a workflow at a fixed interval. The first run starts as soon as the scheduler starts. On a standalone scheduler each later run starts one interval after the previous run finishes; with <code>with_store</code> it starts one interval after the previous run started. After a failure the wait stretches to the flow's <a href="backoff-and-trip/">backoff window</a> when that is longer.</p>
 
 <div class="diagram-frame">
-<p class="diagram-label">Interval scheduling timeline (standalone fixed-delay)</p>
+<p class="diagram-label">Interval scheduling timeline (standalone)</p>
 <div class="cd-wrap">
 <svg class="cd" viewBox="0 0 760 180" role="img" aria-labelledby="sched-interval-title sched-interval-desc">
 <title id="sched-interval-title">Interval scheduling timeline</title>
@@ -333,7 +330,7 @@ plus cron and manual flows).</p>
 </div>
 
 <h3 id="cron-scheduling"><a href="#cron-scheduling" class="anchor-link" aria-hidden="true">#</a>Cron scheduling</h3>
-<p>Runs a workflow on a cron expression (a leading seconds field, parsed by the <code>cron</code> crate and evaluated in UTC). A tick that falls inside a pending backoff window is skipped, missed firings during an outage are skipped without a catch-up flood, and waking re-checks <code>Utc::now()</code> against backward NTP clock steps. With <code>with_store</code>, a transient store error on a due tick retries every <code>(ttl / 3).clamp(50ms, 5s)</code> while still before the next firing.</p>
+<p>Runs a workflow on a cron expression (a leading seconds field, parsed by the <code>cron</code> crate and evaluated in UTC). A tick that falls inside a pending backoff window is skipped, and so are firings missed while a run or an outage lasted (see <a href="#overlap-prevention">overlap prevention</a>).</p>
 
 <div class="diagram-frame">
 <p class="diagram-label">Cron scheduling timeline</p>
