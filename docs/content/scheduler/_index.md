@@ -23,6 +23,7 @@ template = "section.html"
 <li class="toc-sub"><a href="#mixed-scheduling">Mixed scheduling</a></li>
 <li><a href="#backoff-guide">Backoff and trip state</a></li>
 <li><a href="#several-instances">Several instances</a></li>
+<li><a href="#checkpoint-resume">Checkpoints and auto-resume</a></li>
 <li><a href="#cancellation">Cancelling a flow</a></li>
 <li><a href="#graceful-shutdown">Graceful shutdown</a></li>
 <li><a href="#multi-level-map-reduce">Multi-level map-reduce</a></li>
@@ -72,9 +73,12 @@ cheap and control the same scheduler, so <code>trigger</code>, <code>status</cod
 <code>reset_flow</code>, <code>cancel_flow</code> and <code>stop</code> work from any task.</li>
 </ul>
 <p>
-<code>start</code> consumes the builder. It validates every workflow and its initial state, sets up each
-workflow's resources in registration order (a setup failure tears down the flows already set up and returns
-the error), then spawns one loop per interval or cron flow. Manual flows get no loop and run only on
+<code>start</code> consumes the builder. It validates every workflow and its initial state (rejecting any
+workflow containing a <a href="../suspend-task/"><code>SuspendTask</code></a> state with
+<code>CanoError::Configuration</code>, because scheduled runs have no per-run
+<code>workflow_id</code> or <code>resume_with</code> caller), sets up each workflow's resources in
+registration order (a setup failure tears down the flows already set up and returns the error), then
+spawns one loop per interval or cron flow. Manual flows get no loop and run only on
 <code>trigger</code>.
 </p>
 <p>The methods of <code>RunningScheduler</code>, each with its signature:</p>
@@ -86,16 +90,82 @@ the error), then spawns one loop per interval or cron flow. Manual flows get no 
 <dt><code>async fn wait_idle(&amp;self, id: &amp;str) -&gt; Option&lt;FlowInfo&gt;</code></dt>
 <dd>Waits until the flow is not <code>Running</code> and returns its <code>FlowInfo</code>, or <code>None</code> for an unknown id. Returns at once for a flow that is not running.</dd>
 <dt><code>async fn trigger(&amp;self, id: &amp;str) -&gt; CanoResult&lt;()&gt;</code></dt>
-<dd>Starts a run now. Errors when the id is unknown, the scheduler is stopping or stopped, the flow is already running, or the flow is tripped. A pending backoff window does not block it. With a store it also errors while another instance runs the flow.</dd>
+<dd>Starts a run immediately. Errors when the id is unknown, the scheduler is stopping or stopped, the flow is already running, or the flow is tripped. A pending backoff window does not block it. With a store it also errors while another instance runs the flow.</dd>
 <dt><code>fn cancel_flow(&amp;self, id: &amp;str) -&gt; CanoResult&lt;()&gt;</code></dt>
 <dd>Cooperatively cancels the flow's in-flight run on this instance. A no-op when the flow is idle here; an unknown id is an error.</dd>
 <dt><code>async fn reset_flow(&amp;self, id: &amp;str) -&gt; CanoResult&lt;()&gt;</code></dt>
-<dd>Clears the failure streak and the backoff window. A flow that is not running returns to <code>Idle</code>. With a store the reset applies to every instance.</dd>
+<dd>Clears the failure streak and the backoff window. A flow that is not running returns to <code>Idle</code>. With a store the reset applies to every instance and clears any expired lease while leaving live ones intact.</dd>
+<dt><code>fn instance_id(&amp;self) -&gt; &amp;str</code></dt>
+<dd>Returns this instance's id: the one set with <code>with_instance_id</code>, or the random <code>cano-...</code> default. With a store it names the lease owner in stored records and <code>Status::RunningElsewhere</code>.</dd>
 <dt><code>fn status(&amp;self, id: &amp;str) -&gt; Option&lt;FlowInfo&gt;</code></dt>
 <dd>Snapshot of one flow, or <code>None</code> for an unknown id.</dd>
 <dt><code>fn list(&amp;self) -&gt; Vec&lt;FlowInfo&gt;</code></dt>
 <dd>Snapshot of every flow, in registration order.</dd>
 </dl>
+<div class="diagram-frame">
+<p class="diagram-label">Scheduler dispatch lifecycle</p>
+<div class="cd-wrap">
+<svg class="cd cd-anim" viewBox="0 0 780 336" role="img" aria-labelledby="sched-dispatch-title sched-dispatch-desc">
+<title id="sched-dispatch-title">Scheduler dispatch lifecycle</title>
+<desc id="sched-dispatch-desc">An interval tick, cron firing or manual trigger attempts to reserve the flow locally and, when a SchedulerStore is configured, via compare-and-swap. Refused attempts skip the tick or return an error. A won reservation runs Workflow::run_once under a run token and optional lease renewal. When a CheckpointStore is attached, unfinished checkpoint rows auto-resume and stale completed exit rows are cleared before starting fresh. Completion commits Completed, Idle on clean cancellation, or Backoff or Tripped on failure.</desc>
+<defs><marker id="sched-dispatch-ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="context-stroke"/></marker></defs>
+<rect class="n" x="14" y="28" width="142" height="40" rx="8"/>
+<text class="t-code" x="85" y="48">every(interval)</text>
+<rect class="n" x="14" y="86" width="142" height="40" rx="8"/>
+<text class="t-code" x="85" y="106">cron(expr)</text>
+<rect class="n-cop" x="14" y="144" width="142" height="40" rx="8"/>
+<text class="t-code" x="85" y="164">trigger(id)</text>
+<path class="e" d="M156,48 H178 Q186,48 186,56 V106"/>
+<path class="e" d="M156,106 H206" marker-end="url(#sched-dispatch-ah)"/>
+<path class="e" d="M156,164 H178 Q186,164 186,156 V106"/>
+<rect class="n-hot" x="210" y="58" width="154" height="96" rx="10"/>
+<text class="t-strong" x="287" y="84">Reserve flow</text>
+<text class="t-mut t-code" x="287" y="106">local cell / CAS</text>
+<text class="t-mut" x="287" y="126">allocates run_token</text>
+<path class="e e-dash" d="M287,154 V192" marker-end="url(#sched-dispatch-ah)"/>
+<text class="t-mut ta-s" x="295" y="173">refused</text>
+<rect class="n-ghost" x="210" y="196" width="154" height="48" rx="8"/>
+<text class="t-strong" x="287" y="212">Skip / Err</text>
+<text class="t-mut" x="287" y="230">busy &middot; not due &middot; tripped</text>
+<path class="e" d="M364,106 H412" marker-end="url(#sched-dispatch-ah)"/>
+<text class="t-mut t-ok" x="388" y="93">won</text>
+<rect class="n" x="416" y="54" width="172" height="104" rx="10"/>
+<text class="t-strong" x="502" y="76">Workflow::run_once</text>
+<text class="t-mut" x="502" y="96">runs FSM to exit</text>
+<text class="t-mut" x="502" y="114">optional lease renewal</text>
+<rect class="n-cop" x="416" y="196" width="172" height="64" rx="8"/>
+<text class="t-strong" x="502" y="214">CheckpointStore</text>
+<text class="t-mut" x="502" y="232">unfinished: auto-resume</text>
+<text class="t-mut" x="502" y="248">exit row: clear &amp; fresh</text>
+<path class="e e-dash" d="M482,158 V192" marker-end="url(#sched-dispatch-ah)"/>
+<path class="e e-dash" d="M522,196 V162" marker-end="url(#sched-dispatch-ah)"/>
+<text class="t-mut ta-e" x="474" y="177">load</text>
+<text class="t-mut ta-s" x="530" y="177">clear</text>
+<path class="e" d="M588,84 H606 Q614,84 614,76 V58 Q614,50 622,50 H630" marker-end="url(#sched-dispatch-ah)"/>
+<path class="e e-dash" d="M588,116 H630" marker-end="url(#sched-dispatch-ah)"/>
+<path class="e" d="M588,136 H606 Q614,136 614,144 V174 Q614,182 622,182 H630" marker-end="url(#sched-dispatch-ah)"/>
+<rect class="n-ok" x="634" y="26" width="132" height="48" rx="8"/>
+<text class="t-strong" x="700" y="42">Completed</text>
+<text class="t-mut t-ok" x="700" y="60">streak = 0</text>
+<rect class="n-ghost" x="634" y="92" width="132" height="48" rx="8"/>
+<text class="t-strong" x="700" y="108">Idle</text>
+<text class="t-mut" x="700" y="126">clean cancel</text>
+<rect class="n-err" x="634" y="158" width="132" height="48" rx="8"/>
+<text class="t-strong" x="700" y="174">Backoff / Tripped</text>
+<text class="t-mut t-err" x="700" y="192">streak + 1</text>
+<g class="cd-loop"><animate attributeName="opacity" dur="9.0s" repeatCount="indefinite" keyTimes="0;0.9333;0.9889;1" values="1;1;0;0"/>
+<rect class="band-hot" x="430" y="132" width="144" height="12" rx="4"><animate attributeName="width" dur="9.0s" repeatCount="indefinite" keyTimes="0;0.3111;0.6111;1" values="0;0;144;144"/></rect>
+<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="9.0s" repeatCount="indefinite" path="M156,48 H178 Q186,48 186,56 V98 Q186,106 194,106 H210" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.0333;0.1556;1"/><animate attributeName="opacity" dur="9.0s" repeatCount="indefinite" keyTimes="0;0.0222;0.0333;0.1556;0.1667;1" values="0;0;1;1;0;0"/></circle>
+<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="9.0s" repeatCount="indefinite" path="M364,106 H416" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.1667;0.2778;1"/><animate attributeName="opacity" dur="9.0s" repeatCount="indefinite" keyTimes="0;0.1556;0.1667;0.2778;0.2889;1" values="0;0;1;1;0;0"/></circle>
+<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="9.0s" repeatCount="indefinite" path="M482,158 V196" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.2889;0.3778;1"/><animate attributeName="opacity" dur="9.0s" repeatCount="indefinite" keyTimes="0;0.2778;0.2889;0.3778;0.3889;1" values="0;0;1;1;0;0"/></circle>
+<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="9.0s" repeatCount="indefinite" path="M522,196 V158" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.3889;0.4778;1"/><animate attributeName="opacity" dur="9.0s" repeatCount="indefinite" keyTimes="0;0.3778;0.3889;0.4778;0.4889;1" values="0;0;1;1;0;0"/></circle>
+<circle class="token" r="5" cx="0" cy="0" opacity="0"><animateMotion dur="9.0s" repeatCount="indefinite" path="M588,84 H606 Q614,84 614,76 V58 Q614,50 622,50 H634" calcMode="linear" keyPoints="0;0;1;1" keyTimes="0;0.6111;0.7222;1"/><animate attributeName="opacity" dur="9.0s" repeatCount="indefinite" keyTimes="0;0.6;0.6111;0.7222;0.7333;1" values="0;0;1;1;0;0"/></circle>
+<rect class="n-hot" x="14" y="282" width="752" height="36" rx="10"><animate attributeName="opacity" dur="9.0s" repeatCount="indefinite" keyTimes="0;0.7222;0.7778;1" values="0;0;1;1"/></rect>
+<text class="t-strong" x="390" y="300">Triggers reserve a flow, execute run_once (auto-resuming checkpoints), and commit status<animate attributeName="opacity" dur="9.0s" repeatCount="indefinite" keyTimes="0;0.7222;0.7778;1" values="0;0;1;1"/></text>
+</g>
+</svg>
+</div>
+</div>
 <p>
 <code>stop</code>, <code>wait</code>, <code>wait_idle</code>, <code>trigger</code> and <code>reset_flow</code> are <code>async</code>.
 <code>trigger</code>, <code>cancel_flow</code> and <code>reset_flow</code> must be called inside a Tokio runtime, because <code>trigger</code> spawns the run.
@@ -111,9 +181,19 @@ a loop cannot start a second run while one is in progress. A tick that finds the
 manual trigger is skipped, and a <code>trigger()</code> on a running flow returns an error.
 </p>
 <p>
-If a workflow is set to run every 30 seconds and one execution takes 45 seconds, the next run starts 30
-seconds after that execution finishes. A cron loop works the same way: after a run returns, it waits for
-the next firing after that moment, so firings that fell inside the run are skipped.
+On a standalone scheduler (without a store), an interval flow is fixed-delay: if a workflow is set to run
+every 30 seconds and one execution takes 45 seconds, the next run starts 30 seconds after that execution
+finishes. With <a href="several-instances/"><code>with_store</code></a>, an interval flow is fixed-rate
+anchored at <code>last_run + interval</code> (stamped when the lease is claimed), so after a 45 second
+execution on a 30 second interval the next tick is already due and dispatches after the 10 ms minimum
+poll floor.
+</p>
+<p>
+A cron loop advances from <code>prev.max(now)</code> after each run or outage, skipping missed firings
+rather than replaying a catch-up flood. On waking from sleep, it re-checks <code>Utc::now()</code> in a
+loop so a backward NTP clock step cannot fire a cron expression early. With <code>with_store</code>, if a
+due cron tick hits a transient store error, the loop retries after <code>(ttl / 3).clamp(50ms, 5s)</code>
+while still strictly before the next scheduled firing.
 </p>
 <hr class="section-divider">
 
@@ -156,10 +236,10 @@ the next firing after that moment, so firings that fell inside the run are skipp
 <p>Each strategy has a complete example below.</p>
 
 <h3 id="interval-scheduling"><a href="#interval-scheduling" class="anchor-link" aria-hidden="true">#</a>Interval scheduling</h3>
-<p>Runs a workflow at a fixed interval. The first run starts as soon as the scheduler starts, and each later run starts one interval after the previous run finishes. After a failure the wait stretches to the flow's <a href="backoff-and-trip/">backoff window</a> when that is longer.</p>
+<p>Runs a workflow at a fixed interval. The first run starts as soon as the scheduler starts. Standalone, each later run starts one interval after the previous run finishes (fixed-delay); with <code>with_store</code>, cadence anchors at <code>last_run + interval</code> (fixed-rate). After a failure the wait stretches to the flow's <a href="backoff-and-trip/">backoff window</a> when that is longer.</p>
 
 <div class="diagram-frame">
-<p class="diagram-label">Interval scheduling timeline</p>
+<p class="diagram-label">Interval scheduling timeline (standalone fixed-delay)</p>
 <div class="cd-wrap">
 <svg class="cd" viewBox="0 0 760 180" role="img" aria-labelledby="sched-interval-title sched-interval-desc">
 <title id="sched-interval-title">Interval scheduling timeline</title>
@@ -253,7 +333,7 @@ plus cron and manual flows).</p>
 </div>
 
 <h3 id="cron-scheduling"><a href="#cron-scheduling" class="anchor-link" aria-hidden="true">#</a>Cron scheduling</h3>
-<p>Runs a workflow on a cron expression (a leading seconds field, parsed by the <code>cron</code> crate and evaluated in UTC). A tick that falls inside a pending backoff window is skipped.</p>
+<p>Runs a workflow on a cron expression (a leading seconds field, parsed by the <code>cron</code> crate and evaluated in UTC). A tick that falls inside a pending backoff window is skipped, missed firings during an outage are skipped without a catch-up flood, and waking re-checks <code>Utc::now()</code> against backward NTP clock steps. With <code>with_store</code>, a transient store error on a due tick retries every <code>(ttl / 3).clamp(50ms, 5s)</code> while still before the next firing.</p>
 
 <div class="diagram-frame">
 <p class="diagram-label">Cron scheduling timeline</p>
@@ -637,6 +717,44 @@ and how to recover a tripped flow.</p>
 <p>Give several processes the same flows and one shared store, and each tick of each flow runs on exactly one
 of them. <code>Scheduler::with_store</code> turns it on; see
 <a href="several-instances/">Several scheduler instances</a> for leases, failure behaviour and the stores.</p>
+<hr class="section-divider">
+
+<h2 id="checkpoint-resume"><a href="#checkpoint-resume" class="anchor-link" aria-hidden="true">#</a>Checkpoints and auto-resume</h2>
+<p>
+A scheduled workflow can carry a <a href="../recovery/"><code>CheckpointStore</code></a> via
+<code>Workflow::with_checkpoint_store</code>. When <code>Workflow::with_workflow_id</code> is omitted, the
+scheduler defaults the checkpoint id to the registered <code>flow_id</code>, so distinct flow ids remain isolated.
+</p>
+<ul>
+<li>If <code>load_run</code> finds no rows, the workflow runs from <code>initial_state</code> at sequence <code>0</code>.</li>
+<li>If the log ends at a registered exit state with a matching <code>workflow_version</code> (for example after a crash between writing the exit row and clearing it), the scheduler clears the stale log and starts a fresh run.</li>
+<li>If the log holds an unfinished run (after a process crash, shutdown abort, non-saga failure or incomplete rollback), the next scheduled run or cluster failover automatically resumes from those checkpoint rows, rebuilding any <a href="../saga/">saga compensation stack</a> and <a href="../stepped-task/">SteppedTask</a> or <a href="../stream-task/">StreamTask</a> cursor.</li>
+</ul>
+<p>
+Resource <code>setup()</code> and <code>teardown()</code> stay owned by the scheduler, so an auto-resumed run reuses the scheduler's active resources instead of running per-run setup or teardown. Workflows containing <a href="../suspend-task/"><code>SuspendTask</code></a> states are rejected at <code>Scheduler::start()</code> with <code>CanoError::Configuration</code>.
+</p>
+
+```rust
+use cano::prelude::*;
+use cano::RedbStore;
+use std::sync::Arc;
+use std::time::Duration;
+
+let checkpoints = Arc::new(RedbStore::new("scheduled.redb")?);
+
+// Without with_workflow_id, checkpoints use the flow id ("sync").
+// An interrupted run resumes automatically on the next tick or failover.
+let workflow = Workflow::new(Resources::new())
+    .register(SyncState::Start, StartTask)
+    .register(SyncState::Apply, ApplyTask)
+    .add_exit_state(SyncState::Done)
+    .with_checkpoint_store(checkpoints);
+
+let running = Scheduler::new()
+    .every("sync", workflow, SyncState::Start, Duration::from_secs(60))
+    .start()
+    .await?;
+```
 <hr class="section-divider">
 
 <h2 id="cancellation"><a href="#cancellation" class="anchor-link" aria-hidden="true">#</a>Cancelling a flow</h2>
