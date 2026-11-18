@@ -79,7 +79,8 @@
 - Animated SMIL diagrams across the scheduler documentation, plus updated resilience, scheduled
   checkpoint auto-resume, store contract, and network store documentation.
 - A "Checkpoint stores" docs page under Recovery: choosing a built-in store, the `CheckpointStore`
-  contract, and a guide to writing and testing your own store.
+  contract, automatic reconnection and prolonged-outage handling (with recovery and stranded-clear
+  code patterns), and a guide to writing and testing your own store.
 
 ### Changed
 

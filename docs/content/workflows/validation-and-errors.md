@@ -220,6 +220,9 @@ its error is the one returned; a <code>teardown</code> error is returned only wh
 <dt><code>CanoError::CircuitOpen</code></dt>
 <dd>An open <code>CircuitBreaker</code> attached to the <code>TaskConfig</code> rejected the call. The retry loop stops at once and no attempt is consumed. Wait for the breaker's <code>reset_timeout</code> or fix the upstream dependency.</dd>
 
+<dt><code>CanoError::CheckpointStore</code></dt>
+<dd>A checkpoint write or load failed (after any configured store retries). A failed <code>append</code> stops the run before the incoming state's task executes, drains any completed saga compensations in memory, and surfaces under <code>CanoError::WithStateContext</code> (or as <code>errors[0]</code> of <code>CanoError::CompensationFailed</code> on a dirty rollback). A failed final <code>clear</code> keeps the run's own result and fires <code>on_checkpoint_clear_failed</code>. See <a href="../../recovery/checkpoint-stores/#network-failures">Connection failures, retries and outages</a>.</dd>
+
 <dt><code>CanoError::TaskExecution</code> <small>panic</small></dt>
 <dd>A single task panicked. The message starts with <code>"panic:"</code> and carries the panic payload. Fix the broken invariant in the task body.</dd>
 
@@ -244,6 +247,7 @@ match workflow.orchestrate(State::Start).await {
         CanoError::Configuration(msg) => eprintln!("Config error: {}", msg),
         CanoError::Timeout(msg) => eprintln!("Attempt timed out: {}", msg),
         CanoError::RetryExhausted { .. } => eprintln!("Retries exhausted: {}", e),
+        CanoError::CheckpointStore(msg) => eprintln!("Checkpoint store error: {}", msg),
         _ => eprintln!("Task error: {}", e),
     },
 }

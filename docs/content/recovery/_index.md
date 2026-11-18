@@ -332,7 +332,10 @@ The log lives in a <code>CheckpointStore</code>: the built-in <code>RedbStore</c
 <code>PostgresStore</code> or <code>NatsStore</code>, or your own implementation of the trait's three
 methods (<code>append</code>, <code>load_run</code>, <code>clear</code>).
 <a href="checkpoint-stores/">Checkpoint stores</a> compares the built-in stores, lists their settings,
-and walks through writing and testing your own.
+and walks through writing and testing your own. For <code>PostgresStore</code> and
+<code>NatsStore</code>, <a href="checkpoint-stores/#network-failures">Connection failures, retries and outages</a>
+covers automatic reconnection, per-call retry policies, and how runs, sagas and stranded logs behave
+when the store stays unreachable.
 </p>
 <hr class="section-divider">
 

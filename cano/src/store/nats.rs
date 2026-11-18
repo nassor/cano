@@ -43,10 +43,27 @@
 //!
 //! ## Failures
 //!
+//! The underlying [`async_nats::Client`] reconnects in the background according to its
+//! [`ConnectOptions`](async_nats::ConnectOptions) without recreating the store. While the
+//! client is disconnected, store attempts fail fast as transient errors (`client is not
+//! connected`) rather than waiting out `operation_timeout`, and calls succeed again once it
+//! reconnects.
+//!
 //! Every call is bounded by the operation timeout (10 s by default). With
 //! [`with_retry`](NatsStoreBuilder::with_retry) a call that fails on a
 //! transient error (a timeout, a lost connection) is retried; a conflict or a malformed row
 //! is never retried.
+//!
+//! [`RetryMode`] is finite (`RetryMode::None` by default): when the connection stays
+//! unreachable past [`RetryMode::max_attempts`], the call stops and returns
+//! `Err(CanoError::CheckpointStore(..))` (or `Err(CanoError::SchedulerStore(..))` on
+//! scheduler calls). Inside a workflow, a failed `append` stops execution before the
+//! incoming state's task runs and drains in-memory saga compensations, leaving earlier rows
+//! stored for [`Workflow::resume_from`](crate::Workflow::resume_from) once connectivity
+//! returns (unless a saga rollback already undid those steps, in which case `clear` the
+//! stranded log first). A failed exit-state or post-rollback `clear` keeps the run's
+//! outcome and fires
+//! [`WorkflowObserver::on_checkpoint_clear_failed`](crate::WorkflowObserver::on_checkpoint_clear_failed).
 //!
 //! An `Err` from `append` after a timeout does not prove the row is absent: the server may
 //! have stored it after the client gave up, and `async-nats` sends a buffered publish once

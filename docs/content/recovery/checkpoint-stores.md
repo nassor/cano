@@ -31,7 +31,11 @@ outlives the process.
 <li class="toc-sub"><a href="#custom-network">Network backends: timeouts and lost acknowledgements</a></li>
 <li class="toc-sub"><a href="#custom-test">Test it against the contract</a></li>
 <li class="toc-sub"><a href="#custom-attach">Attach it to a workflow</a></li>
-<li><a href="#network-failures">Timeouts and retries in the network stores</a></li>
+<li><a href="#network-failures">Connection failures, retries and outages</a></li>
+<li class="toc-sub"><a href="#reconnection">Automatic reconnection</a></li>
+<li class="toc-sub"><a href="#retries-and-lost-acks">Per-call timeouts, retries and lost acknowledgements</a></li>
+<li class="toc-sub"><a href="#prolonged-outages">When the connection does not come back</a></li>
+<li class="toc-sub"><a href="#handling-outages">Handling store outages in code</a></li>
 </ol>
 </nav>
 <hr class="section-divider">
@@ -217,7 +221,7 @@ let checkpoint_store = PostgresStore::builder()
 <dd>The bound on each attempt of both <code>CheckpointStore</code> (<code>append</code>, <code>load_run</code>, <code>clear</code>) and <code>SchedulerStore</code> (<code>load</code>, <code>compare_and_swap</code>, <code>remove</code>), connection checkout and migration included.</dd>
 
 <dt><code>with_retry(RetryMode)</code> <small><code>RetryMode::None</code></small></dt>
-<dd>Jittered retries for transient failures across both <code>CheckpointStore</code> and <code>SchedulerStore</code>. See <a href="#network-failures">timeouts and retries</a>.</dd>
+<dd>Jittered retries for transient failures across both <code>CheckpointStore</code> and <code>SchedulerStore</code>. See <a href="#network-failures">connection failures, retries and outages</a>.</dd>
 </dl>
 
 <p>
@@ -306,7 +310,7 @@ let checkpoint_store = NatsStore::builder()
 <dd>The bound on each attempt of both <code>CheckpointStore</code> (<code>append</code>, <code>load_run</code>, <code>clear</code>) and <code>SchedulerStore</code> (<code>load</code>, <code>compare_and_swap</code>, <code>remove</code>), and on opening a bucket.</dd>
 
 <dt><code>with_retry(RetryMode)</code> <small><code>RetryMode::None</code></small></dt>
-<dd>Jittered retries for transient failures across both <code>CheckpointStore</code> and <code>SchedulerStore</code>, plus bucket opening. See <a href="#network-failures">timeouts and retries</a>.</dd>
+<dd>Jittered retries for transient failures across both <code>CheckpointStore</code> and <code>SchedulerStore</code>, plus bucket opening. See <a href="#network-failures">connection failures, retries and outages</a>.</dd>
 </dl>
 
 <p>
@@ -497,26 +501,213 @@ that crashes once and continues with <code>resume_from</code>. It needs no featu
 </div>
 <hr class="section-divider">
 
-<h2 id="network-failures"><a href="#network-failures" class="anchor-link" aria-hidden="true">#</a>Timeouts and retries in the network stores</h2>
+<h2 id="network-failures"><a href="#network-failures" class="anchor-link" aria-hidden="true">#</a>Connection failures, retries and outages</h2>
+<p>
+Both network stores (<code>PostgresStore</code> and <code>NatsStore</code>) recover from dropped
+connections automatically without recreating the store. <code>RedbStore</code> operates on an embedded
+local file, so it has no network connection to drop or reconnect.
+</p>
+
+<h3 id="reconnection"><a href="#reconnection" class="anchor-link" aria-hidden="true">#</a>Automatic reconnection</h3>
+<dl class="key-list">
+<dt><code>PostgresStore</code> <small>pool eviction and keepalives</small></dt>
+<dd>Connections come from a <code>deadpool-postgres</code> pool. Whenever an operation hits a transient error (a closed socket, I/O error, operation timeout, cancelled caller, or transient SQLSTATE such as <code>08xxx</code> or <code>57Pxx</code>), the broken connection is evicted and closed rather than returned to the pool, so the next checkout opens a fresh connection automatically. TCP keepalives default to 30 seconds idle so dead peers surface promptly. On initial <code>connect</code>, the table migration runs under <code>with_retry</code> as well.</dd>
+
+<dt><code>NatsStore</code> <small>background client reconnect</small></dt>
+<dd><code>NatsStore</code> wraps an <code>async_nats::Client</code>, which reconnects in the background according to its <code>ConnectOptions</code> (pass custom reconnect settings, credentials, or ping intervals through <code>connect_with_options</code>). While the client is disconnected, each attempt checks <code>connection_state()</code> and fails at once as a transient error rather than waiting out the operation timeout; once the client reconnects, calls on the same <code>NatsStore</code> succeed again. Initial <code>connect</code> and <code>connect_with_options</code> bound the first TCP handshake by <code>operation_timeout</code> and apply <code>with_retry</code> when opening or creating the KV buckets.</dd>
+</dl>
+
+<h3 id="retries-and-lost-acks"><a href="#retries-and-lost-acks" class="anchor-link" aria-hidden="true">#</a>Per-call timeouts, retries and lost acknowledgements</h3>
 <p>
 <code>PostgresStore</code> and <code>NatsStore</code> bound every attempt of every call, checkpoint
 (<code>append</code>, <code>load_run</code>, <code>clear</code>) and scheduler (<code>load</code>,
-<code>compare_and_swap</code>, <code>remove</code>) alike, with the operation timeout, and with
-<code>with_retry</code> they retry a call that failed on a transient error: a timeout, a dropped
-connection, a Postgres serialization failure, a server shutting down. Each retry delay is randomized
-between half and all of the configured delay, so instances that lost the store together do not retry in
-lockstep. A conflict or a malformed row is never retried. A Postgres connection whose call timed out is
-closed, never returned to the pool.
+<code>compare_and_swap</code>, <code>remove</code>) alike, with <code>operation_timeout</code> (10 s by
+default). Per-call retries default to <code>RetryMode::None</code>: without <code>with_retry</code>, a
+call during a connection drop fails once, evicts or reconnects the transport, and returns
+<code>Err(CanoError::CheckpointStore(...))</code>; later calls succeed once connectivity heals.
+</p>
+<p>
+With <code>with_retry(RetryMode::...)</code>, transient failures (timeouts, dropped connections,
+Postgres serialization or deadlock failures, server restarts) are retried with equal jitter in
+<code>[50%, 100%]</code> of the configured delay so instances that lost the store together do not retry
+in lockstep. Conflicts and malformed rows are fatal and never retried. A Postgres connection whose
+call timed out or was cancelled is closed and never returned to the pool.
 </p>
 <p>
 An <code>Err</code> from <code>append</code> or <code>compare_and_swap</code> after a timeout does not prove
-the write is absent: it may have landed after the client gave up. Every <code>append</code> carries a
+the write is absent: it may have landed after the client gave up. Every <code>append</code> stamps a
 random 16-byte write id (the <code>write_id</code> column in <code>PostgresStore</code>, the row header in
-<code>NatsStore</code>), and a retried <code>append</code> treats the row at its sequence as its own
+<code>NatsStore</code>), and a retried <code>append</code> treats an existing row at its sequence as its own
 earlier write only when both the contents and the write id match. Two fresh runs that start at sequence
 <code>0</code> with the same initial state therefore never mistake each other's row for their own. A
 retried <code>compare_and_swap</code> likewise accepts a stored record whose bytes equal what it sent;
 the scheduler stamps every record with its writer, session, timestamp and a write counter, so equal bytes
 mean the earlier attempt landed.
 </p>
+
+<h3 id="prolonged-outages"><a href="#prolonged-outages" class="anchor-link" aria-hidden="true">#</a>When the connection does not come back</h3>
+<p>
+<code>RetryMode</code> has no unbounded variant, so store calls never hang forever when a backend stays
+unreachable past all configured attempts:
+</p>
+<dl class="key-list">
+<dt>Store layer <small>finite exhaustion</small></dt>
+<dd>Once <code>RetryMode::max_attempts()</code> is exhausted, the call returns <code>Err(CanoError::CheckpointStore(...))</code> (or <code>CanoError::SchedulerStore(...)</code> on scheduler calls). <code>PostgresStore</code> leaves broken slots evicted and stays idle until another call runs. <code>NatsStore</code>'s underlying <code>async_nats::Client</code> continues background reconnect attempts unless capped via <code>ConnectOptions::max_reconnects</code>.</dd>
+
+<dt><code>append</code> during a run <small><code>orchestrate</code>, <code>resume_from</code>, <code>resume_with</code></small></dt>
+<dd>State-entry rows are written before the incoming state's task runs, so that task never executes when the write fails. If a <code>CompensatableTask</code> finished its forward <code>run</code> and its completion-row <code>append</code> fails, Cano still pushes its output onto the in-memory compensation stack before aborting so that step is rolled back too. The engine stops the FSM, drains any in-memory saga compensations in LIFO order (without needing the checkpoint store), runs resource <code>teardown</code>, and returns <code>CanoError::WithStateContext</code> wrapping <code>CanoError::CheckpointStore</code> (or <code>CanoError::CompensationFailed</code> if a compensator also failed). Pre-outage rows remain in the store: if no saga steps rolled back, call <code>resume_from</code> once connectivity returns (or <code>orchestrate</code> if sequence <code>0</code> never landed); if saga steps rolled back in memory while <code>clear</code> could not reach the store, call <code>store.clear(id)</code> before reusing that id rather than calling <code>resume_from</code>.</dd>
+
+<dt><code>load_run</code> on resume <small><code>resume_from</code>, <code>resume_with</code></small></dt>
+<dd>Tears down resources and returns <code>Err(CanoError::CheckpointStore(...))</code> before any task runs. Retry the call once the store answers again.</dd>
+
+<dt><code>clear</code> at completion <small>exit state or clean saga rollback</small></dt>
+<dd>Final log cleanup is best-effort. A completed run still returns <code>Ok(exit_state)</code> and a cleanly rolled-back saga still returns its original error. Cano logs a <code>tracing</code> warning, records a failed clear metric, and fires <code>WorkflowObserver::on_checkpoint_clear_failed(workflow_id, error)</code>. Because the old rows remain stored, a fresh <code>orchestrate</code> with the same <code>workflow_id</code> later hits a sequence-0 conflict until <code>store.clear(workflow_id)</code> removes them, and calling <code>resume_from</code> on a rolled-back saga's stranded log would compensate its steps again.</dd>
+
+<dt>Under <code>Scheduler</code> <small>backoff, trips and leases</small></dt>
+<dd>When only the workflow's <code>CheckpointStore</code> fails, each failed run feeds the flow's <code>BackoffPolicy</code> (<code>Status::Backoff</code>, and <code>Status::Tripped</code> when <code>streak_limit</code> is set). Once the store recovers, the next tick clears a stranded exit log or auto-resumes an unfinished run; see <a href="../../scheduler/#checkpoint-resume">checkpoints and auto-resume</a>. When the same store backs <code>SchedulerStore</code>, a run that cannot renew its lease for a whole <code>lease_ttl</code> is cancelled via its <code>CancellationToken</code> without writing an outcome, and due ticks skip failed claims and retry until the store answers; see <a href="../../scheduler/several-instances/#leases">leases and failures</a>.</dd>
+</dl>
+
+<h3 id="handling-outages"><a href="#handling-outages" class="anchor-link" aria-hidden="true">#</a>Handling store outages in code</h3>
+<p>
+Configure bounded operation timeouts and jittered retries on the builder so short blips recover
+transparently while prolonged outages still fail in predictable time:
+</p>
+
+```rust
+use cano::store::nats::async_nats::ConnectOptions;
+use cano::{CanoError, NatsStore, PostgresStore, RetryMode};
+use std::sync::Arc;
+use std::time::Duration;
+
+async fn postgres_store(dsn: &str) -> Result<Arc<PostgresStore>, CanoError> {
+    let store = PostgresStore::builder()
+        .with_operation_timeout(Duration::from_secs(3))
+        .with_retry(RetryMode::exponential(4))
+        .connect(dsn)
+        .await?;
+    Ok(Arc::new(store))
+}
+
+async fn nats_store(url: &str) -> Result<Arc<NatsStore>, CanoError> {
+    let timeout = Duration::from_secs(3);
+    let options = ConnectOptions::new()
+        .name("orders")
+        .request_timeout(Some(timeout))
+        .ping_interval(Duration::from_secs(10));
+    let store = NatsStore::builder()
+        .with_operation_timeout(timeout)
+        .with_retry(RetryMode::exponential(4))
+        .connect_with_options(url, options)
+        .await?;
+    Ok(Arc::new(store))
+}
+```
+
+<p>
+When <code>orchestrate</code> still fails with <code>CanoError::CheckpointStore</code> after retries are
+exhausted, keep the existing store instance and inspect <code>store.load_run(run_id)</code> once the
+backend recovers: if no rows landed, start fresh with <code>orchestrate</code>; otherwise continue from the
+last durable checkpoint with <code>resume_from</code> (unless saga steps already rolled back in memory, in
+which case clear the log before starting fresh):
+</p>
+
+```rust
+use cano::PostgresStore;
+use cano::prelude::*;
+use std::time::Duration;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Step { Start, Work, Done }
+
+async fn run_or_recover(
+    store: &PostgresStore,
+    workflow: &Workflow<Step>,
+    run_id: &str,
+) -> Result<Step, CanoError> {
+    match workflow.orchestrate(Step::Start).await {
+        Ok(state) => return Ok(state),
+        Err(err) => match err.inner() {
+            CanoError::CheckpointStore(msg) => {
+                eprintln!("store unreachable on {run_id}: {msg}");
+                // Keep `store` as is: broken pooled connections were evicted.
+            }
+            CanoError::CompensationFailed { errors } => {
+                // `errors[0]` is the wrapped trigger; `errors[1..]` are rollback errors.
+                eprintln!("rollback failed ({} error(s)): {err}", errors.len() - 1);
+                return Err(err);
+            }
+            _ => return Err(err),
+        },
+    }
+
+    // Wait for Postgres to answer again, then check what landed before the drop.
+    // (If this workflow ran CompensatableTask steps, they already rolled back in
+    // memory; call `store.clear(run_id).await?` before starting a fresh run.)
+    let rows = loop {
+        match store.load_run(run_id).await {
+            Ok(rows) => break rows,
+            Err(_) => tokio::time::sleep(Duration::from_secs(5)).await,
+        }
+    };
+    if rows.is_empty() {
+        workflow.orchestrate(Step::Start).await
+    } else {
+        workflow.resume_from(run_id).await
+    }
+}
+```
+
+<p>
+Because final <code>clear</code> is best-effort, attach a <code>WorkflowObserver</code> implementing
+<code>on_checkpoint_clear_failed</code> to record workflow ids whose logs could not be deleted, then
+sweep them once the store is reachable again:
+</p>
+
+```rust
+use cano::prelude::*;
+use std::sync::{Arc, Mutex};
+
+#[derive(Default)]
+struct StrandedClearTracker {
+    pending_ids: Mutex<Vec<String>>,
+}
+
+impl StrandedClearTracker {
+    async fn sweep(&self, store: &dyn CheckpointStore) {
+        let ids = std::mem::take(&mut *self.pending_ids.lock().unwrap());
+        for id in ids {
+            if let Err(err) = store.clear(&id).await {
+                eprintln!("clear still failing for {id}: {err}");
+                let mut pending = self.pending_ids.lock().unwrap();
+                if !pending.iter().any(|existing| existing == &id) {
+                    pending.push(id);
+                }
+            }
+        }
+    }
+}
+
+impl WorkflowObserver for StrandedClearTracker {
+    fn on_checkpoint_clear_failed(&self, workflow_id: &str, error: &CanoError) {
+        eprintln!("checkpoint clear failed for {workflow_id}: {error}");
+        let mut pending = self.pending_ids.lock().unwrap();
+        if !pending.iter().any(|id| id == workflow_id) {
+            pending.push(workflow_id.to_owned());
+        }
+    }
+}
+
+fn attach_tracker<S>(
+    workflow: Workflow<S>,
+    store: Arc<dyn CheckpointStore>,
+    tracker: Arc<StrandedClearTracker>,
+) -> Workflow<S>
+where
+    S: Clone + std::fmt::Debug + std::hash::Hash + Eq + Send + Sync + 'static,
+{
+    workflow
+        .with_checkpoint_store(store)
+        .with_observer(tracker)
+}
+```
 </div>

@@ -63,16 +63,32 @@
 //!
 //! ## Failures
 //!
+//! Broken connections recover automatically without recreating the store: any pooled
+//! connection that hits a transient error (a closed socket, I/O error, operation timeout,
+//! cancelled caller, or transient SQLSTATE such as `08xxx` or `57Pxx`) is evicted and
+//! closed rather than returned to the pool, so the next checkout opens a fresh connection.
+//! TCP keepalives default to 30 s idle so dead peers surface promptly.
+//!
 //! Every call is bounded by the operation timeout (10 s by default). With
 //! [`with_retry`](PostgresStoreBuilder::with_retry) a call that fails on a
 //! transient error (a dropped connection, a timeout, a serialization failure) is retried;
-//! a conflict or a malformed row is never retried. A connection whose call timed out or
-//! was cancelled is closed, never returned to the pool.
+//! a conflict or a malformed row is never retried.
+//!
+//! [`RetryMode`] is finite (`RetryMode::None` by default): when the connection stays
+//! unreachable past [`RetryMode::max_attempts`], the call stops and returns
+//! `Err(CanoError::CheckpointStore(..))` (or `Err(CanoError::SchedulerStore(..))` on
+//! scheduler calls), leaving broken pool slots evicted and idle until another call runs.
+//! Inside a workflow, a failed `append` stops execution before the incoming state's task
+//! runs and drains in-memory saga compensations, leaving earlier rows stored for
+//! [`Workflow::resume_from`](crate::Workflow::resume_from) once connectivity returns (unless
+//! a saga rollback already undid those steps, in which case `clear` the stranded log
+//! first). A failed exit-state or post-rollback `clear` keeps the run's outcome and fires
+//! [`WorkflowObserver::on_checkpoint_clear_failed`](crate::WorkflowObserver::on_checkpoint_clear_failed).
 //!
 //! An `Err` from `append` after a timeout does not prove the row is absent: the insert may
-//! have committed after the client gave up. A retried `append` treats a byte-identical row
-//! already stored at its sequence as its own earlier write and returns `Ok`; a different
-//! row there is a conflict.
+//! have committed after the client gave up. Each `append` stamps a fresh 128-bit `write_id`,
+//! and a retried `append` treats an existing row at its sequence as its own earlier write
+//! only when both the row contents and `write_id` match; anything else is a conflict.
 //!
 //! A retried `compare_and_swap` likewise accepts a stored record whose bytes equal the
 //! ones it sent: the scheduler's records carry the writer's identity and a timestamp, so
