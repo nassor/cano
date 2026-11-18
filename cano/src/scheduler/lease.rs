@@ -62,6 +62,14 @@ pub(super) enum FlowState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(super) struct Lease {
     pub(super) owner: String,
+    /// Per-process `Coordinator` session token so a crashed and fast-restarted process
+    /// sharing a static `instance_id` does not treat its pre-crash lease as its own.
+    #[serde(default)]
+    pub(super) session: u64,
+    /// Monotonic per-claim lease id so a thawed zombie or dropped claim cleanup can never
+    /// renew or release a newer run's lease on the same instance.
+    #[serde(default)]
+    pub(super) id: u64,
     pub(super) expires_at: DateTime<Utc>,
 }
 
@@ -94,10 +102,10 @@ impl FlowRecord {
         })
     }
 
-    /// The status instance `me` shows for this record at `now`.
-    fn status(&self, me: &str, now: DateTime<Utc>) -> Status {
+    /// The status instance `(me, session)` shows for this record at `now`.
+    fn status(&self, me: &str, session: u64, now: DateTime<Utc>) -> Status {
         if let Some(lease) = &self.lease
-            && lease.owner != me
+            && (lease.owner != me || lease.session != session)
             && lease.expires_at > now
         {
             return Status::RunningElsewhere {
@@ -145,9 +153,14 @@ impl FlowRecord {
         self.state = FlowState::Completed;
     }
 
-    /// A deliberate cancel is not a fault: idle again, streak and window untouched.
-    fn cancelled(&mut self) {
-        self.state = FlowState::Idle;
+    /// A deliberate cancel is not a fault: leave streak and window untouched, restoring
+    /// `Backoff` if an earlier backoff window is still active at `now`.
+    fn cancelled(&mut self, now: DateTime<Utc>) {
+        if self.failure_streak > 0 && self.in_backoff(now) {
+            self.state = FlowState::Backoff;
+        } else {
+            self.state = FlowState::Idle;
+        }
     }
 }
 
@@ -210,10 +223,15 @@ pub(super) enum Claim {
 /// A lease this instance holds, with the record version it was last written at.
 pub(super) struct HeldLease {
     version: u64,
+    id: u64,
     record: FlowRecord,
 }
 
 impl HeldLease {
+    pub(super) fn id(&self) -> u64 {
+        self.id
+    }
+
     pub(super) fn record(&self) -> &FlowRecord {
         &self.record
     }
@@ -252,8 +270,10 @@ enum Renew {
 pub(super) struct Coordinator {
     store: Arc<dyn SchedulerStore>,
     instance_id: Arc<str>,
+    session: u64,
     ttl: Duration,
     writes: AtomicU64,
+    leases: AtomicU64,
 }
 
 /// Run a store call so that a panic inside a custom store becomes an error instead of
@@ -299,9 +319,23 @@ impl Coordinator {
         Self {
             store,
             instance_id,
+            session: rand::random::<u64>().max(1),
             ttl,
             writes: AtomicU64::new(0),
+            leases: AtomicU64::new(0),
         }
+    }
+
+    pub(super) fn next_lease_id(&self) -> u64 {
+        self.leases.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    fn is_same_session(&self, lease: &Lease) -> bool {
+        *lease.owner == *self.instance_id && lease.session == self.session
+    }
+
+    fn matches_lease(&self, lease: &Lease, lease_id: u64) -> bool {
+        self.is_same_session(lease) && lease.id == lease_id
     }
 
     #[cfg(feature = "tracing")]
@@ -380,9 +414,11 @@ impl Coordinator {
     pub(super) async fn claim(
         &self,
         flow_id: &str,
+        lease_id: u64,
         policy: &BackoffPolicy,
         due: Due,
         shutdown: Option<&CancellationToken>,
+        sent_lease: &std::sync::atomic::AtomicBool,
     ) -> Result<Option<Claim>, CanoError> {
         for _ in 0..CAS_ATTEMPTS {
             let loaded = match shutdown {
@@ -405,7 +441,7 @@ impl Coordinator {
             let mut abandoned = false;
             if let Some(lease) = record.lease.clone() {
                 if lease.expires_at > now {
-                    if *lease.owner != *self.instance_id {
+                    if !self.is_same_session(&lease) {
                         return Ok(Some(Claim::Refused {
                             reason: Refusal::Elsewhere {
                                 owner: Arc::from(lease.owner.as_str()),
@@ -414,8 +450,9 @@ impl Coordinator {
                             record,
                         }));
                     }
-                    // Our own live lease with no run in flight: a release that gave
-                    // up. Take it over without counting a failure.
+                    // Our own live lease from this same Coordinator session with no run
+                    // in flight: a release that gave up. Take it over without counting a
+                    // failure.
                 } else {
                     // The owner stopped renewing: count the lost run as a failure,
                     // and write that even when the claim below is refused.
@@ -451,6 +488,8 @@ impl Coordinator {
 
             record.lease = Some(Lease {
                 owner: self.instance_id.to_string(),
+                session: self.session,
+                id: lease_id,
                 expires_at: plus(now, self.ttl),
             });
             record.run_count = record.run_count.saturating_add(1);
@@ -458,12 +497,17 @@ impl Coordinator {
             if let Due::Cron(tick) = due {
                 record.last_tick = Some(tick);
             }
+            sent_lease.store(true, Ordering::Relaxed);
             if let Some(version) = self.swap(flow_id, version, &mut record).await? {
                 #[cfg(feature = "metrics")]
                 if abandoned {
                     count_failure(flow_id, &record);
                 }
-                return Ok(Some(Claim::Won(HeldLease { version, record })));
+                return Ok(Some(Claim::Won(HeldLease {
+                    version,
+                    id: lease_id,
+                    record,
+                })));
             }
         }
         Err(contended(flow_id, "claim"))
@@ -500,11 +544,13 @@ impl Coordinator {
                 return Renew::Lost(None);
             }
             // No store call may outlive the lease it is renewing.
-            let deadline = tokio::time::Instant::now() + remaining;
+            let deadline = crate::workflow::deadline_after(remaining);
 
             let mut next = held.record.clone();
             next.lease = Some(Lease {
                 owner: self.instance_id.to_string(),
+                session: self.session,
+                id: held.id,
                 expires_at: plus(now, self.ttl),
             });
             match tokio::time::timeout_at(
@@ -527,13 +573,13 @@ impl Coordinator {
             }
 
             // Someone changed the record (`reset_flow` on another instance): follow it
-            // while the lease is still ours.
+            // while this exact lease (`held.id`) is still ours.
             match tokio::time::timeout_at(deadline, self.load(flow_id)).await {
                 Ok(Ok(Some((version, record))))
                     if record
                         .lease
                         .as_ref()
-                        .is_some_and(|lease| *lease.owner == *self.instance_id) =>
+                        .is_some_and(|lease| self.matches_lease(lease, held.id)) =>
                 {
                     held.version = version;
                     held.record = record;
@@ -555,28 +601,31 @@ impl Coordinator {
     pub(super) async fn release(
         &self,
         flow_id: &str,
+        lease_id: u64,
         policy: &BackoffPolicy,
         result: &CanoResult<()>,
     ) -> Release {
-        let deadline = tokio::time::Instant::now() + self.ttl;
+        let deadline = crate::workflow::deadline_after(self.ttl);
         let mut conflicts = 0;
         let mut errors = 0;
         loop {
-            let attempt =
-                match tokio::time::timeout_at(deadline, self.try_release(flow_id, policy, result))
-                    .await
-                {
-                    Ok(attempt) => attempt,
-                    Err(_) => {
-                        #[cfg(feature = "tracing")]
-                        tracing::error!(
-                            flow_id,
-                            ttl = ?self.ttl,
-                            "scheduler store: releasing the lease timed out; it will expire"
-                        );
-                        return Release::GaveUp;
-                    }
-                };
+            let attempt = match tokio::time::timeout_at(
+                deadline,
+                self.try_release(flow_id, lease_id, policy, result),
+            )
+            .await
+            {
+                Ok(attempt) => attempt,
+                Err(_) => {
+                    #[cfg(feature = "tracing")]
+                    tracing::error!(
+                        flow_id,
+                        ttl = ?self.ttl,
+                        "scheduler store: releasing the lease timed out; it will expire"
+                    );
+                    return Release::GaveUp;
+                }
+            };
             match attempt {
                 Ok(ReleaseAttempt::Written(record)) => {
                     #[cfg(feature = "metrics")]
@@ -632,6 +681,7 @@ impl Coordinator {
     async fn try_release(
         &self,
         flow_id: &str,
+        lease_id: u64,
         policy: &BackoffPolicy,
         result: &CanoResult<()>,
     ) -> Result<ReleaseAttempt, CanoError> {
@@ -641,14 +691,15 @@ impl Coordinator {
         if !record
             .lease
             .as_ref()
-            .is_some_and(|lease| *lease.owner == *self.instance_id)
+            .is_some_and(|lease| self.matches_lease(lease, lease_id))
         {
             return Ok(ReleaseAttempt::NotHeld(Some(record)));
         }
+        let now = Utc::now();
         match result {
             Ok(()) => record.succeed(),
-            Err(e) if e.is_cancelled() => record.cancelled(),
-            Err(e) => record.fail(policy, e.to_string(), Utc::now()),
+            Err(e) if e.is_cancelled() => record.cancelled(now),
+            Err(e) => record.fail(policy, e.to_string(), now),
         }
         record.lease = None;
         Ok(
@@ -690,7 +741,7 @@ impl Coordinator {
         info.failure_streak = record.failure_streak;
         info.next_eligible = record.next_eligible;
         if info.status != Status::Running {
-            info.status = record.status(&self.instance_id, Utc::now());
+            info.status = record.status(&self.instance_id, self.session, Utc::now());
         }
     }
 

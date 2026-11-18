@@ -16,7 +16,9 @@
   `CheckpointRow::with_resume_input`. Custom `CheckpointStore` backends that map `RowKind` to
   their own encoding need the two new variants.
 - `cano_workflow_runs_total` and `cano_workflow_duration_seconds` use the outcome label
-  `suspended` for a run that parks at a suspend state.
+  `suspended` for a run that parks at a suspend state and `cancelled` for a run stopped via a
+  `CancellationToken`; `cano_scheduler_flow_runs_total` uses `cancelled` for a cancelled
+  scheduled run.
 - `cano::store::postgres::PostgresStore` (feature `store-postgres`): a `CheckpointStore` in one
   PostgreSQL table, `cano_checkpoints` by default, over a `deadpool-postgres` pool. A builder sets
   the schema, table (`with_checkpoint_table`), pool size and timeouts, TLS connector or your own
@@ -43,7 +45,8 @@
 - Multi-instance scheduling (feature `scheduler`). `SchedulerStore` (also `cano::scheduler::SchedulerStore`
   and in the prelude) is a versioned compare-and-swap register keyed by flow id: `load`,
   `compare_and_swap` (returns `CasOutcome::Written(version)` or `Conflict`) and `remove`, with
-  `VersionedRecord`. Implement it with `#[cano::scheduler_store]`. Errors use
+  `VersionedRecord` (both `CasOutcome` and `VersionedRecord` are in `cano::prelude`). Implement it
+  with `#[cano::scheduler_store]` on a trait impl or inherent `impl` block. Errors use
   `CanoError::SchedulerStore` (constructor `CanoError::scheduler_store`, category `scheduler_store`).
 - `Scheduler::with_store(Arc<dyn SchedulerStore>)`, `with_lease_ttl(Duration)` (30 s by default, zero is a
   configuration error) and `with_instance_id(&str)` (a random `cano-<16 hex digits>` by default, empty is a
@@ -81,6 +84,42 @@
   `blackboard_performance` and `blackboard_shared_performance`.
 - **Breaking:** `RunningScheduler::trigger` and `RunningScheduler::reset_flow` are `async` for every
   scheduler, so a call needs `.await`.
+
+### Fixed
+
+- `Workflow::resume_from` and `resume_with` clear rehydrated `SteppedTask` cursors whenever the FSM
+  transitions to a different state, so a completed visit in a looping workflow cannot leak its
+  cursor into a later visit, and cap rehydrated `prior_transitions` at 64 entries.
+- `Workflow::resume_from_with_token` on a log whose last row is already an exit state returns
+  `Ok(exit_state)` and clears the log without rehydrating or draining the saga compensation stack.
+- `Workflow::validate` checks duplicate compensator names across current state registrations (so
+  replacing a duplicate state clears the error and preserves remaining compensators) and rejects
+  colliding `Debug` state labels when a checkpoint store is attached.
+- `Scheduler::start` rejects workflows containing a `SuspendTask`, attaches `Workflow::with_tracing_span`
+  on scheduled runs, tags `execute_flow` spans with `flow_id`, preserves `Status::Backoff` when a
+  manual trigger is cancelled during an active backoff window, and stamps per-process session and
+  per-claim lease ids on distributed leases so fast restarts with a static `instance_id` and delayed
+  zombie tasks cannot steal or release another run's lease.
+- Dropping `RunningScheduler::stop()` mid-drain (for example under `tokio::time::timeout`) resets
+  aborted flows from `Status::Running` to `Status::Idle` and ensures a subsequent `stop()` reports
+  the aborted flows and tears down each flow's resources at most once.
+- `WorkflowObserver` `on_task_start` and `on_task_failure` hooks stay balanced when a `CancellationToken`
+  fires during `CheckpointStore::append` before task polling begins, and when a split state times out
+  under `JoinConfig::with_timeout`.
+- `Resources::setup_all` and `teardown_all_result` catch panics inside custom `setup` and `teardown`
+  methods so prior resources still roll back and remaining teardowns still run in reverse order.
+- `WindowedRateLimiter` avoids `u64` overflow when `limit == u64::MAX`; `PollTask` and `StreamTask`
+  avoid `u32` overflow when `max_errors == u32::MAX`; sub-millisecond `RetryMode` delays sleep as
+  configured; `BackoffPolicy::compute_delay` and engine deadlines avoid panicking on `Duration::MAX`
+  or extreme streaks.
+- `PostgresStore` and `NatsStore` only treat a duplicate row or `WrongLastRevision` as an absorbed
+  lost acknowledgement when an earlier attempt actually sent the write, evict broken pooled Postgres
+  connections on transient failures, reject matching checkpoint and scheduler table names in
+  `PostgresStoreBuilder`, bound `NatsStoreBuilder::connect_with_options` by `operation_timeout`, and
+  reject trailing bytes in `postcard`-encoded checkpoint payloads.
+- `#[task]`, `#[resource]`, `#[checkpoint_store]` and `#[scheduler_store]` preserve explicit
+  lifetimes, rewrite nested elided references, order lifetime parameters before type and const
+  generics, and reject duplicate or unsupported items with spanned compile errors.
 
 ## 0.16.0 - 2026-11-15 - API Simplification
 

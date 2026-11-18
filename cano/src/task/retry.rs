@@ -140,15 +140,15 @@ impl RetryMode {
                         0.0
                     };
 
-                    let base_ms = base_delay.as_millis() as f64;
+                    let base_ns = base_delay.as_nanos() as f64;
                     // Saturate the exponent before the i32 cast. Without this clamp
                     // an `attempt` of `i32::MAX as usize + 1` wraps to a large
                     // negative i32 and `mult.powi(NEG)` collapses to ~0, producing
                     // a zero-delay retry storm against the failing dependency on
                     // pathological `max_retries` values.
                     let exponent = attempt.min(i32::MAX as usize) as i32;
-                    let exponential_delay = base_ms * mult.powi(exponent);
-                    let capped_delay = exponential_delay.min(max_delay.as_millis() as f64);
+                    let exponential_ns = base_ns * mult.powi(exponent);
+                    let capped_ns = exponential_ns.min(max_delay.as_nanos() as f64);
 
                     // Add jitter: delay * (1 ± jitter * random_factor)
                     let jitter_factor = if safe_jitter > 0.0 {
@@ -159,28 +159,26 @@ impl RetryMode {
                         1.0
                     };
 
-                    let final_delay_f = (capped_delay * jitter_factor).max(0.0);
-                    // Saturate rather than wrap or panic when the computed delay
-                    // exceeds u64::MAX milliseconds (e.g. enormous max_delay + jitter).
-                    let final_delay = if final_delay_f >= u64::MAX as f64 {
-                        u64::MAX
+                    let final_ns_f = (capped_ns * jitter_factor).max(0.0);
+                    // Convert nanoseconds back to `Duration`, saturating at `Duration::MAX`
+                    // when enormous `max_delay + jitter` exceeds `u64::MAX` nanoseconds (~584y).
+                    let final_dur = if final_ns_f >= u64::MAX as f64 {
+                        Duration::try_from_secs_f64(final_ns_f / 1_000_000_000.0)
+                            .unwrap_or(Duration::MAX)
                     } else {
-                        final_delay_f as u64
+                        Duration::from_nanos(final_ns_f.round() as u64)
                     };
-                    // Floor to at least 1 ms when there is a non-zero configured
-                    // backoff so a jitter draw of `-1.0` (legal endpoint of
-                    // `random_range(-1.0..=1.0)`) with `jitter == 1.0` can't
-                    // collapse the inter-attempt delay to `Duration::ZERO` — the
-                    // tokio sleep would then only yield, letting the retry loop
-                    // burst against the failing dependency. A pre-clamp `base_ms
-                    // == 0` (i.e. user actually wants zero-delay retries) still
-                    // yields `Duration::ZERO`.
-                    let final_delay = if base_ms > 0.0 {
-                        final_delay.max(1)
+                    // Floor to at least `min(1ms, base_delay, max_delay)` when there is a
+                    // non-zero configured backoff so a jitter draw of `-1.0` with `jitter == 1.0`
+                    // can't collapse the inter-attempt delay to `Duration::ZERO`. An explicit
+                    // `base_delay == 0` still yields `Duration::ZERO`.
+                    let final_dur = if !base_delay.is_zero() && !max_delay.is_zero() {
+                        let floor = Duration::from_millis(1).min(*base_delay).min(*max_delay);
+                        final_dur.max(floor)
                     } else {
-                        final_delay
+                        final_dur
                     };
-                    Some(Duration::from_millis(final_delay))
+                    Some(final_dur)
                 } else {
                     None
                 }
@@ -405,11 +403,11 @@ where
                 if attempt >= max_attempts {
                     return Err(e);
                 }
-                on_retry(attempt as u32);
+                on_retry(u32::try_from(attempt).unwrap_or(u32::MAX));
                 // `delay_for_attempt` takes the 0-based index of the attempt
                 // that just failed — `attempt - 1` after the increment above.
                 if let Some(delay) = retry_mode.delay_for_attempt(attempt - 1)
-                    && delay.as_millis() > 0
+                    && !delay.is_zero()
                 {
                     tokio::time::sleep(delay).await;
                 }
@@ -544,7 +542,10 @@ where
                                 // No retries configured: surface the raw error.
                                 e
                             } else {
-                                CanoError::retry_exhausted(attempts_made as u32, e)
+                                CanoError::retry_exhausted(
+                                    u32::try_from(attempts_made).unwrap_or(u32::MAX),
+                                    e,
+                                )
                             }));
                         }
                         #[cfg(feature = "tracing")]
@@ -1371,6 +1372,59 @@ mod tests {
             before,
             "task body must not run when the breaker is open"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sub_millisecond_fixed_and_exponential_retries_sleep_nonzero_delays() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let fixed = RetryMode::Fixed {
+            retries: 2,
+            delay: Duration::from_micros(400),
+        };
+        let cfg = TaskConfig::new().with_retry(fixed);
+        let t0 = tokio::time::Instant::now();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_ref = Arc::clone(&calls);
+        let out = run_with_retries(&cfg, move || {
+            let calls_ref = Arc::clone(&calls_ref);
+            async move {
+                let n = calls_ref.fetch_add(1, Ordering::SeqCst);
+                if n < 2 {
+                    Err::<u8, _>(CanoError::task_execution("try again"))
+                } else {
+                    Ok(42)
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(out, 42);
+        assert!(
+            t0.elapsed() >= Duration::from_micros(800),
+            "sub-ms fixed retry must sleep on each retry, elapsed {:?}",
+            t0.elapsed()
+        );
+
+        let exp = RetryMode::ExponentialBackoff {
+            max_retries: 3,
+            base_delay: Duration::from_micros(200),
+            multiplier: 2.0,
+            max_delay: Duration::from_micros(700),
+            jitter: 0.0,
+        };
+        assert_eq!(exp.delay_for_attempt(0), Some(Duration::from_micros(200)));
+        assert_eq!(exp.delay_for_attempt(1), Some(Duration::from_micros(400)));
+        assert_eq!(exp.delay_for_attempt(2), Some(Duration::from_micros(700)));
+
+        let max_cap = RetryMode::ExponentialBackoff {
+            max_retries: usize::MAX,
+            base_delay: Duration::from_secs(10),
+            multiplier: 10.0,
+            max_delay: Duration::MAX,
+            jitter: 1.0,
+        };
+        assert!(max_cap.delay_for_attempt(usize::MAX - 1).is_some());
     }
 }
 

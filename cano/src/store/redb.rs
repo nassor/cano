@@ -372,8 +372,8 @@ impl CheckpointStore for RedbStore {
                     // Untagged row written before version tagging: try the current
                     // shape, then the pre-`workflow_version` shape. Only this legacy
                     // path keeps the heuristic fallback.
-                    match postcard::from_bytes::<StoredRow>(bytes) {
-                        Ok(payload) => stored_to_row(
+                    match postcard::take_from_bytes::<StoredRow>(bytes) {
+                        Ok((payload, [])) => stored_to_row(
                             sequence,
                             payload.state,
                             payload.task_id,
@@ -381,8 +381,14 @@ impl CheckpointStore for RedbStore {
                             payload.kind,
                             payload.workflow_version,
                         ),
-                        Err(new_err) => match postcard::from_bytes::<StoredRowV0>(bytes) {
-                            Ok(legacy) => stored_to_row(
+                        Ok((_, rest)) => {
+                            return Err(CanoError::CheckpointStore(format!(
+                                "decode checkpoint row at workflow_id={wf_id:?} sequence={sequence}: {} trailing bytes after payload",
+                                rest.len()
+                            )));
+                        }
+                        Err(new_err) => match postcard::take_from_bytes::<StoredRowV0>(bytes) {
+                            Ok((legacy, [])) => stored_to_row(
                                 sequence,
                                 legacy.state,
                                 legacy.task_id,
@@ -390,7 +396,7 @@ impl CheckpointStore for RedbStore {
                                 legacy.kind,
                                 0,
                             ),
-                            Err(_) => {
+                            _ => {
                                 // Surface both workflow id and sequence so an operator
                                 // can locate the bad row directly via redb CLI or repair
                                 // tooling — the postcard error alone leaves no anchor.

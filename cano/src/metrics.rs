@@ -208,7 +208,7 @@ pub fn describe() {
     describe_counter!(
         WORKFLOW_RUNS_TOTAL,
         Unit::Count,
-        "Workflow runs (via Workflow::orchestrate/resume_from/resume_with), by outcome (completed|suspended|failed)"
+        "Workflow runs (via Workflow::orchestrate/resume_from/resume_with), by outcome (completed|suspended|cancelled|failed)"
     );
     describe_histogram!(
         WORKFLOW_DURATION_SECONDS,
@@ -341,7 +341,7 @@ pub fn describe() {
         describe_counter!(
             SCHEDULER_FLOW_RUNS_TOTAL,
             Unit::Count,
-            "Scheduled-flow runs, by flow and outcome (completed|failed)"
+            "Scheduled-flow runs, by flow and outcome (completed|cancelled|failed)"
         );
         describe_histogram!(
             SCHEDULER_FLOW_DURATION_SECONDS,
@@ -555,8 +555,9 @@ pub(crate) fn multi_rate_limiter_throttled(tier: &'static str) {
 // ----- scheduler -----
 
 #[cfg(feature = "scheduler")]
-pub(crate) fn scheduler_flow_run(flow: &str, ok: bool, dur: Duration) {
-    counter!(SCHEDULER_FLOW_RUNS_TOTAL, "flow" => flow.to_owned(), "outcome" => if ok { "completed" } else { "failed" }).increment(1);
+pub(crate) fn scheduler_flow_run(flow: &str, outcome: &'static str, dur: Duration) {
+    counter!(SCHEDULER_FLOW_RUNS_TOTAL, "flow" => flow.to_owned(), "outcome" => outcome)
+        .increment(1);
     histogram!(SCHEDULER_FLOW_DURATION_SECONDS, "flow" => flow.to_owned())
         .record(dur.as_secs_f64());
 }

@@ -6,7 +6,7 @@
 //! is the entry point in the other direction: replay a checkpointed run from its
 //! last recorded state, rehydrating the compensation stack from the log.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
@@ -106,6 +106,7 @@ where
         // ascending walk over `rows`.
         let mut state_entries: Vec<(u64, &str)> = Vec::new();
         let mut resume_state_entry_cutoff: Option<u64> = None;
+        let mut active_state: Option<&str> = None;
 
         for r in rows {
             #[cfg(feature = "tracing")]
@@ -120,6 +121,15 @@ where
             }
             match r.kind {
                 RowKind::StateEntry => {
+                    // Clear persisted step cursors whenever the FSM transitions to a
+                    // different state so an earlier completed visit in a looping
+                    // workflow never leaks its stale cursor into a later visit.
+                    // Consecutive `StateEntry` rows for the *same* state (written across
+                    // repeated crash-resumes of that state) preserve `resume_cursors`.
+                    if active_state != Some(r.state.as_str()) {
+                        resume_cursors.clear();
+                        active_state = Some(r.state.as_str());
+                    }
                     if r.state == resume_label {
                         // `rows` is ascending — overwriting with each match
                         // yields the highest-sequence row, which is the cutoff.
@@ -159,14 +169,20 @@ where
                 resume_state = %resume_label,
                 "no StateEntry row found for resume state — using last.sequence + 1 as cutoff for the rehydrated path"
             );
-            resume_sequence + 1
+            resume_sequence.saturating_add(1)
         });
 
-        let mut prior_transitions: Vec<TState> = Vec::new();
+        let mut prior_transitions: VecDeque<TState> =
+            VecDeque::with_capacity(super::execution::MAX_TRANSITION_PATH);
         for (seq, label) in state_entries {
             if seq < cutoff {
                 match resolve_state(label) {
-                    Some(state) => prior_transitions.push(state),
+                    Some(state) => {
+                        if prior_transitions.len() == super::execution::MAX_TRANSITION_PATH {
+                            prior_transitions.pop_front();
+                        }
+                        prior_transitions.push_back(state);
+                    }
                     None => {
                         #[cfg(feature = "tracing")]
                         tracing::warn!(
@@ -186,7 +202,7 @@ where
         Self {
             compensation_stack,
             resume_cursors,
-            prior_transitions,
+            prior_transitions: prior_transitions.into(),
         }
     }
 }
@@ -440,7 +456,7 @@ where
     /// `label_index` construction in `resume_from` — both map checkpoint state
     /// labels (the `Debug` rendering of each state) back to a `TState` and used
     /// to duplicate this exact chain.
-    fn all_states(&self) -> impl Iterator<Item = &TState> {
+    pub(super) fn all_states(&self) -> impl Iterator<Item = &TState> {
         self.states.keys().chain(self.exit_states.iter())
     }
 
@@ -670,7 +686,10 @@ where
                 last.state
             ))
         })?;
-        let mut sequence = last.sequence + 1;
+        let mut sequence = last
+            .sequence
+            .checked_add(1)
+            .ok_or_else(|| CanoError::checkpoint_store("checkpoint sequence overflow"))?;
         let resume_sequence = last.sequence;
 
         // Suspend states: the last row's kind decides whether the run is parked
@@ -715,6 +734,33 @@ where
             }
             (_, _, None) => None,
         };
+
+        // Exit-state short-circuit: the run already reached a terminal exit state
+        // before `clear_checkpoint_log` completed. Return immediately after best-effort
+        // cleanup without rehydrating the compensation stack or checking `token`, so a
+        // cancelled token or transient store-append error can never roll back an
+        // already-completed saga.
+        if resume_input.is_none() && self.exit_states.contains(&resume_state) {
+            let started = std::time::Instant::now();
+            #[cfg(feature = "tracing")]
+            info!(
+                workflow_id = %workflow_id,
+                resume_state = ?resume_state,
+                last_sequence = last.sequence,
+                "Workflow already reached exit state; clearing checkpoint log"
+            );
+            notify_observers(&self.observers, |o| {
+                o.on_resume(&workflow_id, last.sequence);
+            });
+            if !self.observers.is_empty() {
+                let label = format!("{resume_state:?}");
+                notify_observers(&self.observers, |o| o.on_state_enter(&label));
+            }
+            self.clear_checkpoint_log(Some(&workflow_id)).await;
+            let result = Ok(resume_state);
+            self.record_run_outcome(&result, started);
+            return result;
+        }
 
         // Resolve checkpoint state labels (the `Debug` rendering of each state)
         // back to a `TState` in O(1). `from_rows` invokes the closure below once
@@ -4010,6 +4056,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resume_from_exit_state_with_cancelled_token_never_compensates_completed_saga() {
+        let store = Arc::new(InMemoryCheckpointStore::new());
+        let log: CompLog = Arc::new(Mutex::new(Vec::new()));
+        // Simulate a run whose saga committed AND reached the exit state `Complete`,
+        // crashing right before `clear_checkpoint_log` deleted the rows.
+        store
+            .append("done-saga", CheckpointRow::new(0, "Start", "c1"))
+            .await
+            .unwrap();
+        store
+            .append(
+                "done-saga",
+                CheckpointRow::new(1, "Start", "c1")
+                    .with_output(serde_json::to_vec(&99u32).unwrap()),
+            )
+            .await
+            .unwrap();
+        store
+            .append("done-saga", CheckpointRow::new(2, "Complete", ""))
+            .await
+            .unwrap();
+
+        let workflow = Workflow::bare()
+            .register(
+                TestState::Start,
+                CompTask::ok("c1", 99, TestState::Complete, &log),
+            )
+            .add_exit_state(TestState::Complete)
+            .with_checkpoint_store(store.clone());
+
+        let token = CancellationToken::new();
+        token.cancel();
+        let out = workflow
+            .resume_from_with_token("done-saga", &token)
+            .await
+            .expect(
+                "already-completed workflow must return Ok(Complete) even with cancelled token",
+            );
+        assert_eq!(out, TestState::Complete);
+        assert!(
+            log.lock().unwrap().is_empty(),
+            "completed saga must NEVER be rolled back on exit-state resume: {:?}",
+            *log.lock().unwrap()
+        );
+        assert!(
+            store.load_run("done-saga").await.unwrap().is_empty(),
+            "exit-state resume should clear the stranded checkpoint log"
+        );
+    }
+
+    #[tokio::test]
     async fn resume_from_accepts_mixed_version_log_with_matching_tail() {
         // F3 follow-up: only the last row's `workflow_version` is
         // authoritative — that determines which workflow definition the
@@ -4284,8 +4381,13 @@ mod rehydrated_run_tests {
             resolve_test_state,
         );
         let elapsed = started.elapsed();
-        // prior_transitions = every row at seq < 9999 → 9999 entries.
-        assert_eq!(rh.prior_transitions.len(), 9_999);
+        // `prior_transitions` is capped inline at `MAX_TRANSITION_PATH` (64) so
+        // rehydrating a long log never allocates O(rows) transient state history.
+        assert_eq!(
+            rh.prior_transitions.len(),
+            super::super::execution::MAX_TRANSITION_PATH
+        );
+        assert_eq!(rh.prior_transitions.last(), Some(&TestState::Start));
         // Smoke check, not a benchmark: the assert exists to catch accidental
         // quadratic regressions (an O(n²) scan over 10k rows would blow far past
         // this), not to time-box legitimate debug-build variance on slow CI

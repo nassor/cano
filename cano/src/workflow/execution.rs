@@ -35,7 +35,7 @@ use tracing::{Instrument, debug, info, info_span, warn};
 /// Entry in the workflow state machine
 /// How many of the most recent states `CanoError::WithStateContext::transitions_so_far`
 /// reports.
-const MAX_TRANSITION_PATH: usize = 64;
+pub(super) const MAX_TRANSITION_PATH: usize = 64;
 
 /// What a state runs, as produced by [`Registrable::into_entry`](super::Registrable::into_entry).
 ///
@@ -215,6 +215,8 @@ struct SplitOutcome {
     successes: Vec<usize>,
     errors: Vec<(usize, CanoError)>,
     cancelled: usize,
+    completed_indices: Vec<bool>,
+    timed_out: bool,
 }
 
 fn split_error_summary(errors: &[(usize, CanoError)]) -> String {
@@ -326,15 +328,7 @@ where
             std::time::Instant,
             std::time::Duration,
             tokio::time::Instant,
-        )> = total_budget.map(|(start, limit)| {
-            let deadline = start
-                .checked_add(limit)
-                .map(tokio::time::Instant::from_std)
-                .unwrap_or_else(|| {
-                    tokio::time::Instant::now() + std::time::Duration::from_secs(u32::MAX as u64)
-                });
-            (start, limit, deadline)
-        });
+        )> = total_budget.map(|(start, limit)| (start, limit, super::deadline_after(limit)));
 
         let mut skip_entry_row = resume_input.is_some();
         loop {
@@ -837,22 +831,36 @@ where
     where
         F: std::future::Future<Output = Result<T, CanoError>>,
     {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        // Zero-cost path: neither budget nor token is active.
+        if step_budget.is_none() && token.is_none() {
+            return fut.await;
+        }
+
         let fan = &task_failure_fan_out;
-        // The existing budget logic, untouched: `timeout_at` when a budget is set,
-        // otherwise a bare `fut.await`. Captured as a future so the cancellation
-        // arm below can race it. `async move` takes ownership of `fut`; `observers`
-        // and `fan` are `Copy` references, so they remain usable in the cancel arm.
+        let polled = AtomicBool::new(false);
+        let polled_ref = &polled;
+        let mut pinned_fut = std::pin::pin!(fut);
+        let tracked_fut = std::future::poll_fn(move |cx| {
+            polled_ref.store(true, Ordering::Relaxed);
+            pinned_fut.as_mut().poll(cx)
+        });
+
         let budgeted = async move {
             let Some((start, limit, deadline)) = step_budget else {
-                return fut.await;
+                return tracked_fut.await;
             };
-            match tokio::time::timeout_at(deadline, fut).await {
+            match tokio::time::timeout_at(deadline, tracked_fut).await {
                 Ok(inner) => inner,
                 Err(_) => {
                     let elapsed = start.elapsed();
                     let err = CanoError::workflow_timeout(elapsed, limit);
+                    let did_poll = polled_ref.load(Ordering::Relaxed);
                     notify_observers(observers, |o| {
-                        fan(o, &err);
+                        if did_poll {
+                            fan(o, &err);
+                        }
                         o.on_workflow_timeout(elapsed, limit);
                     });
                     Err(err)
@@ -860,22 +868,23 @@ where
             }
         };
 
-        // Zero-cost path: no token, so skip the `select!` entirely and run the
-        // budgeted future exactly as before.
         let Some(token) = token else {
             return budgeted.await;
         };
 
         // Race cancellation against the budgeted dispatch. `biased` checks the
         // cancel arm first so cancellation deterministically wins a tie against
-        // the per-state timeout. On cancel the inner `fut` is dropped (for splits
-        // this drops the `JoinSet`, aborting its children); we fire the same
-        // per-task fan-out the timeout path uses so observer gauges stay balanced.
+        // the per-state timeout. Only emit the per-task failure fan-out if `fut`
+        // was actually polled (and therefore fired `on_task_start`), keeping
+        // observer gauges balanced even when `token` was cancelled during the
+        // preceding `append_row` before `fut` was ever polled.
         tokio::select! {
             biased;
             _ = token.cancelled() => {
                 let err = CanoError::cancelled();
-                notify_observers(observers, |o| fan(o, &err));
+                if polled.load(Ordering::Relaxed) {
+                    notify_observers(observers, |o| fan(o, &err));
+                }
                 if let Some(label) = state_label {
                     notify_observers(observers, |o| o.on_cancelled(label));
                 }
@@ -936,7 +945,7 @@ where
         match total_budget {
             Some((_, limit)) => {
                 let comp_budget = resolve_compensation_deadline(limit, self.compensation_timeout);
-                let comp_deadline = tokio::time::Instant::now() + comp_budget;
+                let comp_deadline = super::deadline_after(comp_budget);
                 self.run_compensations_bounded(
                     workflow_id,
                     compensation_stack,
@@ -1036,7 +1045,9 @@ where
             return Err(CanoError::checkpoint_store(format!("append {what}: {e}")));
         }
         notify_observers(&self.observers, |o| o.on_checkpoint(workflow_id, *sequence));
-        *sequence += 1;
+        *sequence = sequence
+            .checked_add(1)
+            .ok_or_else(|| CanoError::checkpoint_store("checkpoint sequence overflow"))?;
         Ok(())
     }
 
@@ -1446,9 +1457,11 @@ where
         );
 
         // Fire per-task observer events for everything that ran to completion.
-        // Cancelled tasks are intentionally silent (no dedicated hook), and an
+        // Cancelled tasks are intentionally silent on early-return success, and an
         // aggregated error entry carries `task_index == usize::MAX`, which
-        // `task_ids.get` filters out.
+        // `task_ids.get` filters out. When `join_config.timeout` aborted a
+        // non-PartialTimeout split, pair every incomplete branch's `on_task_start`
+        // with `on_task_failure` so observer gauges remain balanced.
         if let Some(ref slice) = observers {
             for &idx in &split_result.successes {
                 if let Some(id) = task_ids.get(idx) {
@@ -1460,6 +1473,18 @@ where
                     notify_observers(slice, |o| o.on_task_failure(id, err));
                 }
             }
+        }
+
+        if split_result.timed_out {
+            let timeout_err = CanoError::workflow("Split task timeout exceeded");
+            if let Some(ref slice) = observers {
+                for (idx, &done) in split_result.completed_indices.iter().enumerate() {
+                    if !done && let Some(id) = task_ids.get(idx) {
+                        notify_observers(slice, |o| o.on_task_failure(id, &timeout_err));
+                    }
+                }
+            }
+            return Err(timeout_err);
         }
 
         let successful = split_result.successes.len();
@@ -1536,12 +1561,14 @@ where
             successes: Vec::with_capacity(total_tasks),
             errors: Vec::new(),
             cancelled: 0,
+            completed_indices: Vec::new(),
+            timed_out: false,
         };
         // Bitset over task indices; cheaper than HashSet<usize> on cache and alloc.
         let mut completed_indices: Vec<bool> = vec![false; total_tasks];
 
         // Determine deadline if timeout is configured
-        let deadline = join_config.timeout.map(|d| tokio::time::Instant::now() + d);
+        let deadline = join_config.timeout.map(super::deadline_after);
 
         loop {
             // Wait for next completion or timeout
@@ -1549,16 +1576,14 @@ where
                 match tokio::time::timeout_at(d, join_set.join_next()).await {
                     Ok(res) => res,
                     Err(_) => {
-                        // Timeout reached
-                        if matches!(join_config.strategy, JoinStrategy::PartialTimeout) {
-                            // For PartialTimeout, abort remaining and return what we have
-                            join_set.abort_all();
-                            break;
-                        } else {
-                            // For other strategies, timeout is an error
-                            join_set.abort_all();
-                            return Err(CanoError::workflow("Split task timeout exceeded"));
+                        // Timeout reached: abort remaining branches and return collected
+                        // state so `execute_split_join` can record metrics and balance
+                        // observer hooks before failing non-PartialTimeout strategies.
+                        join_set.abort_all();
+                        if !matches!(join_config.strategy, JoinStrategy::PartialTimeout) {
+                            split_result.timed_out = true;
                         }
+                        break;
                     }
                 }
             } else {
@@ -1602,6 +1627,7 @@ where
         // Identify cancelled tasks (those that didn't complete).
         // JoinSet::abort_all() and drop handle cleanup automatically.
         split_result.cancelled = completed_indices.iter().filter(|done| !**done).count();
+        split_result.completed_indices = completed_indices;
 
         Ok(split_result)
     }
@@ -3397,16 +3423,16 @@ mod dispatch_with_budget_tests {
     }
 
     #[tokio::test]
-    async fn precancelled_token_returns_cancelled_and_fires_hooks() {
-        // The new cancel arm: a pre-cancelled token (biased `select!` picks it) must drop
-        // the inner future, return `Cancelled`, fire the per-task fan-out (gauge balance)
-        // AND `on_cancelled(state_label)` — but not the timeout hook.
+    async fn precancelled_token_returns_cancelled_without_spurious_failure_when_unpolled() {
+        // When `token` is already cancelled before `dispatch_with_budget` polls `fut`
+        // (e.g. cancelled during `append_row`), `fut` never ran `on_task_start`, so
+        // `task_failure_fan_out` must NOT fire (keeping observer gauges balanced),
+        // while `on_cancelled(state_label)` still fires once.
         let (observer, rec) = EventLog::new();
         let observer_dyn: Arc<dyn WorkflowObserver> = Arc::new(observer);
         let observers = [observer_dyn];
         let token = CancellationToken::new();
-        let handle = token.clone();
-        handle.cancel();
+        token.cancel();
         let err = Workflow::<TestState>::dispatch_with_budget(
             None,
             Some(&token),
@@ -3423,8 +3449,8 @@ mod dispatch_with_budget_tests {
         assert!(matches!(err, CanoError::Cancelled), "got: {err}");
         let labels = rec.labels();
         assert!(
-            labels.iter().any(|l| l == "task_failure:synthetic"),
-            "fan-out (gauge balance) fired: {labels:?}"
+            !labels.iter().any(|l| l == "task_failure:synthetic"),
+            "fan-out must NOT fire when fut was never polled: {labels:?}"
         );
         assert!(
             labels.iter().any(|l| l == "cancelled:StateX"),
@@ -3433,6 +3459,39 @@ mod dispatch_with_budget_tests {
         assert!(
             !labels.iter().any(|l| l.starts_with("workflow_timeout:")),
             "timeout hook must NOT fire on a cancel: {labels:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mid_flight_cancelled_token_fires_failure_fanout_and_on_cancelled() {
+        let (observer, rec) = EventLog::new();
+        let observer_dyn: Arc<dyn WorkflowObserver> = Arc::new(observer);
+        let observers = [observer_dyn];
+        let token = CancellationToken::new();
+        let handle = token.clone();
+        let err = Workflow::<TestState>::dispatch_with_budget(
+            None,
+            Some(&token),
+            Some("StateX"),
+            &observers,
+            async {
+                handle.cancel();
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                Ok::<TestState, CanoError>(TestState::Complete)
+            },
+            |o, err| o.on_task_failure("synthetic", err),
+        )
+        .await
+        .expect_err("mid-flight cancelled token returns Cancelled");
+        assert!(matches!(err, CanoError::Cancelled), "got: {err}");
+        let labels = rec.labels();
+        assert!(
+            labels.iter().any(|l| l == "task_failure:synthetic"),
+            "fan-out (gauge balance) fired after fut was polled: {labels:?}"
+        );
+        assert!(
+            labels.iter().any(|l| l == "cancelled:StateX"),
+            "on_cancelled fired with the state label: {labels:?}"
         );
     }
 
@@ -3764,5 +3823,180 @@ mod engine_contract_tests {
             .register(S::Loop, FailsOnce(AtomicU32::new(0)))
             .add_exit_state(S::Done);
         assert_eq!(workflow.orchestrate(S::Loop).await.unwrap(), S::Done);
+    }
+
+    #[tokio::test]
+    async fn split_timeout_balances_observer_start_and_terminal_events() {
+        use crate::testing::{RecordedEvent, RecordingObserver};
+        use crate::workflow::{JoinConfig, JoinStrategy};
+
+        #[derive(Clone)]
+        enum BranchKind {
+            Fast,
+            Slow,
+        }
+        #[crate::task(state = S)]
+        impl BranchKind {
+            async fn run(&self) -> Result<S, CanoError> {
+                match self {
+                    BranchKind::Fast => Ok(S::Done),
+                    BranchKind::Slow => {
+                        tokio::time::sleep(Duration::from_secs(10)).await;
+                        Ok(S::Done)
+                    }
+                }
+            }
+        }
+
+        let obs = Arc::new(RecordingObserver::new());
+        let wf = Workflow::bare()
+            .with_observer(obs.clone())
+            .register_split(
+                S::Loop,
+                vec![BranchKind::Fast, BranchKind::Slow, BranchKind::Slow],
+                JoinConfig::new(JoinStrategy::All, S::Done).with_timeout(Duration::from_millis(25)),
+            )
+            .add_exit_state(S::Done);
+
+        let err = wf.orchestrate(S::Loop).await.unwrap_err();
+        assert!(
+            err.to_string().contains("Split task timeout exceeded"),
+            "{err}"
+        );
+        let events = obs.events();
+        let starts = events
+            .iter()
+            .filter(|e| matches!(e, RecordedEvent::TaskStarted { .. }))
+            .count();
+        let terminals = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    RecordedEvent::TaskSucceeded { .. } | RecordedEvent::TaskFailed { .. }
+                )
+            })
+            .count();
+        assert_eq!(starts, 3);
+        assert_eq!(
+            terminals, 3,
+            "every split branch that fired on_task_start must fire on_task_success or on_task_failure on timeout: {events:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn duration_max_compensation_split_and_stream_timeouts_do_not_panic() {
+        use crate::workflow::test_support::{CompLog, CompTask, FailTask, SimpleTask, TestState};
+        use crate::workflow::{JoinConfig, JoinStrategy};
+        use std::sync::Mutex;
+
+        let log: CompLog = Arc::new(Mutex::new(Vec::new()));
+        let wf = Workflow::bare()
+            .with_total_timeout(Duration::MAX)
+            .with_compensation_timeout(Duration::MAX)
+            .register(
+                TestState::Start,
+                CompTask::ok("c1", 1, TestState::Split, &log),
+            )
+            .register_split(
+                TestState::Split,
+                vec![SimpleTask::new(TestState::Process)],
+                JoinConfig::new(JoinStrategy::All, TestState::Process).with_timeout(Duration::MAX),
+            )
+            .register(TestState::Process, FailTask::new(true))
+            .add_exit_state(TestState::Complete);
+
+        let err = wf.orchestrate(TestState::Start).await.unwrap_err();
+        assert!(err.to_string().contains("intentionally failed"), "{err}");
+        assert_eq!(*log.lock().unwrap(), vec![("c1".to_string(), 1)]);
+    }
+
+    #[tokio::test]
+    async fn observer_panics_in_cancelled_timeout_resume_and_clear_failed_are_isolated() {
+        use crate::CancellationToken;
+        use crate::checkpoint::{CheckpointRow, CheckpointStore};
+        use crate::testing::InMemoryCheckpointStore;
+        use crate::workflow::test_support::{SimpleTask, TestState};
+
+        struct PanickyLifecycleObserver;
+        impl WorkflowObserver for PanickyLifecycleObserver {
+            fn on_cancelled(&self, _state: &str) {
+                panic!("panic in on_cancelled");
+            }
+            fn on_workflow_timeout(&self, _elapsed: Duration, _limit: Duration) {
+                panic!("panic in on_workflow_timeout");
+            }
+            fn on_resume(&self, _workflow_id: &str, _sequence: u64) {
+                panic!("panic in on_resume");
+            }
+            fn on_checkpoint_clear_failed(&self, _workflow_id: &str, _error: &CanoError) {
+                panic!("panic in on_checkpoint_clear_failed");
+            }
+        }
+
+        struct ClearFailStore(InMemoryCheckpointStore);
+        #[crate::checkpoint_store]
+        impl CheckpointStore for ClearFailStore {
+            async fn append(&self, wf_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
+                self.0.append(wf_id, row).await
+            }
+            async fn load_run(&self, wf_id: &str) -> Result<Vec<CheckpointRow>, CanoError> {
+                self.0.load_run(wf_id).await
+            }
+            async fn clear(&self, _wf_id: &str) -> Result<(), CanoError> {
+                Err(CanoError::checkpoint_store("disk read-only"))
+            }
+        }
+
+        struct Slow;
+        #[crate::task(state = TestState)]
+        impl Slow {
+            async fn run(&self) -> Result<TestState, CanoError> {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                Ok(TestState::Complete)
+            }
+        }
+
+        let obs: Arc<dyn WorkflowObserver> = Arc::new(PanickyLifecycleObserver);
+        let store = Arc::new(ClearFailStore(InMemoryCheckpointStore::new()));
+
+        // 1. `on_checkpoint_clear_failed` + `on_resume` panic isolation
+        let wf = Workflow::bare()
+            .with_observer(Arc::clone(&obs))
+            .with_checkpoint_store(store.clone())
+            .with_workflow_id("panic-obs")
+            .register(TestState::Start, SimpleTask::new(TestState::Complete))
+            .add_exit_state(TestState::Complete);
+        assert_eq!(
+            wf.orchestrate(TestState::Start).await.unwrap(),
+            TestState::Complete
+        );
+        assert_eq!(
+            wf.resume_from("panic-obs").await.unwrap(),
+            TestState::Complete
+        );
+
+        // 2. `on_cancelled` panic isolation
+        let token = CancellationToken::new();
+        token.cancel();
+        let err = Workflow::bare()
+            .with_observer(Arc::clone(&obs))
+            .register(TestState::Start, Slow)
+            .add_exit_state(TestState::Complete)
+            .orchestrate_with_token(TestState::Start, &token)
+            .await
+            .unwrap_err();
+        assert!(err.is_cancelled());
+
+        // 3. `on_workflow_timeout` panic isolation
+        let err = Workflow::bare()
+            .with_observer(obs)
+            .with_total_timeout(Duration::from_millis(15))
+            .register(TestState::Start, Slow)
+            .add_exit_state(TestState::Complete)
+            .orchestrate(TestState::Start)
+            .await
+            .unwrap_err();
+        assert!(matches!(err.inner(), CanoError::WorkflowTimeout { .. }));
     }
 }

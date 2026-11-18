@@ -207,7 +207,7 @@ impl PostgresStore {
         &self,
         workflow_id: &str,
         row: &CheckpointRow,
-        attempt: usize,
+        sent: &std::sync::atomic::AtomicBool,
     ) -> Result<(), Failure> {
         let sequence = i64::try_from(row.sequence).map_err(|_| {
             Failure::fatal(CanoError::checkpoint_store(format!(
@@ -217,9 +217,9 @@ impl PostgresStore {
         })?;
         let client = Checkout::get(&self.pool, "append").await?;
         let result = self
-            .insert_or_verify(&client, workflow_id, sequence, row, attempt)
+            .insert_or_verify(&client, workflow_id, sequence, row, sent)
             .await;
-        client.release();
+        client.finish(&result);
         result
     }
 
@@ -229,12 +229,13 @@ impl PostgresStore {
         workflow_id: &str,
         sequence: i64,
         row: &CheckpointRow,
-        attempt: usize,
+        sent: &std::sync::atomic::AtomicBool,
     ) -> Result<(), Failure> {
         let insert = client
             .prepare_cached(&self.sql.insert)
             .await
             .map_err(|e| statement_failure("append", &e))?;
+        let prior_sent = sent.swap(true, std::sync::atomic::Ordering::Relaxed);
         let inserted = client
             .execute(
                 &insert,
@@ -253,8 +254,9 @@ impl PostgresStore {
         if inserted == 1 {
             return Ok(());
         }
-        if attempt > 0 {
-            // An earlier attempt may have committed before its reply was lost.
+        if prior_sent {
+            // An earlier attempt actually sent `INSERT` and may have committed before
+            // its reply was lost.
             let select = client
                 .prepare_cached(&self.sql.select_row)
                 .await
@@ -276,9 +278,10 @@ impl PostgresStore {
             let select = client.prepare_cached(&self.sql.select_run).await?;
             client.query(&select, &[&workflow_id]).await
         }
-        .await;
-        client.release();
-        let rows = result.map_err(|e| statement_failure("load_run", &e))?;
+        .await
+        .map_err(|e| statement_failure("load_run", &e));
+        client.finish(&result);
+        let rows = result?;
         rows.iter()
             .map(|stored| decode_row(workflow_id, stored))
             .collect()
@@ -290,9 +293,11 @@ impl PostgresStore {
             let delete = client.prepare_cached(&self.sql.delete).await?;
             client.execute(&delete, &[&workflow_id]).await
         }
-        .await;
-        client.release();
-        result.map(drop).map_err(|e| statement_failure("clear", &e))
+        .await
+        .map(drop)
+        .map_err(|e| statement_failure("clear", &e));
+        client.finish(&result);
+        result
     }
 }
 
@@ -300,11 +305,13 @@ impl PostgresStore {
 impl CheckpointStore for PostgresStore {
     async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
         let row = &row;
-        retry::run(&self.retry, move |n| {
+        let sent = std::sync::atomic::AtomicBool::new(false);
+        let sent = &sent;
+        retry::run(&self.retry, move |_| {
             retry::bounded(
                 "postgres append",
                 self.operation_timeout,
-                self.append_once(workflow_id, row, n),
+                self.append_once(workflow_id, row, sent),
             )
         })
         .await
@@ -341,9 +348,10 @@ impl PostgresStore {
             let select = client.prepare_cached(&self.scheduler.select).await?;
             client.query_opt(&select, &[&flow_id]).await
         }
-        .await;
-        client.release();
-        let stored = result.map_err(|e| statement_failure("scheduler load", &e))?;
+        .await
+        .map_err(|e| statement_failure("scheduler load", &e));
+        client.finish(&result);
+        let stored = result?;
         stored
             .as_ref()
             .map(|stored| decode_record(flow_id, stored))
@@ -355,9 +363,9 @@ impl PostgresStore {
         flow_id: &str,
         expected: Option<u64>,
         value: &[u8],
-        attempt: usize,
+        sent: &std::sync::atomic::AtomicBool,
     ) -> Result<CasOutcome, Failure> {
-        let expected = match expected {
+        let expected_i64 = match expected {
             None => None,
             // Postgres sequence values live in `1..=i64::MAX`, so `0` or anything above
             // `i64::MAX` can never match a stored version.
@@ -369,9 +377,9 @@ impl PostgresStore {
         };
         let client = Checkout::get(&self.pool, "scheduler swap").await?;
         let result = self
-            .swap_or_verify(&client, flow_id, expected, value, attempt)
+            .swap_or_verify(&client, flow_id, expected, expected_i64, value, sent)
             .await;
-        client.release();
+        client.finish(&result);
         result
     }
 
@@ -379,9 +387,10 @@ impl PostgresStore {
         &self,
         client: &Object,
         flow_id: &str,
+        expected_u64: Option<u64>,
         expected: Option<i64>,
         value: &[u8],
-        attempt: usize,
+        sent: &std::sync::atomic::AtomicBool,
     ) -> Result<CasOutcome, Failure> {
         let fail = |e: tokio_postgres::Error| statement_failure("scheduler swap", &e);
         let swapped = match expected {
@@ -390,27 +399,34 @@ impl PostgresStore {
                     .prepare_cached(&self.scheduler.insert)
                     .await
                     .map_err(fail)?;
-                client
+                let prior_sent = sent.swap(true, std::sync::atomic::Ordering::Relaxed);
+                let row = client
                     .query_opt(&insert, &[&flow_id, &value])
                     .await
-                    .map_err(fail)?
+                    .map_err(fail)?;
+                (row, prior_sent)
             }
             Some(version) => {
                 let update = client
                     .prepare_cached(&self.scheduler.update)
                     .await
                     .map_err(fail)?;
-                client
+                let prior_sent = sent.swap(true, std::sync::atomic::Ordering::Relaxed);
+                let row = client
                     .query_opt(&update, &[&flow_id, &version, &value])
                     .await
-                    .map_err(fail)?
+                    .map_err(fail)?;
+                (row, prior_sent)
             }
         };
+        let (swapped, prior_sent) = swapped;
         if let Some(written) = swapped {
             return Ok(CasOutcome::Written(version_from_db(flow_id, &written, 0)?));
         }
-        if attempt > 0 {
-            // An earlier attempt may have committed before its reply was lost.
+        if prior_sent {
+            // An earlier attempt actually sent `INSERT`/`UPDATE` and may have committed
+            // before its reply was lost; verify both payload equality and strictly newer
+            // sequence version than `expected`.
             let select = client
                 .prepare_cached(&self.scheduler.select)
                 .await
@@ -418,7 +434,7 @@ impl PostgresStore {
             let stored = client.query_opt(&select, &[&flow_id]).await.map_err(fail)?;
             if let Some(stored) = stored {
                 let record = decode_record(flow_id, &stored)?;
-                if record.value == value {
+                if record.value == value && expected_u64.is_none_or(|exp| record.version > exp) {
                     return Ok(CasOutcome::Written(record.version));
                 }
             }
@@ -432,11 +448,11 @@ impl PostgresStore {
             let delete = client.prepare_cached(&self.scheduler.delete).await?;
             client.execute(&delete, &[&flow_id]).await
         }
-        .await;
-        client.release();
+        .await
+        .map(drop)
+        .map_err(|e| statement_failure("scheduler remove", &e));
+        client.finish(&result);
         result
-            .map(drop)
-            .map_err(|e| statement_failure("scheduler remove", &e))
     }
 }
 
@@ -462,11 +478,13 @@ impl SchedulerStore for PostgresStore {
         value: Vec<u8>,
     ) -> Result<CasOutcome, CanoError> {
         let value = value.as_slice();
-        retry::run(&self.retry, move |n| {
+        let sent = std::sync::atomic::AtomicBool::new(false);
+        let sent = &sent;
+        retry::run(&self.retry, move |_| {
             retry::bounded(
                 "postgres scheduler swap",
                 self.operation_timeout,
-                self.scheduler_swap_once(flow_id, expected, value, n),
+                self.scheduler_swap_once(flow_id, expected, value, sent),
             )
         })
         .await
@@ -667,14 +685,21 @@ impl PostgresStoreBuilder {
                 "SELECT pg_advisory_xact_lock({MIGRATION_LOCK});\n{}",
                 self.ddl()?
             );
-            retry::bounded("postgres migrate", self.operation_timeout, async {
-                let client = Checkout::get(&pool, "migrate").await?;
-                let result = client.batch_execute(&migration).await;
-                client.release();
-                result.map_err(|e| statement_failure("migrate", &e))
+            let migration = migration.as_str();
+            let pool_ref = &pool;
+            let op_timeout = self.operation_timeout;
+            retry::run(&self.retry, move |_| {
+                retry::bounded("postgres migrate", op_timeout, async move {
+                    let client = Checkout::get(pool_ref, "migrate").await?;
+                    let result = client
+                        .batch_execute(migration)
+                        .await
+                        .map_err(|e| statement_failure("migrate", &e));
+                    client.finish(&result);
+                    result
+                })
             })
-            .await
-            .map_err(|failure| failure.error)?;
+            .await?;
         }
         Ok(PostgresStore {
             pool,
@@ -708,6 +733,12 @@ impl PostgresStoreBuilder {
     /// The qualified scheduler table and its qualified version sequence.
     #[cfg(feature = "scheduler")]
     fn scheduler_names(&self) -> Result<(String, String), CanoError> {
+        if self.scheduler_table == self.table {
+            return Err(CanoError::configuration(format!(
+                "the checkpoint and scheduler tables must differ, both are {:?}",
+                self.table
+            )));
+        }
         let table = self.qualify(&self.scheduler_table)?;
         // `qualify` validated the name as ASCII, so cutting at a byte index is safe.
         let stem = &self.scheduler_table[..self.scheduler_table.len().min(SEQUENCE_STEM_MAX)];
@@ -867,6 +898,14 @@ impl Checkout {
     /// Return the connection to the pool: its statements ran to completion.
     fn release(mut self) {
         drop(self.0.take());
+    }
+
+    /// Return the connection to the pool unless a transient failure left its socket
+    /// suspect (in which case `Drop` closes and evicts it).
+    fn finish<T>(self, result: &Result<T, Failure>) {
+        if !matches!(result, Err(f) if f.transient) {
+            self.release();
+        }
     }
 }
 
@@ -1283,5 +1322,17 @@ mod tests {
                 .unwrap();
             assert_eq!(outcome, CasOutcome::Conflict, "version {impossible}");
         }
+    }
+
+    #[cfg(feature = "scheduler")]
+    #[test]
+    fn matching_checkpoint_and_scheduler_tables_are_rejected() {
+        let err = PostgresStore::builder()
+            .with_checkpoint_table("shared_table")
+            .with_scheduler_table("shared_table")
+            .schema_sql()
+            .unwrap_err();
+        assert_eq!(err.category(), "configuration");
+        assert!(err.to_string().contains("must differ"), "{err}");
     }
 }

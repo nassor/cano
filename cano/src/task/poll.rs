@@ -317,10 +317,10 @@ where
             Err(e) => match &policy {
                 PollErrorPolicy::FailFast => return Err(e),
                 PollErrorPolicy::RetryOnError { max_errors } => {
-                    consecutive_errors += 1;
-                    if consecutive_errors > *max_errors {
+                    if consecutive_errors >= *max_errors {
                         return Err(e);
                     }
+                    consecutive_errors += 1;
                     // Yield before the next poll so a synchronously-erroring poll
                     // body can't spin the executor either.
                     tokio::task::yield_now().await;
@@ -739,6 +739,32 @@ mod tests {
             "timeout took too long: {elapsed:?}"
         );
     }
+
+    #[tokio::test]
+    async fn poll_retry_on_error_with_u32_max_budget_recovers_without_overflow() {
+        struct FlakyPoller(AtomicU32);
+        #[task::poll]
+        impl PollTask<Step> for FlakyPoller {
+            fn on_poll_error(&self) -> PollErrorPolicy {
+                PollErrorPolicy::RetryOnError {
+                    max_errors: u32::MAX,
+                }
+            }
+            async fn poll(&self, _res: &Resources) -> Result<PollOutcome<Step>, CanoError> {
+                let n = self.0.fetch_add(1, Ordering::Relaxed);
+                if n < 3 {
+                    Err(CanoError::task_execution("transient"))
+                } else {
+                    Ok(PollOutcome::Ready(Step::Done))
+                }
+            }
+        }
+
+        let poller = FlakyPoller(AtomicU32::new(0));
+        let res = Resources::new();
+        assert_eq!(run_poll_loop(&poller, &res).await.unwrap(), Step::Done);
+        assert_eq!(poller.0.load(Ordering::Relaxed), 4);
+    }
 }
 
 #[cfg(all(test, feature = "metrics"))]
@@ -758,8 +784,6 @@ mod metrics_tests {
         count: Arc<AtomicU32>,
     }
 
-    // Use the trait-impl form: inside cano the inherent form emits ::cano:: paths
-    // that don't resolve; trait-impl form works everywhere.
     #[crate::task::poll]
     impl PollTask<St> for TwicePendingPoller {
         async fn poll(&self, _res: &Resources) -> Result<PollOutcome<St>, CanoError> {

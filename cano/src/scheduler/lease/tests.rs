@@ -379,6 +379,8 @@ async fn a_lost_lease_cancels_the_run_and_keeps_the_new_owners_record() {
         assert_eq!(rec.lease.as_ref().unwrap().owner, "a");
         rec.lease = Some(Lease {
             owner: "thief".into(),
+            session: 99,
+            id: 1,
             expires_at: Utc::now() + chrono::Duration::seconds(60),
         });
         rec.written_by = "thief".into();
@@ -425,6 +427,8 @@ async fn an_expired_foreign_lease_counts_as_a_failure() {
             last_run: Some(now - chrono::Duration::seconds(60)),
             lease: Some(Lease {
                 owner: "ghost".into(),
+                session: 99,
+                id: 1,
                 expires_at: now - chrono::Duration::seconds(10),
             }),
             written_by: "ghost".into(),
@@ -1058,6 +1062,8 @@ async fn a_store_outage_after_an_expired_foreign_lease_does_not_busy_poll() {
         last_run: Some(now - chrono::Duration::seconds(10)),
         lease: Some(Lease {
             owner: "other".into(),
+            session: 99,
+            id: 1,
             expires_at: now + chrono::Duration::milliseconds(150),
         }),
         written_by: "other".into(),
@@ -1513,8 +1519,18 @@ async fn consecutive_swaps_carry_distinct_write_sequences() {
         Duration::from_secs(30),
     );
     let policy = BackoffPolicy::default();
-    let Some(super::Claim::Won(held)) =
-        coord.claim("f", &policy, Due::Trigger, None).await.unwrap()
+    let sent = std::sync::atomic::AtomicBool::new(false);
+    let Some(super::Claim::Won(held)) = coord
+        .claim(
+            "f",
+            coord.next_lease_id(),
+            &policy,
+            Due::Trigger,
+            None,
+            &sent,
+        )
+        .await
+        .unwrap()
     else {
         panic!("first claim must win");
     };
@@ -1530,6 +1546,191 @@ async fn consecutive_swaps_carry_distinct_write_sequences() {
     let reset_again_bytes = store.record("f").unwrap().value;
     assert_eq!(reset_again.write_seq, 3);
     assert_ne!(reset_bytes, reset_again_bytes);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn restarted_instance_with_same_instance_id_does_not_steal_pre_crash_lease() {
+    #[derive(Clone)]
+    struct Uncancellable(Arc<AtomicBool>);
+    #[crate::saga::task(state = TestState)]
+    impl Uncancellable {
+        type Output = ();
+        async fn run(&self) -> Result<(TestState, ()), CanoError> {
+            self.0.store(true, Ordering::SeqCst);
+            sleep(Duration::from_secs(60)).await;
+            Ok((TestState::Complete, ()))
+        }
+        async fn compensate(&self, _o: ()) -> Result<(), CanoError> {
+            Ok(())
+        }
+    }
+
+    let store = store();
+    let ttl = Duration::from_millis(250);
+    let started = Arc::new(AtomicBool::new(false));
+    let crash_wf = Workflow::bare()
+        .register(TestState::Start, Uncancellable(Arc::clone(&started)))
+        .add_exit_state(TestState::Complete);
+
+    let first_gen = instance(&store, "pod-0")
+        .manual("f", crash_wf, TestState::Start)
+        .with_lease_ttl(ttl)
+        .start()
+        .await
+        .unwrap();
+    first_gen.trigger("f").await.unwrap();
+    assert!(wait_until(Duration::from_secs(2), || started.load(Ordering::SeqCst)).await);
+    // Simulate sudden process crash: drop `first_gen` without `stop()`, leaving its
+    // `pod-0` lease live in the store until `ttl` elapses.
+    drop(first_gen);
+
+    let fast = Probe::new(Duration::from_millis(5));
+    let restarted = instance(&store, "pod-0")
+        .manual("f", fast.workflow(), TestState::Start)
+        .with_backoff("f", BackoffPolicy::with_trip(1))
+        .with_lease_ttl(ttl)
+        .start()
+        .await
+        .unwrap();
+
+    // Even though `instance_id` is also `"pod-0"`, `session` differs, so the restarted
+    // process sees the pre-crash lease as foreign (`RunningElsewhere`) and refuses to steal it.
+    let initial = restarted.status("f").unwrap();
+    assert!(
+        matches!(initial.status, Status::RunningElsewhere { ref owner, .. } if &**owner == "pod-0"),
+        "expected RunningElsewhere for pre-crash lease, got {:?}",
+        initial.status
+    );
+    let err = restarted
+        .trigger("f")
+        .await
+        .expect_err("must not steal pre-crash lease before expiry");
+    assert!(err.to_string().contains("pod-0"), "{err}");
+
+    // Once the pre-crash lease expires, the restarted `pod-0` counts the crashed run as
+    // a failure (tripping at streak 1) instead of silently forgiving it!
+    tokio::time::sleep(ttl + Duration::from_millis(60)).await;
+    let err = restarted
+        .trigger("f")
+        .await
+        .expect_err("expired pre-crash lease must count as failure and trip at streak 1");
+    assert!(err.to_string().contains("tripped"), "{err}");
+    assert_eq!(record(&store, "f").failure_streak, 1);
+    restarted.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn stale_lease_id_cannot_release_newer_run_on_same_instance() {
+    let store = store();
+    let coord = super::Coordinator::new(
+        Arc::clone(&store) as Arc<dyn SchedulerStore>,
+        Arc::from("node-1"),
+        Duration::from_millis(20),
+    );
+    let policy = BackoffPolicy::default();
+    let sent = std::sync::atomic::AtomicBool::new(false);
+
+    let id1 = coord.next_lease_id();
+    let Some(super::Claim::Won(_)) = coord
+        .claim("f", id1, &policy, Due::Trigger, None, &sent)
+        .await
+        .unwrap()
+    else {
+        panic!("claim 1 must win");
+    };
+
+    tokio::time::sleep(Duration::from_millis(40)).await;
+
+    let id2 = coord.next_lease_id();
+    let Some(super::Claim::Won(_)) = coord
+        .claim("f", id2, &policy, Due::Trigger, None, &sent)
+        .await
+        .unwrap()
+    else {
+        panic!("claim 2 must win after expiry");
+    };
+
+    // Late zombie release for `id1` must return `NotHeld` and leave `id2` intact.
+    let rel = coord.release("f", id1, &policy, &Ok(())).await;
+    assert!(matches!(rel, super::Release::NotHeld(Some(_))));
+    let rec = record(&store, "f");
+    assert_eq!(rec.lease.as_ref().map(|l| l.id), Some(id2));
+
+    // Releasing `id2` succeeds and clears the lease.
+    let rel2 = coord.release("f", id2, &policy, &Ok(())).await;
+    assert!(matches!(rel2, super::Release::Written(_)));
+    assert!(record(&store, "f").lease.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_manual_trigger_during_store_backoff_preserves_backoff_state() {
+    let store = store();
+    let failing = Probe::failing(Duration::from_millis(1));
+    let slow = Probe::new(Duration::from_secs(30));
+
+    let a = instance(&store, "a")
+        .manual("f", failing.workflow(), TestState::Start)
+        .with_backoff(
+            "f",
+            BackoffPolicy {
+                initial: Duration::from_secs(120),
+                jitter: 0.0,
+                ..BackoffPolicy::default()
+            },
+        )
+        .start()
+        .await
+        .unwrap();
+    a.trigger("f").await.unwrap();
+    let s1 = a.wait_idle("f").await.unwrap();
+    assert!(matches!(s1.status, Status::Backoff { streak: 1, .. }));
+    a.stop().await.unwrap();
+
+    let b = instance(&store, "b")
+        .manual("f", slow.workflow(), TestState::Start)
+        .start()
+        .await
+        .unwrap();
+    b.trigger("f").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    b.cancel_flow("f").unwrap();
+    let after = b.wait_idle("f").await.unwrap();
+    assert!(
+        matches!(after.status, Status::Backoff { streak: 1, .. }),
+        "expected Status::Backoff after cancelling manual trigger during backoff, got {:?}",
+        after.status
+    );
+    assert_eq!(record(&store, "f").state, FlowState::Backoff);
+    b.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn inherent_scheduler_store_macro_implements_trait_and_passes_contract() {
+    #[derive(Default)]
+    struct InherentSchedStore(crate::testing::InMemorySchedulerStore);
+
+    #[crate::scheduler_store]
+    impl InherentSchedStore {
+        async fn load(&self, flow_id: &str) -> Result<Option<crate::VersionedRecord>, CanoError> {
+            self.0.load(flow_id).await
+        }
+
+        async fn compare_and_swap(
+            &self,
+            flow_id: &str,
+            expected: Option<u64>,
+            value: Vec<u8>,
+        ) -> Result<crate::CasOutcome, CanoError> {
+            self.0.compare_and_swap(flow_id, expected, value).await
+        }
+
+        async fn remove(&self, flow_id: &str) -> Result<(), CanoError> {
+            self.0.remove(flow_id).await
+        }
+    }
+
+    let store = InherentSchedStore::default();
+    crate::testing::assert_scheduler_store_contract(&store, "inherent-macro").await;
 }
 
 #[cfg(feature = "metrics")]
@@ -1548,6 +1749,8 @@ fn store_backed_failures_and_expired_leases_emit_scheduler_metrics() {
                 last_run: Some(now - chrono::Duration::seconds(60)),
                 lease: Some(Lease {
                     owner: "dead".into(),
+                    session: 99,
+                    id: 1,
                     expires_at: now - chrono::Duration::seconds(5),
                 }),
                 written_by: "dead".into(),

@@ -418,11 +418,26 @@ impl Resources {
     ///
     /// The first `setup` error.
     pub async fn setup_all(&self) -> Result<(), CanoError> {
-        for (idx, (_, resource)) in self.lifecycle.iter().enumerate() {
-            if let Err(e) = resource.setup().await {
-                self.teardown_range(0..idx).await;
-                return Err(e);
-            }
+        use futures_util::FutureExt;
+        use std::panic::AssertUnwindSafe;
+
+        for (idx, (label, resource)) in self.lifecycle.iter().enumerate() {
+            let outcome = AssertUnwindSafe(async { resource.setup().await })
+                .catch_unwind()
+                .await;
+            let err = match outcome {
+                Ok(Ok(())) => continue,
+                Ok(Err(e)) => e,
+                Err(payload) => {
+                    let msg = crate::workflow::panic_payload_message(&*payload);
+                    #[cfg(feature = "tracing")]
+                    tracing::error!(resource = %label, panic = %msg, "resource setup panicked");
+                    let _ = label;
+                    CanoError::generic(format!("resource setup panicked: {msg}"))
+                }
+            };
+            self.teardown_range(0..idx).await;
+            return Err(err);
         }
         Ok(())
     }
@@ -447,11 +462,28 @@ impl Resources {
     /// Tear down `lifecycle[range]` LIFO; every resource is still torn down when one fails,
     /// each error is logged, and the first one is returned.
     async fn teardown_range_result(&self, range: Range<usize>) -> Result<(), CanoError> {
+        use futures_util::FutureExt;
+        use std::panic::AssertUnwindSafe;
+
         let mut first_error: Option<CanoError> = None;
-        for (_, resource) in self.lifecycle[range].iter().rev() {
-            if let Err(e) = resource.teardown().await {
+        for (label, resource) in self.lifecycle[range].iter().rev() {
+            let outcome = AssertUnwindSafe(async { resource.teardown().await })
+                .catch_unwind()
+                .await;
+            let maybe_err = match outcome {
+                Ok(Ok(())) => None,
+                Ok(Err(e)) => Some(e),
+                Err(payload) => {
+                    let msg = crate::workflow::panic_payload_message(&*payload);
+                    let _ = label;
+                    Some(CanoError::generic(format!(
+                        "resource teardown panicked: {msg}"
+                    )))
+                }
+            };
+            if let Some(e) = maybe_err {
                 #[cfg(feature = "tracing")]
-                tracing::error!("resource teardown failed: {e}");
+                tracing::error!(resource = %label, "resource teardown failed: {e}");
                 #[cfg(not(feature = "tracing"))]
                 eprintln!("cano: resource teardown error: {e}");
                 if first_error.is_none() {
@@ -802,5 +834,136 @@ mod tests {
         assert!(HealthStatus::Healthy.is_healthy());
         assert!(!HealthStatus::Degraded("x".to_string()).is_healthy());
         assert!(!HealthStatus::Unhealthy("x".to_string()).is_healthy());
+    }
+
+    #[tokio::test]
+    async fn panicking_setup_rolls_back_prior_resources_lifo_and_returns_error() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+
+        struct TrackedRes {
+            name: &'static str,
+            log: Arc<std::sync::Mutex<Vec<String>>>,
+        }
+        #[crate::resource]
+        impl Resource for TrackedRes {
+            async fn setup(&self) -> Result<(), crate::CanoError> {
+                self.log
+                    .lock()
+                    .unwrap()
+                    .push(format!("setup:{}", self.name));
+                Ok(())
+            }
+            async fn teardown(&self) -> Result<(), crate::CanoError> {
+                self.log
+                    .lock()
+                    .unwrap()
+                    .push(format!("teardown:{}", self.name));
+                Ok(())
+            }
+        }
+
+        struct PanicSetup;
+        #[crate::resource]
+        impl Resource for PanicSetup {
+            async fn setup(&self) -> Result<(), crate::CanoError> {
+                panic!("boom during setup");
+            }
+        }
+
+        let res = Resources::new()
+            .insert_named(
+                "first",
+                TrackedRes {
+                    name: "first",
+                    log: Arc::clone(&log),
+                },
+            )
+            .insert_named(
+                "second",
+                TrackedRes {
+                    name: "second",
+                    log: Arc::clone(&log),
+                },
+            )
+            .insert(PanicSetup);
+
+        let err = res
+            .setup_all()
+            .await
+            .expect_err("panicking setup must fail");
+        assert!(err.to_string().contains("boom during setup"), "{err}");
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                "setup:first".to_string(),
+                "setup:second".to_string(),
+                "teardown:second".to_string(),
+                "teardown:first".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn panicking_teardown_still_runs_remaining_teardowns_lifo() {
+        let log = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+
+        struct TrackedTear {
+            name: &'static str,
+            panic_on_tear: bool,
+            log: Arc<std::sync::Mutex<Vec<String>>>,
+        }
+        #[crate::resource]
+        impl Resource for TrackedTear {
+            async fn teardown(&self) -> Result<(), crate::CanoError> {
+                self.log
+                    .lock()
+                    .unwrap()
+                    .push(format!("teardown:{}", self.name));
+                if self.panic_on_tear {
+                    panic!("boom during teardown {}", self.name);
+                }
+                Ok(())
+            }
+        }
+
+        let res = Resources::new()
+            .insert_named(
+                "a",
+                TrackedTear {
+                    name: "a",
+                    panic_on_tear: false,
+                    log: Arc::clone(&log),
+                },
+            )
+            .insert_named(
+                "b",
+                TrackedTear {
+                    name: "b",
+                    panic_on_tear: true,
+                    log: Arc::clone(&log),
+                },
+            )
+            .insert_named(
+                "c",
+                TrackedTear {
+                    name: "c",
+                    panic_on_tear: false,
+                    log: Arc::clone(&log),
+                },
+            );
+
+        let err = res
+            .teardown_all_result()
+            .await
+            .expect_err("panicking teardown must surface an error");
+        assert!(err.to_string().contains("boom during teardown b"), "{err}");
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                "teardown:c".to_string(),
+                "teardown:b".to_string(),
+                "teardown:a".to_string(),
+            ]
+        );
     }
 }

@@ -19,6 +19,9 @@ impl AttrArgs {
         }
         let parser = syn::meta::parser(|meta| {
             if meta.path.is_ident("state") {
+                if out.state.is_some() {
+                    return Err(meta.error("duplicate `state` argument"));
+                }
                 out.state = Some(meta.value()?.parse()?);
                 Ok(())
             } else {

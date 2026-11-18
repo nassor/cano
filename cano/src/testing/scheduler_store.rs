@@ -47,7 +47,9 @@ impl SchedulerStore for InMemorySchedulerStore {
         if records.get(flow_id).map(|r| r.version) != expected {
             return Ok(CasOutcome::Conflict);
         }
-        *counter += 1;
+        *counter = counter
+            .checked_add(1)
+            .ok_or_else(|| CanoError::scheduler_store("scheduler version counter overflow"))?;
         records.insert(
             flow_id.to_string(),
             VersionedRecord {
@@ -94,18 +96,21 @@ impl SchedulerStore for InMemorySchedulerStore {
 /// ```
 pub async fn assert_scheduler_store_contract(store: &dyn SchedulerStore, namespace: &str) {
     let id = |case: &str| format!("{namespace}/{case}");
-    let isolated = ["a", "a.b", "a/b", "ab"].map(id);
+    let isolated = ["a", "a.b", "a=2Eb", "a_b", "axb", "a/b", "ab"].map(id);
     let awkward = [
         id(" spaced id"),
         id("wild*card>"),
         id("ünï©ode-✓"),
         id("per%cent=eq"),
+        id(".dot."),
+        id("'quoted'"),
         id(&"x".repeat(200)),
     ];
     let mut ids: Vec<String> = [
         "unknown",
         "create",
         "swap",
+        "empty",
         "recreate",
         "race-new",
         "race-swap",
@@ -302,7 +307,7 @@ pub async fn assert_scheduler_store_contract(store: &dyn SchedulerStore, namespa
     let outcomes = race(store, &race_swap, Some(base)).await;
     assert_one_winner("race on swap", &outcomes);
 
-    // 7. A 64 KiB value.
+    // 7. A 64 KiB value, empty value, and identical-value version bump.
     let big = id("big");
     let value: Vec<u8> = (0..64 * 1024).map(|i| (i % 251) as u8).collect();
     let v = written(
@@ -315,6 +320,43 @@ pub async fn assert_scheduler_store_contract(store: &dyn SchedulerStore, namespa
         .await,
     );
     expect_record(store, "large value", &big, v, &value).await;
+
+    let empty = id("empty");
+    let e1 = written(
+        "empty value",
+        must(
+            "empty value",
+            "compare_and_swap",
+            store.compare_and_swap(&empty, None, Vec::new()),
+        )
+        .await,
+    );
+    expect_record(store, "empty value", &empty, e1, &[]).await;
+    let e2 = written(
+        "same value swap",
+        must(
+            "same value swap",
+            "compare_and_swap",
+            store.compare_and_swap(&empty, Some(e1), Vec::new()),
+        )
+        .await,
+    );
+    assert_ne!(
+        e1, e2,
+        "scheduler store contract [same value swap]: swapping identical bytes must bump version"
+    );
+    let stale_same = must(
+        "same value swap",
+        "compare_and_swap stale",
+        store.compare_and_swap(&empty, Some(e1), Vec::new()),
+    )
+    .await;
+    assert_eq!(
+        stale_same,
+        CasOutcome::Conflict,
+        "scheduler store contract [same value swap]: stale version with identical bytes must conflict"
+    );
+    expect_record(store, "empty value", &empty, e2, &[]).await;
 
     for flow_id in &ids {
         must("cleanup", "remove", store.remove(flow_id)).await;

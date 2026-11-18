@@ -195,7 +195,7 @@ names follow the <code>metrics</code> crate's underscore convention.
 <div class="card">
 <h3>Workflow</h3>
 <ul>
-<li><code>cano_workflow_runs_total{outcome}</code>: counter; <code>outcome</code> is <code>completed</code> or <code>failed</code>. A run that trips its total timeout counts as <code>failed</code>.</li>
+<li><code>cano_workflow_runs_total{outcome}</code>: counter; <code>outcome</code> is <code>completed</code>, <code>suspended</code>, <code>cancelled</code> or <code>failed</code>. A run that trips its total timeout counts as <code>failed</code>.</li>
 <li><code>cano_workflow_duration_seconds{outcome}</code>: histogram (seconds)</li>
 <li><code>cano_workflow_active</code>: gauge; workflows currently executing</li>
 </ul>
@@ -203,7 +203,7 @@ names follow the <code>metrics</code> crate's underscore convention.
 <div class="card">
 <h3>Task dispatch</h3>
 <ul>
-<li><code>cano_task_duration_seconds{state, kind}</code>: histogram (seconds); <code>kind</code> is <code>single</code>, <code>router</code>, <code>split</code>, <code>compensatable</code>, <code>stepped</code> or <code>stream</code></li>
+<li><code>cano_task_duration_seconds{state, kind}</code>: histogram (seconds); <code>kind</code> is <code>single</code>, <code>router</code>, <code>split</code>, <code>compensatable</code>, <code>stepped</code>, <code>stream</code> or <code>suspend</code></li>
 <li><code>cano_task_attempts_total{outcome}</code>: counter; per attempt inside the retry loop; <code>outcome</code> is <code>completed</code> or <code>failed</code></li>
 <li><code>cano_circuit_rejections_total</code>: counter; attempts short-circuited by an open breaker</li>
 </ul>
@@ -260,7 +260,7 @@ names follow the <code>metrics</code> crate's underscore convention.
 <h3 id="scheduler-metrics"><a href="#scheduler-metrics" class="anchor-link" aria-hidden="true">#</a>Scheduler</h3>
 <p class="feature-tag">Also requires the <code>scheduler</code> feature.</p>
 <ul>
-<li><code>cano_scheduler_flow_runs_total{flow, outcome}</code>: counter; <code>outcome</code> is <code>completed</code> or <code>failed</code></li>
+<li><code>cano_scheduler_flow_runs_total{flow, outcome}</code>: counter; <code>outcome</code> is <code>completed</code>, <code>cancelled</code> or <code>failed</code></li>
 <li><code>cano_scheduler_flow_duration_seconds{flow}</code>: histogram (seconds)</li>
 <li><code>cano_scheduler_flow_backoff_total{flow}</code>: counter</li>
 <li><code>cano_scheduler_flow_tripped_total{flow}</code>: counter</li>

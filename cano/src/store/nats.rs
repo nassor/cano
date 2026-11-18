@@ -187,19 +187,21 @@ impl NatsStore {
         sequence: u64,
         key: &str,
         payload: &Bytes,
-        attempt: usize,
+        sent: &std::sync::atomic::AtomicBool,
     ) -> Result<(), Failure> {
         // Revision 0 means "the subject has no message". `kv.create` is not used: it
         // re-reads the key after any failed publish and so reports its own lost-ack write
         // as `AlreadyExists`.
+        let prior_sent = sent.swap(true, std::sync::atomic::Ordering::Relaxed);
         let error = match self.kv.update(key, payload.clone(), 0).await {
             Ok(_) => return Ok(()),
             Err(error) => error,
         };
         match error.kind() {
             UpdateErrorKind::WrongLastRevision => {
-                if attempt > 0 {
-                    // An earlier attempt may have been stored before its ack was lost.
+                if prior_sent {
+                    // An earlier attempt actually sent `update` and may have been stored
+                    // before its ack was lost.
                     match self.kv.get(key).await {
                         Ok(Some(stored)) if stored == *payload => return Ok(()),
                         Ok(_) => {}
@@ -300,7 +302,7 @@ impl NatsStore {
         key: &str,
         expected: Option<u64>,
         value: &Bytes,
-        attempt: usize,
+        sent: &std::sync::atomic::AtomicBool,
     ) -> Result<CasOutcome, Failure> {
         if expected == Some(0) {
             // JetStream revisions start at 1; passing 0 to `kv.update` means "create".
@@ -311,6 +313,7 @@ impl NatsStore {
         // whose revision then stands in for "absent".
         let mut revision = expected.unwrap_or(0);
         loop {
+            let prior_sent = sent.swap(true, std::sync::atomic::Ordering::Relaxed);
             match self.scheduler_kv.update(key, value.clone(), revision).await {
                 Ok(written) => return Ok(CasOutcome::Written(written)),
                 Err(error) => match error.kind() {
@@ -337,11 +340,13 @@ impl NatsStore {
                     revision = entry.revision;
                 }
                 Some(entry)
-                    if attempt > 0
+                    if prior_sent
                         && entry.operation == kv::Operation::Put
-                        && entry.value == *value =>
+                        && entry.value == *value
+                        && entry.revision > revision =>
                 {
-                    // An earlier attempt may have been stored before its ack was lost.
+                    // An earlier attempt actually sent `update` and may have been stored
+                    // before its ack was lost.
                     return Ok(CasOutcome::Written(entry.revision));
                 }
                 _ => return Ok(CasOutcome::Conflict),
@@ -364,11 +369,13 @@ impl CheckpointStore for NatsStore {
         let key = format!("{}.{sequence}", encode_id(workflow_id));
         let payload = Bytes::from(codec::encode(row)?);
         let (key, payload) = (key.as_str(), &payload);
-        retry::run(&self.retry, move |n| {
+        let sent = std::sync::atomic::AtomicBool::new(false);
+        let sent = &sent;
+        retry::run(&self.retry, move |_| {
             retry::bounded(
                 "nats append",
                 self.operation_timeout,
-                self.append_once(workflow_id, sequence, key, payload, n),
+                self.append_once(workflow_id, sequence, key, payload, sent),
             )
         })
         .await
@@ -421,11 +428,13 @@ impl SchedulerStore for NatsStore {
     ) -> Result<CasOutcome, CanoError> {
         let key = encode_id(flow_id);
         let (key, value) = (key.as_str(), &Bytes::from(value));
-        retry::run(&self.retry, move |n| {
+        let sent = std::sync::atomic::AtomicBool::new(false);
+        let sent = &sent;
+        retry::run(&self.retry, move |_| {
             scheduler_bounded(
                 "nats scheduler swap",
                 self.operation_timeout,
-                self.swap_once(key, expected, value, n),
+                self.swap_once(key, expected, value, sent),
             )
         })
         .await
@@ -593,9 +602,12 @@ impl NatsStoreBuilder {
         options: async_nats::ConnectOptions,
     ) -> Result<NatsStore, CanoError> {
         self.validate()?;
-        let client = options
-            .connect(addrs)
+        let limit = self.operation_timeout;
+        let client = tokio::time::timeout(limit, options.connect(addrs))
             .await
+            .map_err(|_| {
+                CanoError::checkpoint_store(format!("nats connect: timed out after {limit:?}"))
+            })?
             .map_err(|e| CanoError::checkpoint_store(format!("nats connect: {e}")))?;
         self.build_with_client(client).await
     }

@@ -13,7 +13,6 @@ use cano::prelude::*;
 use cano::store::nats::NatsStore;
 use cano::store::nats::async_nats;
 use cano::testing::{assert_checkpoint_store_contract, assert_scheduler_store_contract};
-use cano::{CasOutcome, SchedulerStore};
 use futures_util::TryStreamExt;
 use support::{Fault, NatsFixture, row};
 
@@ -430,4 +429,69 @@ async fn scheduler_retry_absorbs_a_lost_ack() {
             .unwrap(),
         CasOutcome::Conflict
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn multi_instance_scheduler_cluster_coordinates_over_nats() {
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    enum TickState {
+        Run,
+        Done,
+    }
+
+    #[derive(Clone)]
+    struct CountTask(Arc<AtomicUsize>);
+
+    #[task(state = TickState)]
+    impl CountTask {
+        async fn run(&self) -> Result<TickState, CanoError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            Ok(TickState::Done)
+        }
+    }
+
+    let nats = NatsFixture::start().await;
+    let store_a = Arc::new(NatsStore::connect(nats.direct_url()).await.unwrap());
+    let store_b = Arc::new(NatsStore::connect(nats.direct_url()).await.unwrap());
+
+    let runs = Arc::new(AtomicUsize::new(0));
+    let wf = Workflow::bare()
+        .register(TickState::Run, CountTask(Arc::clone(&runs)))
+        .add_exit_state(TickState::Done);
+
+    let node_a = Scheduler::new()
+        .manual("cluster-job", wf.clone(), TickState::Run)
+        .with_store(store_a)
+        .with_instance_id("nats-node-a")
+        .with_lease_ttl(Duration::from_secs(5))
+        .start()
+        .await
+        .unwrap();
+    let node_b = Scheduler::new()
+        .manual("cluster-job", wf, TickState::Run)
+        .with_store(store_b)
+        .with_instance_id("nats-node-b")
+        .with_lease_ttl(Duration::from_secs(5))
+        .start()
+        .await
+        .unwrap();
+
+    node_a.trigger("cluster-job").await.unwrap();
+    let err = node_b
+        .trigger("cluster-job")
+        .await
+        .expect_err("node_b must be blocked while node_a holds the NATS lease");
+    assert!(err.to_string().contains("nats-node-a"), "{err}");
+
+    node_a.wait_idle("cluster-job").await.unwrap();
+    node_b
+        .trigger("cluster-job")
+        .await
+        .expect("node_b can claim once node_a releases its lease");
+    node_b.wait_idle("cluster-job").await.unwrap();
+    assert_eq!(runs.load(Ordering::SeqCst), 2);
+
+    node_a.stop().await.unwrap();
+    node_b.stop().await.unwrap();
 }

@@ -64,16 +64,10 @@ struct Fixture {
 /// `testcontainers_modules::postgres::Postgres::default()` used to provide (that crate
 /// hard-pins `testcontainers ^0.27`, so it can't come along to 0.28).
 fn postgres_image() -> GenericImage {
-    // The official entrypoint logs this line twice: once for the throwaway server
-    // `initdb` runs (which then shuts down) and again for the real server. Waiting for a
-    // single occurrence would hand us a server that is about to stop, so wait for both —
-    // one per stream, exactly as the modules image did. `with_wait_for` appends to the
-    // list of ready conditions rather than replacing it, so both are honoured.
     const READY: &str = "database system is ready to accept connections";
-    GenericImage::new("postgres", "11-alpine")
+    GenericImage::new("postgres", "18-alpine")
         .with_exposed_port(5432.tcp())
         .with_wait_for(WaitFor::message_on_stderr(READY))
-        .with_wait_for(WaitFor::message_on_stdout(READY))
 }
 
 impl Fixture {
@@ -96,6 +90,14 @@ impl Fixture {
             .get_host_port_ipv4(5432)
             .await
             .expect("postgres host port");
+        let dsn = format!("postgres://postgres:postgres@127.0.0.1:{pg_host_port}/postgres");
+        support::eventually(Duration::from_secs(60), || async {
+            let (client, connection) = tokio_postgres::connect(&dsn, NoTls).await?;
+            tokio::spawn(connection);
+            client.simple_query("SELECT 1").await?;
+            Ok::<_, tokio_postgres::Error>(())
+        })
+        .await;
         Self {
             _pg: pg,
             network,
@@ -239,10 +241,11 @@ async fn crash_mid_flight_then_resume_completes_without_losing_or_duplicating_ef
             "expected at least one CompensationCompletion row (kind=1) for Reserve; \
              got: {kinds:?}"
         );
-        // All rows must have a recognized kind (0, 1, or 2).
+        // All rows must have a recognized kind (0..=4: StateEntry, CompensationCompletion,
+        // StepCursor, Suspended, ResumeInput).
         for (seq, k) in &kinds {
             assert!(
-                matches!(k, 0..=2),
+                matches!(k, 0..=4),
                 "checkpoint row at sequence {seq} has unrecognized kind {k}"
             );
         }

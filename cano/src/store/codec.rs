@@ -57,7 +57,13 @@ pub(super) fn decode(
     let body = bytes
         .strip_prefix(&ROW_TAG_V1)
         .ok_or_else(|| fail(&"missing row tag"))?;
-    let stored = postcard::from_bytes::<StoredRow>(body).map_err(|e| fail(&e))?;
+    let (stored, rest) = postcard::take_from_bytes::<StoredRow>(body).map_err(|e| fail(&e))?;
+    if !rest.is_empty() {
+        return Err(fail(&format!(
+            "{} trailing bytes after payload",
+            rest.len()
+        )));
+    }
     Ok(CheckpointRow {
         sequence,
         state: stored.state,
@@ -107,5 +113,20 @@ mod tests {
             err.to_string().contains("decode checkpoint row at"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn decode_rejects_truncated_and_trailing_byte_payloads() {
+        let valid =
+            encode(CheckpointRow::new(1, "StateA", "task_a").with_output(vec![9, 8, 7])).unwrap();
+        for cut in 0..valid.len() {
+            let err = decode("wf", 1, &valid[..cut]).unwrap_err();
+            assert_eq!(err.category(), "checkpoint_store", "cut={cut}: {err}");
+        }
+        let mut trailing = valid;
+        trailing.push(0xAA);
+        let err = decode("wf", 1, &trailing).unwrap_err();
+        assert_eq!(err.category(), "checkpoint_store");
+        assert!(err.to_string().contains("trailing bytes"), "{err}");
     }
 }

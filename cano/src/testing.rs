@@ -573,12 +573,14 @@ pub fn assert_compensation_ran<S: AsRef<str>>(actual: &[S], expected: &[&str]) {
 /// ```
 pub async fn assert_checkpoint_store_contract(store: &dyn CheckpointStore, namespace: &str) {
     let id = |case: &str| format!("{namespace}/{case}");
-    let isolated = ["a", "a.b", "a/b", "ab"].map(id);
+    let isolated = ["a", "a.b", "a=2Eb", "a_b", "axb", "a/b", "ab"].map(id);
     let awkward = [
         id(" spaced id"),
         id("wild*card>"),
         id("ünï©ode-✓"),
         id("per%cent=eq"),
+        id(".dot."),
+        id("'quoted'"),
         id(&"x".repeat(200)),
     ];
     let mut ids: Vec<String> = [
@@ -590,6 +592,7 @@ pub async fn assert_checkpoint_store_contract(store: &dyn CheckpointStore, names
         "concurrent",
         "race",
         "blob",
+        "load-clear",
     ]
     .into_iter()
     .map(id)
@@ -634,20 +637,20 @@ pub async fn assert_checkpoint_store_contract(store: &dyn CheckpointStore, names
         "checkpoint store contract [round trip]: loaded rows differ from appended rows"
     );
 
-    // 3. Sorted by sequence whatever the append order.
+    // 3. Sorted by numeric sequence whatever the append order (catches lexicographic sort).
     let order = id("order");
-    for sequence in [2, 0, 1] {
+    for sequence in [10, 0, 2, 1, 100] {
         let row = CheckpointRow::new(sequence, format!("S{sequence}"), "t");
         must("sorted load", "append", store.append(&order, row)).await;
     }
     let rows = must("sorted load", "load_run", store.load_run(&order)).await;
     assert_eq!(
         rows.iter().map(|r| r.sequence).collect::<Vec<_>>(),
-        [0, 1, 2],
-        "checkpoint store contract [sorted load]: rows must load ascending by sequence"
+        [0, 1, 2, 10, 100],
+        "checkpoint store contract [sorted load]: rows must load ascending by numeric sequence"
     );
 
-    // 4. A duplicate sequence is rejected and changes nothing.
+    // 4. A duplicate sequence (distinct OR byte-identical) is rejected and changes nothing.
     let duplicate = id("duplicate");
     let first = CheckpointRow::new(0, "First", "t");
     must(
@@ -656,17 +659,18 @@ pub async fn assert_checkpoint_store_contract(store: &dyn CheckpointStore, names
         store.append(&duplicate, first.clone()),
     )
     .await;
-    match store
-        .append(&duplicate, CheckpointRow::new(0, "Second", "t"))
-        .await
-    {
-        Err(e) => assert_eq!(
-            e.category(),
-            "checkpoint_store",
-            "checkpoint store contract [duplicate]: wrong error category: {e}"
-        ),
-        Ok(()) => {
-            panic!("checkpoint store contract [duplicate]: a second append at sequence 0 succeeded")
+    for candidate in [CheckpointRow::new(0, "Second", "t"), first.clone()] {
+        match store.append(&duplicate, candidate).await {
+            Err(e) => assert_eq!(
+                e.category(),
+                "checkpoint_store",
+                "checkpoint store contract [duplicate]: wrong error category: {e}"
+            ),
+            Ok(()) => {
+                panic!(
+                    "checkpoint store contract [duplicate]: a second append at sequence 0 succeeded"
+                )
+            }
         }
     }
     let next = CheckpointRow::new(1, "Next", "t");
@@ -810,6 +814,35 @@ pub async fn assert_checkpoint_store_contract(store: &dyn CheckpointStore, names
     assert!(
         rows == [big],
         "checkpoint store contract [large blob]: the 256 KiB blob did not round-trip"
+    );
+
+    // 11. Concurrent `load_run` and `clear` neither error nor corrupt state.
+    let load_clear = id("load-clear");
+    for seq in 0..8 {
+        must(
+            "concurrent load+clear",
+            "append",
+            store.append(&load_clear, CheckpointRow::new(seq, format!("S{seq}"), "t")),
+        )
+        .await;
+    }
+    let (loaded, cleared) =
+        futures_util::future::join(store.load_run(&load_clear), store.clear(&load_clear)).await;
+    if let Err(e) = loaded {
+        panic!("checkpoint store contract [concurrent load+clear]: load_run failed: {e}");
+    }
+    if let Err(e) = cleared {
+        panic!("checkpoint store contract [concurrent load+clear]: clear failed: {e}");
+    }
+    let after = must(
+        "concurrent load+clear",
+        "load_run after clear",
+        store.load_run(&load_clear),
+    )
+    .await;
+    assert!(
+        after.is_empty(),
+        "checkpoint store contract [concurrent load+clear]: rows remained after clear: {after:?}"
     );
 
     for workflow_id in &ids {

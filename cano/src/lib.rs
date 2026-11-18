@@ -416,8 +416,8 @@ pub mod prelude {
 
     #[cfg(feature = "scheduler")]
     pub use crate::{
-        BackoffPolicy, FlowInfo, RunningScheduler, Scheduler, SchedulerStore, Status,
-        scheduler_store, shutdown_signal,
+        BackoffPolicy, CasOutcome, FlowInfo, RunningScheduler, Scheduler, SchedulerStore, Status,
+        VersionedRecord, scheduler_store, shutdown_signal,
     };
 
     #[cfg(feature = "tracing")]

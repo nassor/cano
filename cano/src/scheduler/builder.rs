@@ -319,7 +319,9 @@ impl Scheduler {
                 next_eligible: None,
             },
             run_token: None,
+            last_error: None,
             claiming: false,
+            aborted: false,
         };
         let runtime = FlowRuntime {
             flow: Arc::new(WorkflowFlow {
@@ -330,6 +332,7 @@ impl Scheduler {
             policy: BackoffPolicy::default(),
             cell: tokio::sync::watch::Sender::new(cell),
             coordinator: None,
+            torn_down: std::sync::atomic::AtomicBool::new(false),
         };
         self.flows.push((id, runtime));
         self

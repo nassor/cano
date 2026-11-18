@@ -32,6 +32,11 @@
 //! | `CircuitOpen` | Circuit breaker rejected the call while open | Wait for the breaker's `reset_timeout` or fix the upstream dependency |
 //! | `CircuitHalfOpenBusy` | Breaker is probing the dependency but every trial slot is occupied | Retry shortly — a slot frees when an in-flight trial completes |
 //! | `CheckpointStore` | Checkpoint persistence failed | Check the recovery store backend (disk, permissions, encoding) |
+//! | `SchedulerStore` | Scheduler coordination store failed | Check the scheduler store backend (connectivity, table/bucket, encoding) |
+//! | `WorkflowVersionMismatch` | Stored checkpoint version differs from `with_workflow_version` | Deploy matching workflow version or migrate stored checkpoints |
+//! | `Cancelled` | Cooperative `CancellationToken` fired | Expected on cancel; inspect with `CanoError::is_cancelled()` |
+//! | `RateLimited` | A `MultiRateLimiter` tier rejected `try_acquire` | Wait `retry_after` or use `acquire()` |
+//! | `OrphanedCompensation` | Compensation skipped due to missing compensator or elapsed deadline | Decode `output_blob` for `task_id` to undo manually |
 //! | `CompensationFailed` | A `compensate` run failed during rollback | Inspect the aggregated errors; the original failure is `errors[0]` |
 //! | `WithStateContext` | A task failed during `Workflow::orchestrate` / `resume_from` | Read `state`, `attempt`, and `transitions_so_far`; inspect `source` for the underlying cause |
 //! | `Generic` | General errors | Check the specific error message |

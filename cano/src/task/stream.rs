@@ -356,8 +356,11 @@ where
     // absolute deadline never changes. Pinning a single future here and only
     // re-arming it on flush (below) keeps the per-item cost to the stream poll
     // alone. `None` for count windows — the tick branch then never resolves.
-    let mut tick: Option<Pin<Box<tokio::time::Sleep>>> = duration_len
-        .map(|len| Box::pin(tokio::time::sleep_until(tokio::time::Instant::now() + len)));
+    let mut tick: Option<Pin<Box<tokio::time::Sleep>>> = duration_len.map(|len| {
+        Box::pin(tokio::time::sleep_until(crate::workflow::deadline_after(
+            len,
+        )))
+    });
 
     // Resolves when the token fires, or never (no token). Built once and polled by
     // reference so the `select!` below does not re-register a waiter per item.
@@ -414,8 +417,11 @@ where
                 // Duration window elapsed.
                 if buf.is_empty() {
                     // Empty tumbling window: re-arm the deadline and keep waiting.
-                    tick = duration_len
-                        .map(|len| Box::pin(tokio::time::sleep_until(tokio::time::Instant::now() + len)));
+                    tick = duration_len.map(|len| {
+                        Box::pin(tokio::time::sleep_until(crate::workflow::deadline_after(
+                            len,
+                        )))
+                    });
                     continue;
                 }
                 return flush_full_window(task, res, std::mem::take(&mut buf), last_cursor).await;
@@ -452,10 +458,10 @@ where
                                     StreamErrorPolicy::FailFast => return Err(e),
                                     StreamErrorPolicy::SkipAndContinue => {}
                                     StreamErrorPolicy::RetryOnError { max_errors } => {
-                                        *consecutive_errors += 1;
-                                        if *consecutive_errors > *max_errors {
+                                        if *consecutive_errors >= *max_errors {
                                             return Err(e);
                                         }
+                                        *consecutive_errors += 1;
                                     }
                                 }
                             }

@@ -45,7 +45,9 @@ struct Inner {
 
 impl Drop for Inner {
     fn drop(&mut self) {
-        // The `JoinSet` drop that follows aborts whatever is left.
+        // Abort tasks before firing `cancel_runs` so dropping the last handle without
+        // `stop()` never races a cooperative cancel-release on another worker thread.
+        self.tasks.get_mut().abort_all();
         self.shutdown.cancel();
         self.cancel_runs.cancel();
     }
@@ -278,6 +280,7 @@ impl RunningScheduler {
         rt.cell.send_modify(|cell| {
             cell.info.failure_streak = 0;
             cell.info.next_eligible = None;
+            cell.last_error = None;
             if cell.info.status != Status::Running {
                 cell.info.status = Status::Idle;
             }
@@ -323,7 +326,6 @@ async fn shutdown_sequence(inner: &Inner) -> CanoResult<()> {
 
     inner.shutdown.cancel();
     let mut tasks = std::mem::take(&mut *inner.tasks.lock());
-    let mut result = Ok(());
 
     let drained = tokio::time::timeout(inner.drain_timeout, join_all(&mut tasks))
         .await
@@ -335,32 +337,43 @@ async fn shutdown_sequence(inner: &Inner) -> CanoResult<()> {
             .is_ok();
         if !cancelled {
             tasks.shutdown().await;
-            let mut aborted: Vec<&str> = Vec::new();
-            for id in &inner.order {
-                let was_running = inner.flows[id].cell.send_if_modified(|cell| {
-                    if cell.info.status != Status::Running {
-                        return false;
-                    }
-                    cell.info.status = Status::Idle;
-                    cell.run_token = None;
-                    true
-                });
-                if was_running {
-                    aborted.push(id);
-                }
-            }
-            if !aborted.is_empty() {
-                result = Err(CanoError::timeout(format!(
-                    "scheduler shutdown aborted {} in-flight flow(s): {}",
-                    aborted.len(),
-                    aborted.join(", ")
-                )));
-            }
         }
     }
 
+    let mut aborted: Vec<&str> = Vec::new();
+    for id in &inner.order {
+        let mut was_aborted = false;
+        inner.flows[id].cell.send_if_modified(|cell| {
+            let running = cell.info.status == Status::Running;
+            was_aborted = running || cell.aborted;
+            if !running && !cell.claiming {
+                return false;
+            }
+            cell.claiming = false;
+            cell.info.status = Status::Idle;
+            cell.run_token = None;
+            cell.aborted = true;
+            true
+        });
+        if was_aborted {
+            aborted.push(id);
+        }
+    }
+    let result = if aborted.is_empty() {
+        Ok(())
+    } else {
+        Err(CanoError::timeout(format!(
+            "scheduler shutdown aborted {} in-flight flow(s): {}",
+            aborted.len(),
+            aborted.join(", ")
+        )))
+    };
+
     for id in inner.order.iter().rev() {
-        inner.flows[id].flow.teardown().await;
+        let rt = &inner.flows[id];
+        if !rt.torn_down.swap(true, std::sync::atomic::Ordering::AcqRel) {
+            rt.flow.teardown().await;
+        }
     }
     result
 }
@@ -1900,5 +1913,175 @@ mod tests {
             !done.load(Ordering::SeqCst),
             "dropping the handle must abort the run"
         );
+    }
+
+    #[tokio::test]
+    async fn start_rejects_workflow_with_suspend_task() {
+        struct WaitHuman;
+        #[crate::task::suspend(state = TestState)]
+        impl WaitHuman {
+            async fn suspend(&self) -> Result<(), CanoError> {
+                Ok(())
+            }
+            async fn resume(&self, _input: String) -> Result<TestState, CanoError> {
+                Ok(TestState::Complete)
+            }
+        }
+
+        let store = Arc::new(crate::testing::InMemoryCheckpointStore::new());
+        let wf = Workflow::bare()
+            .with_checkpoint_store(store)
+            .with_workflow_id("parked")
+            .register(TestState::Start, WaitHuman)
+            .add_exit_state(TestState::Complete);
+        assert!(wf.validate().is_ok());
+
+        let err = Scheduler::new()
+            .manual("suspend-flow", wf, TestState::Start)
+            .start()
+            .await
+            .expect_err("scheduler must reject workflows with suspend states");
+        assert_eq!(err.category(), "configuration");
+        assert!(err.to_string().contains("suspend"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn dropped_stop_mid_drain_resets_running_status_and_retry_stop_tears_down_once() {
+        struct UncancellableTask {
+            started: Arc<tokio::sync::Notify>,
+        }
+        #[task]
+        impl Task<TestState> for UncancellableTask {
+            async fn run(&self) -> Result<TestState, CanoError> {
+                self.started.notify_one();
+                std::future::pending::<()>().await;
+                Ok(TestState::Complete)
+            }
+        }
+
+        struct CountedTeardown(Arc<AtomicU32>);
+        #[crate::resource]
+        impl crate::resource::Resource for CountedTeardown {
+            async fn teardown(&self) -> Result<(), CanoError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let started = Arc::new(tokio::sync::Notify::new());
+        let teardowns = Arc::new(AtomicU32::new(0));
+        let wf = Workflow::new(
+            crate::resource::Resources::new().insert(CountedTeardown(Arc::clone(&teardowns))),
+        )
+        .register(
+            TestState::Start,
+            UncancellableTask {
+                started: Arc::clone(&started),
+            },
+        )
+        .add_exit_state(TestState::Complete);
+
+        let running = Scheduler::new()
+            .manual("stuck", wf, TestState::Start)
+            .with_drain_timeout(Duration::from_secs(30))
+            .with_cancel_timeout(Duration::from_secs(30))
+            .start()
+            .await
+            .unwrap();
+        running.trigger("stuck").await.unwrap();
+        started.notified().await;
+
+        // First `stop()` is wrapped in a short timeout and dropped mid-drain.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), running.stop())
+                .await
+                .is_err()
+        );
+
+        // `RunningGuard` must flip the aborted flow out of `Status::Running` so `wait_idle`
+        // resolves immediately instead of hanging forever.
+        let info = tokio::time::timeout(Duration::from_secs(1), running.wait_idle("stuck"))
+            .await
+            .expect("wait_idle must not hang after stop() was dropped")
+            .unwrap();
+        assert_eq!(info.status, Status::Idle);
+
+        // Retrying `stop()` must report the aborted flow and tear down resources exactly once.
+        let err = running
+            .stop()
+            .await
+            .expect_err("second stop() must report the flow aborted when the first stop() dropped");
+        assert!(err.to_string().contains("stuck"), "{err}");
+        assert_eq!(teardowns.load(Ordering::SeqCst), 1);
+
+        // Idempotent thereafter: no second teardown.
+        let _ = running.stop().await;
+        assert_eq!(teardowns.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelling_manual_trigger_during_backoff_preserves_backoff_status() {
+        struct FailOrHang {
+            hang: Arc<std::sync::atomic::AtomicBool>,
+            started: Arc<tokio::sync::Notify>,
+        }
+        #[task]
+        impl Task<TestState> for FailOrHang {
+            async fn run(&self) -> Result<TestState, CanoError> {
+                if self.hang.load(Ordering::SeqCst) {
+                    self.started.notify_one();
+                    tokio::time::sleep(Duration::from_secs(30)).await;
+                    Ok(TestState::Complete)
+                } else {
+                    Err(CanoError::task_execution("initial failure"))
+                }
+            }
+        }
+
+        let hang = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let wf = Workflow::bare()
+            .register(
+                TestState::Start,
+                FailOrHang {
+                    hang: Arc::clone(&hang),
+                    started: Arc::clone(&started),
+                },
+            )
+            .add_exit_state(TestState::Complete);
+
+        let running = Scheduler::new()
+            .manual("f", wf, TestState::Start)
+            .with_backoff(
+                "f",
+                BackoffPolicy {
+                    initial: Duration::from_secs(120),
+                    jitter: 0.0,
+                    ..BackoffPolicy::default()
+                },
+            )
+            .start()
+            .await
+            .unwrap();
+
+        running.trigger("f").await.unwrap();
+        let after_fail = running.wait_idle("f").await.unwrap();
+        assert!(matches!(
+            after_fail.status,
+            Status::Backoff { streak: 1, .. }
+        ));
+
+        // Trigger manually while in backoff, then cancel that manual run.
+        hang.store(true, Ordering::SeqCst);
+        running.trigger("f").await.unwrap();
+        started.notified().await;
+        running.cancel_flow("f").unwrap();
+        let after_cancel = running.wait_idle("f").await.unwrap();
+        assert!(
+            matches!(after_cancel.status, Status::Backoff { streak: 1, ref last_error, .. } if last_error.contains("initial failure")),
+            "cancelling a manual trigger while next_eligible is still in the future must keep Status::Backoff, got {:?}",
+            after_cancel.status
+        );
+        running.stop().await.unwrap();
     }
 }

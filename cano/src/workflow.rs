@@ -101,12 +101,22 @@ pub use join::{JoinConfig, JoinStrategy};
 ///
 /// The task macros implement it for every model (`#[task]`, `#[task::router]`,
 /// `#[task::poll]`, `#[task::timer]`, `#[task::batch]`, `#[task::stepped]`,
-/// `#[task::stream]`, `#[saga::task]`), choosing the engine path for the model. A
-/// hand-written [`Task`] impl (no macro) adds
+/// `#[task::stream]`, `#[task::suspend]`, `#[saga::task]`), choosing the engine path
+/// for the model. A hand-written [`Task`] impl (no macro) adds
 /// `impl Registrable<S> for T { fn into_entry(self) -> StateEntry<S> { StateEntry::single(self) } }`.
 pub trait Registrable<TState> {
     /// The state entry this task registers as.
     fn into_entry(self) -> StateEntry<TState>;
+}
+
+/// Compute `tokio::time::Instant::now() + d` without panicking on overflow
+/// (for example `Duration::MAX`). Uses `tokio::time::Instant` so paused test
+/// clocks stay coherent.
+#[inline]
+pub(crate) fn deadline_after(d: Duration) -> tokio::time::Instant {
+    let now = tokio::time::Instant::now();
+    now.checked_add(d)
+        .unwrap_or_else(|| now + Duration::from_secs(u32::MAX as u64))
 }
 
 /// Invoke `f` for each observer in `observers`. Used at every workflow event site;
@@ -239,9 +249,6 @@ where
     /// compensator up by id when draining the compensation stack — including a stack
     /// rehydrated from a checkpoint log, where only the `task_id` string is available.
     compensators: HashMap<Arc<str>, Arc<dyn ErasedCompensatable<TState>>>,
-    /// A registration mistake that can only be reported later: [`validate`](Self::validate)
-    /// returns it before its other checks (first one wins).
-    config_error: Option<CanoError>,
     /// Optional append-only checkpoint store. When set (alongside [`workflow_id`](Self::workflow_id)),
     /// every state entry writes a [`CheckpointRow`](crate::checkpoint::CheckpointRow) before the state's task runs, so a
     /// crashed run can be resumed via [`resume_from`](Self::resume_from). `None` by default —
@@ -277,7 +284,6 @@ where
             validated: OnceLock::new(),
             observers: Arc::new([]),
             compensators: HashMap::new(),
-            config_error: None,
             checkpoint_store: None,
             workflow_id: None,
             workflow_version: 0,
@@ -414,8 +420,8 @@ where
     ///
     /// Accepts any [`Registrable`] task; the task macros (`#[task]`, `#[task::router]`,
     /// `#[task::poll]`, `#[task::timer]`, `#[task::batch]`, `#[task::stepped]`,
-    /// `#[task::stream]`, `#[saga::task]`) implement it and pick the engine path for
-    /// the model:
+    /// `#[task::stream]`, `#[task::suspend]`, `#[saga::task]`) implement it and pick the
+    /// engine path for the model:
     ///
     /// - **Router** tasks are dispatched like any task but **skipped by the checkpoint
     ///   writer**: no [`CheckpointRow`](crate::checkpoint::CheckpointRow) is appended and
@@ -431,6 +437,10 @@ where
     /// - **Stream** tasks are windowed by the engine, observe the run's
     ///   [`CancellationToken`](crate::CancellationToken) (flushing the in-flight window)
     ///   and, with a store and workflow id, persist each flushed window's cursor.
+    /// - **Suspend** tasks park the run: `suspend` runs on entry, the engine appends a
+    ///   [`RowKind::Suspended`](crate::checkpoint::RowKind::Suspended) row and returns
+    ///   `Ok(state)` without clearing the log; [`resume_with`](Self::resume_with) delivers
+    ///   typed external input and continues from `resume`.
     /// - **Compensatable** (saga) tasks push `(task name, serialized output)` onto the
     ///   run's compensation stack on success; if a later state fails, the stack drains
     ///   in reverse and each [`compensate`](crate::saga::CompensatableTask::compensate) runs. With a
@@ -439,23 +449,10 @@ where
     ///
     /// Replaces any handler previously registered for `state`. Infallible.
     pub fn register<T: Registrable<TState>>(mut self, state: TState, task: T) -> Self {
-        self.forget_compensator_for(&state);
         let entry = task.into_entry().0;
-        if let Entry::Compensatable { task, name, .. } = &entry {
-            // The compensation stack refers to compensators by name: a second state
-            // with the same name would roll back through the wrong instance.
-            if self.compensators.contains_key(name) {
-                self.config_error.get_or_insert_with(|| {
-                    CanoError::configuration(format!(
-                        "two compensatable states share the task name {name:?}; \
-                         override `name()` on one of them"
-                    ))
-                });
-            } else {
-                self.compensators.insert(Arc::clone(name), Arc::clone(task));
-            }
-        }
         self.states.insert(state, Arc::new(entry));
+        self.rebuild_compensators();
+        self.validated = OnceLock::new();
         self
     }
 
@@ -474,7 +471,6 @@ where
     where
         T: Task<TState> + 'static,
     {
-        self.forget_compensator_for(&state);
         let mut configs: Vec<Arc<TaskConfig>> = Vec::new();
         let mut names: Vec<Cow<'static, str>> = Vec::new();
         let mut arc_tasks: Vec<Arc<dyn Task<TState>>> = Vec::new();
@@ -493,16 +489,22 @@ where
                 join_config,
             }),
         );
+        self.rebuild_compensators();
+        self.validated = OnceLock::new();
         self
     }
 
-    /// If `state` currently holds a compensatable task, drop that task's (now-stale)
-    /// entry from the [`compensators`](Self::compensators) registry, so a later
-    /// `register*` for the same state doesn't leave a dangling compensator reachable by id.
-    fn forget_compensator_for(&mut self, state: &TState) {
-        if let Some(Entry::Compensatable { name, .. }) = self.states.get(state).map(|e| &**e) {
-            let name = Arc::clone(name);
-            self.compensators.remove(&*name);
+    /// Rebuild `compensators` from the currently registered `states`, ensuring
+    /// replacing a state handler never drops another state's compensator or leaves
+    /// a stale compensator reachable by name.
+    fn rebuild_compensators(&mut self) {
+        self.compensators.clear();
+        for entry in self.states.values() {
+            if let Entry::Compensatable { task, name, .. } = &**entry {
+                self.compensators
+                    .entry(Arc::clone(name))
+                    .or_insert_with(|| Arc::clone(task));
+            }
         }
     }
 
@@ -511,6 +513,7 @@ where
         if !self.exit_states.contains(&state) {
             self.exit_states.push(state);
         }
+        self.validated = OnceLock::new();
         self
     }
 
@@ -524,6 +527,7 @@ where
                 self.exit_states.push(state);
             }
         }
+        self.validated = OnceLock::new();
         self
     }
 
@@ -608,6 +612,7 @@ where
     /// enum.
     pub fn with_checkpoint_store(mut self, checkpoint_store: Arc<dyn CheckpointStore>) -> Self {
         self.checkpoint_store = Some(checkpoint_store);
+        self.validated = OnceLock::new();
         self
     }
 
@@ -692,12 +697,20 @@ where
         Ok(())
     }
 
+    pub(crate) fn has_suspend_states(&self) -> bool {
+        self.states
+            .values()
+            .any(|e| matches!(**e, Entry::Suspend { .. }))
+    }
+
     /// Validate the workflow configuration.
     ///
     /// Checks:
     /// - At least one exit state is defined
     /// - The workflow has at least one registered state handler
+    /// - No two registered compensatable states share the same task name
     /// - A workflow with a [`SuspendTask`](crate::SuspendTask) state has a checkpoint store
+    /// - With a checkpoint store attached, all distinct states format to unique `Debug` labels
     ///
     /// Call this after building the workflow to catch configuration errors early.
     ///
@@ -706,7 +719,9 @@ where
     /// Returns [`CanoError::Configuration`] if:
     /// - No state handlers have been registered
     /// - No exit states have been defined
+    /// - Two compensatable states share a task name
     /// - A suspend task is registered without a checkpoint store
+    /// - Two distinct states share a `Debug` label when a checkpoint store is attached
     ///
     /// # Example
     ///
@@ -730,9 +745,6 @@ where
     /// assert!(workflow.validate().is_ok());
     /// ```
     pub fn validate(&self) -> Result<(), CanoError> {
-        if let Some(err) = &self.config_error {
-            return Err(err.clone());
-        }
         if self.states.is_empty() {
             return Err(CanoError::configuration(
                 "Workflow has no registered state handlers",
@@ -743,15 +755,36 @@ where
                 "Workflow has no exit states defined — orchestration may loop forever",
             ));
         }
-        if self.checkpoint_store.is_none()
-            && self
-                .states
-                .values()
-                .any(|e| matches!(**e, Entry::Suspend { .. }))
-        {
+        // Check duplicate compensator names across currently registered states.
+        let mut seen_comp_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for entry in self.states.values() {
+            if let Entry::Compensatable { name, .. } = &**entry
+                && !seen_comp_names.insert(name.as_ref())
+            {
+                return Err(CanoError::configuration(format!(
+                    "two compensatable states share the task name {name:?}; \
+                     override `name()` on one of them"
+                )));
+            }
+        }
+        if self.checkpoint_store.is_none() && self.has_suspend_states() {
             return Err(CanoError::configuration(
                 "a suspend task requires a checkpoint store (call with_checkpoint_store)",
             ));
+        }
+        if self.checkpoint_store.is_some() {
+            let mut seen_labels: HashMap<String, &TState> = HashMap::new();
+            for state in self.all_states() {
+                let label = format!("{state:?}");
+                if let Some(prev) = seen_labels.insert(label.clone(), state)
+                    && prev != state
+                {
+                    return Err(CanoError::configuration(format!(
+                        "two distinct states format to the same Debug label {label:?}; \
+                         checkpoint resume requires each state to have a unique Debug form"
+                    )));
+                }
+            }
         }
         // Each join_state in a Split entry must either be registered or an exit state;
         // otherwise orchestration will always error at runtime after the split completes.
@@ -934,7 +967,12 @@ where
     ) -> Result<TState, CanoError> {
         self.validate_cached()?;
         self.validate_initial_state(&initial_state)?;
-        self.run_workflow(initial_state, token).await
+        let run = self.run_workflow(initial_state, token);
+        #[cfg(feature = "tracing")]
+        if let Some(span) = self.tracing_span.clone() {
+            return run.instrument(span).await;
+        }
+        run.await
     }
 
     /// `validate()`, computed once and cached: the workflow shape is immutable post-build.
@@ -978,10 +1016,10 @@ where
         self.total_timeout.map(|d| (started, d))
     }
 
-    /// Emit the workflow-run outcome metric (`completed` / `suspended` / `failed`) once
-    /// per run. Called by both `run_workflow` (forward) and `execute_resume_inner`
-    /// (resume) so the emission lives in one place. No-op without the `metrics`
-    /// feature.
+    /// Emit the workflow-run outcome metric (`completed` / `suspended` / `cancelled` /
+    /// `failed`) once per run. Called by both `run_workflow` (forward) and
+    /// `execute_resume_inner` (resume) so the emission lives in one place. No-op
+    /// without the `metrics` feature.
     #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
     pub(crate) fn record_run_outcome(
         &self,
@@ -993,6 +1031,7 @@ where
             match result {
                 Ok(state) if self.is_parked_at(state) => "suspended",
                 Ok(_) => "completed",
+                Err(e) if e.is_cancelled() => "cancelled",
                 Err(_) => "failed",
             },
             started.elapsed(),
@@ -1026,7 +1065,6 @@ where
             validated: OnceLock::new(),
             observers: Arc::clone(&self.observers),
             compensators: self.compensators.clone(),
-            config_error: self.config_error.clone(),
             checkpoint_store: self.checkpoint_store.clone(),
             workflow_id: self.workflow_id.clone(),
             workflow_version: self.workflow_version,
@@ -1215,6 +1253,28 @@ mod metrics_tests {
                 &[("state", "Start"), ("kind", "split")]
             ),
             1
+        );
+    }
+
+    #[test]
+    fn cancelled_run_records_cancelled_outcome() {
+        let (res, rows) = run_with_recorder(|| async {
+            let token = crate::CancellationToken::new();
+            token.cancel();
+            ok_workflow().orchestrate_with_token(S::Start, &token).await
+        });
+        assert!(res.unwrap_err().is_cancelled());
+        assert_eq!(
+            counter(
+                &rows,
+                "cano_workflow_runs_total",
+                &[("outcome", "cancelled")]
+            ),
+            1
+        );
+        assert_eq!(
+            counter_opt(&rows, "cano_workflow_runs_total", &[("outcome", "failed")]),
+            None
         );
     }
 }
@@ -1885,6 +1945,77 @@ mod resolve_total_budget_tests {
         let (start, limit) = w.resolve_total_budget(now).unwrap();
         assert_eq!(start, now);
         assert_eq!(limit, Duration::from_secs(7));
+    }
+
+    #[tokio::test]
+    async fn replacing_duplicate_compensatable_state_clears_error_and_preserves_first_compensator()
+    {
+        use super::test_support::{CompLog, CompTask, FailTask};
+        use std::sync::Mutex;
+        let log: CompLog = Arc::new(Mutex::new(Vec::new()));
+
+        let wf = Workflow::bare()
+            .register(
+                TestState::Start,
+                CompTask::ok("dup_comp", 10, TestState::Process, &log),
+            )
+            .register(
+                TestState::Process,
+                CompTask::ok("dup_comp", 20, TestState::Complete, &log),
+            )
+            .add_exit_state(TestState::Complete);
+        assert!(
+            wf.validate().is_err(),
+            "duplicate compensator name must fail"
+        );
+
+        // Replacing `Process` with a failing plain task resolves the duplicate AND keeps
+        // `Start`'s compensator intact for rollback!
+        let fixed = wf.register(TestState::Process, FailTask::new(true));
+        fixed
+            .validate()
+            .expect("overwriting duplicate must clear validation error");
+        let err = fixed.orchestrate(TestState::Start).await.unwrap_err();
+        assert!(err.to_string().contains("intentionally failed"), "{err}");
+        assert_eq!(*log.lock().unwrap(), vec![("dup_comp".to_string(), 10)]);
+    }
+
+    #[test]
+    fn validate_rejects_colliding_debug_labels_when_checkpoint_store_is_attached() {
+        use crate::testing::InMemoryCheckpointStore;
+
+        #[derive(Clone, PartialEq, Eq, Hash)]
+        enum Colliding {
+            First,
+            Second,
+        }
+        impl std::fmt::Debug for Colliding {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("SameLabel")
+            }
+        }
+        struct GoSecond;
+        #[crate::task(state = Colliding)]
+        impl GoSecond {
+            async fn run(&self) -> Result<Colliding, CanoError> {
+                Ok(Colliding::Second)
+            }
+        }
+
+        let store = Arc::new(InMemoryCheckpointStore::new());
+        let wf = Workflow::bare()
+            .register(Colliding::First, GoSecond)
+            .add_exit_state(Colliding::Second);
+        assert!(
+            wf.validate().is_ok(),
+            "without checkpoint store, Debug label uniqueness is not required"
+        );
+        let with_store = wf.with_checkpoint_store(store);
+        let err = with_store
+            .validate()
+            .expect_err("colliding Debug labels must fail validate with a checkpoint store");
+        assert_eq!(err.category(), "configuration");
+        assert!(err.to_string().contains("SameLabel"), "{err}");
     }
 }
 
