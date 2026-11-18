@@ -20,6 +20,7 @@
 //!     state            text        NOT NULL,
 //!     task_id          text        NOT NULL,
 //!     output_blob      bytea,
+//!     write_id         bytea,
 //!     PRIMARY KEY (workflow_id, sequence)
 //! );
 //! ```
@@ -207,6 +208,7 @@ impl PostgresStore {
         &self,
         workflow_id: &str,
         row: &CheckpointRow,
+        write_id: &[u8; 16],
         sent: &std::sync::atomic::AtomicBool,
     ) -> Result<(), Failure> {
         let sequence = i64::try_from(row.sequence).map_err(|_| {
@@ -217,7 +219,7 @@ impl PostgresStore {
         })?;
         let client = Checkout::get(&self.pool, "append").await?;
         let result = self
-            .insert_or_verify(&client, workflow_id, sequence, row, sent)
+            .insert_or_verify(&client, workflow_id, sequence, row, write_id, sent)
             .await;
         client.finish(&result);
         result
@@ -229,12 +231,14 @@ impl PostgresStore {
         workflow_id: &str,
         sequence: i64,
         row: &CheckpointRow,
+        write_id: &[u8; 16],
         sent: &std::sync::atomic::AtomicBool,
     ) -> Result<(), Failure> {
         let insert = client
             .prepare_cached(&self.sql.insert)
             .await
             .map_err(|e| statement_failure("append", &e))?;
+        let write_id_slice: &[u8] = write_id;
         let prior_sent = sent.swap(true, std::sync::atomic::Ordering::Relaxed);
         let inserted = client
             .execute(
@@ -247,6 +251,7 @@ impl PostgresStore {
                     &kind_to_db(row.kind),
                     &i64::from(row.workflow_version),
                     &row.output_blob.as_deref(),
+                    &write_id_slice,
                 ],
             )
             .await
@@ -256,7 +261,8 @@ impl PostgresStore {
         }
         if prior_sent {
             // An earlier attempt actually sent `INSERT` and may have committed before
-            // its reply was lost.
+            // its reply was lost. Matching on this invocation's 128-bit `write_id`
+            // prevents a retried seq-0 append from absorbing a rival run's identical row.
             let select = client
                 .prepare_cached(&self.sql.select_row)
                 .await
@@ -265,7 +271,7 @@ impl PostgresStore {
                 .query_opt(&select, &[&workflow_id, &sequence])
                 .await
                 .map_err(|e| statement_failure("append", &e))?;
-            if stored.is_some_and(|stored| same_row(&stored, row)) {
+            if stored.is_some_and(|stored| same_row(&stored, row, write_id_slice)) {
                 return Ok(());
             }
         }
@@ -305,13 +311,15 @@ impl PostgresStore {
 impl CheckpointStore for PostgresStore {
     async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
         let row = &row;
+        let write_id: [u8; 16] = rand::random();
+        let write_id = &write_id;
         let sent = std::sync::atomic::AtomicBool::new(false);
         let sent = &sent;
         retry::run(&self.retry, move |_| {
             retry::bounded(
                 "postgres append",
                 self.operation_timeout,
-                self.append_once(workflow_id, row, sent),
+                self.append_once(workflow_id, row, write_id, sent),
             )
         })
         .await
@@ -513,6 +521,7 @@ pub struct PostgresStoreBuilder {
     create_table: bool,
     max_pool_size: Option<usize>,
     pool_timeouts: Timeouts,
+    custom_pool_timeouts: bool,
     recycling_method: RecyclingMethod,
     operation_timeout: Duration,
     retry: RetryMode,
@@ -528,6 +537,7 @@ impl Default for PostgresStoreBuilder {
             create_table: true,
             max_pool_size: None,
             pool_timeouts: Timeouts::default(),
+            custom_pool_timeouts: false,
             recycling_method: RecyclingMethod::Fast,
             operation_timeout: DEFAULT_OPERATION_TIMEOUT,
             retry: RetryMode::None,
@@ -583,11 +593,12 @@ impl PostgresStoreBuilder {
     }
 
     /// Pool timeouts for waiting on a free slot, creating and recycling a connection.
-    /// Default: none; the operation timeout still bounds every call. Ignored by
-    /// [`build_with_pool`](Self::build_with_pool).
+    /// Default: `wait` is bounded by `operation_timeout`; `create` and `recycle` are
+    /// unset. Ignored by [`build_with_pool`](Self::build_with_pool).
     #[must_use]
     pub fn with_pool_timeouts(mut self, timeouts: Timeouts) -> Self {
         self.pool_timeouts = timeouts;
+        self.custom_pool_timeouts = true;
         self
     }
 
@@ -656,6 +667,8 @@ impl PostgresStoreBuilder {
     {
         self.ddl()?;
         apply_default_application_name(&mut config);
+        apply_default_transport_options(&mut config, self.operation_timeout);
+        let pool_timeouts = self.effective_pool_timeouts();
         let manager = Manager::from_config(
             config,
             tls,
@@ -665,7 +678,7 @@ impl PostgresStoreBuilder {
         );
         let mut pool = Pool::builder(manager)
             .runtime(Runtime::Tokio1)
-            .timeouts(self.pool_timeouts);
+            .timeouts(pool_timeouts);
         if let Some(max_size) = self.max_pool_size {
             pool = pool.max_size(max_size);
         }
@@ -754,11 +767,35 @@ impl PostgresStoreBuilder {
             None => name,
         })
     }
+
+    fn effective_pool_timeouts(&self) -> Timeouts {
+        let mut timeouts = self.pool_timeouts;
+        if !self.custom_pool_timeouts && timeouts.wait.is_none() {
+            timeouts.wait = Some(self.operation_timeout);
+        }
+        timeouts
+    }
 }
+
+const DEFAULT_PG_KEEPALIVES_IDLE: Duration = Duration::from_secs(2 * 60 * 60);
+const DEFAULT_CANO_KEEPALIVES_IDLE: Duration = Duration::from_secs(30);
 
 fn apply_default_application_name(config: &mut tokio_postgres::Config) {
     if config.get_application_name().is_none() {
         config.application_name(DEFAULT_APPLICATION_NAME);
+    }
+}
+
+fn apply_default_transport_options(
+    config: &mut tokio_postgres::Config,
+    operation_timeout: Duration,
+) {
+    if config.get_keepalives() && config.get_keepalives_idle() == DEFAULT_PG_KEEPALIVES_IDLE {
+        config.keepalives(true);
+        config.keepalives_idle(DEFAULT_CANO_KEEPALIVES_IDLE);
+    }
+    if config.get_connect_timeout().is_none() && !operation_timeout.is_zero() {
+        config.connect_timeout(operation_timeout);
     }
 }
 
@@ -790,8 +827,10 @@ fn create_table_sql(table: &str) -> String {
     state            text        NOT NULL,
     task_id          text        NOT NULL,
     output_blob      bytea,
+    write_id         bytea,
     PRIMARY KEY (workflow_id, sequence)
-);"
+);
+ALTER TABLE {table} ADD COLUMN IF NOT EXISTS write_id bytea;"
     )
 }
 
@@ -821,15 +860,15 @@ impl Statements {
     fn new(table: String) -> Self {
         Self {
             insert: format!(
-                "INSERT INTO {table} (workflow_id, sequence, state, task_id, kind, workflow_version, output_blob) \
-                 VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (workflow_id, sequence) DO NOTHING"
+                "INSERT INTO {table} (workflow_id, sequence, state, task_id, kind, workflow_version, output_blob, write_id) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (workflow_id, sequence) DO NOTHING"
             ),
             select_run: format!(
                 "SELECT sequence, state, task_id, kind, workflow_version, output_blob FROM {table} \
                  WHERE workflow_id = $1 ORDER BY sequence"
             ),
             select_row: format!(
-                "SELECT state, task_id, kind, workflow_version, output_blob FROM {table} \
+                "SELECT state, task_id, kind, workflow_version, output_blob, write_id FROM {table} \
                  WHERE workflow_id = $1 AND sequence = $2"
             ),
             delete: format!("DELETE FROM {table} WHERE workflow_id = $1"),
@@ -954,13 +993,14 @@ fn is_transient(e: &tokio_postgres::Error) -> bool {
 }
 
 /// Connection exceptions (`08`), insufficient resources (`53`), operator intervention such
-/// as a server shutdown (`57P`), serialization failure (`40001`) and deadlock (`40P01`).
+/// as a server shutdown (`57P`), query cancellation (`57014`), read-only standby failover
+/// (`25006`), serialization failure (`40001`), statement completion unknown (`40003`) and
+/// deadlock (`40P01`).
 fn transient_sqlstate(code: &str) -> bool {
     code.starts_with("08")
         || code.starts_with("53")
         || code.starts_with("57P")
-        || code == "40001"
-        || code == "40P01"
+        || matches!(code, "40001" | "40003" | "40P01" | "25006" | "57014")
 }
 
 fn kind_to_db(kind: RowKind) -> i16 {
@@ -984,8 +1024,8 @@ fn kind_from_db(kind: i16) -> Option<RowKind> {
     })
 }
 
-/// Whether a `select_row` result holds exactly `row`'s payload.
-fn same_row(stored: &tokio_postgres::Row, row: &CheckpointRow) -> bool {
+/// Whether a `select_row` result holds `row`'s payload and this invocation's `write_id`.
+fn same_row(stored: &tokio_postgres::Row, row: &CheckpointRow, write_id: &[u8]) -> bool {
     stored.try_get::<_, &str>(0).is_ok_and(|s| s == row.state)
         && stored.try_get::<_, &str>(1).is_ok_and(|s| s == row.task_id)
         && stored
@@ -997,6 +1037,9 @@ fn same_row(stored: &tokio_postgres::Row, row: &CheckpointRow) -> bool {
         && stored
             .try_get::<_, Option<&[u8]>>(4)
             .is_ok_and(|b| b == row.output_blob.as_deref())
+        && stored
+            .try_get::<_, Option<&[u8]>>(5)
+            .is_ok_and(|id| id == Some(write_id))
 }
 
 /// Map a `select_run` row; any out-of-range or unknown value is a fatal failure.
@@ -1101,6 +1144,13 @@ mod tests {
     fn schema_sql_names_the_configured_table() {
         let default = PostgresStore::builder().schema_sql().unwrap();
         assert!(default.contains("\"cano_checkpoints\""), "{default}");
+        assert!(default.contains("write_id         bytea"), "{default}");
+        assert!(
+            default.contains(
+                "ALTER TABLE \"cano_checkpoints\" ADD COLUMN IF NOT EXISTS write_id bytea;"
+            ),
+            "{default}"
+        );
         assert!(
             default.contains("PRIMARY KEY (workflow_id, sequence)"),
             "{default}"
@@ -1111,6 +1161,12 @@ mod tests {
             .unwrap();
         assert!(
             qualified.contains("\"wf\".\"cano_checkpoints\""),
+            "{qualified}"
+        );
+        assert!(
+            qualified.contains(
+                "ALTER TABLE \"wf\".\"cano_checkpoints\" ADD COLUMN IF NOT EXISTS write_id bytea;"
+            ),
             "{qualified}"
         );
     }
@@ -1147,7 +1203,9 @@ mod tests {
 
     #[test]
     fn sqlstate_classification() {
-        for code in ["08006", "08001", "57P01", "40001", "40P01", "53300"] {
+        for code in [
+            "08006", "08001", "57P01", "40001", "40003", "40P01", "53300", "25006", "57014",
+        ] {
             assert!(transient_sqlstate(code), "{code}");
         }
         for code in ["23505", "42P01", "28P01", "22021"] {
@@ -1165,6 +1223,55 @@ mod tests {
         config.application_name("my-app");
         apply_default_application_name(&mut config);
         assert_eq!(config.get_application_name(), Some("my-app"));
+    }
+
+    #[test]
+    fn transport_options_and_pool_wait_default_only_when_unset() {
+        let mut config = tokio_postgres::Config::new();
+        apply_default_transport_options(&mut config, Duration::from_secs(7));
+        assert!(config.get_keepalives());
+        assert_eq!(config.get_keepalives_idle(), Duration::from_secs(30));
+        assert_eq!(config.get_connect_timeout(), Some(&Duration::from_secs(7)));
+
+        let mut custom = tokio_postgres::Config::new();
+        custom.keepalives(false);
+        custom.keepalives_idle(Duration::from_secs(90));
+        custom.connect_timeout(Duration::from_secs(2));
+        apply_default_transport_options(&mut custom, Duration::from_secs(7));
+        assert!(!custom.get_keepalives());
+        assert_eq!(custom.get_keepalives_idle(), Duration::from_secs(90));
+        assert_eq!(custom.get_connect_timeout(), Some(&Duration::from_secs(2)));
+
+        let default_builder =
+            PostgresStore::builder().with_operation_timeout(Duration::from_secs(4));
+        assert_eq!(
+            default_builder.effective_pool_timeouts().wait,
+            Some(Duration::from_secs(4))
+        );
+
+        let custom_builder = PostgresStore::builder()
+            .with_operation_timeout(Duration::from_secs(4))
+            .with_pool_timeouts(Timeouts {
+                wait: Some(Duration::from_secs(12)),
+                create: Some(Duration::from_secs(3)),
+                recycle: None,
+            });
+        let timeouts = custom_builder.effective_pool_timeouts();
+        assert_eq!(timeouts.wait, Some(Duration::from_secs(12)));
+        assert_eq!(timeouts.create, Some(Duration::from_secs(3)));
+
+        let explicit_none = PostgresStore::builder()
+            .with_operation_timeout(Duration::from_secs(4))
+            .with_pool_timeouts(Timeouts::new());
+        assert_eq!(explicit_none.effective_pool_timeouts().wait, None);
+    }
+
+    #[test]
+    fn checkpoint_statements_include_write_id() {
+        let sql = Statements::new("\"cano_checkpoints\"".to_owned());
+        assert!(sql.insert.contains("write_id"), "{}", sql.insert);
+        assert!(sql.insert.contains("$8"), "{}", sql.insert);
+        assert!(sql.select_row.contains("write_id"), "{}", sql.select_row);
     }
 
     #[cfg(feature = "scheduler")]

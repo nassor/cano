@@ -4,6 +4,7 @@
 
 mod support;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use cano::RetryMode;
@@ -214,7 +215,7 @@ async fn primary_key_is_the_only_index_and_serves_every_statement() {
     for statement in [
         "SELECT sequence, state, task_id, kind, workflow_version, output_blob FROM cano_checkpoints \
          WHERE workflow_id = 'seed-7' ORDER BY sequence",
-        "SELECT state, task_id, kind, workflow_version, output_blob FROM cano_checkpoints \
+        "SELECT state, task_id, kind, workflow_version, output_blob, write_id FROM cano_checkpoints \
          WHERE workflow_id = 'seed-7' AND sequence = 3",
         "DELETE FROM cano_checkpoints WHERE workflow_id = 'seed-7'",
     ] {
@@ -529,4 +530,95 @@ async fn multi_instance_scheduler_cluster_coordinates_over_postgres() {
 
     node_a.stop().await.unwrap();
     node_b.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn identical_seq0_append_race_with_lost_ack() {
+    let pg = PgFixture::start().await;
+    let store_a = Arc::new(
+        PostgresStore::builder()
+            .with_operation_timeout(Duration::from_millis(800))
+            .with_retry(RetryMode::fixed(20, Duration::from_millis(150)))
+            .connect(&pg.proxied_dsn())
+            .await
+            .unwrap(),
+    );
+    let store_b = Arc::new(
+        PostgresStore::builder()
+            .with_operation_timeout(Duration::from_secs(2))
+            .with_retry(RetryMode::fixed(4, Duration::from_millis(100)))
+            .connect(&pg.direct_dsn())
+            .await
+            .unwrap(),
+    );
+    support::scenario_identical_seq0_append_race(store_a, store_b, &pg.toxi).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scheduler_partition_failover_and_zombie_fencing() {
+    let pg = PgFixture::start().await;
+    let store_a = Arc::new(
+        PostgresStore::builder()
+            .with_operation_timeout(Duration::from_millis(500))
+            .connect(&pg.proxied_dsn())
+            .await
+            .unwrap(),
+    );
+    let store_b = Arc::new(
+        PostgresStore::builder()
+            .with_operation_timeout(Duration::from_secs(1))
+            .connect(&pg.direct_dsn())
+            .await
+            .unwrap(),
+    );
+    support::scenario_scheduler_partition_failover_and_zombie_fencing(store_a, store_b, &pg.toxi)
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scheduler_lost_ack_on_claim_renew_release_preserves_ticks() {
+    let pg = PgFixture::start().await;
+    let store = Arc::new(
+        PostgresStore::builder()
+            .with_operation_timeout(Duration::from_millis(800))
+            .with_retry(RetryMode::fixed(20, Duration::from_millis(150)))
+            .connect(&pg.proxied_dsn())
+            .await
+            .unwrap(),
+    );
+    support::scenario_scheduler_lost_ack_preserves_ticks(store, &pg.toxi).await;
+}
+
+#[tokio::test]
+async fn reset_peer_recovers_idle_pool_connections() {
+    let pg = PgFixture::start().await;
+    let store = PostgresStore::builder()
+        .with_max_pool_size(2)
+        .with_operation_timeout(Duration::from_secs(2))
+        .with_retry(RetryMode::fixed(5, Duration::from_millis(100)))
+        .connect(&pg.proxied_dsn())
+        .await
+        .unwrap();
+
+    // Warm both pool slots so idle connections stay open in deadpool.
+    let (a, b) = tokio::join!(store.load_run("warm-1"), store.load_run("warm-2"));
+    a.unwrap();
+    b.unwrap();
+
+    // Kill connections via reset_peer, then heal after the first reset is hit so
+    // retries must evict the broken pooled sockets and open fresh healthy ones.
+    pg.toxi.reset_peer().await;
+    let api = pg.toxi.api();
+    let healer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        api.heal().await;
+    });
+
+    store
+        .append("after-reset", row(0))
+        .await
+        .expect("PostgresStore must evict reset idle connections and recover via retry");
+    healer.await.unwrap();
+    assert_eq!(store.load_run("after-reset").await.unwrap(), [row(0)]);
+    assert!(store.load("after-reset").await.unwrap().is_none());
 }

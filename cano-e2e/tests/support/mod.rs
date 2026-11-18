@@ -6,11 +6,14 @@
 #![allow(dead_code)]
 
 use std::future::Future;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use cano::CheckpointStore;
 use cano::checkpoint::CheckpointRow;
+use cano::prelude::*;
+use cano::scheduler::{CasOutcome, SchedulerStore};
 use cano::store::nats::async_nats;
 use serde_json::json;
 use testcontainers::core::{IntoContainerPort, WaitFor};
@@ -528,4 +531,360 @@ pub async fn scenario_retry_absorbs_a_lost_ack(store: &dyn CheckpointStore, toxi
         matches!(&result, Err(e) if e.to_string().contains("conflict")),
         "a different row at an existing sequence must conflict: {result:?}"
     );
+}
+
+/// Concurrent identical seq-0 `append` race under `blackhole` / `blackhole_responses`
+/// with `with_retry`: a caller's retried append must NOT absorb another writer's identical
+/// seq-0 row, while absorbing its own lost ACK via its 128-bit `write_id`.
+pub async fn scenario_identical_seq0_append_race(
+    store_a: Arc<dyn CheckpointStore>,
+    store_b: Arc<dyn CheckpointStore>,
+    toxi: &Toxiproxy,
+) {
+    store_a.append("warm-a", row(0)).await.expect("warm A");
+    store_b.append("warm-b", row(0)).await.expect("warm B");
+
+    let identical = CheckpointRow::new(0, "Identical", "same-task");
+
+    // 1. A is blackholed before reaching the server; B commits an identical seq-0 row;
+    //    after healing, A's retry must see a different `write_id` and return conflict.
+    toxi.blackhole().await;
+    let a_store = Arc::clone(&store_a);
+    let a_row = identical.clone();
+    let a_task = tokio::spawn(async move { a_store.append("seq0-race", a_row).await });
+
+    // Let A's initial attempt time out (800 ms operation_timeout) before B commits.
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    store_b
+        .append("seq0-race", identical.clone())
+        .await
+        .expect("B commits identical seq-0 directly");
+    toxi.heal().await;
+
+    let a_err = a_task
+        .await
+        .unwrap()
+        .expect_err("A must conflict rather than absorb B's identical seq-0 row");
+    assert_eq!(a_err.category(), "checkpoint_store", "{a_err}");
+    assert!(a_err.to_string().contains("conflict"), "{a_err}");
+    assert_eq!(
+        store_b.load_run("seq0-race").await.unwrap(),
+        std::slice::from_ref(&identical)
+    );
+
+    // 2. When A's own seq-0 write actually lands and its ACK is blackholed, A's retry
+    //    matches its own `write_id` and returns Ok, while B subsequently conflicts.
+    toxi.blackhole_responses().await;
+    let api = toxi.api();
+    let healer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        api.heal().await;
+    });
+    store_a
+        .append("seq0-own-ack", identical.clone())
+        .await
+        .expect("A must absorb its own lost ACK via write_id");
+    healer.await.unwrap();
+
+    let b_err = store_b
+        .append("seq0-own-ack", identical.clone())
+        .await
+        .expect_err("B must conflict with A's stored row");
+    assert_eq!(b_err.category(), "checkpoint_store", "{b_err}");
+    assert!(b_err.to_string().contains("conflict"), "{b_err}");
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum E2eState {
+    Run,
+    Done,
+}
+
+#[derive(Clone)]
+struct SagaGateTask {
+    started: Arc<tokio::sync::Notify>,
+    gate: Arc<tokio::sync::Notify>,
+    compensated: Arc<AtomicUsize>,
+}
+
+#[cano::saga::task(state = E2eState)]
+impl SagaGateTask {
+    type Output = ();
+
+    async fn run(&self) -> Result<(E2eState, ()), CanoError> {
+        self.started.notify_one();
+        self.gate.notified().await;
+        Ok((E2eState::Done, ()))
+    }
+
+    async fn compensate(&self, _output: ()) -> Result<(), CanoError> {
+        self.compensated.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct CountHoldTask {
+    runs: Arc<AtomicUsize>,
+    started: Option<Arc<tokio::sync::Notify>>,
+    gate: Option<Arc<tokio::sync::Notify>>,
+    hold: Duration,
+}
+
+#[task(state = E2eState)]
+impl CountHoldTask {
+    async fn run(&self) -> Result<E2eState, CanoError> {
+        self.runs.fetch_add(1, Ordering::SeqCst);
+        if let Some(started) = &self.started {
+            started.notify_one();
+        }
+        if let Some(gate) = &self.gate {
+            gate.notified().await;
+        } else if !self.hold.is_zero() {
+            tokio::time::sleep(self.hold).await;
+        }
+        Ok(E2eState::Done)
+    }
+}
+
+/// Active-lease network partition -> holder lease-loss cancel -> failover -> healed
+/// zombie write fencing over Toxiproxy.
+pub async fn scenario_scheduler_partition_failover_and_zombie_fencing(
+    store_a: Arc<dyn SchedulerStore>,
+    store_b: Arc<dyn SchedulerStore>,
+    toxi: &Toxiproxy,
+) {
+    let a_started = Arc::new(tokio::sync::Notify::new());
+    let a_gate = Arc::new(tokio::sync::Notify::new());
+    let a_compensated = Arc::new(AtomicUsize::new(0));
+    let wf_a = Workflow::bare()
+        .register(
+            E2eState::Run,
+            SagaGateTask {
+                started: Arc::clone(&a_started),
+                gate: Arc::clone(&a_gate),
+                compensated: Arc::clone(&a_compensated),
+            },
+        )
+        .add_exit_state(E2eState::Done);
+
+    let b_runs = Arc::new(AtomicUsize::new(0));
+    let b_started = Arc::new(tokio::sync::Notify::new());
+    let wf_b = Workflow::bare()
+        .register(
+            E2eState::Run,
+            CountHoldTask {
+                runs: Arc::clone(&b_runs),
+                started: Some(Arc::clone(&b_started)),
+                gate: None,
+                hold: Duration::from_millis(300),
+            },
+        )
+        .add_exit_state(E2eState::Done);
+
+    let ttl = Duration::from_secs(2);
+    let node_a = Scheduler::new()
+        .manual("failover-job", wf_a, E2eState::Run)
+        .with_store(Arc::clone(&store_a))
+        .with_instance_id("node-a")
+        .with_lease_ttl(ttl)
+        .start()
+        .await
+        .unwrap();
+    let node_b = Scheduler::new()
+        .manual("failover-job", wf_b, E2eState::Run)
+        .with_store(Arc::clone(&store_b))
+        .with_instance_id("node-b")
+        .with_lease_ttl(ttl)
+        .start()
+        .await
+        .unwrap();
+
+    node_a.trigger("failover-job").await.unwrap();
+    a_started.notified().await;
+    let a_version = store_b
+        .load("failover-job")
+        .await
+        .unwrap()
+        .expect("node-a lease must be present")
+        .version;
+
+    // Partition node-a while it holds the active lease.
+    toxi.blackhole().await;
+
+    // Once node-a's 2 s lease expires, node-b reaps it and takes ownership.
+    eventually(Duration::from_secs(12), || node_b.trigger("failover-job")).await;
+    b_started.notified().await;
+    let b_info = node_b.wait_idle("failover-job").await.unwrap();
+    assert_eq!(b_info.status, Status::Completed);
+    assert_eq!(b_runs.load(Ordering::SeqCst), 1);
+
+    let after_b = store_b
+        .load("failover-job")
+        .await
+        .unwrap()
+        .expect("node-b record must exist");
+    assert!(after_b.version > a_version);
+
+    // Heal node-a's partition, allow its stalled saga task to finish, and verify
+    // node-a's lease loss drained compensation and never overwrote node-b's record.
+    toxi.heal().await;
+    let stale_cas = eventually(Duration::from_secs(10), || {
+        store_a.compare_and_swap("failover-job", Some(a_version), b"zombie".to_vec())
+    })
+    .await;
+    assert_eq!(stale_cas, CasOutcome::Conflict);
+
+    a_gate.notify_one();
+    let a_info = tokio::time::timeout(Duration::from_secs(10), node_a.wait_idle("failover-job"))
+        .await
+        .expect("node-a settles promptly after heal")
+        .unwrap();
+    assert_ne!(a_info.status, Status::Running);
+    assert_eq!(a_compensated.load(Ordering::SeqCst), 1);
+
+    let final_rec = store_b.load("failover-job").await.unwrap().unwrap();
+    assert_eq!(
+        final_rec, after_b,
+        "healed zombie node-a must not modify node-b's completed record"
+    );
+
+    node_a.stop().await.unwrap();
+    node_b.stop().await.unwrap();
+}
+
+/// `blackhole_responses` lost-ACK on `claim`, `renew`, and `release` with `with_retry`
+/// preserves `every` and `cron` ticks and completes without leaking leases or false streaks.
+pub async fn scenario_scheduler_lost_ack_preserves_ticks(
+    store: Arc<dyn SchedulerStore>,
+    toxi: &Toxiproxy,
+) {
+    store.load("warm-sched").await.expect("warm connection");
+
+    let every_runs = Arc::new(AtomicUsize::new(0));
+    let cron_runs = Arc::new(AtomicUsize::new(0));
+    let wf_every = Workflow::bare()
+        .register(
+            E2eState::Run,
+            CountHoldTask {
+                runs: Arc::clone(&every_runs),
+                started: None,
+                gate: None,
+                hold: Duration::from_millis(20),
+            },
+        )
+        .add_exit_state(E2eState::Done);
+    let wf_cron = Workflow::bare()
+        .register(
+            E2eState::Run,
+            CountHoldTask {
+                runs: Arc::clone(&cron_runs),
+                started: None,
+                gate: None,
+                hold: Duration::from_millis(20),
+            },
+        )
+        .add_exit_state(E2eState::Done);
+
+    // 1. Drop ACKs during startup `claim` for both `every` and `cron`.
+    toxi.blackhole_responses().await;
+    let api = toxi.api();
+    let healer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        api.heal().await;
+    });
+
+    let sched = Scheduler::new()
+        .every(
+            "every-lost-ack",
+            wf_every,
+            E2eState::Run,
+            Duration::from_millis(450),
+        )
+        .cron("cron-lost-ack", wf_cron, E2eState::Run, "* * * * * *")
+        .with_store(Arc::clone(&store))
+        .with_instance_id("lost-ack-node")
+        .with_lease_ttl(Duration::from_secs(6))
+        .start()
+        .await
+        .unwrap();
+
+    healer.await.unwrap();
+    eventually(Duration::from_secs(6), || {
+        let e = every_runs.load(Ordering::SeqCst);
+        let c = cron_runs.load(Ordering::SeqCst);
+        async move {
+            if e >= 2 && c >= 2 {
+                Ok(())
+            } else {
+                Err(format!("every={e}, cron={c}"))
+            }
+        }
+    })
+    .await;
+    sched.stop().await.unwrap();
+
+    assert_eq!(sched.status("every-lost-ack").unwrap().failure_streak, 0);
+    assert_eq!(sched.status("cron-lost-ack").unwrap().failure_streak, 0);
+
+    // 2. Drop ACKs during `renew` and `release` of a manual flow.
+    let manual_runs = Arc::new(AtomicUsize::new(0));
+    let manual_started = Arc::new(tokio::sync::Notify::new());
+    let manual_gate = Arc::new(tokio::sync::Notify::new());
+    let wf_manual = Workflow::bare()
+        .register(
+            E2eState::Run,
+            CountHoldTask {
+                runs: Arc::clone(&manual_runs),
+                started: Some(Arc::clone(&manual_started)),
+                gate: Some(Arc::clone(&manual_gate)),
+                hold: Duration::ZERO,
+            },
+        )
+        .add_exit_state(E2eState::Done);
+
+    let sched2 = Scheduler::new()
+        .manual("manual-lost-ack", wf_manual, E2eState::Run)
+        .with_store(Arc::clone(&store))
+        .with_instance_id("lost-ack-node-2")
+        .with_lease_ttl(Duration::from_secs(3))
+        .start()
+        .await
+        .unwrap();
+
+    sched2.trigger("manual-lost-ack").await.unwrap();
+    manual_started.notified().await;
+
+    // Drop ACKs across the `ttl / 3 = 1s` renewal boundary; retries must keep the lease held.
+    toxi.blackhole_responses().await;
+    let api = toxi.api();
+    let renew_healer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1300)).await;
+        api.heal().await;
+    });
+    renew_healer.await.unwrap();
+    assert_eq!(
+        sched2.status("manual-lost-ack").unwrap().status,
+        Status::Running,
+        "lost renewal ACK must not cancel the running flow"
+    );
+
+    // Drop ACKs while `release` commits the outcome; retries must complete cleanly.
+    toxi.blackhole_responses().await;
+    let api = toxi.api();
+    let release_healer = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        api.heal().await;
+    });
+    manual_gate.notify_one();
+    let info = tokio::time::timeout(Duration::from_secs(6), sched2.wait_idle("manual-lost-ack"))
+        .await
+        .expect("release must complete")
+        .unwrap();
+    release_healer.await.unwrap();
+    assert_eq!(info.status, Status::Completed);
+    assert_eq!(info.failure_streak, 0);
+    assert_eq!(manual_runs.load(Ordering::SeqCst), 1);
+
+    sched2.stop().await.unwrap();
 }

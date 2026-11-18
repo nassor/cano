@@ -76,10 +76,13 @@ impl SchedulerStore for InMemorySchedulerStore {
 /// The clauses: an unknown id loads `None` and removes as a no-op; a create (`expected =
 /// None`) writes once and conflicts afterwards; a swap from the current version writes and
 /// changes the version; a swap from a stale or wrong version conflicts and leaves the record
-/// alone; a removed id can be created again with a version different from its earlier ones;
-/// ids that share a prefix (`a`, `a.b`, `a/b`, `ab`) stay isolated; ids with spaces,
-/// wildcards, non-ASCII and 200+ characters work; of concurrent creates, and of concurrent
-/// swaps from one version, exactly one is written; a 64 KiB value round-trips.
+/// alone; a removed id can be created again with a version different from its earlier ones,
+/// and pre-remove versions still conflict; ids that share a prefix (`a`, `a.b`, `a/b`, `ab`)
+/// stay isolated; ids with spaces, wildcards, non-ASCII and 200+ characters work; of
+/// concurrent creates (including post-`remove` races with equal bytes), and of concurrent
+/// swaps from one version, exactly one is written and matches what `load` reads back;
+/// concurrent `load`, `compare_and_swap`, and `remove` stay linearizable; a 256 KiB value
+/// and an empty value round-trip.
 ///
 /// # Panics
 ///
@@ -114,6 +117,8 @@ pub async fn assert_scheduler_store_contract(store: &dyn SchedulerStore, namespa
         "recreate",
         "race-new",
         "race-swap",
+        "race-tombstone",
+        "concurrent-ops",
         "big",
     ]
     .into_iter()
@@ -254,6 +259,18 @@ pub async fn assert_scheduler_store_contract(store: &dyn SchedulerStore, namespa
         "scheduler store contract [recreate]: a re-created record must not reuse an old version"
     );
     expect_record(store, "recreate", &recreate, r2, b"y").await;
+    let stale_after_recreate = must(
+        "recreate",
+        "compare_and_swap stale pre-remove version",
+        store.compare_and_swap(&recreate, Some(r1), b"z".to_vec()),
+    )
+    .await;
+    assert_eq!(
+        stale_after_recreate,
+        CasOutcome::Conflict,
+        "scheduler store contract [recreate]: pre-remove version must conflict after recreate"
+    );
+    expect_record(store, "recreate", &recreate, r2, b"y").await;
 
     // 5. Isolation, including awkward ids.
     for flow_id in isolated.iter().chain(awkward.iter()) {
@@ -290,10 +307,20 @@ pub async fn assert_scheduler_store_contract(store: &dyn SchedulerStore, namespa
         );
     }
 
-    // 6. Races: exactly one of concurrent creates, and of concurrent swaps, wins.
+    // 6. Races: exactly one of concurrent creates, of concurrent swaps, and of
+    // post-remove creates with equal bytes wins, and `load` sees the winner's payload.
     let race_new = id("race-new");
     let outcomes = race(store, &race_new, None).await;
-    assert_one_winner("race on create", &outcomes);
+    let (winner_idx, winner_ver) = assert_one_winner("race on create", &outcomes);
+    expect_record(
+        store,
+        "race on create",
+        &race_new,
+        winner_ver,
+        &[b'r', winner_idx as u8],
+    )
+    .await;
+
     let race_swap = id("race-swap");
     let base = written(
         "race on swap",
@@ -305,11 +332,56 @@ pub async fn assert_scheduler_store_contract(store: &dyn SchedulerStore, namespa
         .await,
     );
     let outcomes = race(store, &race_swap, Some(base)).await;
-    assert_one_winner("race on swap", &outcomes);
+    let (winner_idx, winner_ver) = assert_one_winner("race on swap", &outcomes);
+    expect_record(
+        store,
+        "race on swap",
+        &race_swap,
+        winner_ver,
+        &[b'r', winner_idx as u8],
+    )
+    .await;
 
-    // 7. A 64 KiB value, empty value, and identical-value version bump.
+    let race_tombstone = id("race-tombstone");
+    let t_prev = written(
+        "race after remove",
+        must(
+            "race after remove",
+            "seed",
+            store.compare_and_swap(&race_tombstone, None, b"seed".to_vec()),
+        )
+        .await,
+    );
+    must("race after remove", "remove", store.remove(&race_tombstone)).await;
+    let equal_payload = b"same-after-remove".to_vec();
+    let calls =
+        (0..8).map(|_| store.compare_and_swap(&race_tombstone, None, equal_payload.clone()));
+    let outcomes: Vec<CasOutcome> = futures_util::future::join_all(calls)
+        .await
+        .into_iter()
+        .map(|r| {
+            r.unwrap_or_else(|e| {
+                panic!("scheduler store contract [race after remove]: compare_and_swap failed: {e}")
+            })
+        })
+        .collect();
+    let (_, t_ver) = assert_one_winner("race after remove", &outcomes);
+    assert_ne!(
+        t_ver, t_prev,
+        "scheduler store contract [race after remove]: recreated version must not repeat"
+    );
+    expect_record(
+        store,
+        "race after remove",
+        &race_tombstone,
+        t_ver,
+        &equal_payload,
+    )
+    .await;
+
+    // 7. A 256 KiB value, empty value, and identical-value version bump.
     let big = id("big");
-    let value: Vec<u8> = (0..64 * 1024).map(|i| (i % 251) as u8).collect();
+    let value: Vec<u8> = (0..256 * 1024).map(|i| (i % 251) as u8).collect();
     let v = written(
         "large value",
         must(
@@ -358,6 +430,92 @@ pub async fn assert_scheduler_store_contract(store: &dyn SchedulerStore, namespa
     );
     expect_record(store, "empty value", &empty, e2, &[]).await;
 
+    // 8. Concurrent `load`, `compare_and_swap`, and `remove` stay linearizable without error.
+    let concurrent_ops = id("concurrent-ops");
+    let seed_v = written(
+        "concurrent load+swap+remove",
+        must(
+            "concurrent load+swap+remove",
+            "seed",
+            store.compare_and_swap(&concurrent_ops, None, b"seed".to_vec()),
+        )
+        .await,
+    );
+    let loads = futures_util::future::join_all((0..4).map(|_| store.load(&concurrent_ops)));
+    let swaps = futures_util::future::join_all(
+        (0..4u8).map(|i| store.compare_and_swap(&concurrent_ops, Some(seed_v), vec![b's', i])),
+    );
+    let removes = futures_util::future::join_all((0..2).map(|_| store.remove(&concurrent_ops)));
+    let (load_results, swap_results, remove_results) =
+        futures_util::future::join3(loads, swaps, removes).await;
+
+    for res in load_results {
+        let rec = res.unwrap_or_else(|e| {
+            panic!("scheduler store contract [concurrent load+swap+remove]: load failed: {e}")
+        });
+        if let Some(rec) = rec {
+            let valid_payload = rec.value == b"seed"
+                || (rec.value.len() == 2 && rec.value[0] == b's' && rec.value[1] < 4);
+            assert!(
+                valid_payload,
+                "scheduler store contract [concurrent load+swap+remove]: unexpected value {:?}",
+                rec.value
+            );
+        }
+    }
+    let mut swap_wins = 0usize;
+    for res in swap_results {
+        match res.unwrap_or_else(|e| {
+            panic!("scheduler store contract [concurrent load+swap+remove]: swap failed: {e}")
+        }) {
+            CasOutcome::Written(_) => swap_wins += 1,
+            CasOutcome::Conflict => {}
+        }
+    }
+    assert!(
+        swap_wins <= 1,
+        "scheduler store contract [concurrent load+swap+remove]: {swap_wins} swaps from seed version succeeded"
+    );
+    for res in remove_results {
+        res.unwrap_or_else(|e| {
+            panic!("scheduler store contract [concurrent load+swap+remove]: remove failed: {e}")
+        });
+    }
+    must(
+        "concurrent load+swap+remove",
+        "final remove",
+        store.remove(&concurrent_ops),
+    )
+    .await;
+    assert!(
+        must(
+            "concurrent load+swap+remove",
+            "load after remove",
+            store.load(&concurrent_ops)
+        )
+        .await
+        .is_none(),
+        "scheduler store contract [concurrent load+swap+remove]: record remained after remove"
+    );
+    let recreated_after = written(
+        "concurrent load+swap+remove",
+        must(
+            "concurrent load+swap+remove",
+            "create after remove",
+            store.compare_and_swap(&concurrent_ops, None, b"after".to_vec()),
+        )
+        .await,
+    );
+    assert_ne!(recreated_after, seed_v);
+    expect_record(
+        store,
+        "concurrent load+swap+remove",
+        &concurrent_ops,
+        recreated_after,
+        b"after",
+    )
+    .await;
+
     for flow_id in &ids {
         must("cleanup", "remove", store.remove(flow_id)).await;
     }
@@ -377,17 +535,23 @@ async fn race(store: &dyn SchedulerStore, flow_id: &str, expected: Option<u64>) 
         .collect()
 }
 
-fn assert_one_winner(clause: &str, outcomes: &[CasOutcome]) {
-    let wins = outcomes
+fn assert_one_winner(clause: &str, outcomes: &[CasOutcome]) -> (usize, u64) {
+    let winners: Vec<(usize, u64)> = outcomes
         .iter()
-        .filter(|o| matches!(o, CasOutcome::Written(_)))
-        .count();
+        .enumerate()
+        .filter_map(|(idx, o)| match o {
+            CasOutcome::Written(ver) => Some((idx, *ver)),
+            CasOutcome::Conflict => None,
+        })
+        .collect();
     assert_eq!(
-        wins,
+        winners.len(),
         1,
-        "scheduler store contract [{clause}]: {wins} of {} concurrent swaps were written",
+        "scheduler store contract [{clause}]: {} of {} concurrent swaps were written",
+        winners.len(),
         outcomes.len()
     );
+    winners[0]
 }
 
 fn written(clause: &str, outcome: CasOutcome) -> u64 {

@@ -591,6 +591,7 @@ pub async fn assert_checkpoint_store_contract(store: &dyn CheckpointStore, names
         "reuse",
         "concurrent",
         "race",
+        "race-identical",
         "blob",
         "load-clear",
     ]
@@ -803,6 +804,39 @@ pub async fn assert_checkpoint_store_contract(store: &dyn CheckpointStore, names
         rows,
         [racers[winners[0]].clone()],
         "checkpoint store contract [duplicate race]: the stored row is not the winner's"
+    );
+
+    let race_identical = id("race-identical");
+    let identical_row = CheckpointRow::new(0, "Identical", "t");
+    let results = futures_util::future::join_all(
+        (0..8).map(|_| store.append(&race_identical, identical_row.clone())),
+    )
+    .await;
+    let mut identical_wins = 0usize;
+    for result in results {
+        match result {
+            Ok(()) => identical_wins += 1,
+            Err(e) => assert_eq!(
+                e.category(),
+                "checkpoint_store",
+                "checkpoint store contract [identical duplicate race]: wrong error category: {e}"
+            ),
+        }
+    }
+    assert_eq!(
+        identical_wins, 1,
+        "checkpoint store contract [identical duplicate race]: {identical_wins} of 8 identical seq-0 appends succeeded"
+    );
+    let rows = must(
+        "identical duplicate race",
+        "load_run",
+        store.load_run(&race_identical),
+    )
+    .await;
+    assert_eq!(
+        rows,
+        [identical_row],
+        "checkpoint store contract [identical duplicate race]: wrong stored row"
     );
 
     // 10. A large blob round-trips.
