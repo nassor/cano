@@ -368,7 +368,7 @@ match node.status("fetch").map(|info| info.status) {
 <h2 id="requirements"><a href="#requirements" class="anchor-link" aria-hidden="true">#</a>Clocks, ids and clusters</h2>
 <ul>
 <li>Cross-host lease expiry (<code>expires_at &lt;= now</code>) compares UTC wall clocks across instances, even though the holder bounds its own TTL monotonically via <code>Instant</code>. Keep host clocks synchronized with NTP skew well below <code>ttl / 3</code>.</li>
-<li>Every instance needs a distinct <code>with_instance_id</code>. Two concurrent processes with one id treat each other's lease as their own. A stable name such as a pod or host name keeps logs and statuses readable.</li>
+<li>Give every instance a distinct <code>with_instance_id</code>. Per-process random <code>session</code> tokens keep concurrent processes and restarts sharing an id from claiming each other's leases, and distinct stable names (such as a pod or host name) keep logs and <code>Status::RunningElsewhere { owner, .. }</code> unambiguous.</li>
 <li>Instances that share a table, bucket or file form one cluster. Give every deployment that must not
 share flows its own table or bucket, or two unrelated services with a flow called <code>fetch</code> will
 coordinate with each other.</li>

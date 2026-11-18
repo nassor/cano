@@ -277,14 +277,15 @@ The variants, with the fields they carry:
 </div>
 <p>
 A single atomic write decides each run's terminal status: <code>Completed</code> on success, otherwise
-<code>Backoff</code> or <code>Tripped</code>. Observers never see a transient intermediate state. With a
-shared store, <code>last_error</code> in <code>FlowRecord</code> is UTF-8-safely capped at 4 KiB
-(<code>4096</code> bytes), and an expired lease reaped by another instance counts as a failure anchored
-at <code>lease.expires_at</code> rather than the later read time. A run that ends because it was cancelled
-(<code>cancel_flow</code> or a scheduler shutdown) and rolled back cleanly returns the flow to
-<code>Idle</code> (or restores an active <code>Backoff</code> window) and leaves the streak untouched.
-If a saga rollback fails, the run ends with <code>CompensationFailed</code>, which counts as a failure.
-<code>FlowInfo</code> exposes <code>failure_streak</code> and <code>next_eligible</code>.
+<code>Backoff</code> or <code>Tripped</code>. Observers never see a transient intermediate state. In
+both standalone and store-backed schedulers, <code>last_error</code> is UTF-8-safely capped at 4 KiB
+(<code>4096</code> bytes); with a shared store, an expired lease reaped by another instance counts as a
+failure anchored at <code>lease.expires_at</code> rather than the later read time. A run that ends
+because it was cancelled (<code>cancel_flow</code> or a scheduler shutdown) and rolled back cleanly
+returns the flow to <code>Idle</code> (or restores an active <code>Backoff</code> window) and leaves
+the streak untouched. If a saga rollback fails, the run ends with <code>CompensationFailed</code>,
+which counts as a failure. <code>FlowInfo</code> exposes <code>failure_streak</code> and
+<code>next_eligible</code>.
 </p>
 
 <h2 id="recovery"><a href="#recovery" class="anchor-link" aria-hidden="true">#</a>Recovery with <code>reset_flow</code></h2>

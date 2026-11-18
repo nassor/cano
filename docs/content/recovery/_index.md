@@ -511,8 +511,8 @@ let checkpoint_store = PostgresStore::builder()
 <dt><code>with_max_pool_size(n)</code> <small>twice the core count</small></dt>
 <dd>The most connections the pool opens.</dd>
 
-<dt><code>with_pool_timeouts(Timeouts)</code> <small>none</small></dt>
-<dd>deadpool's waits for a free slot, a new connection and a recycle check.</dd>
+<dt><code>with_pool_timeouts(Timeouts)</code> <small><code>wait</code> = <code>operation_timeout</code> (10 s)</small></dt>
+<dd>deadpool's waits for a free slot, a new connection and a recycle check. By default <code>wait</code> is bounded by <code>operation_timeout</code>, while <code>create</code> and <code>recycle</code> are unset.</dd>
 
 <dt><code>with_recycling_method(RecyclingMethod)</code> <small><code>Fast</code></small></dt>
 <dd>How the pool checks a connection before reuse.</dd>
@@ -545,6 +545,7 @@ CREATE TABLE IF NOT EXISTS "cano_checkpoints" (
     state            text        NOT NULL,
     task_id          text        NOT NULL,
     output_blob      bytea,
+    write_id         bytea,
     PRIMARY KEY (workflow_id, sequence)
 );
 ```
@@ -552,10 +553,11 @@ CREATE TABLE IF NOT EXISTS "cano_checkpoints" (
 <p>
 The primary key is the only index. It rejects a duplicate sequence, and <code>load_run</code> and
 <code>clear</code> each read one range of it, so no statement the store runs scans the whole table.
-<code>output_blob</code> holds the row's bytes exactly as written. <code>kind</code>
-stores <code>StateEntry</code> as 0, <code>CompensationCompletion</code> as 1, <code>StepCursor</code>
-as 2, <code>Suspended</code> as 3 and <code>ResumeInput</code> as 4. <code>created_at</code> is for
-operators and is not indexed.
+<code>output_blob</code> holds the row's bytes exactly as written, and <code>write_id</code> stores a
+per-append 16-byte token so retried appends after a lost ACK match only their own write.
+<code>kind</code> stores <code>StateEntry</code> as 0, <code>CompensationCompletion</code> as 1,
+<code>StepCursor</code> as 2, <code>Suspended</code> as 3 and <code>ResumeInput</code> as 4.
+<code>created_at</code> is for operators and is not indexed.
 </p>
 <hr class="section-divider">
 
