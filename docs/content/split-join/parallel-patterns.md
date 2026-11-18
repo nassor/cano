@@ -9,6 +9,10 @@ weight = 2
 
 <h1>Parallel patterns</h1>
 <p class="subtitle">Real-world fan-out recipes built on split/join.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.7.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 Recipes for common fan-out problems. Each one applies <a href="../">split/join</a>, or a batch task,

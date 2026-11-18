@@ -7,6 +7,10 @@ template = "section.html"
 <div class="content-wrapper">
 <h1>Task</h1>
 <p class="subtitle">One async method that does the work and returns the next state.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.5.0 (trait) · 0.10.0 (#[task])</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 A <code>Task</code> is the basic building block of a Cano workflow: a single <code>run</code>

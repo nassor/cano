@@ -8,6 +8,10 @@ template = "section.html"
 
 <h1>Split and join</h1>
 <p class="subtitle">Run several tasks concurrently in one state, then join the results back into the workflow.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.7.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 A <a href="../workflows/">workflow</a> normally runs one task per state. A split registers a list of

@@ -7,6 +7,10 @@ template = "section.html"
 <div class="content-wrapper">
 <h1>Testing</h1>
 <p class="subtitle">Ready-made fixtures for workflow tests, behind <code>use cano::testing::*;</code>.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.15.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported (except scheduler doubles)</span>
+</div>
 <p class="feature-tag">Everything on this page is behind the <code>testing</code> feature gate (<code>features = ["testing"]</code>), normally enabled under <code>[dev-dependencies]</code>.</p>
 
 <p>
@@ -52,6 +56,10 @@ cano = { version = "@CANO_MINOR@", features = ["testing"] }
 <p>The <code>testing</code> feature pulls in no extra dependencies.</p>
 
 <h2 id="recording-observer"><a href="#recording-observer" class="anchor-link" aria-hidden="true">#</a>RecordingObserver</h2>
+<div class="meta-tags">
+<span class="meta-tag">since 0.15.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 A <a href="../observers/"><code>WorkflowObserver</code></a> that records every lifecycle event into an
@@ -218,6 +226,10 @@ async fn every_registered_state_is_reached() {
 ```
 
 <h2 id="in-memory-store"><a href="#in-memory-store" class="anchor-link" aria-hidden="true">#</a>InMemoryCheckpointStore</h2>
+<div class="meta-tags">
+<span class="meta-tag">since 0.15.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 A process-local <a href="../recovery/"><code>CheckpointStore</code></a> for resume and recovery tests.
@@ -267,6 +279,10 @@ async fn checkpoints_run_in_memory() {
 ```
 
 <h2 id="store-contract"><a href="#store-contract" class="anchor-link" aria-hidden="true">#</a>assert_checkpoint_store_contract</h2>
+<div class="meta-tags">
+<span class="meta-tag">since 0.17.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 Runs the <a href="../recovery/checkpoint-stores/#trait"><code>CheckpointStore</code> contract</a> against any store and
@@ -295,7 +311,11 @@ async fn my_store_meets_the_contract() {
 ```
 
 <h2 id="in-memory-scheduler-store"><a href="#in-memory-scheduler-store" class="anchor-link" aria-hidden="true">#</a>InMemorySchedulerStore</h2>
-<p class="feature-tag">Also needs the <code>scheduler</code> feature.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.17.0</span>
+<span class="meta-tag meta-tag-native">not wasm-supported</span>
+</div>
+<p class="feature-tag">Also needs the <code>scheduler</code> feature (implies <code>runtime-tokio</code>; not supported on Wasm).</p>
 
 <p>
 A process-local <a href="../scheduler/several-instances/"><code>SchedulerStore</code></a>. Share one
@@ -331,7 +351,11 @@ let node_b = Scheduler::new()
 ```
 
 <h2 id="scheduler-store-contract"><a href="#scheduler-store-contract" class="anchor-link" aria-hidden="true">#</a>assert_scheduler_store_contract</h2>
-<p class="feature-tag">Also needs the <code>scheduler</code> feature.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.17.0</span>
+<span class="meta-tag meta-tag-native">not wasm-supported</span>
+</div>
+<p class="feature-tag">Also needs the <code>scheduler</code> feature (implies <code>runtime-tokio</code>; not supported on Wasm).</p>
 
 <p>
 Runs the <a href="../scheduler/several-instances/#custom-store"><code>SchedulerStore</code> contract</a> against
@@ -365,6 +389,10 @@ async fn my_scheduler_store_meets_the_contract() {
 ```
 
 <h2 id="panic-on-attempt"><a href="#panic-on-attempt" class="anchor-link" aria-hidden="true">#</a>panic_on_attempt</h2>
+<div class="meta-tags">
+<span class="meta-tag">since 0.15.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 A <a href="../task/"><code>Task</code></a> that panics on its first <em>N</em> attempts, for testing
@@ -400,6 +428,10 @@ async fn panicking_task_fails_fast() {
 ```
 
 <h2 id="assert-compensation"><a href="#assert-compensation" class="anchor-link" aria-hidden="true">#</a>assert_compensation_ran</h2>
+<div class="meta-tags">
+<span class="meta-tag">since 0.15.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 A <a href="../saga/">saga</a> assertion that compares the recorded compensation order against an

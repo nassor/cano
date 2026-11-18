@@ -9,6 +9,10 @@ weight = 1
 
 <h1>Validation and errors</h1>
 <p class="subtitle">Check a workflow is wired correctly, and handle what <code>orchestrate()</code> returns.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.1.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 This page is a reference for validation and runtime errors. <a href="../">Workflows</a> covers defining states and building a workflow.
@@ -237,7 +241,8 @@ its error is the one returned; a <code>teardown</code> error is returned only wh
 <p>
 A single task runs under <code>catch_unwind</code>, so a panic surfaces as
 <code>CanoError::TaskExecution("panic: ...")</code> and does not abort the workflow. Split branches run in a
-<code>tokio::task::JoinSet</code>, so a panic there counts as a failed branch and goes through the join strategy.
+runtime join set (<code>tokio::task::JoinSet</code> on <code>runtime-tokio</code>, <code>FuturesUnordered</code>
+on <code>wasm</code>), so a panic there counts as a failed branch and goes through the join strategy.
 </p>
 </div>
 

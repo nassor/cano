@@ -7,6 +7,10 @@ template = "section.html"
 <div class="content-wrapper">
 <h1>Resources</h1>
 <p class="subtitle">Lifecycle-managed, typed dependency injection for Cano workflows.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.10.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 <code>Resources</code> is the typed map every workflow carries. Database pools, HTTP clients, config structs,

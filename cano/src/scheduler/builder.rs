@@ -20,6 +20,8 @@ const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(30);
 
 /// Scheduler builder: register workflows, then [`start`](Self::start).
 ///
+/// **Availability:** since `0.2.0` (`scheduler` feature since `0.6.0`) · **not wasm-supported** (native only)
+///
 /// Every method consumes and returns the builder, so registration is one chain.
 /// One scheduler can host workflows with different state (and resource) types.
 /// Registration problems (a zero interval, a bad cron expression, a duplicate id,

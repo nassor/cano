@@ -1,5 +1,7 @@
 //! # Workflow API - Build Workflows with Split/Join Support
 //!
+//! **Availability:** since `0.1.0` (Split/Join since `0.7.0`) · **wasm-supported**
+//!
 //! This module provides the core [`Workflow`] type for building async workflow systems
 //! with support for parallel task execution through split/join patterns.
 //!
@@ -90,7 +92,7 @@ use tracing::{Instrument, Span, info_span};
 mod compensation;
 mod execution;
 mod join;
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 pub(crate) mod test_support;
 
 use execution::Entry;
@@ -109,14 +111,10 @@ pub trait Registrable<TState> {
     fn into_entry(self) -> StateEntry<TState>;
 }
 
-/// Compute `tokio::time::Instant::now() + d` without panicking on overflow
-/// (for example `Duration::MAX`). Uses `tokio::time::Instant` so paused test
-/// clocks stay coherent.
+/// Compute `now + d` without panicking on overflow (for example `Duration::MAX`).
 #[inline]
-pub(crate) fn deadline_after(d: Duration) -> tokio::time::Instant {
-    let now = tokio::time::Instant::now();
-    now.checked_add(d)
-        .unwrap_or_else(|| now + Duration::from_secs(u32::MAX as u64))
+pub(crate) fn deadline_after(d: Duration) -> crate::rt::Instant {
+    crate::rt::deadline_after(d)
 }
 
 /// Invoke `f` for each observer in `observers`. Used at every workflow event site;
@@ -154,18 +152,23 @@ pub(crate) fn notify_observers(
 
 #[cfg(not(feature = "tracing"))]
 fn observer_panic_notice(msg: &str) {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    static EMITTED: AtomicBool = AtomicBool::new(false);
-    // Compare-exchange so only the first panic prints; further panics are silent
-    // (avoids drowning stderr in a loop) but the operator still sees one line.
-    if EMITTED
-        .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
-        .is_ok()
+    #[cfg(not(all(target_arch = "wasm32", panic = "abort")))]
     {
-        eprintln!(
-            "cano: workflow observer panicked (further panics will be silent until process restart): {msg}"
-        );
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static EMITTED: AtomicBool = AtomicBool::new(false);
+        // Compare-exchange so only the first panic prints; further panics are silent
+        // (avoids drowning stderr in a loop) but the operator still sees one line.
+        if EMITTED
+            .compare_exchange(false, true, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+        {
+            eprintln!(
+                "cano: workflow observer panicked (further panics will be silent until process restart): {msg}"
+            );
+        }
     }
+    #[cfg(all(target_arch = "wasm32", panic = "abort"))]
+    let _ = msg;
 }
 
 /// Best-effort extraction of a human-readable message from a panic payload.
@@ -217,6 +220,8 @@ where
 }
 
 /// State machine workflow orchestration with split/join support.
+///
+/// **Availability:** since `0.1.0` (Split/Join since `0.7.0`) · **wasm-supported**
 #[must_use]
 pub struct Workflow<TState>
 where
@@ -1141,7 +1146,7 @@ where
     }
 }
 
-#[cfg(all(test, feature = "metrics"))]
+#[cfg(all(test, feature = "metrics", feature = "runtime-tokio"))]
 mod metrics_tests {
     use crate::metrics::test_support::*;
     use crate::prelude::*;
@@ -1325,7 +1330,7 @@ mod metrics_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
     use super::test_support::*;
     use super::*;
@@ -1972,7 +1977,7 @@ mod tests {
 
 /// Edge-case unit tests for `resolve_total_budget` — the budget is simply the
 /// `with_total_timeout` duration (or `None`).
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod resolve_total_budget_tests {
     use super::test_support::TestState;
     use super::*;
@@ -2070,7 +2075,7 @@ mod resolve_total_budget_tests {
 /// helper end-to-end through the task dispatch; this module pins down the
 /// helper's contract in isolation so a regression in panic-message
 /// extraction or error shape lands here first.
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod catch_panic_to_error_tests {
     use super::*;
 

@@ -81,11 +81,22 @@
 - A "Checkpoint stores" docs page under Recovery: choosing a built-in store, the `CheckpointStore`
   contract, automatic reconnection and prolonged-outage handling (with recovery and stranded-clear
   code patterns), and a guide to writing and testing your own store.
+- WebAssembly / WASI Preview 3 (`wasm32-wasip3`) support via the `wasm` feature: disables Tokio
+  runtime/time drivers and `parking_lot` in favor of `wasip3::clocks::monotonic_clock`,
+  cooperative `FuturesUnordered` split/batch fan-out, and `std::sync` locks so Cano runs cleanly
+  inside a lean Component Model guest library. Added a "WebAssembly (WASI P3)" docs page
+  and `since <version>` + `wasm-supported` / `not wasm-supported` availability annotations across
+  the Rust docs and documentation site.
 
 ### Changed
 
-- **Breaking:** the `recovery` feature is replaced by `store-redb`, which is on by default.
-  `default-features = false` removes redb from the build.
+- **Breaking:** the `recovery` feature is replaced by `store-redb`, which is on by default alongside
+  `runtime-tokio`. `default-features = false, features = ["runtime-tokio"]` removes redb from native builds.
+- **Breaking:** extracted native Tokio time/task drivers and `parking_lot` behind the
+  `runtime-tokio` feature (`default = ["runtime-tokio", "store-redb"]`; implied by `scheduler`,
+  `store-redb`, `store-postgres`, `store-nats`, and `all`). Native builds using
+  `default-features = false` without `scheduler` or `store-*` must now pass
+  `features = ["runtime-tokio"]`; WASI Preview 3 builds pass `default-features = false, features = ["wasm"]`.
 - **Breaking:** `RedbCheckpointStore` is `cano::store::RedbStore`, re-exported as `cano::RedbStore`
   and in the prelude. Its default file is `cano.redb`.
 - **Breaking:** the module `cano::recovery` is split: `cano::checkpoint` holds `CheckpointStore`,
@@ -98,6 +109,8 @@
   `blackboard_performance` and `blackboard_shared_performance`.
 - **Breaking:** `RunningScheduler::trigger` and `RunningScheduler::reset_flow` are `async` for every
   scheduler, so a call needs `.await`.
+- The `cano` package carries an empty `[lints]` table. A workspace that depends on cano by path and
+  defines `[workspace.lints]` otherwise gets a `missing_lints_inheritance` warning on every build.
 
 ### Fixed
 

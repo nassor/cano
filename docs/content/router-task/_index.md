@@ -7,6 +7,10 @@ template = "section.html"
 <div class="content-wrapper">
 <h1>RouterTask</h1>
 <p class="subtitle">Side-effect-free branching for your workflows.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.12.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 A <code>RouterTask</code> reads <a href="../resources/">Resources</a> and returns the next state

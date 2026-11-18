@@ -7,6 +7,10 @@ template = "section.html"
 <div class="content-wrapper">
 <h1>Observers and health probes</h1>
 <p class="subtitle">Lifecycle hooks for your workflows, and on-demand health for their dependencies.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.12.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 Cano has two opt-in observability surfaces next to the <a href="../tracing/">tracing</a> integration
@@ -94,6 +98,10 @@ async fn main() -> Result<(), CanoError> {
 <hr class="section-divider">
 
 <h2 id="events"><a href="#events" class="anchor-link" aria-hidden="true">#</a>Lifecycle events</h2>
+<div class="meta-tags">
+<span class="meta-tag">since 0.12.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 <p>
 <code>WorkflowObserver</code> has twelve hooks. Each has a default no-op body, so you override only the
 ones you need.
@@ -312,6 +320,10 @@ async fn main() {
 <hr class="section-divider">
 
 <h2 id="tracing-observer"><a href="#tracing-observer" class="anchor-link" aria-hidden="true">#</a>Built-in: <code>TracingObserver</code></h2>
+<div class="meta-tags">
+<span class="meta-tag">since 0.12.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 <p class="feature-tag">Behind the <code>tracing</code> feature gate (<code>features = ["tracing"]</code>).</p>
 
 <p>
@@ -395,6 +407,10 @@ Each entry below shows the event level and fields. The message text follows in t
 <hr class="section-divider">
 
 <h2 id="health"><a href="#health" class="anchor-link" aria-hidden="true">#</a>Resource health probes</h2>
+<div class="meta-tags">
+<span class="meta-tag">since 0.12.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 <p>
 Every <a href="../resources/">Resource</a> has a <code>health()</code> method that defaults to
 <code>HealthStatus::Healthy</code>. Override it to report on a connection pool, a downstream API or

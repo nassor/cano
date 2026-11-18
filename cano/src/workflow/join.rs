@@ -1,5 +1,7 @@
 //! Join strategies and configuration for parallel split tasks.
 //!
+//! **Availability:** since `0.7.0` (`bulkhead` since `0.12.0`) · **wasm-supported**
+//!
 //! [`Workflow::register_split`] runs several tasks in parallel; a [`JoinConfig`]
 //! decides when the workflow may proceed past them and which state to enter next.
 //!
@@ -8,6 +10,8 @@
 use std::time::Duration;
 
 /// Strategy for joining parallel tasks
+///
+/// **Availability:** since `0.7.0` · **wasm-supported**
 #[derive(Clone, Debug, PartialEq)]
 pub enum JoinStrategy {
     /// All tasks must complete successfully
@@ -70,6 +74,8 @@ impl JoinStrategy {
 }
 
 /// Configuration for join behavior after split tasks
+///
+/// **Availability:** since `0.7.0` (`bulkhead` since `0.12.0`) · **wasm-supported**
 #[must_use]
 #[derive(Clone)]
 pub struct JoinConfig<TState> {

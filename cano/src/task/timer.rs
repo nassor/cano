@@ -1,10 +1,12 @@
 //! # TimerTask — Wait-Then-Transition Processing Model
 //!
+//! **Availability:** since `0.15.0` · **wasm-supported**
+//!
 //! A [`TimerTask`] sleeps for a [`Duration`](std::time::Duration) (or until a monotonic
 //! [`Instant`](std::time::Instant) is reached) and then transitions to the next state. It
 //! replaces the manual `PollTask + sleep + check` boilerplate users write when all they actually
 //! need is "pause here, then continue": a [`PollTask`](crate::task::PollTask) re-evaluates a
-//! condition on every wake-up, whereas a `TimerTask` schedules **a single** `tokio::time::sleep`
+//! condition on every wake-up, whereas a `TimerTask` schedules **a single** timer sleep
 //! and wakes exactly once.
 //!
 //! ## When to use `TimerTask`
@@ -161,6 +163,8 @@ pub enum TimerOutcome {
 /// [`TimerOutcome`] returned by [`wait`](TimerTask::wait), then routes via
 /// [`after_wait`](TimerTask::after_wait).
 ///
+/// **Availability:** since `0.15.0` · **wasm-supported**
+///
 /// # Generic Types
 ///
 /// - **`TState`**: The state enum used by the workflow (`Clone + Debug + Send + Sync`).
@@ -256,9 +260,9 @@ where
     S: Clone + fmt::Debug + Send + Sync + 'static,
 {
     match t.wait(res).await? {
-        TimerOutcome::Duration(d) => tokio::time::sleep(d).await,
+        TimerOutcome::Duration(d) => crate::rt::sleep(d).await,
         // `sleep_until` resolves immediately for a deadline already in the past.
-        TimerOutcome::Until(i) => tokio::time::sleep_until(tokio::time::Instant::from_std(i)).await,
+        TimerOutcome::Until(i) => crate::rt::sleep_until(crate::rt::instant_from_std(i)).await,
     }
     t.after_wait(res).await
 }
@@ -271,7 +275,7 @@ where
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
     use super::*;
     use crate::resource::Resources;

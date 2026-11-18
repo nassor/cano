@@ -1,5 +1,7 @@
 //! # StreamTask — A Genuine Stream-Processing Model
 //!
+//! **Availability:** since `0.15.0` · **wasm-supported**
+//!
 //! A [`StreamTask`] consumes an `impl Stream` **continuously**, processes each item, and
 //! flushes per-[`StreamWindow`] window — memory is bounded by the window (a
 //! [`Count`](StreamWindow::Count) window buffers at most that many outputs; a
@@ -156,6 +158,8 @@ pub enum CloseReason {
 
 /// A genuine stream-processing model: consume an `impl Stream` continuously, flush per
 /// window, run until cancelled/exhausted, and resume from a persisted cursor.
+///
+/// **Availability:** since `0.15.0` · **wasm-supported**
 ///
 /// # Generic Types
 ///
@@ -356,11 +360,8 @@ where
     // absolute deadline never changes. Pinning a single future here and only
     // re-arming it on flush (below) keeps the per-item cost to the stream poll
     // alone. `None` for count windows — the tick branch then never resolves.
-    let mut tick: Option<Pin<Box<tokio::time::Sleep>>> = duration_len.map(|len| {
-        Box::pin(tokio::time::sleep_until(crate::workflow::deadline_after(
-            len,
-        )))
-    });
+    let mut tick: Option<crate::rt::SleepBox> =
+        duration_len.map(|len| crate::rt::sleep_until_boxed(crate::workflow::deadline_after(len)));
 
     // Resolves when the token fires, or never (no token). Built once and polled by
     // reference so the `select!` below does not re-register a waiter per item.
@@ -418,9 +419,7 @@ where
                 if buf.is_empty() {
                     // Empty tumbling window: re-arm the deadline and keep waiting.
                     tick = duration_len.map(|len| {
-                        Box::pin(tokio::time::sleep_until(crate::workflow::deadline_after(
-                            len,
-                        )))
+                        crate::rt::sleep_until_boxed(crate::workflow::deadline_after(len))
                     });
                     continue;
                 }
@@ -435,7 +434,7 @@ where
                         // retry (`max_attempts`) is intentionally NOT applied — the per-item
                         // policy + the loop are the resilience surface.
                         let processed = match attempt_timeout {
-                            Some(d) => match tokio::time::timeout(d, task.process_item(res, item)).await {
+                            Some(d) => match crate::rt::timeout(d, task.process_item(res, item)).await {
                                 Ok(inner) => inner,
                                 Err(_elapsed) => Err(CanoError::timeout(
                                     "stream process_item exceeded attempt_timeout",
@@ -758,7 +757,7 @@ fn encode_cursor<C: Serialize>(cursor: &C, task_name: &str) -> Result<Vec<u8>, C
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
     use super::*;
     use crate::task;
@@ -3202,7 +3201,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "metrics"))]
+#[cfg(all(test, feature = "metrics", feature = "runtime-tokio"))]
 mod metrics_tests {
     use super::*;
     use crate::CancellationToken;

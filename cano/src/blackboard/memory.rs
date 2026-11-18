@@ -1,20 +1,21 @@
 use super::{BlackboardResult, error::BlackboardError};
-use parking_lot::RwLock;
+use crate::sync::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Thread-safe in-memory typed key-value blackboard
 ///
+/// **Availability:** since `0.17.0` · **wasm-supported**
+///
 /// `Blackboard` provides a thread-safe shared map using
-/// a `HashMap` wrapped in `Arc<parking_lot::RwLock<_>>` as the backing storage.
+/// a `HashMap` wrapped in `Arc<RwLock<_>>` as the backing storage.
 /// This is the default blackboard implementation used throughout Cano workflows.
 ///
 /// ## Thread Safety
 ///
-/// The blackboard is fully thread-safe using `Arc<parking_lot::RwLock<_>>` for interior
-/// mutability. Multiple readers can access the blackboard concurrently, while writers get
-/// exclusive access. `parking_lot::RwLock` is used instead of `std::sync::RwLock` for
-/// faster lock acquisition and an infallible (non-poisonable) API.
+/// The blackboard is thread-safe using interior mutability (`parking_lot::RwLock` under the
+/// default `runtime-tokio` feature, or `std::sync::RwLock` under `wasm`). Multiple readers can
+/// access the blackboard concurrently, while writers get exclusive access.
 ///
 /// ## Performance Characteristics
 ///
@@ -182,7 +183,7 @@ impl Blackboard {
 
 impl crate::resource::Resource for Blackboard {}
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
     use super::*;
     use crate::resource::Resource;

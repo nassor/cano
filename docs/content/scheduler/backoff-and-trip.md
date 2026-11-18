@@ -9,6 +9,10 @@ weight = 1
 
 <h1>Scheduler backoff and trip state</h1>
 <p class="subtitle">How the scheduler delays a failing flow, when it stops dispatching it, and how to recover it.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.11.0</span>
+<span class="meta-tag meta-tag-native">not wasm-supported</span>
+</div>
 
 <p>
 See <a href="../">Scheduler</a> for scheduling strategies and lifecycle. This page covers what the

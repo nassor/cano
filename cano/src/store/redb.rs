@@ -1,5 +1,7 @@
 //! [`RedbStore`]: the default store, an embedded [`redb`] database file.
 //!
+//! **Availability:** since `0.17.0` (`store-redb` feature, on by default) · **not wasm-supported** (native only)
+//!
 //! [`redb`](https://docs.rs/redb) is an embedded, ACID, pure-Rust key-value store
 //! with no background daemon, a good fit for state that lives in the same process as
 //! the workflow engine. Compiled with the `store-redb` feature, on by default.
@@ -145,6 +147,8 @@ fn stored_to_row(
 /// The embedded store: one `redb` database file. Implements [`CheckpointStore`] and, with
 /// the `scheduler` feature, `SchedulerStore` (tables `cano_checkpoints` and
 /// `cano_scheduler`).
+///
+/// **Availability:** since `0.17.0` (`store-redb` feature) · **not wasm-supported** (native only)
 ///
 /// A redb file is held by one process, so the scheduler side coordinates schedulers inside
 /// one process and persists their state across restarts; it cannot coordinate several

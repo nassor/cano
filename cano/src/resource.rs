@@ -1,5 +1,7 @@
 //! # Resources — Unified Lifecycle-Managed Dependencies
 //!
+//! **Availability:** since `0.10.0` (`HealthStatus` since `0.12.0`) · **wasm-supported**
+//!
 //! This module provides the [`Resource`] trait and the [`Resources`] container. All external
 //! dependencies a workflow needs — database pools, HTTP clients, configuration objects,
 //! caches — are registered once into a [`Resources`] map and then injected into every task at
@@ -98,6 +100,8 @@ use std::sync::Arc;
 // ---------------------------------------------------------------------------
 
 /// Health of a single [`Resource`], as reported by [`Resource::health`].
+///
+/// **Availability:** since `0.12.0` · **wasm-supported**
 ///
 /// Returned per-resource by [`Resources::check_all_health`] and folded into a
 /// single worst-case value by [`Resources::aggregate_health`]. Health checks
@@ -231,6 +235,8 @@ impl Hasher for TypeIdHasher {
 type TypeMap = HashMap<TypeId, Box<dyn Any + Send + Sync>, BuildHasherDefault<TypeIdHasher>>;
 
 /// A map of lifecycle-managed resources, keyed by type (and optionally by name).
+///
+/// **Availability:** since `0.10.0` · **wasm-supported**
 ///
 /// See the [module documentation](self) for lookups, lifecycle guarantees and
 /// concurrency notes.
@@ -538,7 +544,7 @@ impl fmt::Debug for Resources {
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
     use super::*;
     use std::sync::Mutex;

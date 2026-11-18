@@ -52,6 +52,9 @@ jobs:
     - name: Build (default features)
       run: cargo build
 
+    - name: Check (lean runtime-tokio)
+      run: cargo check -p cano --no-default-features --features runtime-tokio
+
     - name: Build (all features)
       run: cargo build --all-features
 
@@ -87,6 +90,45 @@ jobs:
       # deps); a compile-only check of its lib + bin here keeps it from bit-rotting. The
       # Docker tests (and clippy on them) run in `e2e.yml`.
       run: cargo check -p cano-e2e
+
+  wasm:
+    name: WASI P3
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v7
+
+    - name: Install Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: wasm32-wasip3
+        components: clippy
+
+    - name: Cache cargo registry
+      uses: actions/cache@v6
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-wasm-cargo-registry-${{ hashFiles('**/Cargo.toml') }}
+
+    - name: Cache cargo index
+      uses: actions/cache@v6
+      with:
+        path: ~/.cargo/git
+        key: ${{ runner.os }}-wasm-cargo-index-${{ hashFiles('**/Cargo.toml') }}
+
+    - name: Cache cargo build
+      uses: actions/cache@v6
+      with:
+        path: target
+        key: ${{ runner.os }}-wasm-cargo-build-target-${{ hashFiles('**/Cargo.toml') }}
+
+    - name: Check (wasm)
+      run: cargo check -p cano --target wasm32-wasip3 --no-default-features --features wasm
+
+    - name: Check (wasm + tracing + metrics + testing)
+      run: cargo check -p cano --target wasm32-wasip3 --no-default-features --features wasm,tracing,metrics,testing
+
+    - name: Clippy (wasm + tracing + metrics + testing)
+      run: cargo clippy -p cano --target wasm32-wasip3 --no-default-features --features wasm,tracing,metrics,testing -- -D warnings
 
   security_audit:
     name: Security Audit

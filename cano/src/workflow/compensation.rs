@@ -255,7 +255,7 @@ where
         workflow_id: Option<&str>,
         mut stack: Vec<CompensationEntry>,
         original: CanoError,
-        comp_deadline: Option<tokio::time::Instant>,
+        comp_deadline: Option<crate::rt::Instant>,
     ) -> Result<TState, CanoError> {
         if stack.is_empty() {
             return Err(original);
@@ -272,7 +272,7 @@ where
             // would silently drop blobs the new `OrphanedCompensation` variant
             // was specifically introduced to keep.
             if let Some(d) = comp_deadline
-                && tokio::time::Instant::now() >= d
+                && crate::rt::is_elapsed(d)
             {
                 let remaining_count = stack.len() + 1; // +1 for the just-popped entry
                 // Push the just-popped entry back so every entry (including it)
@@ -321,23 +321,24 @@ where
                     let attempt_timeout = compensator.config().attempt_timeout;
                     let compensate_fut =
                         compensator.compensate(&self.resources, &entry.output_blob);
-                    let inner = async {
-                        match attempt_timeout {
-                            Some(d) => tokio::time::timeout(d, compensate_fut)
-                                .await
-                                .unwrap_or_else(|_| {
-                                    Err(CanoError::timeout(format!(
-                                        "compensate for {:?} exceeded attempt_timeout {d:?}",
-                                        entry.task_id
-                                    )))
-                                }),
-                            None => compensate_fut.await,
-                        }
-                    };
+                    let inner =
+                        async {
+                            match attempt_timeout {
+                                Some(d) => crate::rt::timeout(d, compensate_fut)
+                                    .await
+                                    .unwrap_or_else(|_| {
+                                        Err(CanoError::timeout(format!(
+                                            "compensate for {:?} exceeded attempt_timeout {d:?}",
+                                            entry.task_id
+                                        )))
+                                    }),
+                                None => compensate_fut.await,
+                            }
+                        };
                     let task_id_for_deadline = entry.task_id.clone();
                     let with_deadline = async move {
                         match comp_deadline {
-                            Some(d) => match tokio::time::timeout_at(d, inner).await {
+                            Some(d) => match crate::rt::timeout_at(d, inner).await {
                                 Ok(inner_result) => inner_result,
                                 Err(_) => Err(CanoError::timeout(format!(
                                     "compensate for {task_id_for_deadline:?} exceeded compensation deadline"
@@ -850,7 +851,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
     use super::*;
     use crate::resource::Resources;
@@ -4178,7 +4179,7 @@ mod tests {
 /// `double_compensate_on_resume_is_avoided`) cover the builder end-to-end
 /// through `execute_resume_inner`; this module pins down the boundary
 /// behavior in isolation.
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod rehydrated_run_tests {
     use super::*;
     use crate::checkpoint::CheckpointRow;
@@ -4424,7 +4425,7 @@ mod rehydrated_run_tests {
     }
 }
 
-#[cfg(all(test, feature = "metrics"))]
+#[cfg(all(test, feature = "metrics", feature = "runtime-tokio"))]
 mod metrics_tests {
     use crate::metrics::test_support::*;
     use crate::prelude::*;

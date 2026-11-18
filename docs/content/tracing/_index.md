@@ -7,6 +7,10 @@ template = "section.html"
 <div class="content-wrapper">
 <h1>Tracing</h1>
 <p class="subtitle"><code>tracing</code>-crate span instrumentation for your workflows.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.6.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 <p class="feature-tag">Behind the <code>tracing</code> feature gate (<code>features = ["tracing"]</code>).</p>
 
 <div class="callout callout-info">

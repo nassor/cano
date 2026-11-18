@@ -1,5 +1,7 @@
 //! # SteppedTask — Resumable-Iterative Processing Model
 //!
+//! **Availability:** since `0.12.0` · **wasm-supported**
+//!
 //! A [`SteppedTask`] processes work in discrete, resumable steps. Each call to
 //! [`step`](SteppedTask::step) either advances the cursor (`StepOutcome::More(cursor)`) or signals
 //! completion with a workflow state transition (`StepOutcome::Done(state)`). The cursor threading
@@ -152,6 +154,10 @@ pub enum StepOutcome<TCursor, TState> {
 /// transient errors on individual step calls.
 ///
 /// # Implementing SteppedTask
+///
+/// Resumable-iterative processing model (`step()` with a serializable cursor).
+///
+/// **Availability:** since `0.12.0` · **wasm-supported**
 ///
 /// Prefer the inherent `#[task::stepped(state = S)]` form:
 ///
@@ -358,7 +364,7 @@ where
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
     use super::*;
 
@@ -712,7 +718,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "metrics"))]
+#[cfg(all(test, feature = "metrics", feature = "runtime-tokio"))]
 mod metrics_tests {
     use super::*;
 

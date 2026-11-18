@@ -1,5 +1,7 @@
 //! # RouterTask — Side-Effect-Free Branching
 //!
+//! **Availability:** since `0.12.0` · **wasm-supported**
+//!
 //! A [`RouterTask`] inspects the workflow [`Resources`] and returns the next
 //! next state without performing any side effects. It is the canonical way
 //! to implement branching logic in a Cano workflow.
@@ -97,6 +99,8 @@ use std::fmt;
 
 /// RouterTask trait for side-effect-free workflow branching
 ///
+/// **Availability:** since `0.12.0` · **wasm-supported**
+///
 /// A [`RouterTask`] inspects the workflow [`Resources`] and returns the next
 /// next state *without* mutating any state. It is the lightweight building block
 /// for conditional routing and fan-out in a Cano workflow.
@@ -167,7 +171,7 @@ where
     async fn route(&self, res: &Resources) -> Result<TState, CanoError>;
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
     use super::*;
 

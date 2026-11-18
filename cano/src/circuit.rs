@@ -1,5 +1,7 @@
 //! # Circuit Breaker — Fail-Fast Protection for Flaky Dependencies
 //!
+//! **Availability:** since `0.11.0` · **wasm-supported**
+//!
 //! A [`CircuitBreaker`] short-circuits calls to a failing dependency so the system
 //! degrades gracefully instead of hammering a broken backend with retries.
 //!
@@ -160,6 +162,8 @@ impl Inner {
 }
 
 /// A reusable circuit breaker.
+///
+/// **Availability:** since `0.11.0` · **wasm-supported**
 ///
 /// Cheap to clone (`Arc` internally). Share one breaker across every task that
 /// depends on the same external resource so a trip from any caller protects every
@@ -489,7 +493,7 @@ impl Drop for Permit {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
     use super::*;
 
@@ -982,7 +986,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "metrics"))]
+#[cfg(all(test, feature = "metrics", feature = "runtime-tokio"))]
 mod metrics_tests {
     use super::*;
     use crate::metrics::test_support::*;

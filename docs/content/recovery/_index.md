@@ -7,7 +7,11 @@ template = "section.html"
 <div class="content-wrapper">
 <h1>Crash recovery</h1>
 <p class="subtitle">Persist every state transition, then resume a crashed run from the last checkpoint.</p>
-<p class="feature-tag">The <code>CheckpointStore</code> trait is always available. <code>RedbStore</code> is behind <code>store-redb</code>, which is on by default. <code>PostgresStore</code> is behind <code>store-postgres</code> and <code>NatsStore</code> behind <code>store-nats</code>.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.12.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported (trait &amp; in-memory)</span>
+</div>
+<p class="feature-tag">The <code>CheckpointStore</code> trait is always available (including under <code>wasm</code>). <code>RedbStore</code> (<code>store-redb</code>, on by default), <code>PostgresStore</code> (<code>store-postgres</code>), and <code>NatsStore</code> (<code>store-nats</code>) require <code>runtime-tokio</code> and are not supported on Wasm.</p>
 
 <p>
 Attach a <code>CheckpointStore</code> to a <a href="../workflows/">Workflow</a> and the engine

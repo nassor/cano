@@ -1,5 +1,9 @@
 //! # Scheduler API
 //!
+//! **Availability:** `Scheduler` since `0.2.0`; `scheduler` feature since `0.6.0`;
+//! `BackoffPolicy` since `0.11.0`; `SchedulerStore` since `0.17.0` · **not wasm-supported**
+//! (native only; requires `runtime-tokio`)
+//!
 //! Time-driven dispatch for [`Workflow`] instances — intervals, cron
 //! expressions, and manual triggers, plus per-flow backoff and trip semantics.
 //!

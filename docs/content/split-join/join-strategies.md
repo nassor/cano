@@ -9,6 +9,10 @@ weight = 1
 
 <h1>Join strategies</h1>
 <p class="subtitle">Pick the completion condition for a split.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.7.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 A split advances when its <code>JoinStrategy</code> is satisfied. This page is a reference for the six

@@ -9,6 +9,10 @@ weight = 1
 
 <h1>Resource lifecycle and concurrency</h1>
 <p class="subtitle">When setup/teardown fire, and how resources behave under concurrency.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.10.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 This page explains when resources are set up and torn down and how they behave under concurrency.

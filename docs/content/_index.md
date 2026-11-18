@@ -8,8 +8,6 @@ template = "index.html"
 <h1 class="animate-in">Cano</h1>
 <p class="subtitle animate-in">Type-safe async workflow engine with built-in scheduling, retry logic, and state machine semantics.</p>
 
-<p class="prerelease-notice animate-in"><em>Cano is still far from a 1.0 release; the API is subject to change and may include breaking changes.</em></p>
-
 <div class="badges animate-in">
 <a href="https://crates.io/crates/cano" title="Crates.io">
 <img src="https://img.shields.io/crates/v/cano.svg" alt="Crates.io">
@@ -172,35 +170,43 @@ Each of these is opt-in and costs nothing when unused: the FSM dispatch path sta
 <p>Full coverage: the <a href="resilience/">Resilience</a>, <a href="recovery/">Recovery</a>, <a href="saga/">Saga</a> and <a href="observers/">Observers</a> guides.</p>
 
 <h2>Getting started</h2>
-<p>Cano requires Rust 1.98.0 or later (edition 2024). Add it to your <code>Cargo.toml</code>:</p>
+<p>Cano requires Rust 1.98.0 or later (edition 2024), or Rust 1.100.0+ for WASI Preview 3 (<code>wasm32-wasip3</code>). Add it to your <code>Cargo.toml</code>:</p>
 
 <div class="getting-started-code">
 
 ```toml
+# Native (all features)
 [dependencies]
 cano = { version = "@CANO_MINOR@", features = ["all"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+# WebAssembly / WASI Preview 3 guest component (lean core)
+[dependencies]
+cano = { version = "@CANO_MINOR@", default-features = false, features = ["wasm"] }
 ```
 
 </div>
 
 <p>
-Cano enables one feature by default, <code>store-redb</code>. <code>features = ["all"]</code> turns on all seven optional features:
+Cano enables two features by default: <code>runtime-tokio</code> and <code>store-redb</code>. <code>features = ["all"]</code> turns on every native optional feature:
 </p>
 <ul>
-<li><code>scheduler</code>: the <a href="scheduler/"><code>Scheduler</code></a> (cron, interval and manual triggers), and with a store feature <a href="scheduler/several-instances/">several instances sharing one set of flows</a></li>
+<li><code>runtime-tokio</code> (default): Native Tokio timers, background task spawning, and <code>parking_lot</code> locks</li>
+<li><code>wasm</code>: WASI Preview 3 (<code>wasm32-wasip3</code>) clocks, cooperative <code>FuturesUnordered</code> fan-out, and zero native runtime dependencies. See the <a href="wasm/">WebAssembly guide</a></li>
+<li><code>scheduler</code>: the <a href="scheduler/"><code>Scheduler</code></a> (cron, interval and manual triggers), and with a store feature <a href="scheduler/several-instances/">several instances sharing one set of flows</a> (implies <code>runtime-tokio</code>)</li>
 <li><code>tracing</code>: <a href="tracing/"><code>tracing</code>-crate spans</a> and the <code>TracingObserver</code></li>
-<li><code>store-redb</code> (default): <a href="recovery/checkpoint-stores/#redb"><code>RedbStore</code></a>, a checkpoint store in an embedded redb file. <code>default-features = false</code> drops redb from the build</li>
-<li><code>store-postgres</code>: <a href="recovery/checkpoint-stores/#postgres"><code>PostgresStore</code></a>, a checkpoint and scheduler store in PostgreSQL tables</li>
-<li><code>store-nats</code>: <a href="recovery/checkpoint-stores/#nats"><code>NatsStore</code></a>, a checkpoint and scheduler store in NATS JetStream Key/Value buckets</li>
+<li><code>store-redb</code> (default): <a href="recovery/checkpoint-stores/#redb"><code>RedbStore</code></a>, a checkpoint store in an embedded redb file (implies <code>runtime-tokio</code>). On native without redb, use <code>default-features = false, features = ["runtime-tokio"]</code></li>
+<li><code>store-postgres</code>: <a href="recovery/checkpoint-stores/#postgres"><code>PostgresStore</code></a>, a checkpoint and scheduler store in PostgreSQL tables (implies <code>runtime-tokio</code>)</li>
+<li><code>store-nats</code>: <a href="recovery/checkpoint-stores/#nats"><code>NatsStore</code></a>, a checkpoint and scheduler store in NATS JetStream Key/Value buckets (implies <code>runtime-tokio</code>)</li>
 <li><code>metrics</code>: <a href="metrics/"><code>metrics</code>-crate counters, histograms and gauges</a> and the <code>MetricsObserver</code></li>
 <li><code>testing</code>: <a href="testing/">test fixtures</a> (recording observer, in-memory checkpoint and scheduler stores, store contract suites, panic and saga helpers), usually enabled under <code>[dev-dependencies]</code></li>
 </ul>
 <p>
-Enable only what you need, for example <code>features = ["scheduler"]</code>, or omit <code>features</code>
-for the core. Cano runs on Tokio, so <code>tokio</code> is a direct dependency and you start the runtime
-with <code>#[tokio::main]</code> or <code>tokio::runtime::Builder</code>. The two <code>tokio</code> features above are the minimum for that.
-Add <code>"time"</code>, <code>"sync"</code> and others only when your own code uses them, or use <code>"full"</code>.
+On native targets, enable only what you need, for example <code>features = ["scheduler"]</code>, or
+<code>default-features = false, features = ["runtime-tokio"]</code> for the lean Tokio core. Cano's
+<code>runtime-tokio</code> backend keeps <code>tokio</code> as a direct dependency and you start the
+runtime with <code>#[tokio::main]</code> or <code>tokio::runtime::Builder</code>. On
+<code>wasm32-wasip3</code>, use <code>default-features = false, features = ["wasm"]</code> instead.
 </p>
 
 <h3>Basic example</h3>

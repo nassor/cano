@@ -324,11 +324,8 @@ where
         // never fires, rather than aborting the orchestrate task with a panic.
         // `u32::MAX` seconds (~136 years) is comfortably below the representable
         // range of `tokio::time::Instant` on every supported platform.
-        let step_budget: Option<(
-            std::time::Instant,
-            std::time::Duration,
-            tokio::time::Instant,
-        )> = total_budget.map(|(start, limit)| (start, limit, super::deadline_after(limit)));
+        let step_budget: Option<(std::time::Instant, std::time::Duration, crate::rt::Instant)> =
+            total_budget.map(|(start, limit)| (start, limit, super::deadline_after(limit)));
 
         let mut skip_entry_row = resume_input.is_some();
         loop {
@@ -817,11 +814,7 @@ where
     /// `fut.await` is the zero-cost path when `step_budget` and `token` are both
     /// `None`; no observer plumbing runs in that case.
     async fn dispatch_with_budget<T, F>(
-        step_budget: Option<(
-            std::time::Instant,
-            std::time::Duration,
-            tokio::time::Instant,
-        )>,
+        step_budget: Option<(std::time::Instant, std::time::Duration, crate::rt::Instant)>,
         token: Option<&CancellationToken>,
         state_label: Option<&str>,
         observers: &[Arc<dyn crate::observer::WorkflowObserver>],
@@ -851,7 +844,7 @@ where
             let Some((start, limit, deadline)) = step_budget else {
                 return tracked_fut.await;
             };
-            match tokio::time::timeout_at(deadline, tracked_fut).await {
+            match crate::rt::timeout_at(deadline, tracked_fut).await {
                 Ok(inner) => inner,
                 Err(_) => {
                     let elapsed = start.elapsed();
@@ -1156,18 +1149,16 @@ where
         sequence: &mut u64,
         resume_cursor: Option<Vec<u8>>,
         token: Option<&CancellationToken>,
-        step_budget: Option<(
-            std::time::Instant,
-            std::time::Duration,
-            tokio::time::Instant,
-        )>,
+        step_budget: Option<(std::time::Instant, std::time::Duration, crate::rt::Instant)>,
     ) -> Result<TState, CanoError> {
         use std::sync::atomic::{AtomicBool, Ordering};
 
         // Aborts the spawned deadline-forwarder task when dropped, so a run that ends
         // normally (or via a real cancel, well before any deadline) doesn't leave that task
         // sleeping until the total-timeout deadline for no reason.
+        #[cfg(feature = "runtime-tokio")]
         struct AbortOnDrop(tokio::task::JoinHandle<()>);
+        #[cfg(feature = "runtime-tokio")]
         impl Drop for AbortOnDrop {
             fn drop(&mut self) {
                 self.0.abort();
@@ -1184,23 +1175,39 @@ where
         // commit its cursor, run `on_close`) instead of a `timeout_at` wrapper that would
         // drop the future mid-window — the exact hazard this arm bypasses
         // `dispatch_with_budget` to avoid. Without a budget (the common case) the caller's
-        // token is used as is and no task is spawned. With one, a child token inherits the
-        // caller's cancellation and the forwarder only has to fire it at the deadline.
+        // token is used as is and no task/timer is attached. With one, a child token
+        // inherits the caller's cancellation and fires at the deadline.
+        #[cfg(feature = "runtime-tokio")]
         let deadline_child: Option<(CancellationToken, AbortOnDrop)> =
             step_budget.map(|(_, _, deadline)| {
                 let child =
                     token.map_or_else(CancellationToken::new, CancellationToken::child_token);
                 let fire = child.clone();
                 let join = tokio::spawn(async move {
-                    tokio::time::sleep_until(deadline).await;
+                    crate::rt::sleep_until(deadline).await;
                     fire.cancel();
                 });
                 (child, AbortOnDrop(join))
             });
+        #[cfg(not(feature = "runtime-tokio"))]
+        let (deadline_token, mut deadline_sleep): (
+            Option<CancellationToken>,
+            Option<crate::rt::SleepBox>,
+        ) = match step_budget {
+            Some((_, _, deadline)) => (
+                Some(token.map_or_else(CancellationToken::new, CancellationToken::child_token)),
+                Some(crate::rt::sleep_until_boxed(deadline)),
+            ),
+            None => (None, None),
+        };
+
+        #[cfg(feature = "runtime-tokio")]
         let effective_token: Option<&CancellationToken> = match &deadline_child {
             Some((child, _)) => Some(child),
             None => token,
         };
+        #[cfg(not(feature = "runtime-tokio"))]
+        let effective_token: Option<&CancellationToken> = deadline_token.as_ref().or(token);
 
         // Set when the engine's own cooperative-drain path ends the run (the
         // `ErasedWindowStep::Cancelled` arm below, or the cancel-during-`open_session` race
@@ -1209,7 +1216,7 @@ where
         // onto the cancelled path. `AtomicBool` (not `Cell`) so the spawned workflow future
         // stays `Send`.
         let was_cancelled = AtomicBool::new(false);
-        let outcome: Result<TState, CanoError> = async {
+        let stream_body = async {
             let open = task.open_session(&self.resources, resume_cursor, config.attempt_timeout);
             let mut session = match effective_token {
                 Some(effective) => tokio::select! {
@@ -1263,8 +1270,25 @@ where
                     return result;
                 }
             }
-        }
-        .await;
+        };
+        #[cfg(feature = "runtime-tokio")]
+        let outcome: Result<TState, CanoError> = stream_body.await;
+        #[cfg(not(feature = "runtime-tokio"))]
+        let outcome: Result<TState, CanoError> = {
+            let mut body = std::pin::pin!(stream_body);
+            std::future::poll_fn(|cx| {
+                if let Some(sleep) = deadline_sleep.as_mut()
+                    && sleep.as_mut().poll(cx).is_ready()
+                {
+                    if let Some(fire) = deadline_token.as_ref() {
+                        fire.cancel();
+                    }
+                    deadline_sleep = None;
+                }
+                body.as_mut().poll(cx)
+            })
+            .await
+        };
 
         // The engine's drain path fired (`was_cancelled`) AND the outcome it produced is
         // still `Cancelled` (not overwritten by e.g. a later checkpoint-append failure,
@@ -1341,8 +1365,8 @@ where
             .bulkhead
             .map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
 
-        let mut join_set: tokio::task::JoinSet<(usize, Result<TState, CanoError>)> =
-            tokio::task::JoinSet::new();
+        let mut join_set: crate::rt::JoinSet<(usize, Result<TState, CanoError>)> =
+            crate::rt::JoinSet::new();
 
         // Observer wiring. `task_ids[idx]` is each branch's reported id
         // (`"{name}[{idx}]"`); spawned branches report retries through a shared copy
@@ -1553,7 +1577,7 @@ where
 
     async fn collect_results(
         &self,
-        mut join_set: tokio::task::JoinSet<(usize, Result<TState, CanoError>)>,
+        mut join_set: crate::rt::JoinSet<(usize, Result<TState, CanoError>)>,
         join_config: &JoinConfig<TState>,
         total_tasks: usize,
     ) -> Result<SplitOutcome, CanoError> {
@@ -1573,7 +1597,7 @@ where
         loop {
             // Wait for next completion or timeout
             let next_result = if let Some(d) = deadline {
-                match tokio::time::timeout_at(d, join_set.join_next()).await {
+                match crate::rt::timeout_at(d, join_set.join_next()).await {
                     Ok(res) => res,
                     Err(_) => {
                         // Timeout reached: abort remaining branches and return collected
@@ -1633,7 +1657,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
     use super::*;
     use crate::resource::Resources;
@@ -2948,7 +2972,7 @@ mod tests {
 /// `compensations_run_in_reverse_on_terminal_failure`) cover the helper
 /// end-to-end through `execute_workflow_from`; this module pins down the
 /// boundary behaviour in isolation.
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod wrap_and_drain_tests {
     use super::*;
     use crate::saga::CompensationEntry;
@@ -3132,7 +3156,7 @@ mod wrap_and_drain_tests {
 /// tests above; these tests pin down the helper's behavior in isolation —
 /// what happens when there are no observers, when the future returns first,
 /// when the deadline is already past, etc.
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod dispatch_with_budget_tests {
     use super::*;
     use crate::observer::WorkflowObserver;
@@ -3525,7 +3549,7 @@ mod dispatch_with_budget_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod register_paths_tests {
     use crate::checkpoint::RowKind;
     use crate::error::CanoError;
@@ -3695,7 +3719,7 @@ mod register_paths_tests {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod engine_contract_tests {
     use crate::error::CanoError;
     use crate::observer::WorkflowObserver;

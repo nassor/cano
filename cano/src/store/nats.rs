@@ -1,6 +1,8 @@
 //! [`NatsStore`]: a [`CheckpointStore`] and, with the `scheduler` feature, a
 //! `SchedulerStore`, both backed by NATS JetStream Key/Value buckets.
 //!
+//! **Availability:** since `0.17.0` (`store-nats` feature) · **not wasm-supported** (native only)
+//!
 //! Compiled with the `store-nats` feature. [`async_nats`] is re-exported here so you can
 //! build [`ConnectOptions`](async_nats::ConnectOptions), a client or a JetStream context
 //! without adding it as a dependency.
@@ -152,6 +154,8 @@ pub const DEFAULT_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A [`CheckpointStore`], and with the `scheduler` feature a `SchedulerStore`, that keeps
 /// its data in NATS JetStream Key/Value buckets.
+///
+/// **Availability:** since `0.17.0` (`store-nats` feature) · **not wasm-supported** (native only)
 ///
 /// Cheap to clone: clones share the client. Build one with [`builder`](Self::builder), or
 /// [`connect`](Self::connect) for the defaults. See the [module docs](self) for the key

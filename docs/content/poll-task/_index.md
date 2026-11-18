@@ -7,6 +7,10 @@ template = "section.html"
 <div class="content-wrapper">
 <h1>PollTask</h1>
 <p class="subtitle">"Wait-until" loops without blocking a thread.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.12.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 A <code>PollTask</code> calls its <code>poll</code> method until the work it waits on is ready. Each
@@ -321,7 +325,7 @@ impl PollTask<Step> for AwaitJob {
 <p>
 Use a <code>PollTask</code> to wait for an external job to finish, or for a database row to appear or a
 flag to flip, with a ready or pending result per check instead of hand-written
-<code>tokio::time::sleep</code> bookkeeping. If you only need to pause once for a known delay, use a
+sleep bookkeeping (backed by Tokio timers on native targets and WASI Preview 3 clocks on <code>wasm</code>). If you only need to pause once for a known delay, use a
 <a href="../timer-task/">TimerTask</a>.
 </p>
 

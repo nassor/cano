@@ -8,6 +8,10 @@ template = "section.html"
 
 <h1>Scheduler</h1>
 <p class="subtitle">Run workflows on an interval, on a cron schedule, or on demand.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.6.0</span>
+<span class="meta-tag meta-tag-native">not wasm-supported</span>
+</div>
 <p class="feature-tag">Behind the <code>scheduler</code> feature gate (<code>features = ["scheduler"]</code>).</p>
 
 <nav class="page-toc" aria-label="Table of contents">

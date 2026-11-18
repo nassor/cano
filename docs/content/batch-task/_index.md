@@ -7,6 +7,10 @@ template = "section.html"
 <div class="content-wrapper">
 <h1>BatchTask</h1>
 <p class="subtitle">Fan out over data items with bounded concurrency and per-item retry, then re-join.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.12.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 A <code>BatchTask</code> loads a <code>Vec</code> of work items, processes them with bounded

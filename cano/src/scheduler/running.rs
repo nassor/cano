@@ -1,4 +1,6 @@
 //! `RunningScheduler` — the live, cloneable handle returned by [`Scheduler::start`](crate::scheduler::Scheduler::start).
+//!
+//! **Availability:** `scheduler` feature (`since 0.6.0`) · **not wasm-supported** (native only)
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -16,6 +18,8 @@ use super::loops::{
 use super::{FlowInfo, FlowRuntime, ParsedSchedule, Status};
 
 /// Live handle to a started [`Scheduler`](crate::scheduler::Scheduler).
+///
+/// **Availability:** `scheduler` feature (`since 0.6.0`) · **not wasm-supported** (native only)
 ///
 /// Cheap to clone; every clone controls the same scheduler. Dropping the last
 /// clone without calling [`stop`](Self::stop) cancels every in-flight run and

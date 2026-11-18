@@ -1,5 +1,7 @@
 //! Retry policy and the retry-driving loop for task execution.
 //!
+//! **Availability:** since `0.1.4` (`attempt_timeout` since `0.10.3`) · **wasm-supported**
+//!
 //! [`RetryMode`] / [`TaskConfig`] describe *how* a task should be retried;
 //! [`run_with_retries`] is the loop that applies that policy (and consults an
 //! attached [`CircuitBreaker`]) around a single unit of work. The workflow and
@@ -19,6 +21,8 @@ use crate::observer::WorkflowObserver;
 use tracing::{Instrument, debug, error, info, info_span, instrument, warn};
 
 /// Retry modes for task execution
+///
+/// **Availability:** since `0.1.4` · **wasm-supported**
 ///
 /// Defines different retry strategies that can be used when task execution fails.
 #[derive(Debug, Clone)]
@@ -196,6 +200,8 @@ impl Default for RetryMode {
 
 /// Task configuration for retry behavior and parameters
 ///
+/// **Availability:** since `0.1.4` (`attempt_timeout` since `0.10.3`) · **wasm-supported**
+///
 /// This struct provides configuration for task execution behavior,
 /// including retry logic and custom parameters.
 #[must_use]
@@ -204,7 +210,7 @@ pub struct TaskConfig {
     /// Retry strategy for failed executions
     pub retry_mode: RetryMode,
     /// Optional per-attempt timeout. When set, each attempt inside
-    /// [`run_with_retries`] is wrapped with [`tokio::time::timeout`]; an
+    /// [`run_with_retries`] is bounded by `attempt_timeout`; an
     /// expired attempt produces a [`CanoError::Timeout`] and the retry loop
     /// continues per `retry_mode`. `None` (the default) preserves the
     /// previous behavior of letting attempts run unbounded.
@@ -409,7 +415,7 @@ where
                 if let Some(delay) = retry_mode.delay_for_attempt(attempt - 1)
                     && !delay.is_zero()
                 {
-                    tokio::time::sleep(delay).await;
+                    crate::rt::sleep(delay).await;
                 }
             }
         }
@@ -492,7 +498,7 @@ where
                 };
 
                 let attempt_outcome = match config.attempt_timeout {
-                    Some(d) => match tokio::time::timeout(d, run_fn()).await {
+                    Some(d) => match crate::rt::timeout(d, run_fn()).await {
                         Ok(inner) => inner,
                         Err(_) => Err(CanoError::timeout("task attempt exceeded attempt_timeout")),
                     },
@@ -576,7 +582,7 @@ where
     .await
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -1428,7 +1434,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "metrics"))]
+#[cfg(all(test, feature = "metrics", feature = "runtime-tokio"))]
 mod metrics_tests {
     use super::*;
     use crate::circuit::{CircuitBreaker, CircuitPolicy};

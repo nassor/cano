@@ -12,15 +12,19 @@ readme = "../README.md"
 keywords = ["framework", "async", "workflow", "data-processing", "ai"]
 categories = ["development-tools", "concurrency", "asynchronous"]
 
+# No lints of its own. The empty table tells cargo this is intentional: a workspace that depends on cano by path and
+# defines `[workspace.lints]` otherwise gets a `missing_lints_inheritance` warning on every build.
+[lints]
+
 [dependencies]
 cano-macros.workspace = true
-tokio = { version = "1.54.1", features = ["macros", "sync", "time", "rt-multi-thread"] }
+tokio = { version = "1.54.1", default-features = false, features = ["macros", "sync"] }
 rand = "0.10"
 chrono = { version = "0.4", features = ["serde"], optional = true }
 cron = { version = "0.17.0", optional = true }
 futures-util = "0.3"
 tokio-util = { version = "0.7", default-features = false }
-parking_lot = "0.13"
+parking_lot = { version = "0.13", optional = true }
 smallvec = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -33,26 +37,33 @@ deadpool-postgres = { version = "0.14.2", optional = true }
 async-nats = { version = "0.52.0", default-features = false, features = ["kv", "ring", "nkeys", "nuid", "server_2_10", "server_2_11", "server_2_12", "server_2_14"], optional = true }
 bytes = { version = "1", optional = true }
 
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasip3 = { version = "0.10", optional = true }
+
 [features]
-default = ["store-redb"]
-scheduler = ["dep:chrono", "dep:cron", "tokio/signal"]
+default = ["runtime-tokio", "store-redb"]
+runtime-tokio = ["tokio/time", "tokio/rt", "tokio/rt-multi-thread", "dep:parking_lot"]
+wasm = ["dep:wasip3"]
+scheduler = ["runtime-tokio", "dep:chrono", "dep:cron", "tokio/signal"]
 tracing = ["dep:tracing"]
-store-redb = ["dep:redb", "dep:postcard"]
-store-postgres = ["dep:tokio-postgres", "dep:deadpool-postgres"]
-store-nats = ["dep:async-nats", "dep:postcard", "dep:bytes"]
+store-redb = ["runtime-tokio", "dep:redb", "dep:postcard"]
+store-postgres = ["runtime-tokio", "dep:tokio-postgres", "dep:deadpool-postgres"]
+store-nats = ["runtime-tokio", "dep:async-nats", "dep:postcard", "dep:bytes"]
 metrics = ["dep:metrics"]
 testing = []
-all = ["scheduler", "tracing", "store-redb", "store-postgres", "store-nats", "metrics", "testing"]
+all = ["runtime-tokio", "scheduler", "tracing", "store-redb", "store-postgres", "store-nats", "metrics", "testing"]
 
 [dev-dependencies]
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 axum = "0.8.9"
 redb = "4.6"
 criterion = { version = "0.8", features = ["html_reports", "async_tokio"] }
 cuca = { version = "0.9", features = ["provider-lmstudio"] }
-futures-util = "0.3"
 parking_lot = "0.13"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
 tempfile = "3"
 wide = "1.7"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

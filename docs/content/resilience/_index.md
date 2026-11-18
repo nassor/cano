@@ -7,6 +7,10 @@ template = "section.html"
 <div class="content-wrapper">
 <h1>Resilience</h1>
 <p class="subtitle">Retries, timeouts, cancellation, circuit breakers, rate limiting, bulkheads, panic safety and scheduler backoff.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.1.4</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported (except scheduler backoff)</span>
+</div>
 
 <p>
 Cano's resilience features are separate, opt-in primitives that sit on the dispatch path of each
@@ -39,6 +43,10 @@ Checkpoint and resume, sagas and observers cover recovery: see <a href="../recov
 <hr class="section-divider">
 
 <h2 id="retries"><a href="#retries" class="anchor-link" aria-hidden="true">#</a>Retries</h2>
+<div class="meta-tags">
+<span class="meta-tag">since 0.1.4</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 <p>
 A task's <code>config()</code> returns a <a href="../task/configuration/"><code>TaskConfig</code></a>
 whose <code>retry_mode</code> drives the retry loop. The default is no retries:
@@ -79,9 +87,13 @@ impl FetchTask {
 <hr class="section-divider">
 
 <h2 id="timeouts"><a href="#timeouts" class="anchor-link" aria-hidden="true">#</a>Per-attempt timeouts</h2>
+<div class="meta-tags">
+<span class="meta-tag">since 0.10.3</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 <p>
 <code>TaskConfig::with_attempt_timeout(Duration)</code> wraps each attempt in
-<code>tokio::time::timeout</code>. A blown deadline produces <code>CanoError::Timeout</code>, which
+Cano's runtime timeout (<code>tokio::time::timeout</code> on native, WASI Preview 3 monotonic clock on <code>wasm</code>). A blown deadline produces <code>CanoError::Timeout</code>, which
 the retry loop treats like any other failure: the attempt is retried, and when every attempt times
 out the last timeout is wrapped in <code>CanoError::RetryExhausted</code>. With three attempts and a
 2s timeout, the worst case is about 6s plus backoff.
@@ -108,6 +120,10 @@ impl CallTask {
 <hr class="section-divider">
 
 <h2 id="workflow-total-timeout"><a href="#workflow-total-timeout" class="anchor-link" aria-hidden="true">#</a>Workflow total timeout</h2>
+<div class="meta-tags">
+<span class="meta-tag">since 0.15.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 <p>
 <code>Workflow::with_total_timeout(Duration)</code> sets a wall-clock budget for the entire
 <code>orchestrate</code> or <a href="../recovery/"><code>resume_from</code></a> call. When the budget
@@ -133,7 +149,7 @@ let workflow = Workflow::bare()
 
 <p>
 Retries, per-attempt timeouts and circuit breakers all run inside the per-state dispatch, which the
-engine wraps in <code>tokio::time::timeout_at</code>. A task that retries forever cannot outlive the
+engine wraps in a runtime deadline check (<code>tokio::time::timeout_at</code> on native, WASI Preview 3 monotonic clock deadline on <code>wasm</code>). A task that retries forever cannot outlive the
 total budget.
 </p>
 
@@ -235,6 +251,10 @@ the final error is the wrapped <code>WorkflowTimeout</code>.</p>
 <hr class="section-divider">
 
 <h2 id="cancellation"><a href="#cancellation" class="anchor-link" aria-hidden="true">#</a>Cooperative cancellation</h2>
+<div class="meta-tags">
+<span class="meta-tag">since 0.15.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 <p>
 A total timeout aborts a run on a deadline. Cancellation aborts it on a signal you control: a
 shutdown handler, a stop button, a parent task giving up.
@@ -318,6 +338,10 @@ final error is the wrapped <code>Cancelled</code>.</p>
 <hr class="section-divider">
 
 <h2 id="bulkhead"><a href="#bulkhead" class="anchor-link" aria-hidden="true">#</a>Bulkheads</h2>
+<div class="meta-tags">
+<span class="meta-tag">since 0.12.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 <p>
 A <a href="../split-join/">split/join</a> state runs its tasks in parallel, which can mean 500
 connections to a database that handles 50. <a href="../split-join/#bulkhead"><code>JoinConfig::with_bulkhead(n)</code></a>
@@ -342,6 +366,11 @@ let workflow = Workflow::bare()
 <hr class="section-divider">
 
 <h2 id="panic-safety"><a href="#panic-safety" class="anchor-link" aria-hidden="true">#</a>Panic safety</h2>
+<div class="meta-tags">
+<span class="meta-tag">since 0.12.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported (unwind)</span>
+</div>
+<p class="feature-tag">Under <code>wasm32</code> with <code>panic = "abort"</code>, panics trap the component instance instead of unwinding; targets compiled with unwind support catch panics cleanly at task and split boundaries.</p>
 <p>
 A <code>panic!</code> inside a task body, or an <code>.unwrap()</code> that fires, does not unwind
 through the workflow engine. The dispatcher wraps the retry loop in <code>catch_unwind</code> and turns a
@@ -359,7 +388,11 @@ step's rollback still runs.</p>
 <hr class="section-divider">
 
 <h2 id="scheduler-backoff"><a href="#scheduler-backoff" class="anchor-link" aria-hidden="true">#</a>Scheduler backoff and trip</h2>
-<p class="feature-tag">Behind the <code>scheduler</code> feature gate.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.11.0</span>
+<span class="meta-tag meta-tag-native">not wasm-supported</span>
+</div>
+<p class="feature-tag">Behind the <code>scheduler</code> feature gate (implies <code>runtime-tokio</code>; not supported on Wasm).</p>
 <p>
 The primitives above act per dispatch. A workflow that runs on a timer has a second, flow-level
 layer: a per-flow <code>BackoffPolicy</code> lengthens the gap between failed runs and can trip a flow
@@ -391,7 +424,7 @@ all of them on each dispatch:
 <text class="t-strong ta-s" x="58" y="70">retry loop</text>
 <text class="t-code t-mut ta-s" x="152" y="70">run_with_retries, up to max_attempts</text>
 <rect class="n-ghost" x="280" y="84" width="444" height="112" rx="12"/>
-<text class="t-code t-mut ta-s" x="298" y="104">tokio::time::timeout(attempt_timeout)</text>
+<text class="t-code t-mut ta-s" x="298" y="104">runtime timeout(attempt_timeout)</text>
 <text class="t-mut ta-e" x="712" y="104">your task body</text>
 <circle class="n" cx="10" cy="151" r="5"/>
 <path class="e" d="M17,151 H64" marker-end="url(#resilience-layers-ah)"/>

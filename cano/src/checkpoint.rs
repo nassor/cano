@@ -1,5 +1,8 @@
 //! # Checkpoint: append-only checkpoint storage
 //!
+//! **Availability:** `CheckpointStore`, `CheckpointRow`, and `RowKind` since `0.12.0`
+//! (`RowKind::Suspended` and `RowKind::ResumeInput` since `0.17.0`) · **wasm-supported**
+//!
 //! This module defines the [`CheckpointStore`] trait: a pluggable, append-only
 //! log of FSM transitions that lets a workflow be resumed after a crash. Each
 //! transition is recorded as one [`CheckpointRow`] — a monotonically increasing
@@ -189,6 +192,8 @@ impl CheckpointRow {
 
 /// Append-only checkpoint log keyed by workflow id.
 ///
+/// **Availability:** since `0.12.0` · **wasm-supported**
+///
 /// Implementations record one [`CheckpointRow`] per FSM transition and can
 /// replay them in sequence order to resume a crashed run. The contract:
 ///
@@ -222,7 +227,7 @@ pub trait CheckpointStore: Send + Sync + 'static {
     async fn clear(&self, workflow_id: &str) -> Result<(), CanoError>;
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
     use super::*;
     use crate::testing::InMemoryCheckpointStore;
