@@ -45,9 +45,11 @@ state enums and different resources.
 </p>
 
 ```rust
+// SyncState and ExportState are different enum types hosted in one Scheduler.
 let running = Scheduler::new()
     .every("sync", sync_workflow, SyncState::Start, Duration::from_secs(300))
     .manual("export", export_workflow, ExportState::Start)
+    // Validates all flows, runs resource setup once, and spawns interval/cron loops.
     .start()
     .await?;
 ```
@@ -202,8 +204,7 @@ next firing.
 <p>Run workflows at fixed time intervals.</p>
 
 ```rust
-.every(..., Duration::from_secs(30))
-
+.every("sync", workflow, State::Start, Duration::from_secs(30))
 ```
 </div>
 <div class="mode-card">
@@ -212,8 +213,7 @@ next firing.
 <p>Run workflows based on cron expressions.</p>
 
 ```rust
-.cron(..., "0 0 9 * * *")
-
+.cron("report", workflow, State::Start, "0 0 9 * * *")
 ```
 </div>
 <div class="mode-card">
@@ -222,8 +222,7 @@ next firing.
 <p>Trigger workflows on demand.</p>
 
 ```rust
-.manual(...)
-
+.manual("export", workflow, State::Start)
 ```
 </div>
 </div>
@@ -283,7 +282,6 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum State { Start, Complete }
 
-#[derive(Clone)]
 struct HealthCheckTask;
 
 #[task(state = State)]
@@ -291,10 +289,8 @@ impl HealthCheckTask {
     async fn run(&self, res: &Resources) -> Result<State, CanoError> {
         println!("Running health check...");
 
-        // Check system health
         let board = res.get::<Blackboard>()?;
-        let status = "healthy".to_string();
-        board.put("last_health_check", status);
+        board.put("last_health_check", "healthy".to_string());
 
         Ok(State::Complete)
     }
@@ -302,25 +298,22 @@ impl HealthCheckTask {
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let board = Blackboard::new();
-
-    let workflow = Workflow::new(Resources::new().insert(board.clone()))
+    // Scheduler runs resource setup once at start() and teardown once at stop().
+    let workflow = Workflow::new(Resources::new().insert(Blackboard::new()))
         .register(State::Start, HealthCheckTask)
         .add_exit_state(State::Complete);
 
-    // Run every 30 seconds. start() consumes the builder and returns a
-    // clone-able RunningScheduler.
+    // Run every 30 s; start() consumes the builder and returns a cloneable RunningScheduler.
     let running = Scheduler::new()
         .every("health_check", workflow, State::Start, Duration::from_secs(30))
         .start()
         .await?;
 
     // Block until Ctrl-C (or SIGTERM on Unix), then drain in-flight runs and tear down.
-    cano::scheduler::shutdown_signal().await?;
+    shutdown_signal().await?;
     running.stop().await?;
     Ok(())
 }
-
 ```
 
 <div class="callout callout-tip">
@@ -377,12 +370,10 @@ plus cron and manual flows).</p>
 
 ```rust
 use cano::prelude::*;
-use chrono::Utc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum State { Start, Complete }
 
-#[derive(Clone)]
 struct DailyReport {
     report_type: String,
 }
@@ -393,15 +384,10 @@ impl DailyReport {
         println!("Preparing {} report...", self.report_type);
 
         let board = res.get::<Blackboard>()?;
+        let metrics = &["metric1", "metric2", "metric3"];
 
-        // Load data for report
-        let data = vec!["metric1".to_string(), "metric2".to_string(), "metric3".to_string()];
-        board.put("report_start", Utc::now().to_rfc3339());
-
-        println!("Generating report with {} records", data.len());
-        let result = format!("{} report: {} records processed", self.report_type, data.len());
-
-        println!("Report completed: {}", result);
+        let result = format!("{} report: {} metrics processed", self.report_type, metrics.len());
+        println!("{result}");
         board.put("last_report", result);
 
         Ok(State::Complete)
@@ -410,35 +396,28 @@ impl DailyReport {
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let board = Blackboard::new();
-
-    // Morning report workflow
-    let morning_report = Workflow::new(Resources::new().insert(board.clone()))
-        .register(State::Start, DailyReport {
-            report_type: "Morning".to_string()
-        })
+    // Give each flow its own Blackboard so scheduled runs do not overwrite one another.
+    let morning_report = Workflow::new(Resources::new().insert(Blackboard::new()))
+        .register(State::Start, DailyReport { report_type: "Morning".to_string() })
         .add_exit_state(State::Complete);
 
-    // Evening report workflow
-    let evening_report = Workflow::new(Resources::new().insert(board.clone()))
-        .register(State::Start, DailyReport {
-            report_type: "Evening".to_string()
-        })
+    let evening_report = Workflow::new(Resources::new().insert(Blackboard::new()))
+        .register(State::Start, DailyReport { report_type: "Evening".to_string() })
         .add_exit_state(State::Complete);
 
     let running = Scheduler::new()
-        // Run daily at 9 AM: "0 0 9 * * *"
+        // 6-field cron (sec min hour dom month dow), evaluated in UTC: 09:00:00 UTC daily.
         .cron("morning_report", morning_report, State::Start, "0 0 9 * * *")
-        // Run daily at 6 PM: "0 0 18 * * *"
+        // Daily at 18:00:00 UTC.
         .cron("evening_report", evening_report, State::Start, "0 0 18 * * *")
         .start()
         .await?;
 
-    cano::scheduler::shutdown_signal().await?;
+    // Wait for shutdown signal, then drain in-flight runs and run teardown hooks.
+    shutdown_signal().await?;
     running.stop().await?;
     Ok(())
 }
-
 ```
 
 <h3 id="manual-triggering"><a href="#manual-triggering" class="anchor-link" aria-hidden="true">#</a>Manual triggering</h3>
@@ -491,7 +470,6 @@ use cano::prelude::*;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum State { Start, Complete }
 
-#[derive(Clone)]
 struct DataExportTask;
 
 #[task(state = State)]
@@ -499,10 +477,8 @@ impl DataExportTask {
     async fn run(&self, res: &Resources) -> Result<State, CanoError> {
         println!("Starting data export...");
 
-        // Export data to CSV
         let board = res.get::<Blackboard>()?;
-        let export_path = "/tmp/export.csv".to_string();
-        board.put("export_path", export_path);
+        board.put("export_path", "/tmp/export.csv".to_string());
 
         println!("Export completed");
         Ok(State::Complete)
@@ -511,35 +487,37 @@ impl DataExportTask {
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
+    // Keep a handle on the Blackboard to inspect outputs after a manual run settles.
     let board = Blackboard::new();
 
     let export_workflow = Workflow::new(Resources::new().insert(board.clone()))
         .register(State::Start, DataExportTask)
         .add_exit_state(State::Complete);
 
-    // Register as manual-only workflow. start() returns a live, clone-able handle.
+    // Register as a manual-only flow; start() returns a live, cloneable handle.
     let running = Scheduler::new()
         .manual("data_export", export_workflow, State::Start)
         .start()
         .await?;
 
-    // trigger() starts the run and returns.
+    // trigger() spawns the run immediately and rejects overlapping triggers while Running.
     println!("Triggering export...");
     running.trigger("data_export").await?;
 
-    // wait_idle() returns once the run has finished.
+    // Wait until the first run finishes before reading results or triggering again.
     let info = running.wait_idle("data_export").await.expect("flow exists");
-    println!("Export finished: {:?}", info.status);
+    let export_path: String = board.get("export_path")?;
+    println!("Export finished: {:?} -> {export_path}", info.status);
 
-    // Can be triggered again later
+    // Safe to trigger again once wait_idle() resolves.
     running.trigger("data_export").await?;
-    running.wait_idle("data_export").await;
+    let info = running.wait_idle("data_export").await.expect("flow exists");
+    println!("Total runs: {}", info.run_count);
 
-    // stop() drains in-flight runs, then tears the resources down.
+    // stop() drains in-flight runs, then tears resources down.
     running.stop().await?;
     Ok(())
 }
-
 ```
 
 <h3 id="mixed-scheduling"><a href="#mixed-scheduling" class="anchor-link" aria-hidden="true">#</a>Mixed scheduling</h3>
@@ -598,104 +576,97 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum State { Start, Complete }
 
+struct DataSyncTask;
+
+#[task(state = State)]
+impl DataSyncTask {
+    async fn run(&self) -> Result<State, CanoError> {
+        println!("Syncing data...");
+        Ok(State::Complete)
+    }
+}
+
+struct BackupTask;
+
+#[task(state = State)]
+impl BackupTask {
+    async fn run(&self) -> Result<State, CanoError> {
+        println!("Running backup...");
+        Ok(State::Complete)
+    }
+}
+
+struct WeeklyReportTask;
+
+#[task(state = State)]
+impl WeeklyReportTask {
+    async fn run(&self) -> Result<State, CanoError> {
+        println!("Generating weekly report...");
+        Ok(State::Complete)
+    }
+}
+
+struct EmergencyExportTask;
+
+#[task(state = State)]
+impl EmergencyExportTask {
+    async fn run(&self) -> Result<State, CanoError> {
+        println!("Emergency export...");
+        Ok(State::Complete)
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let board = Blackboard::new();
-
-    // Define simple tasks
-    #[derive(Clone)]
-    struct DataSyncTask;
-
-    #[task(state = State)]
-    impl DataSyncTask {
-        async fn run(&self) -> Result<State, CanoError> {
-            println!("Syncing data...");
-            Ok(State::Complete)
-        }
-    }
-
-    #[derive(Clone)]
-    struct BackupTask;
-    #[task(state = State)]
-    impl BackupTask {
-        async fn run(&self) -> Result<State, CanoError> {
-            println!("Running backup...");
-            Ok(State::Complete)
-        }
-    }
-
-    #[derive(Clone)]
-    struct WeeklyReportTask;
-
-    #[task(state = State)]
-    impl WeeklyReportTask {
-        async fn run(&self) -> Result<State, CanoError> {
-            println!("Generating weekly report...");
-            Ok(State::Complete)
-        }
-    }
-
-    #[derive(Clone)]
-    struct EmergencyExportTask;
-
-    #[task(state = State)]
-    impl EmergencyExportTask {
-        async fn run(&self) -> Result<State, CanoError> {
-            println!("Emergency export...");
-            Ok(State::Complete)
-        }
-    }
-
-    // 1. Interval: Data sync every 5 minutes
-    let sync_workflow = Workflow::new(Resources::new().insert(board.clone()))
+    let sync_workflow = Workflow::bare()
         .register(State::Start, DataSyncTask)
         .add_exit_state(State::Complete);
 
-    // 2. Cron: Daily backup at 3 AM
-    let backup_workflow = Workflow::new(Resources::new().insert(board.clone()))
+    let backup_workflow = Workflow::bare()
         .register(State::Start, BackupTask)
         .add_exit_state(State::Complete);
 
-    // 3. Cron: Weekly report on Mondays at 9 AM
-    let report_workflow = Workflow::new(Resources::new().insert(board.clone()))
+    let report_workflow = Workflow::bare()
         .register(State::Start, WeeklyReportTask)
         .add_exit_state(State::Complete);
 
-    // 4. Manual: Emergency data export
-    let export_workflow = Workflow::new(Resources::new().insert(board.clone()))
+    let export_workflow = Workflow::bare()
         .register(State::Start, EmergencyExportTask)
         .add_exit_state(State::Complete);
 
-    // One chain registers every flow; start() returns the live handle.
+    // Register interval, UTC cron (sec min hour dom month dow), and manual flows together.
     let running = Scheduler::new()
         .every("data_sync", sync_workflow, State::Start, Duration::from_secs(300))
-        .cron("daily_backup", backup_workflow, State::Start, "0 0 3 * * *")
-        .cron("weekly_report", report_workflow, State::Start, "0 0 9 * * MON")
-        .manual("emergency_export", export_workflow, State::Start)
+        .cron("daily_backup", backup_workflow, State::Start, "0 0 3 * * *")     // 03:00 UTC daily
+        .cron("weekly_report", report_workflow, State::Start, "0 0 9 * * MON") // 09:00 UTC Mondays
+        .manual("emergency_export", export_workflow, State::Start)             // runs on trigger() only
         .start()
         .await?;
 
-    // Report on every flow once a minute until Ctrl-C (or SIGTERM on Unix).
-    let shutdown = cano::scheduler::shutdown_signal();
+    // Report status every minute until Ctrl-C (or SIGTERM on Unix).
+    let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
-            _ = &mut shutdown => break,
+            res = &mut shutdown => {
+                res?;
+                break;
+            }
             _ = tokio::time::sleep(Duration::from_secs(60)) => {
                 for info in running.list() {
                     println!("{}: {:?} (runs: {})", info.id, info.status, info.run_count);
                 }
 
-                // Example: trigger the emergency export if some condition holds.
+                // Example: trigger the manual flow on demand.
                 // running.trigger("emergency_export").await?;
             }
         }
     }
 
+    // Drains running flows, cancels stragglers after the drain timeout, and tears down resources.
     running.stop().await?;
     Ok(())
 }
-
 ```
 
 <div class="callout callout-tip">
@@ -733,20 +704,19 @@ Resource <code>setup()</code> and <code>teardown()</code> stay owned by the sche
 
 ```rust
 use cano::prelude::*;
-use cano::RedbStore;
 use std::sync::Arc;
 use std::time::Duration;
 
 let checkpoints = Arc::new(RedbStore::new("scheduled.redb")?);
 
 // Without with_workflow_id, checkpoints use the flow id ("sync").
-// An interrupted run resumes automatically on the next tick or failover.
-let workflow = Workflow::new(Resources::new())
+let workflow = Workflow::bare()
     .register(SyncState::Start, StartTask)
     .register(SyncState::Apply, ApplyTask)
     .add_exit_state(SyncState::Done)
     .with_checkpoint_store(checkpoints);
 
+// On restart or cluster failover, any unfinished log resumes automatically.
 let running = Scheduler::new()
     .every("sync", workflow, SyncState::Start, Duration::from_secs(60))
     .start()
@@ -770,10 +740,10 @@ wait for the run to wind down.
 </p>
 
 ```rust
-// Stop the in-flight run of a flow; its saga rolls back and the flow goes Idle.
+// Sync signal: trips this flow's CancellationToken and returns immediately.
 running.cancel_flow("order")?;
 
-// cancel_flow returns at once; wait for the cancelled run to settle.
+// Wait for the in-flight task (and any saga rollback) to settle.
 let info = running.wait_idle("order").await.expect("flow exists");
 assert_eq!(info.status, Status::Idle);
 ```
@@ -838,19 +808,22 @@ every path, including after an abort.</li>
 </ol>
 
 ```rust
+use cano::prelude::*;
 use std::time::Duration;
 
 let running = Scheduler::new()
     .every("fetch", workflow, State::Start, Duration::from_secs(60))
+    // Phase 1: stop new dispatches and let running flows finish naturally.
     .with_drain_timeout(Duration::from_secs(20))
+    // Phase 2: cancel stragglers and allow saga compensation before aborting.
     .with_cancel_timeout(Duration::from_secs(5))
     .start()
     .await?;
 
 // Resolves on Ctrl-C, or on SIGTERM on Unix.
-cano::scheduler::shutdown_signal().await?;
+shutdown_signal().await?;
 
-// Drain, cancel, abort, teardown.
+// Drain -> cancel -> abort -> teardown in bounded time.
 running.stop().await?;
 ```
 
@@ -895,12 +868,12 @@ fn batch_workflow(batch: Vec<Item>, results: SharedResults) -> Workflow<State> {
     Workflow::new(Resources::new().insert(results))
         .register_split(
             State::Process,
-            batch.iter().map(|item| ProcessTask::new(item)).collect::<Vec<_>>(),
+            batch.into_iter().map(ProcessTask::new),
             JoinConfig::new(JoinStrategy::All, State::Summarize)
                 .with_timeout(Duration::from_secs(60)),
         )
-        .register(State::Summarize, SummarizeTask) // appends a batch summary into `results`
-        .add_exit_states(vec![State::Done, State::Error])
+        .register(State::Summarize, SummarizeTask) // appends batch summary into `results`
+        .add_exit_states([State::Done, State::Error])
 }
 
 // Level 2: the scheduler runs several batch workflows concurrently.
@@ -910,13 +883,15 @@ let running = Scheduler::new()
     .manual("batch-b", batch_workflow(batch_b, results.clone()), State::Process)
     .start()
     .await?;
+
+// trigger() spawns each flow without waiting, so both batches run in parallel.
 running.trigger("batch-a").await?;
 running.trigger("batch-b").await?;
-// Wait for both flows to finish, then reduce across all batch summaries in `results`.
+
+// Wait for both flows to finish (Status::Completed confirms success), then stop.
 running.wait_idle("batch-a").await;
 running.wait_idle("batch-b").await;
 running.stop().await?;
-
 ```
 
 <div class="callout callout-tip">

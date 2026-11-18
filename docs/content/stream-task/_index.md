@@ -41,31 +41,27 @@ impl ConsumeEvents {
         StreamWindow::Count(3) // flush every 3 processed items
     }
 
-    async fn open(&self, _res: &Resources, cursor: Option<u64>)
+    // Resource-free methods omit `res: &Resources`.
+    async fn open(&self, cursor: Option<u64>)
         -> Result<Pin<Box<dyn Stream<Item = u64> + Send>>, CanoError>
     {
         // On a fresh run `cursor` is `None`; on resume it is the last committed offset.
-        let start = cursor.map(|c| c + 1).unwrap_or(0);
-        Ok(Box::pin(stream::iter(start..10)) as Pin<Box<dyn Stream<Item = u64> + Send>>)
+        let start = cursor.map_or(0, |c| c + 1);
+        let feed: Pin<Box<dyn Stream<Item = u64> + Send>> = Box::pin(stream::iter(start..10));
+        Ok(feed)
     }
 
-    async fn process_item(&self, _res: &Resources, item: u64)
-        -> Result<(u64, u64), CanoError>
-    {
+    async fn process_item(&self, item: u64) -> Result<(u64, u64), CanoError> {
         Ok((item * 2, item)) // (output, cursor reached by consuming this item)
     }
 
-    async fn flush_window(&self, _res: &Resources, outputs: Vec<u64>)
-        -> Result<WindowSignal<Step>, CanoError>
-    {
-        // Commit side effects for this window here.
+    async fn flush_window(&self, outputs: Vec<u64>) -> Result<WindowSignal<Step>, CanoError> {
+        // Commit window side effects here; the engine persists the cursor after this returns.
         println!("flushed window of {} outputs", outputs.len());
         Ok(WindowSignal::Continue)
     }
 
-    async fn on_close(&self, _res: &Resources, reason: CloseReason)
-        -> Result<Step, CanoError>
-    {
+    async fn on_close(&self, reason: CloseReason) -> Result<Step, CanoError> {
         println!("stream ended ({reason:?})");
         Ok(Step::Done)
     }
@@ -261,36 +257,31 @@ impl ConsumeEvents {
         StreamWindow::Count(3)
     }
 
-    async fn open(&self, _res: &Resources, cursor: Option<u64>)
+    async fn open(&self, cursor: Option<u64>)
         -> Result<Pin<Box<dyn Stream<Item = Event> + Send>>, CanoError>
     {
-        let start = cursor.map(|c| c + 1).unwrap_or(0);
+        let start = cursor.map_or(0, |c| c + 1);
         let events: Vec<Event> = (start..10)
             .map(|offset| Event { offset, payload: format!("payload-{offset}") })
             .collect();
-        Ok(Box::pin(stream::iter(events)) as Pin<Box<dyn Stream<Item = Event> + Send>>)
+        let feed: Pin<Box<dyn Stream<Item = Event> + Send>> = Box::pin(stream::iter(events));
+        Ok(feed)
     }
 
-    async fn process_item(&self, _res: &Resources, item: Event)
-        -> Result<(Processed, u64), CanoError>
-    {
+    async fn process_item(&self, item: Event) -> Result<(Processed, u64), CanoError> {
         Ok((
             Processed { offset: item.offset, bytes: item.payload.len() },
             item.offset, // the cursor reached by consuming this item
         ))
     }
 
-    async fn flush_window(&self, _res: &Resources, outputs: Vec<Processed>)
-        -> Result<WindowSignal<Step>, CanoError>
-    {
+    async fn flush_window(&self, outputs: Vec<Processed>) -> Result<WindowSignal<Step>, CanoError> {
         let bytes: usize = outputs.iter().map(|p| p.bytes).sum();
         println!("flushed {} events ({bytes} bytes)", outputs.len());
         Ok(WindowSignal::Continue)
     }
 
-    async fn on_close(&self, _res: &Resources, reason: CloseReason)
-        -> Result<Step, CanoError>
-    {
+    async fn on_close(&self, reason: CloseReason) -> Result<Step, CanoError> {
         println!("stream ended ({reason:?})");
         Ok(Step::Done)
     }
@@ -370,7 +361,6 @@ nothing.
 
 ```rust
 use cano::prelude::*;
-use cano::RedbStore;
 use std::sync::Arc;
 
 let checkpoint_store = RedbStore::new("/var/lib/myapp/cano.redb")?;
@@ -554,25 +544,30 @@ impl StreamTask<Step> for Collector {
     async fn open(&self, _res: &Resources, _cursor: Option<u64>)
         -> Result<Pin<Box<dyn Stream<Item = u32> + Send>>, CanoError>
     {
-        Ok(Box::pin(stream::iter(vec![10u32, 20, 30, 40, 50]))
-            as Pin<Box<dyn Stream<Item = u32> + Send>>)
+        // Re-open the stream source starting from _cursor when resumed.
+        let feed: Pin<Box<dyn Stream<Item = u32> + Send>> =
+            Box::pin(stream::iter(vec![10u32, 20, 30, 40, 50]));
+        Ok(feed)
     }
 
     async fn process_item(&self, _res: &Resources, item: u32)
         -> Result<(u32, u64), CanoError>
     {
+        // Return (processed output, item cursor position).
         Ok((item * 2, item as u64))
     }
 
     async fn flush_window(&self, _res: &Resources, _outputs: Vec<u32>)
         -> Result<WindowSignal<Step>, CanoError>
     {
+        // Flush buffered outputs; engine persists the window's final cursor afterward.
         Ok(WindowSignal::Continue)
     }
 
     async fn on_close(&self, _res: &Resources, _reason: CloseReason)
         -> Result<Step, CanoError>
     {
+        // Invoked after the partial final window flushes on Exhausted or Cancelled.
         Ok(Step::Done)
     }
 }

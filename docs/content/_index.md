@@ -209,7 +209,7 @@ Add <code>"time"</code>, <code>"sync"</code> and others only when your own code 
 ```rust
 use cano::prelude::*;
 
-// Workflow states
+// States drive the workflow FSM and require Debug + Clone + Eq + Hash.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum WorkflowState {
     Start,
@@ -217,47 +217,71 @@ enum WorkflowState {
     Complete,
 }
 
-// #[derive(Resource)] implements Resource for a stateless config struct
+// #[derive(Resource)] implements Resource for a stateless config struct.
 #[derive(Resource)]
-struct AppConfig { batch_size: usize }
+struct AppConfig {
+    batch_size: usize,
+}
 
-// #[task] handles the async-trait rewrite, so no async-trait crate is needed
-struct SimpleTask;
+struct StartTask;
 
+// #[task(state = ...)] implements Task<WorkflowState> and Registrable<WorkflowState>
+// directly from an inherent impl, handling the async-trait rewrite automatically.
 #[task(state = WorkflowState)]
-impl SimpleTask {
+impl StartTask {
     async fn run(&self, res: &Resources) -> Result<WorkflowState, CanoError> {
+        // Borrow typed dependencies once; returns ResourceNotFound if absent.
         let config = res.get::<AppConfig>()?;
-        println!("Processing task (batch_size={})...", config.batch_size);
+        println!("Starting batch (size={})...", config.batch_size);
         Ok(WorkflowState::Process)
     }
 }
 
-struct DoneTask;
+struct ProcessTask;
 
-// A task that needs no resources omits the `res` parameter
+// A task that needs no resources omits the `res` parameter.
 #[task(state = WorkflowState)]
-impl DoneTask {
+impl ProcessTask {
     async fn run(&self) -> Result<WorkflowState, CanoError> {
-        println!("Done!");
+        println!("Processing complete.");
         Ok(WorkflowState::Complete)
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let resources = Resources::new()
-        .insert(AppConfig { batch_size: 64 });
+    // Store typed dependencies once for the workflow run.
+    let resources = Resources::new().insert(AppConfig { batch_size: 64 });
 
+    // Map each active state to its task and declare terminal exit states.
     let workflow = Workflow::new(resources)
-        .register(WorkflowState::Start, SimpleTask)
-        .register(WorkflowState::Process, DoneTask)
+        .register(WorkflowState::Start, StartTask)
+        .register(WorkflowState::Process, ProcessTask)
         .add_exit_state(WorkflowState::Complete);
 
-    workflow.orchestrate(WorkflowState::Start).await?;
-    Ok(())
+    // Run setup_all(), drive the FSM to an exit state, and run teardown_all().
+    match workflow.orchestrate(WorkflowState::Start).await {
+        Ok(WorkflowState::Complete) => {
+            println!("Workflow reached Complete.");
+            Ok(())
+        }
+        Ok(other) => {
+            println!("Workflow stopped at {other:?}.");
+            Ok(())
+        }
+        Err(err) => {
+            // err.inner() unwraps CanoError::WithStateContext to match the cause;
+            // `{err}` formats the state, attempt, and transition path.
+            match err.inner() {
+                CanoError::Configuration(msg) => eprintln!("Invalid workflow config: {msg}"),
+                CanoError::ResourceNotFound(msg) => eprintln!("Missing resource: {msg}"),
+                CanoError::TaskExecution(msg) => eprintln!("Task failed: {msg} ({err})"),
+                _ => eprintln!("Workflow failed: {err}"),
+            }
+            Err(err)
+        }
+    }
 }
-
 ```
 
 </div>

@@ -106,6 +106,7 @@ impl Task<S> for OkTask {
 
 #[tokio::test]
 async fn recording_observer_captures_the_path() {
+    // Keep an Arc clone outside the workflow to inspect recorded events after orchestrate().
     let observer = Arc::new(RecordingObserver::new());
     let wf = Workflow::bare()
         .register(S::Start, OkTask)
@@ -114,7 +115,7 @@ async fn recording_observer_captures_the_path() {
 
     assert_eq!(wf.orchestrate(S::Start).await.unwrap(), S::Done);
 
-    // Assert the whole path, or inspect events directly.
+    // Assert the full state sequence, or inspect individual RecordedEvent variants.
     observer.assert_path(&["Start", "Done"]);
     observer.assert_completed_with("Done");
     assert!(observer.events().iter().any(|e| matches!(e, RecordedEvent::TaskSucceeded { .. })));
@@ -188,7 +189,6 @@ use std::sync::Arc;
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum S { Start, Worker, Done }
 
-#[derive(Clone)]
 struct Go(S);
 #[task]
 impl Task<S> for Go {
@@ -207,11 +207,13 @@ async fn every_registered_state_is_reached() {
         .with_observer(observer.clone());
     wf.orchestrate(S::Start).await.unwrap();
 
-    // Every registered handler was reached: no dead states.
+    // Every registered handler was reached (exit-only S::Done has no handler, so it is excluded).
     observer.assert_registered_states_entered(&wf).expect("no dead states");
 
-    // Or assert an explicit set; Err lists what was never entered.
-    observer.assert_all_states_entered(&[S::Start, S::Worker, S::Done]).unwrap();
+    // Or assert an explicit set; Err lists any missing state labels.
+    observer
+        .assert_all_states_entered(&[S::Start, S::Worker, S::Done])
+        .expect("all states entered");
 }
 ```
 
@@ -287,6 +289,7 @@ use cano::testing::{InMemoryCheckpointStore, assert_checkpoint_store_contract};
 #[tokio::test]
 async fn my_store_meets_the_contract() {
     let store = InMemoryCheckpointStore::new(); // your store here
+    // Only touches workflow ids prefixed with "contract-test/" and cleans them up before and after.
     assert_checkpoint_store_contract(&store, "contract-test").await;
 }
 ```
@@ -308,6 +311,7 @@ use cano::testing::InMemorySchedulerStore;
 use std::sync::Arc;
 use std::time::Duration;
 
+// Share one store handle across scheduler instances to test lease coordination in memory.
 let store = Arc::new(InMemorySchedulerStore::new());
 let node_a = Scheduler::new()
     .every("fetch", workflow_a, State::Start, Duration::from_secs(60))
@@ -321,7 +325,9 @@ let node_b = Scheduler::new()
     .with_instance_id("node-b")
     .start()
     .await?;
-// Each tick of "fetch" now runs on exactly one of the two.
+
+// Each tick of "fetch" now claims a lease and runs on exactly one of the two.
+// Shut both down cleanly at the end of the test: node_a.stop().await?; node_b.stop().await?;
 ```
 
 <h2 id="scheduler-store-contract"><a href="#scheduler-store-contract" class="anchor-link" aria-hidden="true">#</a>assert_scheduler_store_contract</h2>
@@ -353,6 +359,7 @@ use cano::testing::{InMemorySchedulerStore, assert_scheduler_store_contract};
 #[tokio::test]
 async fn my_scheduler_store_meets_the_contract() {
     let store = InMemorySchedulerStore::new(); // your store here
+    // Exercises CAS, prefix isolation, recreate races, and 256 KiB values under "contract-test/*".
     assert_scheduler_store_contract(&store, "contract-test").await;
 }
 ```
@@ -382,9 +389,11 @@ enum S { Start, Done }
 #[tokio::test]
 async fn panicking_task_fails_fast() {
     let wf = Workflow::bare()
+        // Panics on attempt 1; catch_unwind fails fast without retrying.
         .register(S::Start, panic_on_attempt(1, S::Done))
         .add_exit_state(S::Done);
 
+    // Caught panics become CanoError::TaskExecution("panic: ..."), wrapped in WithStateContext.
     let err = wf.orchestrate(S::Start).await.unwrap_err();
     assert!(err.to_string().contains("panic"));
 }
@@ -403,8 +412,9 @@ expected sequence. Have each <code>compensate</code> push its identifier into a 
 ```rust
 use cano::testing::assert_compensation_ran;
 
-// Charge ran last, so it compensates first; then Reserve.
+// Charge ran last, so LIFO rollback undoes Charge first, then Reserve.
 let ran = vec!["charge".to_string(), "reserve".to_string()];
+// Panics with a diff if the recorded rollback order differs from expected.
 assert_compensation_ran(&ran, &["charge", "reserve"]);
 ```
 <hr class="section-divider">

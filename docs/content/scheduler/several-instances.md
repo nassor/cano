@@ -56,14 +56,16 @@ use cano::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
 
-let store = PostgresStore::builder()
-    .connect("postgres://cano:secret@db.internal/app")
-    .await?;
+// Opens the Postgres pool and creates cano_scheduler (and cano_checkpoints) if absent.
+let store = PostgresStore::connect("postgres://cano:secret@db.internal/app").await?;
 
 let running = Scheduler::new()
     .every("fetch", workflow, State::Start, Duration::from_secs(60))
+    // Enables cross-instance CAS coordination over the shared table.
     .with_store(Arc::new(store))
+    // Lease duration before a peer considers a silent run crashed (renewed every ttl / 3).
     .with_lease_ttl(Duration::from_secs(30))
+    // Owner label recorded in leases and Status::RunningElsewhere.
     .with_instance_id("worker-1")
     .start()
     .await?;
@@ -80,9 +82,8 @@ use cano::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
 
-let store = NatsStore::builder()
-    .connect("nats://nats.internal:4222")
-    .await?;
+// Connects to NATS and opens/creates the JetStream KV buckets (uses default 30 s lease TTL).
+let store = NatsStore::connect("nats://nats.internal:4222").await?;
 
 let running = Scheduler::new()
     .every("fetch", workflow, State::Start, Duration::from_secs(60))
@@ -438,9 +439,11 @@ and on <code>trigger</code> and <code>reset_flow</code>; a <code>manual</code> f
 
 ```rust
 match node.status("fetch").map(|info| info.status) {
+    // Reported while a peer holds an unexpired lease on the flow.
     Some(Status::RunningElsewhere { owner, lease_expires }) => {
         println!("fetch runs on {owner} until {lease_expires}");
     }
+    // Covers Idle, Running, Completed, Backoff, Tripped, and future #[non_exhaustive] variants.
     Some(other) => println!("fetch: {other:?}"),
     None => println!("unknown flow"),
 }
@@ -507,20 +510,23 @@ Annotate the impl with <code>#[cano::scheduler_store]</code>. Errors use
 
 ```rust
 use cano::prelude::*;
-use cano::scheduler::{CasOutcome, VersionedRecord};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 #[derive(Default)]
 struct MapStore {
-    // The last version handed out, and the records.
+    // Store-wide monotonic version counter and per-flow records.
     inner: Mutex<(u64, HashMap<String, VersionedRecord>)>,
 }
 
-#[cano::scheduler_store]
+#[scheduler_store]
 impl SchedulerStore for MapStore {
     async fn load(&self, flow_id: &str) -> Result<Option<VersionedRecord>, CanoError> {
-        Ok(self.inner.lock().unwrap().1.get(flow_id).cloned())
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|e| CanoError::scheduler_store(e.to_string()))?;
+        Ok(guard.1.get(flow_id).cloned())
     }
 
     async fn compare_and_swap(
@@ -529,19 +535,32 @@ impl SchedulerStore for MapStore {
         expected: Option<u64>,
         value: Vec<u8>,
     ) -> Result<CasOutcome, CanoError> {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| CanoError::scheduler_store(e.to_string()))?;
         let (last_version, records) = &mut *guard;
+
+        // Enforce create-if-absent (expected == None) or versioned swap (Some(v)).
         if records.get(flow_id).map(|r| r.version) != expected {
             return Ok(CasOutcome::Conflict);
         }
-        *last_version += 1;
+
+        // Monotonic store-wide counter ensures a recreated flow never reuses a removed version.
+        *last_version = last_version
+            .checked_add(1)
+            .ok_or_else(|| CanoError::scheduler_store("version counter overflow"))?;
         let version = *last_version;
         records.insert(flow_id.to_string(), VersionedRecord { version, value });
         Ok(CasOutcome::Written(version))
     }
 
     async fn remove(&self, flow_id: &str) -> Result<(), CanoError> {
-        self.inner.lock().unwrap().1.remove(flow_id);
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|e| CanoError::scheduler_store(e.to_string()))?;
+        guard.1.remove(flow_id);
         Ok(())
     }
 }
@@ -560,6 +579,7 @@ use cano::testing::assert_scheduler_store_contract;
 #[tokio::test]
 async fn map_store_meets_the_contract() {
     let store = MapStore::default();
+    // Writes only under the "contract-test/<case>" prefix and cleans them up before and after.
     assert_scheduler_store_contract(&store, "contract-test").await;
 }
 ```

@@ -90,14 +90,17 @@ has one constructor and two optional settings:
 <span class="code-block-label">register_split + JoinConfig</span>
 
 ```rust
+// Wait for all 3 branches to succeed within 5 s, then enter State::Aggregate.
+// Individual branch return states are ignored; JoinConfig picks the join state.
 let join_config = JoinConfig::new(JoinStrategy::All, State::Aggregate)
     .with_timeout(Duration::from_secs(5));
 
-Workflow::new(Resources::new().insert(board))
+let workflow = Workflow::new(Resources::new().insert(board))
     .register(State::Start, Loader)
-    .register_split(State::Fanout, vec![Worker { id: 1 }, Worker { id: 2 }, Worker { id: 3 }], join_config)
+    // Spawn all Worker branches concurrently when entering State::Fanout.
+    .register_split(State::Fanout, [Worker { id: 1 }, Worker { id: 2 }, Worker { id: 3 }], join_config)
     .register(State::Aggregate, Aggregator)
-    .add_exit_state(State::Complete)
+    .add_exit_state(State::Complete);
 ```
 </div>
 
@@ -183,8 +186,10 @@ downstream service.
 <span class="code-block-label">Bulkhead config</span>
 
 ```rust
+// At most 4 split tasks run at once; excess branches queue on a semaphore permit
+// (and any with_timeout() budget includes that queue wait).
 let join_config = JoinConfig::new(JoinStrategy::All, State::Aggregate)
-    .with_bulkhead(4); // at most 4 split tasks run at once
+    .with_bulkhead(4);
 ```
 </div>
 
@@ -217,44 +222,50 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum DataState { Start, ParallelProcessing, Aggregate, Complete }
 
-#[derive(Clone)]
 struct DataLoader;
 
 #[task(state = DataState)]
 impl DataLoader {
     async fn run(&self, res: &Resources) -> Result<DataState, CanoError> {
         let board = res.get::<Blackboard>()?;
+        // Publish shared input once before fanning out across parallel branches.
         board.put("input_data", vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
         Ok(DataState::ParallelProcessing)
     }
 }
 
-#[derive(Clone)]
-struct ProcessorTask { task_id: usize }
-impl ProcessorTask { fn new(task_id: usize) -> Self { Self { task_id } } }
+struct ProcessorTask {
+    task_id: usize,
+}
 
 #[task(state = DataState)]
 impl ProcessorTask {
     async fn run(&self, res: &Resources) -> Result<DataState, CanoError> {
         let board = res.get::<Blackboard>()?;
-        let data: Vec<i32> = board.get("input_data")?;
+        // Zero-copy Arc<Vec<i32>> read shared across concurrent split branches.
+        let data = board.get_shared::<Vec<i32>>("input_data")?;
         tokio::time::sleep(Duration::from_millis(100 * self.task_id as u64)).await;
+
         let result: i32 = data.iter().map(|&x| x * self.task_id as i32).sum();
+        // Write to a branch-specific key so concurrent workers never overwrite each other.
         board.put(&format!("result_{}", self.task_id), result);
+
+        // Return value is ignored; JoinConfig moves the workflow to DataState::Aggregate.
         Ok(DataState::Aggregate)
     }
 }
 
-#[derive(Clone)]
 struct Aggregator;
 
 #[task(state = DataState)]
 impl Aggregator {
     async fn run(&self, res: &Resources) -> Result<DataState, CanoError> {
         let board = res.get::<Blackboard>()?;
-        let total: i32 = (1..=3)
-            .filter_map(|i| board.get::<i32>(&format!("result_{}", i)).ok())
-            .sum();
+        // JoinStrategy::All guarantees all 3 branches succeeded before Aggregate runs.
+        let mut total = 0i32;
+        for id in 1..=3 {
+            total += board.get::<i32>(&format!("result_{id}"))?;
+        }
         board.put("final_result", total);
         Ok(DataState::Complete)
     }
@@ -264,13 +275,13 @@ impl Aggregator {
 async fn main() -> Result<(), CanoError> {
     let board = Blackboard::new();
 
-    let processors = vec![
-        ProcessorTask::new(1),
-        ProcessorTask::new(2),
-        ProcessorTask::new(3),
+    let processors = [
+        ProcessorTask { task_id: 1 },
+        ProcessorTask { task_id: 2 },
+        ProcessorTask { task_id: 3 },
     ];
 
-    // Wait for ALL processors, give up after 5 seconds.
+    // Wait for ALL processors; abort and return CanoError::Workflow if 5 s elapses.
     let join_config = JoinConfig::new(JoinStrategy::All, DataState::Aggregate)
         .with_timeout(Duration::from_secs(5));
 
@@ -282,7 +293,7 @@ async fn main() -> Result<(), CanoError> {
 
     let result = workflow.orchestrate(DataState::Start).await?;
     let final_result: i32 = board.get("final_result")?;
-    println!("Workflow completed: {:?}, total {}", result, final_result);
+    println!("Workflow completed: {result:?}, total {final_result}");
     Ok(())
 }
 ```

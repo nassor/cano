@@ -40,12 +40,14 @@ struct HumanReview;
 
 #[task::suspend(state = Step)]
 impl HumanReview {
-    async fn suspend(&self, _res: &Resources) -> Result<(), CanoError> {
-        // Notify the reviewer. The run parks after this returns.
+    // Resource-free methods omit `res: &Resources`.
+    async fn suspend(&self) -> Result<(), CanoError> {
+        // Notify the reviewer; writes RowKind::Suspended and parks orchestrate().
         Ok(())
     }
 
-    async fn resume(&self, _res: &Resources, decision: Decision) -> Result<Step, CanoError> {
+    // Invoked when Workflow::resume_with delivers Decision (writes RowKind::ResumeInput).
+    async fn resume(&self, decision: Decision) -> Result<Step, CanoError> {
         Ok(match decision {
             Decision::Approve => Step::Approved,
             Decision::Reject => Step::Rejected,
@@ -213,7 +215,6 @@ workflow has a suspend state and no store.
 
 ```rust
 use cano::prelude::*;
-use cano::RedbStore;
 use std::sync::Arc;
 
 let store = Arc::new(RedbStore::new("/var/lib/myapp/cano.redb")?);
@@ -386,7 +387,8 @@ struct HumanReview;
 impl HumanReview {
     async fn suspend(&self, res: &Resources) -> Result<(), CanoError> {
         let db = res.get::<RulesDb>()?;
-        db.0.lock().review_requests += 1;   // RulesDb stands in for the application database
+        // RulesDb holds an application DB handle (e.g. std::sync::Mutex or a DB client).
+        db.0.lock().expect("db lock").review_requests += 1;
         println!("review requested");
         Ok(())
     }
@@ -396,7 +398,7 @@ impl HumanReview {
             Decision::Approve => Step::Deploy,
             Decision::Reject { .. } => Step::Rejected,
             Decision::RequestChanges { feedback } => {
-                res.get::<RulesDb>()?.0.lock().feedback = Some(feedback);
+                res.get::<RulesDb>()?.0.lock().expect("db lock").feedback = Some(feedback);
                 Step::Suggest
             }
         })
@@ -470,6 +472,7 @@ impl SuspendTask<Step> for Review {
     type Input = Decision;
 
     fn config(&self) -> TaskConfig {
+        // Applied independently to both suspend() and resume().
         TaskConfig::new().with_exponential_retry(3)
     }
 

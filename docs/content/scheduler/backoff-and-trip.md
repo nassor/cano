@@ -70,43 +70,48 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum FlowState { Start, Done }
 
-#[derive(Clone)]
-struct NoopTask;
+struct FlakySyncTask;
 
 #[task(state = FlowState)]
-impl NoopTask {
+impl FlakySyncTask {
+    // Tasks default to TaskConfig::new() (no retries), so each failure increments failure_streak.
     async fn run(&self) -> Result<FlowState, CanoError> {
-        Ok(FlowState::Done)
+        Err(CanoError::task_execution("upstream 503"))
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     let workflow = Workflow::bare()
-        .register(FlowState::Start, NoopTask)
+        .register(FlowState::Start, FlakySyncTask)
         .add_exit_state(FlowState::Done);
 
+    // Call with_backoff after registering the matching flow id.
     let running = Scheduler::new()
         .every("flaky", workflow, FlowState::Start, Duration::from_millis(200))
         .with_backoff(
             "flaky",
             BackoffPolicy {
+                // Delay after the first failure (streak == 1).
                 initial: Duration::from_millis(300),
+                // Growth factor per consecutive failure.
                 multiplier: 2.0,
+                // Upper bound on the computed backoff delay.
                 max_delay: Duration::from_secs(2),
+                // Multiplicative jitter in 1.0 +/- 0.1 to spread synchronized retries.
                 jitter: 0.1,
+                // Transition to Status::Tripped after 3 consecutive failures (None = never trip).
                 streak_limit: Some(3),
             },
         )
         .start()
         .await?;
 
-    // Block until Ctrl-C (or SIGTERM on Unix), then shut down.
-    cano::scheduler::shutdown_signal().await?;
+    // Block until Ctrl-C (or SIGTERM on Unix), then drain and tear down.
+    shutdown_signal().await?;
     running.stop().await?;
     Ok(())
 }
-
 ```
 
 <p>
@@ -295,11 +300,13 @@ at 1, so reset after you observe <code>Tripped</code> or <code>Idle</code>.
 </p>
 
 ```rust
+// Read a point-in-time snapshot of the flow's state and failure streak.
 let snap = running.status("flaky").expect("flow exists");
-if matches!(snap.status, Status::Tripped { .. }) {
+if let Status::Tripped { streak, last_error } = &snap.status {
+    eprintln!("flaky tripped after {streak} failures: {last_error:?}");
+    // Clears failure_streak and next_eligible (persisted if a store is attached), returning the flow to Idle.
     running.reset_flow("flaky").await?;
 }
-
 ```
 
 <p>

@@ -64,9 +64,14 @@ deletes a whole run:
 </p>
 
 ```rust
+// #[cano::checkpoint_store] makes async methods object-safe for Arc<dyn CheckpointStore>.
+#[cano::checkpoint_store]
 pub trait CheckpointStore: Send + Sync + 'static {
+    // Persist row durably; return Err on duplicate (workflow_id, sequence).
     async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError>;
+    // Return all rows for workflow_id sorted ascending by sequence (empty when unknown).
     async fn load_run(&self, workflow_id: &str) -> Result<Vec<CheckpointRow>, CanoError>;
+    // Delete all rows for workflow_id without affecting other ids; Ok(()) when unknown.
     async fn clear(&self, workflow_id: &str) -> Result<(), CanoError>;
 }
 ```
@@ -117,8 +122,9 @@ database file if absent and the checkpoint table. Clones share one handle behind
 use cano::RedbStore;
 use std::sync::Arc;
 
-let checkpoint_store: Arc<RedbStore> = Arc::new(RedbStore::new("workflow.redb")?);
-// pass it to the workflow: .with_checkpoint_store(checkpoint_store)
+// Creates workflow.redb and its tables if absent (the parent directory must already exist).
+let checkpoint_store = Arc::new(RedbStore::new("workflow.redb")?);
+// Pass it to the workflow: .with_checkpoint_store(checkpoint_store)
 ```
 
 <p>
@@ -182,19 +188,22 @@ second table, <code>cano_scheduler</code> by default (<code>DEFAULT_SCHEDULER_TA
 </p>
 
 ```rust
-use cano::PostgresStore;
-use cano::RetryMode;
+use cano::{PostgresStore, RetryMode};
 use std::sync::Arc;
 use std::time::Duration;
 
-let checkpoint_store = PostgresStore::builder()
-    .with_schema("workflows")
-    .with_max_pool_size(8)
-    .with_operation_timeout(Duration::from_secs(5))
-    .with_retry(RetryMode::fixed(3, Duration::from_millis(200)))
-    .connect("postgres://cano:secret@db.internal/app")
-    .await?;
-// pass it to the workflow: .with_checkpoint_store(Arc::new(checkpoint_store))
+let checkpoint_store = Arc::new(
+    PostgresStore::builder()
+        .with_schema("workflows")
+        .with_max_pool_size(8)
+        // Per-attempt deadline covering connection checkout, query, and migration.
+        .with_operation_timeout(Duration::from_secs(5))
+        // Jittered retries for transient DB/network faults (conflicts are never retried).
+        .with_retry(RetryMode::fixed(3, Duration::from_millis(200)))
+        .connect("postgres://cano:secret@db.internal/app")
+        .await?,
+);
+// Attach via: .with_checkpoint_store(checkpoint_store)
 ```
 
 <p>The builder settings, with their defaults in small type:</p>
@@ -278,18 +287,22 @@ its handle. See <a href="../../scheduler/several-instances/">Several scheduler i
 </p>
 
 ```rust
+// async_nats is re-exported under cano::store::nats.
 use cano::NatsStore;
 use cano::store::nats::async_nats::ConnectOptions;
 use std::sync::Arc;
 
-let checkpoint_store = NatsStore::builder()
-    .with_checkpoint_bucket("orders_checkpoints")
-    .connect_with_options(
-        "nats://nats.internal:4222",
-        ConnectOptions::with_user_and_password("cano".into(), "secret".into()),
-    )
-    .await?;
-// pass it to the workflow: .with_checkpoint_store(Arc::new(checkpoint_store))
+// Opens or creates the JetStream KV bucket and attaches credentials via ConnectOptions.
+let checkpoint_store = Arc::new(
+    NatsStore::builder()
+        .with_checkpoint_bucket("orders_checkpoints")
+        .connect_with_options(
+            "nats://nats.internal:4222",
+            ConnectOptions::with_user_and_password("cano".into(), "secret".into()),
+        )
+        .await?,
+);
+// Attach via: .with_checkpoint_store(checkpoint_store)
 ```
 
 <p>The builder settings, with their defaults in small type:</p>
@@ -372,20 +385,20 @@ keeps the full contract; replace the map with your storage calls:
 </p>
 
 ```rust
-use cano::checkpoint::CheckpointRow;
-use cano::CanoError;
+use cano::{CanoError, CheckpointRow};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 #[derive(Default)]
 pub struct MapStore(Mutex<HashMap<String, Vec<CheckpointRow>>>);
 
+// Rewrites this inherent impl into an object-safe CheckpointStore trait impl.
 #[cano::checkpoint_store]
 impl MapStore {
     async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
-        let mut runs = self.0.lock().unwrap();
+        let mut runs = self.0.lock().expect("MapStore mutex poisoned");
         let rows = runs.entry(workflow_id.to_string()).or_default();
-        // Check and insert under one lock: the duplicate check must be atomic.
+        // Check and insert under one lock: duplicate rejection must be atomic.
         if rows.iter().any(|r| r.sequence == row.sequence) {
             return Err(CanoError::checkpoint_store(format!(
                 "checkpoint conflict: {workflow_id:?} already has sequence {}",
@@ -397,13 +410,24 @@ impl MapStore {
     }
 
     async fn load_run(&self, workflow_id: &str) -> Result<Vec<CheckpointRow>, CanoError> {
-        let mut rows = self.0.lock().unwrap().get(workflow_id).cloned().unwrap_or_default();
+        // Contract: return rows sorted ascending by sequence, or empty Vec if unknown.
+        let mut rows = self
+            .0
+            .lock()
+            .expect("MapStore mutex poisoned")
+            .get(workflow_id)
+            .cloned()
+            .unwrap_or_default();
         rows.sort_by_key(|r| r.sequence);
         Ok(rows)
     }
 
     async fn clear(&self, workflow_id: &str) -> Result<(), CanoError> {
-        self.0.lock().unwrap().remove(workflow_id);
+        // Contract: remove only this workflow_id; clearing an unknown id succeeds as a no-op.
+        self.0
+            .lock()
+            .expect("MapStore mutex poisoned")
+            .remove(workflow_id);
         Ok(())
     }
 }
@@ -470,6 +494,7 @@ mod tests {
     #[tokio::test]
     async fn map_store_keeps_the_contract() {
         let store = MapStore::default();
+        // Exercises every CheckpointStore contract clause under the "contract/*" namespace.
         assert_checkpoint_store_contract(&store, "contract").await;
     }
 }
@@ -487,11 +512,13 @@ let workflow = Workflow::bare()
     .register(Step::Start, StartTask)
     .register(Step::Work, WorkTask)
     .add_exit_state(Step::Done)
+    // Arc<MapStore> coerces directly to Arc<dyn CheckpointStore>.
     .with_checkpoint_store(store.clone())
     .with_workflow_id("run-42");
 
 workflow.orchestrate(Step::Start).await?;
-assert!(store.load_run("run-42").await?.is_empty()); // cleared at the exit state
+// Best-effort cleanup cleared the log when Step::Done was reached.
+assert!(store.load_run("run-42").await?.is_empty());
 ```
 
 <div class="callout callout-tip">
@@ -580,6 +607,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 async fn postgres_store(dsn: &str) -> Result<Arc<PostgresStore>, CanoError> {
+    // Bound each attempt at 3 s and retry transient DB/network errors with jittered exponential backoff.
     let store = PostgresStore::builder()
         .with_operation_timeout(Duration::from_secs(3))
         .with_retry(RetryMode::exponential(4))
@@ -589,6 +617,7 @@ async fn postgres_store(dsn: &str) -> Result<Arc<PostgresStore>, CanoError> {
 }
 
 async fn nats_store(url: &str) -> Result<Arc<NatsStore>, CanoError> {
+    // Align ConnectOptions request_timeout with Cano's operation_timeout so hung calls evict promptly.
     let timeout = Duration::from_secs(3);
     let options = ConnectOptions::new()
         .name("orders")
@@ -626,6 +655,7 @@ async fn run_or_recover(
 ) -> Result<Step, CanoError> {
     match workflow.orchestrate(Step::Start).await {
         Ok(state) => return Ok(state),
+        // Unwrap WithStateContext to inspect the underlying failure variant.
         Err(err) => match err.inner() {
             CanoError::CheckpointStore(msg) => {
                 eprintln!("store unreachable on {run_id}: {msg}");
@@ -649,6 +679,7 @@ async fn run_or_recover(
             Err(_) => tokio::time::sleep(Duration::from_secs(5)).await,
         }
     };
+    // Sequence 0 never landed: start fresh; otherwise resume from the last durable row.
     if rows.is_empty() {
         workflow.orchestrate(Step::Start).await
     } else {
@@ -665,35 +696,38 @@ sweep them once the store is reachable again:
 
 ```rust
 use cano::prelude::*;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 #[derive(Default)]
 struct StrandedClearTracker {
-    pending_ids: Mutex<Vec<String>>,
+    pending_ids: Mutex<HashSet<String>>,
 }
 
 impl StrandedClearTracker {
+    // Background job: retry store.clear() for stranded workflow logs once connectivity returns.
     async fn sweep(&self, store: &dyn CheckpointStore) {
-        let ids = std::mem::take(&mut *self.pending_ids.lock().unwrap());
+        let ids = std::mem::take(&mut *self.pending_ids.lock().expect("tracker mutex poisoned"));
         for id in ids {
             if let Err(err) = store.clear(&id).await {
                 eprintln!("clear still failing for {id}: {err}");
-                let mut pending = self.pending_ids.lock().unwrap();
-                if !pending.iter().any(|existing| existing == &id) {
-                    pending.push(id);
-                }
+                self.pending_ids
+                    .lock()
+                    .expect("tracker mutex poisoned")
+                    .insert(id);
             }
         }
     }
 }
 
 impl WorkflowObserver for StrandedClearTracker {
+    // Observer hooks are sync and non-blocking, so only queue the id here for sweep().
     fn on_checkpoint_clear_failed(&self, workflow_id: &str, error: &CanoError) {
         eprintln!("checkpoint clear failed for {workflow_id}: {error}");
-        let mut pending = self.pending_ids.lock().unwrap();
-        if !pending.iter().any(|id| id == workflow_id) {
-            pending.push(workflow_id.to_owned());
-        }
+        self.pending_ids
+            .lock()
+            .expect("tracker mutex poisoned")
+            .insert(workflow_id.to_owned());
     }
 }
 

@@ -185,9 +185,9 @@ struct CallUpstream { limiter: RateLimiter }
 #[task(state = Step)]
 impl CallUpstream {
     async fn run(&self) -> Result<Step, CanoError> {
-        // Park until the shared budget admits this call.
+        // Park until the shared budget admits this call; dropping _permit afterward is a no-op.
         let _permit = self.limiter.acquire().await;
-        // ... call the rate-sensitive dependency ...
+        // Perform the rate-limited downstream call here.
         Ok(Step::Done)
     }
 }
@@ -267,15 +267,16 @@ use cano::prelude::*;
 use std::sync::Arc;
 use std::time::Duration;
 
+// Fixed-window request quotas that reset in a step at each window boundary.
 let five_hour: Arc<dyn Meter> =
     Arc::new(WindowedRateLimiter::new(WindowPolicy::per_hours(500, 5)));
 let weekly: Arc<dyn Meter> =
     Arc::new(WindowedRateLimiter::new(WindowPolicy::per_days(5_000, 7)));
 let opus_weekly: Arc<dyn Meter> =
     Arc::new(WindowedRateLimiter::new(WindowPolicy::per_days(200, 7)));
-// A usage budget metered in tokens, smoothed by a bucket.
+// Token-budget tier: 1,000,000/min steady rate with a 100,000-token burst cap for smoothing.
 let tokens: Arc<dyn Meter> = Arc::new(RateLimiter::new(
-    RateLimiterPolicy::new(1_000_000, Duration::from_secs(60)).with_max_tokens(1_000_000),
+    RateLimiterPolicy::new(1_000_000, Duration::from_secs(60)).with_max_tokens(100_000),
 ));
 
 let limiter = MultiRateLimiter::new()
@@ -284,10 +285,11 @@ let limiter = MultiRateLimiter::new()
     .with_tier("opus_weekly", opus_weekly, 1)
     .with_tier("tokens", tokens, 1500); // this call costs 1500 tokens
 
-// Shed load: which tier blocked, and for how long?
+// Shed load: atomic across every tier.
 match limiter.try_acquire() {
     Ok(_permit) => { /* every tier had room; proceed */ }
     Err(CanoError::RateLimited { tier, retry_after }) => {
+        // Earlier tiers are automatically refunded when any later tier rejects.
         eprintln!("blocked by `{tier}`, retry after {retry_after:?}");
     }
     Err(_) => unreachable!(),

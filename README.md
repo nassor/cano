@@ -30,7 +30,7 @@ The engine is built on three core concepts: **Tasks** for logic, **Workflows** f
 ## Features
 
 - **Type-Safe State Machines**: Enum-driven transitions with compile-time guarantees.
-- **Multiple Processing Models**: `Task` for general-purpose work, plus `RouterTask`, `PollTask`, `TimerTask`, `BatchTask`, `SteppedTask`, and `StreamTask` for specialized shapes — mixed freely in one workflow.
+- **Multiple Processing Models**: `Task` for general-purpose work, plus `RouterTask`, `PollTask`, `TimerTask`, `BatchTask`, `SteppedTask`, and `StreamTask` for specialized shapes, mixed freely in one workflow.
 - **Human in the Loop**: a `SuspendTask` parks a run at its state until `Workflow::resume_with` delivers a typed input, such as a reviewer's decision. The pause survives restarts through the checkpoint store.
 - **Resource Dependency Injection**: Typed, lifecycle-managed `Resources` with `setup`/`teardown`/`health` hooks, looked up by type (`res.get::<T>()`) or by name for a second instance, plus `#[derive(FromResources)]` for ergonomic wiring.
 - **Parallel Execution (Split/Join)**: Run tasks concurrently and join results with strategies like `All`, `Any`, `Quorum`, or `PartialResults`, with an optional bulkhead to cap concurrency.
@@ -43,7 +43,7 @@ The engine is built on three core concepts: **Tasks** for logic, **Workflows** f
 - **Observability**: Optional `tracing` (spans + events, plus `TracingObserver`) and `metrics` (a `MetricsObserver` plus low-cardinality counters / histograms / gauges via the [`metrics`](https://docs.rs/metrics) facade) features for deep insight into workflow, task, retry, split/join, circuit-breaker, scheduler, processing-loop, recovery and saga internals; plus synchronous `WorkflowObserver` hooks for lifecycle/failure events and `Resource::health()` probes (`Resources::check_all_health`).
 - **Performance-Focused**: Minimizes heap allocations by leveraging stack-based objects wherever possible, giving you control over where allocations occur.
 
-For how the *resilient, self-healing* tagline maps to concrete primitives — retries, timeouts, circuit breakers, rate limiters, bulkheads, panic safety, flow-level backoff/trip, distributed scheduler leases, checkpoint+resume, sagas, observers, health probes — see the [Resilience](https://nassor.github.io/cano/resilience/), [Recovery](https://nassor.github.io/cano/recovery/), [Saga](https://nassor.github.io/cano/saga/), [Scheduler](https://nassor.github.io/cano/scheduler/), [Backoff and trip](https://nassor.github.io/cano/scheduler/backoff-and-trip/) and [Several instances](https://nassor.github.io/cano/scheduler/several-instances/) guides.
+For how the *resilient, self-healing* tagline maps to concrete primitives (retries, timeouts, circuit breakers, rate limiters, bulkheads, panic safety, flow-level backoff/trip, distributed scheduler leases, checkpoint+resume, sagas, observers, health probes), see the [Resilience](https://nassor.github.io/cano/resilience/), [Recovery](https://nassor.github.io/cano/recovery/), [Saga](https://nassor.github.io/cano/saga/), [Scheduler](https://nassor.github.io/cano/scheduler/), [Backoff and trip](https://nassor.github.io/cano/scheduler/backoff-and-trip/) and [Several instances](https://nassor.github.io/cano/scheduler/several-instances/) guides.
 
 ## Simple Example: Parallel Processing
 
@@ -73,18 +73,17 @@ enum FlowState {
 
 // One row per exchange: its name, the batch of quotes it returns, and whether it's
 // simulated as unreachable (e.g. down for maintenance). Exchanges return different
-// numbers of quotes, and every quote counts toward the reference price — so a deeper
+// numbers of quotes, and every quote counts toward the reference price, so a deeper
 // book pulls it further than a thin one.
 const EXCHANGES: &[(&str, &[f64], bool)] = &[
     ("alpha", &[101.20, 101.36], false),
     ("beta", &[101.45, 101.30, 101.55, 101.42], false),
     ("gamma", &[100.95, 101.10, 100.85, 101.05, 100.90, 101.15], false),
-    ("delta", &[], true), // unreachable — every attempt fails
+    ("delta", &[], true), // unreachable: every attempt fails
 ];
 
 // Fetches a batch of quotes from one exchange. Real networks are flaky, so each task
 // carries its own retry budget: exponential backoff, up to 2 retries.
-#[derive(Clone)]
 struct FetchPriceTask {
     exchange: &'static str,
     quotes: &'static [f64],
@@ -94,6 +93,7 @@ struct FetchPriceTask {
 #[task(state = FlowState)]
 impl FetchPriceTask {
     fn config(&self) -> TaskConfig {
+        // 1 initial attempt + up to 2 retries per exchange.
         TaskConfig::new().with_exponential_retry(2)
     }
 
@@ -114,6 +114,7 @@ impl FetchPriceTask {
         }
 
         board.put(&format!("quotes_{}", self.exchange), self.quotes.to_vec());
+        // Branch return states are ignored; JoinConfig picks the post-split state.
         Ok(FlowState::Aggregate)
     }
 }
@@ -205,7 +206,7 @@ impl MonitorTicksTask {
         let outliers = deviations.iter().filter(|d| d.abs() >= ALERT_PCT).count();
         let worst = deviations.iter().fold(0.0f64, |acc, d| acc.max(d.abs()));
         println!(
-            "  window of {}: worst {worst:.2}% — {outliers} outlier(s)",
+            "  window of {}: worst {worst:.2}%, {outliers} outlier(s)",
             deviations.len()
         );
 
@@ -254,11 +255,37 @@ async fn main() -> Result<(), CanoError> {
         .register(FlowState::Monitor, MonitorTicksTask)
         .add_exit_state(FlowState::Complete);
 
-    // 5. Run.
-    let result = workflow.orchestrate(FlowState::Start).await?;
-    println!("Workflow finished: {result:?}");
-
-    Ok(())
+    // 5. Run the workflow and match on both exit state and error kind.
+    match workflow.orchestrate(FlowState::Start).await {
+        Ok(FlowState::Complete) => {
+            println!("Workflow finished at Complete.");
+            Ok(())
+        }
+        Ok(other) => {
+            println!("Workflow stopped at unexpected exit state: {other:?}");
+            Ok(())
+        }
+        Err(err) => {
+            // Runtime failures are wrapped in CanoError::WithStateContext;
+            // err.inner() inspects the cause while `{err}` keeps state and path context.
+            match err.inner() {
+                CanoError::Workflow(msg) => {
+                    eprintln!("Quorum or routing failed: {msg} ({err})");
+                }
+                CanoError::RetryExhausted { attempts, source } => {
+                    eprintln!("Task exhausted {attempts} attempts: {source} ({err})");
+                }
+                CanoError::TaskExecution(msg) => {
+                    eprintln!("Task failed: {msg} ({err})");
+                }
+                CanoError::Configuration(msg) => {
+                    eprintln!("Invalid workflow configuration: {msg}");
+                }
+                _ => eprintln!("Workflow failed: {err}"),
+            }
+            Err(err)
+        }
+    }
 }
 ```
 

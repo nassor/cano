@@ -103,9 +103,11 @@ Define a resource, insert it, and read it by type in any task. The engine runs
 ```rust
 use cano::prelude::*;
 
-// Stateless resource: derive Resource for a no-op setup/teardown impl
+// Stateless resource: derive Resource for default no-op setup/teardown/health impls.
 #[derive(Resource)]
-struct AppConfig { multiplier: u32 }
+struct AppConfig {
+    multiplier: u32,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step { Init, Done }
@@ -115,7 +117,8 @@ struct InitTask;
 #[task(state = Step)]
 impl InitTask {
     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
-        let board  = res.get::<Blackboard>()?;
+        // Borrow dependencies by concrete type; no string keys needed.
+        let board = res.get::<Blackboard>()?;
         let config = res.get::<AppConfig>()?;
 
         board.put("value", 10u32 * config.multiplier);
@@ -125,18 +128,21 @@ impl InitTask {
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
+    // Blackboard::clone() shares the same underlying map so main can read results back.
+    let board = Blackboard::new();
     let resources = Resources::new()
-        .insert(Blackboard::new())
+        .insert(board.clone())
         .insert(AppConfig { multiplier: 3 });
 
     let workflow = Workflow::new(resources)
         .register(Step::Init, InitTask)
         .add_exit_state(Step::Done);
 
+    // orchestrate runs setup_all() before Step::Init and teardown_all() on exit.
     workflow.orchestrate(Step::Init).await?;
+    assert_eq!(board.get::<u32>("value")?, 30);
     Ok(())
 }
-
 ```
 </div>
 
@@ -161,12 +167,16 @@ so most resources need no manual impl. The engine never calls <code>health()</co
 <span class="code-block-label">Resource trait</span>
 
 ```rust
+// #[resource] rewrites the async methods for dyn Resource compatibility.
+#[resource]
 pub trait Resource: Send + Sync + 'static {
+    // Called in insertion order before tasks run.
     async fn setup(&self) -> Result<(), CanoError> { Ok(()) }
+    // Called in reverse insertion order on exit, even if a task fails.
     async fn teardown(&self) -> Result<(), CanoError> { Ok(()) }
+    // Called only on demand via check_all_health() or aggregate_health().
     async fn health(&self) -> HealthStatus { HealthStatus::Healthy }
 }
-
 ```
 </div>
 
@@ -179,12 +189,14 @@ Generates an empty <code>impl Resource for T {}</code>. Use it for config, param
 <span class="code-block-label">Stateless resource via derive</span>
 
 ```rust
+use cano::prelude::*;
+
+// Expands to an empty Resource impl using default no-op setup, teardown, and health.
 #[derive(Resource)]
 struct WorkflowParams {
     batch_size: usize,
     timeout_ms: u64,
 }
-
 ```
 </div>
 
@@ -200,26 +212,27 @@ Both take <code>&amp;self</code> and resources are shared through <code>Arc</cod
 
 ```rust
 use cano::prelude::*;
+use std::sync::atomic::{AtomicU32, Ordering};
 
-use std::sync::{Arc, Mutex};
-
+// Resources are already wrapped in Arc internally, so atomics or locks suffice.
 struct CounterResource {
-    setup_count: Arc<Mutex<u32>>,
+    setup_count: AtomicU32,
 }
 
+// #[resource] matches the async method signatures of the Resource trait.
 #[resource]
 impl Resource for CounterResource {
     async fn setup(&self) -> Result<(), CanoError> {
-        *self.setup_count.lock().unwrap() += 1;
+        // Runs once before tasks execute; returning Err aborts setup and rolls back prior resources.
+        self.setup_count.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
 
     async fn teardown(&self) -> Result<(), CanoError> {
-        // flush, close handles, etc.
+        // Flush buffers or close handles here; errors are logged, not returned on failed runs.
         Ok(())
     }
 }
-
 ```
 </div>
 
@@ -238,15 +251,14 @@ of a type under a name. <code>try_insert</code> and <code>try_insert_named</code
 <span class="code-block-label">insert + try_insert</span>
 
 ```rust
-// One resource per type; a duplicate type indicates buggy wiring, so it panics
+// One resource per type; insert panics on duplicate types because that signals buggy wiring.
 let resources = Resources::new()
     .insert(Blackboard::new())
     .insert(AppConfig::default())
-    // A second Blackboard needs a name
+    // Register a second Blackboard under a distinct name.
     .insert_named("replica", Blackboard::new())
-    // Dynamic input: handle a collision as data
+    // Returns Err(CanoError::ResourceDuplicateKey(_)) if that type is already registered.
     .try_insert(plugin)?;
-
 ```
 </div>
 
@@ -265,14 +277,14 @@ borrow tied to <code>res</code>. <code>get_arc::&lt;R&gt;()</code> returns an
 <span class="code-block-label">By type, by name, as Arc</span>
 
 ```rust
-let board  = res.get::<Blackboard>()?;          // &Blackboard
-let params = res.get::<WorkflowParams>()?;       // &WorkflowParams
+let board = res.get::<Blackboard>()?;           // &Blackboard (by type)
+let params = res.get::<WorkflowParams>()?;      // &WorkflowParams (by type)
 
-let replica = res.get_named::<Blackboard>("replica")?;
+let replica = res.get_named::<Blackboard>("replica")?; // &Blackboard from the named namespace
 
-let shared: Arc<Blackboard> = res.get_arc::<Blackboard>()?;
+// Owned Arc<Blackboard> handles for moving into spawned tasks or structs.
+let shared = res.get_arc::<Blackboard>()?;
 let shared_replica = res.get_named_arc::<Blackboard>("replica")?;
-
 ```
 </div>
 
@@ -310,21 +322,34 @@ use cano::prelude::*;
 use std::sync::Arc;
 
 #[derive(Resource)]
-struct AppConfig { multiplier: u32 }
+struct AppConfig {
+    multiplier: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum Step { Init, Done }
 
 #[derive(FromResources)]
 struct InitDeps {
+    // Plain Arc<T> fields resolve by type via res.get_arc::<T>()?.
     board: Arc<Blackboard>,
     config: Arc<AppConfig>,
+    // #[res("name")] resolves via res.get_named_arc::<T>("name")?.
     #[res("replica")]
     replica: Arc<Blackboard>,
 }
 
-fn lookup(res: &Resources) -> Result<(), CanoError> {
-    // In a task:
-    let InitDeps { board, config, replica } = InitDeps::from_resources(res)?;
-    let _ = (board, config, replica);
-    Ok(())
+struct InitTask;
+
+#[task(state = Step)]
+impl InitTask {
+    async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
+        let deps = InitDeps::from_resources(res)?;
+        let value = 10u32 * deps.config.multiplier;
+        deps.board.put("value", value);
+        deps.replica.put("value", value);
+        Ok(Step::Done)
+    }
 }
 ```
 </div>
@@ -383,11 +408,11 @@ use cano::prelude::*;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step { Compute, Done }
 
-#[derive(Clone)]
 struct PureTask;
 
 #[task(state = Step)]
 impl PureTask {
+    // Resource-free signature: omit `res: &Resources`.
     async fn run(&self) -> Result<Step, CanoError> {
         let answer = 40 + 2;
         println!("Computed: {answer}");
@@ -396,11 +421,11 @@ impl PureTask {
 }
 
 fn build() -> Workflow<Step> {
+    // Workflow::bare() is shorthand for Workflow::new(Resources::new()).
     Workflow::bare()
         .register(Step::Compute, PureTask)
         .add_exit_state(Step::Done)
 }
-
 ```
 </div>
 

@@ -35,13 +35,14 @@ A state type implements <code>Debug</code>, <code>Clone</code>, <code>PartialEq<
 </p>
 
 ```rust
-use cano::prelude::*;
-
+// States require Debug, Clone, PartialEq, Eq, Hash (plus Send + Sync + 'static).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum OrderState {
+    // Active states: each maps to a registered task or split.
     Start,
     Validate,
     Process,
+    // Terminal states: declared as exit states where orchestrate() stops.
     Complete,
     Failed,
 }
@@ -106,6 +107,7 @@ struct ProcessTask;
 
 #[task(state = OrderState)]
 impl StartTask {
+    // Resource-free tasks omit `res: &Resources` and return the next state.
     async fn run(&self) -> Result<OrderState, CanoError> {
         Ok(OrderState::Validate)
     }
@@ -127,19 +129,21 @@ impl ProcessTask {
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    // Each builder method consumes the workflow and returns it, so chain the calls.
-    let workflow = Workflow::new(Resources::new().insert(Blackboard::new()))
-        // 1. Register a task for each state
+    // Each builder method consumes self and returns the updated Workflow.
+    // Workflow::bare() skips Resources when tasks take no dependencies.
+    let workflow = Workflow::bare()
+        // 1. Register a task for each active state.
         .register(OrderState::Start, StartTask)
         .register(OrderState::Validate, ValidateTask)
         .register(OrderState::Process, ProcessTask)
-        // 2. Declare the exit states, where the run stops
+        // 2. Declare the terminal exit states where the machine stops.
         .add_exit_states([OrderState::Complete, OrderState::Failed]);
 
-    // 3. Run from the initial state
+    // 3. Run the state machine from the initial state.
     let result = workflow.orchestrate(OrderState::Start).await?;
 
-    println!("Final state: {:?}", result);
+    println!("Final state: {result:?}");
+    assert_eq!(result, OrderState::Complete);
     Ok(())
 }
 ```
@@ -165,17 +169,20 @@ drops the in-flight task at its next <code>.await</code>, drains the
 use cano::prelude::*;
 use std::time::Duration;
 
-let token = CancellationToken::new();
+async fn run_with_deadline(workflow: &Workflow<OrderState>) {
+    let token = CancellationToken::new();
 
-// Clones share the token, and cancel() is idempotent.
-let canceller = token.clone();
-tokio::spawn(async move {
-    tokio::time::sleep(Duration::from_secs(5)).await;
-    canceller.cancel();
-});
+    // Clones share the underlying token, and cancel() is idempotent.
+    let canceller = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        canceller.cancel();
+    });
 
-let result = workflow.orchestrate_with_token(OrderState::Start, &token).await;
-assert!(matches!(result, Err(e) if e.is_cancelled()));
+    let result = workflow.orchestrate_with_token(OrderState::Start, &token).await;
+    // is_cancelled() checks for CanoError::Cancelled through WithStateContext.
+    assert!(result.is_err_and(|e| e.is_cancelled()));
+}
 ```
 
 <p>
@@ -241,7 +248,6 @@ use cano::prelude::*;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum State { Start, Complete }
 
-#[derive(Clone)]
 struct MyTask;
 
 #[task(state = State)]
@@ -252,19 +258,18 @@ impl MyTask {
 }
 
 fn examples() {
-    let my_task = MyTask;
-
-    // Wrong: register returns a new workflow, and it is discarded.
+    // Wrong: register consumes self and returns a #[must_use] Workflow;
+    // ignoring it drops the registration and triggers an unused_must_use warning.
     let workflow = Workflow::bare();
-    workflow.register(State::Start, my_task.clone());
+    workflow.register(State::Start, MyTask);
 
     // Correct: capture the returned workflow.
     let workflow = Workflow::bare();
-    let _workflow = workflow.register(State::Start, my_task.clone());
+    let _workflow = workflow.register(State::Start, MyTask);
 
-    // Best: chain the calls in one expression.
+    // Best: chain the builder methods in one expression.
     let _workflow = Workflow::bare()
-        .register(State::Start, my_task)
+        .register(State::Start, MyTask)
         .add_exit_state(State::Complete);
 }
 ```
@@ -292,13 +297,16 @@ plus a <code>JoinConfig</code>. The <code>JoinConfig</code> picks a <code>JoinSt
 <span class="code-block-label">A split state</span>
 
 ```rust
+// Wait for every branch to succeed, then advance to State::Aggregate
+// (branch return states are ignored; the bound includes queue time if a bulkhead is set).
 let join_config = JoinConfig::new(JoinStrategy::All, State::Aggregate)
     .with_timeout(Duration::from_secs(5));
 
-Workflow::new(Resources::new().insert(board))
-    .register_split(State::Fanout, vec![Worker { id: 1 }, Worker { id: 2 }], join_config)
+// Spawn all Worker branches concurrently when entering State::Fanout.
+let workflow = Workflow::new(Resources::new().insert(board))
+    .register_split(State::Fanout, [Worker { id: 1 }, Worker { id: 2 }], join_config)
     .register(State::Aggregate, Aggregator)
-    .add_exit_state(State::Complete)
+    .add_exit_state(State::Complete);
 ```
 </div>
 
@@ -375,17 +383,24 @@ fn build_workflow(resources: Resources) -> Workflow<TextPipelineState> {
         .register(TextPipelineState::Parse, ParseTask)
         .register(TextPipelineState::Transform, TransformTask)
         .add_exit_state(TextPipelineState::Done)
+        // Abort hung requests and return CanoError::WorkflowTimeout.
         .with_total_timeout(Duration::from_secs(5))
 }
 
-// Inside an HTTP handler:
-let board = Blackboard::new(); // fresh blackboard, full isolation
-let resources = Resources::new()
-    .insert(board.clone())
-    .insert(RequestParams { text });
-let workflow = build_workflow(resources);
-let final_state = workflow.orchestrate(TextPipelineState::Parse).await?;
-let word_count: usize = board.get("word_count")?;
+async fn handle_request(text: String) -> Result<usize, CanoError> {
+    // Fresh blackboard per request prevents data leaking across concurrent calls.
+    let board = Blackboard::new();
+    let resources = Resources::new()
+        // Clone keeps a handle so this handler can read outputs after orchestrate().
+        .insert(board.clone())
+        .insert(RequestParams { text });
+
+    let workflow = build_workflow(resources);
+    let final_state = workflow.orchestrate(TextPipelineState::Parse).await?;
+    assert_eq!(final_state, TextPipelineState::Done);
+
+    Ok(board.get("word_count")?)
+}
 ```
 
 <div class="callout callout-tip">

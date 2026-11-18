@@ -64,9 +64,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 <p>For development, install the default formatter.</p>
 
 ```rust
-use tracing_subscriber;
-
-// Simple setup for development
+// Install a global stdout subscriber; reads RUST_LOG when env-filter is enabled.
 tracing_subscriber::fmt::init();
 ```
 
@@ -75,12 +73,11 @@ tracing_subscriber::fmt::init();
 controls log levels at runtime.</p>
 
 ```rust
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
-// Production setup with env filter
+// Read RUST_LOG or fall back to "info", then set the global default subscriber.
 tracing_subscriber::registry()
-    .with(tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| "info".into()))
+    .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
     .with(tracing_subscriber::fmt::layer())
     .init();
 ```
@@ -290,7 +287,6 @@ use cano::prelude::*;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum MyState { Start, Complete }
 
-#[derive(Clone)]
 struct MyProcessor;
 
 #[task(state = MyState)]
@@ -301,15 +297,14 @@ impl MyProcessor {
 }
 
 fn build_workflow() -> Workflow<MyState> {
-    // Create workflow with custom tracing span
+    // Replaces the default workflow_orchestrate span so nested task spans inherit these fields.
     let workflow_span = info_span!(
         "user_data_processing",
         user_id = "12345",
         batch_id = "batch_001"
     );
 
-    let board = Blackboard::new();
-    Workflow::new(Resources::new().insert(board))
+    Workflow::bare()
         .with_tracing_span(workflow_span)
         .register(MyState::Start, MyProcessor)
         .add_exit_state(MyState::Complete)
@@ -331,11 +326,10 @@ use tracing::{info, warn};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum AppState { Process, Confirm }
 
-async fn process_payment(_order_id: &str) -> Result<String, CanoError> {
+async fn process_payment(_order_id: &str) -> Result<String, &'static str> {
     Ok("receipt-1234".to_string())
 }
 
-#[derive(Clone)]
 struct PaymentTask;
 
 #[task(state = AppState)]
@@ -343,17 +337,20 @@ impl PaymentTask {
     async fn run(&self, res: &Resources) -> Result<AppState, CanoError> {
         let board = res.get::<Blackboard>()?;
         let order_id: String = board.get("order_id")?;
+
+        // Events emitted in run() inherit fields from the parent task_attempt and workflow spans.
         info!(order_id = %order_id, "Processing payment");
 
         match process_payment(&order_id).await {
             Ok(receipt) => {
                 info!(order_id = %order_id, receipt = %receipt, "Payment succeeded");
+                // Record receipt on the Blackboard for downstream confirmation.
                 board.put("receipt", receipt);
                 Ok(AppState::Confirm)
             }
-            Err(e) => {
-                warn!(order_id = %order_id, error = %e, "Payment failed");
-                Err(CanoError::task_execution(format!("payment failed: {e}")))
+            Err(reason) => {
+                warn!(order_id = %order_id, error = %reason, "Payment failed");
+                Err(CanoError::task_execution(format!("payment failed: {reason}")))
             }
         }
     }
@@ -384,6 +381,7 @@ across the <code>.await</code>.
 ```rust
 use tracing::Instrument;
 
+// Attach the span to the future via Instrument (never hold Span::enter() across .await).
 workflow
     .orchestrate(State::Start)
     .instrument(tracing::info_span!("api_request", request_id = "abc"))
@@ -428,12 +426,12 @@ enum State {
     Complete,
 }
 
-#[derive(Clone)]
 struct ProcessOrder;
 
 #[task(state = State)]
 impl ProcessOrder {
     async fn run(&self) -> Result<State, CanoError> {
+        // Logged inside `workflow_span`, so order_id and customer attach automatically.
         info!("Processing order...");
         Ok(State::Complete)
     }
@@ -441,29 +439,26 @@ impl ProcessOrder {
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    // 1. Set up the subscriber with an env filter
+    // 1. Set up the subscriber with an env filter.
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| "info".into()))
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    let board = Blackboard::new();
-
-    // 2. Create the workflow with a custom span.
-    // The span wraps every event this workflow logs.
+    // 2. Create a bare workflow with a custom root span covering all child task spans.
     let workflow_span = info_span!(
         "order_processing",
         order_id = "ORD-2025-001",
         customer = "Acme Corp"
     );
 
-    let workflow = Workflow::new(Resources::new().insert(board))
+    let workflow = Workflow::bare()
         .register(State::Start, ProcessOrder)
         .add_exit_state(State::Complete)
         .with_tracing_span(workflow_span);
 
-    // 3. Run
+    // 3. Emitted before orchestrate(), so outside `order_processing`; ProcessOrder runs inside it.
     info!("Submitting order...");
     workflow.orchestrate(State::Start).await?;
 

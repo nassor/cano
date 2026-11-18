@@ -64,16 +64,16 @@ struct ReserveInventory;
 
 #[saga::task(state = Step)]
 impl ReserveInventory {
+    // Output must be Serialize + DeserializeOwned; persisted when a CheckpointStore is attached.
     type Output = Reservation;
 
     async fn run(&self, _res: &Resources) -> Result<(Step, Reservation), CanoError> {
-        // ... actually reserve the stock ...
+        // Commit the reservation right before returning Ok so failures never leak.
         Ok((Step::Ship, Reservation { sku: "WIDGET-7".into(), qty: 3 }))
     }
 
-    async fn compensate(&self, _res: &Resources, output: Reservation) -> Result<(), CanoError> {
-        // ... release `output.qty` of `output.sku`; must be idempotent ...
-        let _ = output;
+    async fn compensate(&self, _res: &Resources, _output: Reservation) -> Result<(), CanoError> {
+        // Release `_output.qty` of `_output.sku`; must be idempotent across resume/retry.
         Ok(())
     }
 }
@@ -117,7 +117,7 @@ stack.
 ```rust
 use cano::prelude::*;
 
-// ReserveInventory, ChargeCard and ShipOrder each implement CompensatableTask<Step>.
+// #[saga::task] implements Registrable, so it uses the same Workflow::register() as plain tasks.
 let workflow = Workflow::bare()
     .register(Step::Reserve, ReserveInventory)
     .register(Step::Charge, ChargeCard)
@@ -361,12 +361,13 @@ struct ShipOrder;
 #[saga::task(state = Step)]
 impl ReserveInventory {
     type Output = Reservation;
-    async fn run(&self, _res: &Resources) -> Result<(Step, Reservation), CanoError> {
+    // Resource-free saga tasks may omit `res: &Resources` from run() and compensate().
+    async fn run(&self) -> Result<(Step, Reservation), CanoError> {
         let r = Reservation { order_id: "ord-1001".into(), sku: "WIDGET-7".into(), qty: 3 };
         println!("reserve  : holding {} x {}", r.qty, r.sku);
         Ok((Step::Validate, r))
     }
-    async fn compensate(&self, _res: &Resources, r: Reservation) -> Result<(), CanoError> {
+    async fn compensate(&self, r: Reservation) -> Result<(), CanoError> {
         println!("reserve  : releasing {} x {}  (rollback)", r.qty, r.sku);
         Ok(())
     }
@@ -384,12 +385,12 @@ impl ValidateOrder {
 #[saga::task(state = Step)]
 impl ChargeCard {
     type Output = Charge;
-    async fn run(&self, _res: &Resources) -> Result<(Step, Charge), CanoError> {
+    async fn run(&self) -> Result<(Step, Charge), CanoError> {
         let charge = Charge { order_id: "ord-1001".into(), txn_id: "tx-7788".into(), amount_cents: 4_200 };
         println!("charge   : $42.00 charged ({})", charge.txn_id);
         Ok((Step::Ship, charge))
     }
-    async fn compensate(&self, _res: &Resources, c: Charge) -> Result<(), CanoError> {
+    async fn compensate(&self, c: Charge) -> Result<(), CanoError> {
         println!("charge   : refunding {} cents (tx {})  (rollback)", c.amount_cents, c.txn_id);
         Ok(())
     }
@@ -416,7 +417,14 @@ async fn main() {
 
     match workflow.orchestrate(Step::Reserve).await {
         Ok(state) => println!("completed at {state:?}"),
-        Err(error) => println!("failed, rolled back: {error}"), // "courier unavailable", the original error
+        Err(error) => match error.inner() {
+            CanoError::CompensationFailed { errors } => {
+                // Dirty rollback: errors[0] is the original failure; errors[1..] are rollback failures.
+                eprintln!("rollback incomplete ({} errors): {error}", errors.len());
+            }
+            // Clean rollback: all compensations ran LIFO and succeeded, so the original error returns.
+            _ => println!("failed, rolled back cleanly: {error}"),
+        },
     }
 }
 ```

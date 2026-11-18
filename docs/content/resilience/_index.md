@@ -59,17 +59,16 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step { Fetch, Done }
 
-#[derive(Clone)]
 struct FetchTask;
 
 #[task(state = Step)]
 impl FetchTask {
     fn config(&self) -> TaskConfig {
-        // One attempt plus four retries, 200ms apart.
+        // One initial attempt plus four retries, 200 ms apart.
         TaskConfig::new().with_fixed_retry(4, Duration::from_millis(200))
     }
     async fn run(&self) -> Result<Step, CanoError> {
-        // ... call the flaky thing ...
+        // Perform the fallible call; returning Err triggers the retry loop.
         Ok(Step::Done)
     }
 }
@@ -92,11 +91,13 @@ out the last timeout is wrapped in <code>CanoError::RetryExhausted</code>. With 
 #[task(state = Step)]
 impl CallTask {
     fn config(&self) -> TaskConfig {
+        // Up to 3 attempts total; each expired 2 s attempt yields Timeout and retries.
         TaskConfig::new()
             .with_fixed_retry(2, Duration::from_millis(100))
-            .with_attempt_timeout(Duration::from_secs(2)) // each attempt gets 2s
+            .with_attempt_timeout(Duration::from_secs(2))
     }
     async fn run(&self) -> Result<Step, CanoError> {
+        // Bounded async operation; dropped at its next .await if the deadline expires.
         Ok(Step::Done)
     }
 }
@@ -120,8 +121,9 @@ returns <code>CanoError::WorkflowTimeout { elapsed, limit }</code> wrapped in
 ```rust
 // Reserve, Charge and Ship are compensatable tasks.
 let workflow = Workflow::bare()
+    // Wall-clock budget across the entire orchestrate() or resume_from() call.
     .with_total_timeout(Duration::from_millis(200))
-    // Optional override; the default is min(total_timeout / 2, 30s).
+    // Optional rollback budget; defaults to min(total_timeout / 2, 30 s).
     .with_compensation_timeout(Duration::from_millis(50))
     .register(Step::Reserve, Reserve)
     .register(Step::Charge, Charge)
@@ -259,8 +261,9 @@ tokio::spawn({
     }
 });
 
+// Drops the cancellable task at its next .await, drains saga compensations, and returns Cancelled.
 let result = workflow.orchestrate_with_token(Step::Reserve, &token).await;
-assert!(matches!(result, Err(e) if e.is_cancelled()));
+assert!(result.is_err_and(|e| e.is_cancelled()));
 ```
 
 <p>
@@ -324,10 +327,12 @@ the rest queue. All tasks are still spawned and the join strategy is unchanged. 
 </p>
 
 ```rust
-let join = JoinConfig::new(JoinStrategy::All, S::Join).with_bulkhead(8); // at most 8 at a time
+// At most 8 of the 200 spawned branches execute at once; the rest queue on the semaphore.
+let join = JoinConfig::new(JoinStrategy::All, Step::Done).with_bulkhead(8);
 let workflow = Workflow::bare()
-    .register_split(S::Fan, (0..200).map(|_| W).collect(), join)
-    .add_exit_state(S::Done);
+    // register_split accepts any IntoIterator of tasks; no intermediate Vec needed.
+    .register_split(Step::Fan, (0..200).map(|_| WorkerTask), join)
+    .add_exit_state(Step::Done);
 ```
 
 <div class="callout callout-tip">
@@ -339,9 +344,9 @@ let workflow = Workflow::bare()
 <h2 id="panic-safety"><a href="#panic-safety" class="anchor-link" aria-hidden="true">#</a>Panic safety</h2>
 <p>
 A <code>panic!</code> inside a task body, or an <code>.unwrap()</code> that fires, does not unwind
-through the workflow engine. The dispatcher wraps each task in <code>catch_unwind</code> and turns the
-panic into <code>CanoError::TaskExecution("panic: &lt;message&gt;")</code>, which then follows the
-normal retry, error and compensation path. Split tasks are wrapped per spawned task. There is nothing
+through the workflow engine. The dispatcher wraps the retry loop in <code>catch_unwind</code> and turns a
+panic into <code>CanoError::TaskExecution("panic: &lt;message&gt;")</code>, failing fast without
+retrying before following the normal error and compensation path. Split tasks are wrapped per spawned task. There is nothing
 to configure. Observer hooks, including <code>on_retry</code> and <code>on_circuit_open</code>, are
 isolated the same way, so a panicking observer never fails the task.
 </p>

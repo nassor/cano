@@ -148,6 +148,7 @@ impl QueueConsumer {
         if self.queue.lock().await.is_empty() {
             Ok(QueueState::Done)
         } else {
+            // Re-enter QueueState::Consume to drain the next batch.
             Ok(QueueState::Consume)
         }
     }
@@ -155,17 +156,28 @@ impl QueueConsumer {
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let board = Blackboard::new();
     let queue: SharedQueue = Arc::new(Mutex::new(VecDeque::from(vec![
-        "order1".to_string(), "order2".to_string(), "order3".to_string(),
-        "order4".to_string(), "order5".to_string(),
+        "order1".to_string(),
+        "order2".to_string(),
+        "order3".to_string(),
+        "order4".to_string(),
+        "order5".to_string(),
     ])));
 
-    let workflow = Workflow::new(Resources::new().insert(board.clone()))
-        .register(QueueState::Consume, QueueConsumer { queue: queue.clone(), batch_size: 10 })
+    // A BatchTask registers with Workflow::register and loops internally per item.
+    // batch_size: 2 drains 5 items across 3 batches (2 + 2 + 1).
+    let workflow = Workflow::new(Resources::new().insert(Blackboard::new()))
+        .register(
+            QueueState::Consume,
+            QueueConsumer {
+                queue: queue.clone(),
+                batch_size: 2,
+            },
+        )
         .add_exit_state(QueueState::Done);
 
     workflow.orchestrate(QueueState::Consume).await?;
+    assert!(queue.lock().await.is_empty());
 
     println!("All items processed");
     Ok(())
@@ -193,59 +205,73 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum DataState { LoadRecords, ProcessBatch, Aggregate, Complete }
 
-#[derive(Clone)]
-struct RecordLoader;
+struct RecordLoader {
+    count: usize,
+}
 
 #[task(state = DataState)]
 impl RecordLoader {
     async fn run(&self, res: &Resources) -> Result<DataState, CanoError> {
         let board = res.get::<Blackboard>()?;
-        board.put("records", (1..=100).collect::<Vec<i32>>());
+        let values: Vec<i32> = (1..=self.count as i32).collect();
+        board.put("records", values);
         Ok(DataState::ProcessBatch)
     }
 }
 
-#[derive(Clone)]
-struct RecordProcessor { index: usize }
+struct RecordProcessor {
+    index: usize,
+}
 
 #[task(state = DataState)]
 impl RecordProcessor {
     async fn run(&self, res: &Resources) -> Result<DataState, CanoError> {
         let board = res.get::<Blackboard>()?;
-        let records: Vec<i32> = board.get("records")?;
+        // Share one Arc<Vec<i32>> across all split tasks instead of cloning N times.
+        let records = board.get_shared::<Vec<i32>>("records")?;
         tokio::time::sleep(Duration::from_millis(10)).await;
-        board.put(&format!("result_{}", self.index), records[self.index] * 2);
+
+        let value = records
+            .get(self.index)
+            .copied()
+            .ok_or_else(|| CanoError::task_execution(format!("missing record {}", self.index)))?;
+        board.put(&format!("result_{}", self.index), value * 2);
         Ok(DataState::Aggregate)
     }
 }
 
-#[derive(Clone)]
-struct FinishAggregate;
+struct FinishAggregate {
+    count: usize,
+}
 
 #[task(state = DataState)]
 impl FinishAggregate {
     async fn run(&self, res: &Resources) -> Result<DataState, CanoError> {
         let board = res.get::<Blackboard>()?;
-        let total: i32 = (0..100)
-            .filter_map(|i| board.get::<i32>(&format!("result_{}", i)).ok())
-            .sum();
-        println!("Aggregated total: {}", total);
+        let mut total = 0i32;
+        for i in 0..self.count {
+            total += board.get::<i32>(&format!("result_{i}"))?;
+        }
+        println!("Aggregated total: {total}");
         Ok(DataState::Complete)
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let board = Blackboard::new();
-
-    // Build the processor tasks before constructing the workflow.
-    let processors: Vec<RecordProcessor> = (0..100).map(|i| RecordProcessor { index: i }).collect();
+    // Determined at workflow build time (here from runtime config or input size).
+    let record_count = 100usize;
     let join_config = JoinConfig::new(JoinStrategy::All, DataState::Aggregate);
 
-    let workflow = Workflow::new(Resources::new().insert(board.clone()))
-        .register(DataState::LoadRecords, RecordLoader)
-        .register_split(DataState::ProcessBatch, processors, join_config)
-        .register(DataState::Aggregate, FinishAggregate)
+    // register_split collects the iterator eagerly when constructing the Workflow.
+    let workflow = Workflow::new(Resources::new().insert(Blackboard::new()))
+        .register(DataState::LoadRecords, RecordLoader { count: record_count })
+        .register_split(
+            DataState::ProcessBatch,
+            (0..record_count).map(|index| RecordProcessor { index }),
+            join_config,
+        )
+        .register(DataState::Aggregate, FinishAggregate { count: record_count })
         .add_exit_state(DataState::Complete);
 
     workflow.orchestrate(DataState::LoadRecords).await?;
@@ -325,8 +351,8 @@ span several splits or workflows.
 
 ```rust
 use cano::prelude::*;
-use tokio::sync::Semaphore;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ApiState { Start, Complete }
@@ -335,14 +361,20 @@ async fn make_api_call(_id: usize) -> Result<String, CanoError> {
     Ok("ok".to_string())
 }
 
-#[derive(Clone)]
-struct RateLimitedApiTask { api_id: usize, semaphore: Arc<Semaphore> }
+struct RateLimitedApiTask {
+    api_id: usize,
+    semaphore: Arc<Semaphore>,
+}
 
 #[task(state = ApiState)]
 impl RateLimitedApiTask {
     async fn run(&self, res: &Resources) -> Result<ApiState, CanoError> {
         let board = res.get::<Blackboard>()?;
-        let _permit = self.semaphore.acquire().await
+        // Hold the permit across make_api_call(); dropping _permit releases it.
+        let _permit = self
+            .semaphore
+            .acquire()
+            .await
             .map_err(|e| CanoError::task_execution(e.to_string()))?;
         let result = make_api_call(self.api_id).await?;
         board.put(&format!("api_result_{}", self.api_id), result);
@@ -350,16 +382,20 @@ impl RateLimitedApiTask {
     }
 }
 
-fn build_workflow(board: Blackboard) -> Workflow<ApiState> {
-    // 20 tasks, at most 5 in flight at once.
-    let semaphore = Arc::new(Semaphore::new(5));
-    let tasks: Vec<RateLimitedApiTask> = (0..20)
-        .map(|i| RateLimitedApiTask { api_id: i, semaphore: semaphore.clone() })
-        .collect();
+// Pass a shared Arc<Semaphore> so several splits or workflows enforce one combined limit.
+// For a limit scoped to a single split, prefer JoinConfig::new(...).with_bulkhead(5).
+fn build_workflow(board: Blackboard, semaphore: Arc<Semaphore>) -> Workflow<ApiState> {
     let join_config = JoinConfig::new(JoinStrategy::All, ApiState::Complete);
 
     Workflow::new(Resources::new().insert(board))
-        .register_split(ApiState::Start, tasks, join_config)
+        .register_split(
+            ApiState::Start,
+            (0..20).map(|api_id| RateLimitedApiTask {
+                api_id,
+                semaphore: semaphore.clone(),
+            }),
+            join_config,
+        )
         .add_exit_state(ApiState::Complete)
 }
 ```
@@ -372,40 +408,47 @@ throughput and let the scheduler run the workflow on an interval.
 </p>
 
 ```rust
+// Requires features = ["scheduler"] for Scheduler and shutdown_signal().
 use cano::prelude::*;
 use std::time::Duration;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum ProcessState { Start, ProcessBatch, Complete }
 
-async fn fetch_pending_work() -> Result<Vec<String>, CanoError> {
-    Ok(vec!["job-1".to_string(), "job-2".to_string()])
+async fn fetch_pending_work(limit: usize) -> Result<Vec<String>, CanoError> {
+    let items = vec!["job-1".to_string(), "job-2".to_string()];
+    Ok(items.into_iter().take(limit).collect())
 }
 
-#[derive(Clone)]
-struct WorkProcessor { item_index: usize }
+struct WorkProcessor {
+    item_index: usize,
+}
 
 #[task(state = ProcessState)]
 impl WorkProcessor {
     async fn run(&self, res: &Resources) -> Result<ProcessState, CanoError> {
         let board = res.get::<Blackboard>()?;
-        let items: Vec<String> = board.get("work_items")?;
+        // Share the fetched Vec without cloning across idle or active workers.
+        let items = board.get_shared::<Vec<String>>("work_items")?;
+        // Pool size is fixed at batch_size, so excess workers on partial batches are fast no-ops.
         if let Some(item) = items.get(self.item_index) {
-            println!("Processing item: {}", item);
+            println!("Processing item: {item}");
         }
         Ok(ProcessState::Complete)
     }
 }
 
-#[derive(Clone)]
-struct BatchLoaderTask;
+struct BatchLoaderTask {
+    batch_size: usize,
+}
 
 #[task(state = ProcessState)]
 impl BatchLoaderTask {
     async fn run(&self, res: &Resources) -> Result<ProcessState, CanoError> {
         let board = res.get::<Blackboard>()?;
-        let items = fetch_pending_work().await?;
+        let items = fetch_pending_work(self.batch_size).await?;
         if items.is_empty() {
+            // Skip the split state on idle ticks when there is no pending work.
             return Ok(ProcessState::Complete);
         }
         board.put("work_items", items);
@@ -415,15 +458,16 @@ impl BatchLoaderTask {
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
-    let board = Blackboard::new();
-
     let batch_size = 10usize;
-    let processors: Vec<WorkProcessor> = (0..batch_size).map(|i| WorkProcessor { item_index: i }).collect();
     let join_config = JoinConfig::new(JoinStrategy::All, ProcessState::Complete);
 
-    let batch_workflow = Workflow::new(Resources::new().insert(board.clone()))
-        .register(ProcessState::Start, BatchLoaderTask)
-        .register_split(ProcessState::ProcessBatch, processors, join_config)
+    let batch_workflow = Workflow::new(Resources::new().insert(Blackboard::new()))
+        .register(ProcessState::Start, BatchLoaderTask { batch_size })
+        .register_split(
+            ProcessState::ProcessBatch,
+            (0..batch_size).map(|item_index| WorkProcessor { item_index }),
+            join_config,
+        )
         .add_exit_state(ProcessState::Complete);
 
     // Keep the handle alive: dropping every `RunningScheduler` handle aborts the runs.

@@ -55,14 +55,13 @@ Two builders opt a workflow into checkpointing:
 
 ```rust
 use cano::prelude::*;
-use cano::RedbStore;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Step { Start, Work, Done }
 
-#[derive(Clone)] struct StartTask;
-#[derive(Clone)] struct WorkTask;
+struct StartTask;
+struct WorkTask;
 
 #[task(state = Step)]
 impl StartTask {
@@ -79,8 +78,10 @@ impl WorkTask {
 
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
+    // Opens cano.redb in the platform's persistent state directory, creating parent dirs.
     let checkpoint_store = Arc::new(RedbStore::open_default()?);
 
+    // Persist each state entry under "run-42" before running its task; cleared on exit.
     let workflow = Workflow::bare()
         .register(Step::Start, StartTask)
         .register(Step::Work, WorkTask)
@@ -206,7 +207,6 @@ the run had already finished and <code>resume_from</code> returns that state imm
 
 ```rust
 use cano::prelude::*;
-use cano::RedbStore;
 use std::sync::Arc;
 
 // Step, StartTask and WorkTask are the ones from the first example.
@@ -217,6 +217,7 @@ async fn main() -> Result<(), CanoError> {
         .register(Step::Start, StartTask)
         .register(Step::Work, WorkTask)
         .add_exit_state(Step::Done)
+        // No with_workflow_id needed on the builder when only calling resume_from().
         .with_checkpoint_store(checkpoint_store);
 
     // An earlier process crashed mid-run; pick up where it left off.
@@ -260,6 +261,7 @@ let workflow = Workflow::new(resources)
     .add_exit_state(MyState::Done)
     .with_checkpoint_store(checkpoint_store)
     .with_workflow_id("orders-v2")
+    // Stamp version 2 on every row; resume_from returns WorkflowVersionMismatch if stored != 2.
     .with_workflow_version(2);
 ```
 
@@ -377,7 +379,6 @@ workspace member.
 
 ```rust
 use cano::prelude::*;
-use cano::RedbStore;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -386,11 +387,13 @@ enum Step { Start, Process, Finalize, Done }
 
 // Shared across runs through Resources: the first Process attempt errors, later ones succeed.
 #[derive(Resource)]
-struct CrashOnce { attempts: AtomicU32 }
+struct CrashOnce {
+    attempts: AtomicU32,
+}
 
-#[derive(Clone)] struct StartTask;
-#[derive(Clone)] struct ProcessTask;
-#[derive(Clone)] struct FinalizeTask;
+struct StartTask;
+struct ProcessTask;
+struct FinalizeTask;
 
 #[task(state = Step)]
 impl StartTask {
@@ -401,7 +404,7 @@ impl StartTask {
 
 #[task(state = Step)]
 impl ProcessTask {
-    // No retries by default, so the first failure leaves `orchestrate`, like a real crash.
+    // No retries by default, so the first failure exits `orchestrate`, like a real crash.
     async fn run(&self, res: &Resources) -> Result<Step, CanoError> {
         let crash = res.get::<CrashOnce>()?;
         if crash.attempts.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -421,7 +424,9 @@ impl FinalizeTask {
 #[tokio::main]
 async fn main() -> Result<(), CanoError> {
     let checkpoint_store = Arc::new(RedbStore::new("recovery.redb")?);
-    let resources = Resources::new().insert(CrashOnce { attempts: AtomicU32::new(0) });
+    let resources = Resources::new().insert(CrashOnce {
+        attempts: AtomicU32::new(0),
+    });
     let workflow = Workflow::new(resources)
         .register(Step::Start, StartTask)
         .register(Step::Process, ProcessTask)
@@ -430,14 +435,15 @@ async fn main() -> Result<(), CanoError> {
         .with_checkpoint_store(checkpoint_store.clone())
         .with_workflow_id("demo-run");
 
-    // Run 1 fails inside ProcessTask. The Start and Process rows are already durable.
-    let _ = workflow.orchestrate(Step::Start).await;
+    // Run 1 fails inside ProcessTask; Start and Process rows are already durable.
+    let crash_err = workflow.orchestrate(Step::Start).await.unwrap_err();
+    println!("first run aborted: {crash_err}");
 
-    // Run 2 resumes: ProcessTask runs again (and now succeeds), then the run finishes at Done.
+    // Run 2 resumes: ProcessTask runs again and succeeds, then the workflow reaches Done.
     let final_state = workflow.resume_from("demo-run").await?;
     assert_eq!(final_state, Step::Done);
 
-    // Reaching Done cleared the log, so nothing is left to print here.
+    // Reaching an exit state clears the run's checkpoint log.
     assert!(checkpoint_store.load_run("demo-run").await?.is_empty());
     Ok(())
 }

@@ -60,12 +60,15 @@ impl Prepare {
     }
 }
 
-struct Worker { id: u32 }
+struct Worker {
+    id: u32,
+}
 
 #[task(state = State)]
 impl Worker {
     async fn run(&self) -> Result<State, CanoError> {
         println!("worker {} finished", self.id);
+        // Returned state is ignored by split dispatch; JoinConfig picks join_state.
         Ok(State::Aggregate)
     }
 }
@@ -79,10 +82,11 @@ impl Summarize {
     }
 }
 
-// Splits `Fanout` into `workers` tasks and joins with `join_config`.
+// Splits `Fanout` into `workers` concurrent tasks and joins with `join_config`.
 fn build(join_config: JoinConfig<State>, workers: u32) -> Workflow<State> {
-    Workflow::new(Resources::new())
+    Workflow::bare()
         .register(State::Start, Prepare)
+        // register_split accepts any IntoIterator of tasks.
         .register_split(State::Fanout, (1..=workers).map(|id| Worker { id }), join_config)
         .register(State::Aggregate, Summarize)
         .add_exit_state(State::Complete)
@@ -131,6 +135,7 @@ required.
 </div>
 
 ```rust
+// All 3 workers must succeed within 10 s before advancing to State::Aggregate.
 let join_config = JoinConfig::new(JoinStrategy::All, State::Aggregate)
     .with_timeout(Duration::from_secs(10));
 let workflow = build(join_config, 3);
@@ -175,7 +180,7 @@ Joins on the first success and aborts the rest. If every task fails, the join fa
 </div>
 
 ```rust
-// Three redundant providers: the first to succeed wins.
+// Three redundant providers: advance on the first success and abort the remaining two.
 let join_config = JoinConfig::new(JoinStrategy::Any, State::Aggregate);
 let workflow = build(join_config, 3);
 ```
@@ -219,7 +224,7 @@ are still worth waiting for.
 </div>
 
 ```rust
-// Write to 5 replicas; 3 must confirm.
+// Wait for all 5 replicas to finish, then advance if at least 3 succeeded.
 let join_config = JoinConfig::new(JoinStrategy::Quorum(3), State::Aggregate)
     .with_timeout(Duration::from_secs(5));
 let workflow = build(join_config, 5);
@@ -264,7 +269,7 @@ whose size varies.
 </div>
 
 ```rust
-// 100 records; at least 75 must succeed.
+// Wait for all 100 tasks to finish; advance if at least ceil(100 * 0.75) = 75 succeeded.
 let join_config = JoinConfig::new(JoinStrategy::Percentage(0.75), State::Aggregate)
     .with_timeout(Duration::from_secs(10));
 let workflow = build(join_config, 100);
@@ -313,7 +318,7 @@ walks through it.
 </div>
 
 ```rust
-// Proceed after any 2 of 4 service calls succeed.
+// Advance as soon as 2 of 4 calls succeed and abort the remaining in-flight tasks.
 let join_config = JoinConfig::new(JoinStrategy::PartialResults(2), State::Aggregate)
     .with_timeout(Duration::from_secs(5));
 let workflow = build(join_config, 4);
@@ -371,7 +376,7 @@ with <code>CanoError::Configuration</code>, before the workflow runs.
 </div>
 
 ```rust
-// Real-time recommendations with a 500 ms SLA.
+// PartialTimeout requires with_timeout(); aborts unfinished tasks at 500 ms and advances with what finished.
 let join_config = JoinConfig::new(JoinStrategy::PartialTimeout, State::Aggregate)
     .with_timeout(Duration::from_millis(500));
 let workflow = build(join_config, 4);

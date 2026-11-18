@@ -38,15 +38,18 @@ struct ScanPages;
 
 #[task::stepped(state = Stage)]
 impl ScanPages {
-    async fn step(&self, _res: &Resources, cursor: Option<Cursor>)
+    // Resource-free step omits `res: &Resources`.
+    async fn step(&self, cursor: Option<Cursor>)
         -> Result<StepOutcome<Cursor, Stage>, CanoError>
     {
+        // `cursor` is None on initial run, or the last persisted cursor after resume_from().
         let c = cursor.unwrap_or(Cursor { page: 0 });
         if c.page >= 50 {
+            // Ends the loop and transitions the workflow to Stage::Done.
             return Ok(StepOutcome::Done(Stage::Done));
         }
-        // ...process page c.page...
-        Ok(StepOutcome::More(Cursor { page: c.page + 1 }))   // cursor persisted here when a store is attached
+        // Process page c.page idempotently, then checkpoint the next cursor.
+        Ok(StepOutcome::More(Cursor { page: c.page + 1 }))
     }
 }
 ```
@@ -177,14 +180,14 @@ struct Cruncher;
 
 #[task::stepped(state = Stage)]
 impl Cruncher {
-    async fn step(&self, _res: &Resources, cursor: Option<Progress>)
+    async fn step(&self, cursor: Option<Progress>)
         -> Result<StepOutcome<Progress, Stage>, CanoError>
     {
         let p = cursor.unwrap_or(Progress { processed: 0, total: 1000 });
         if p.processed >= p.total {
             return Ok(StepOutcome::Done(Stage::Report));
         }
-        // ... do a chunk of work for batch p.processed ...
+        // Writes a RowKind::StepCursor checkpoint before advancing to the next step.
         Ok(StepOutcome::More(Progress { processed: p.processed + 1, ..p }))
     }
 }
@@ -206,7 +209,6 @@ after every step.
 
 ```rust
 use cano::prelude::*;
-use cano::RedbStore;
 use std::sync::Arc;
 
 let checkpoint_store = RedbStore::new("/var/lib/myapp/cano.redb")?;

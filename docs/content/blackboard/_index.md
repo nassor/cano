@@ -82,7 +82,7 @@ let board2 = board.clone(); // same backing map, not a copy
 
 board.put("key", 42i32);
 let val: i32 = board2.get("key")?; // returns 42
-
+assert_eq!(val, 42);
 ```
 </div>
 
@@ -139,29 +139,32 @@ use cano::prelude::*;
 fn main() -> Result<(), CanoError> {
     let board = Blackboard::new();
 
-    // Store primitive and composite types
+    // Store primitive and composite types (values do not need Clone for put).
     board.put("count", 42u32);
     board.put("labels", vec!["a".to_string(), "b".to_string()]);
 
-    // Retrieve with explicit type annotation
+    // `?` converts BlackboardError (KeyNotFound / TypeMismatch) into CanoError::Blackboard.
     let count: u32 = board.get("count")?;
     let labels: Vec<String> = board.get("labels")?;
+    assert_eq!(count, 42);
+    assert_eq!(labels.len(), 2);
 
-    // Append to a Vec (creates if absent)
+    // Append to a Vec in place (creates the entry if absent).
     board.append("log", "step 1 complete".to_string())?;
     board.append("log", "step 2 complete".to_string())?;
     let log: Vec<String> = board.get("log")?;
+    assert_eq!(log.len(), 2);
 
-    // Check existence before reading optional keys
-    if board.contains_key("result") {
-        let result: String = board.get("result")?;
+    // Check membership or read optional keys atomically under one lock.
+    assert!(board.contains_key("count"));
+    if let Ok(result) = board.get::<String>("result") {
+        println!("Found optional result: {result}");
     }
 
-    // Remove a key; a missing key is a no-op
+    // Remove a key; missing keys are a no-op.
     board.remove("scratch");
     Ok(())
 }
-
 ```
 </div>
 
@@ -193,16 +196,16 @@ use std::sync::Arc;
 
 fn main() -> Result<(), CanoError> {
     let board = Blackboard::new();
+    // put and get_shared only need T: Send + Sync + 'static (no Clone required).
     board.put("dataset", vec![0u8; 1_000_000]); // 1 MB
 
-    // Both handles point to the same allocation, so nothing is copied
+    // Both handles point to the same allocation, so nothing is copied.
     let handle_a: Arc<Vec<u8>> = board.get_shared("dataset")?;
     let handle_b: Arc<Vec<u8>> = board.get_shared("dataset")?;
 
     assert!(Arc::ptr_eq(&handle_a, &handle_b));
     Ok(())
 }
-
 ```
 </div>
 
@@ -248,6 +251,7 @@ struct IngestTask;
 impl IngestTask {
     async fn run(&self, res: &Resources) -> Result<Stage, CanoError> {
         let board = res.get::<Blackboard>()?;
+        // Read the seed input inserted before orchestrate() started.
         let batch: usize = board.get("batch_size")?;
         let records: Vec<u32> = (0..batch as u32).collect();
         board.put("records", records);
@@ -261,6 +265,7 @@ struct TransformTask;
 impl TransformTask {
     async fn run(&self, res: &Resources) -> Result<Stage, CanoError> {
         let board = res.get::<Blackboard>()?;
+        // Consume upstream data and store the final output for main.
         let records: Vec<u32> = board.get("records")?;
         let transformed: Vec<u32> = records.into_iter().map(|x| x * 2).collect();
         board.put("result", transformed);
@@ -272,9 +277,10 @@ impl TransformTask {
 async fn main() -> Result<(), CanoError> {
     let board = Blackboard::new();
 
-    // Pre-populate before the workflow starts
+    // Pre-populate inputs before the workflow starts.
     board.put("batch_size", 256usize);
 
+    // Pass a clone into Resources so main keeps a handle to the same map.
     let workflow = Workflow::new(Resources::new().insert(board.clone()))
         .register(Stage::Ingest, IngestTask)
         .register(Stage::Transform, TransformTask)
@@ -282,13 +288,12 @@ async fn main() -> Result<(), CanoError> {
 
     workflow.orchestrate(Stage::Ingest).await?;
 
-    // Read results after the workflow completes
+    // Read results after the workflow completes.
     let result: Vec<u32> = board.get("result")?;
     println!("Processed {} records", result.len());
 
     Ok(())
 }
-
 ```
 </div>
 
@@ -312,27 +317,26 @@ with no storage trait in between.
 <span class="code-block-label"><span class="label-icon">&#128295;</span> Custom namespaced blackboard resource</span>
 
 ```rust
-use cano::prelude::*;
 use cano::blackboard::BlackboardResult;
-use std::sync::Arc;
+use cano::prelude::*;
 
-/// Example: a blackboard that prefixes all keys with a namespace.
-#[derive(Clone)]
+/// Wraps a shared Blackboard and prefixes every key with "{namespace}::".
+#[derive(Clone, Resource)]
 pub struct NamespacedBoard {
     namespace: String,
     inner: Blackboard,
 }
 
 impl NamespacedBoard {
-    pub fn new(namespace: impl Into<String>) -> Self {
+    pub fn new(namespace: impl Into<String>, inner: Blackboard) -> Self {
         Self {
             namespace: namespace.into(),
-            inner: Blackboard::new(),
+            inner,
         }
     }
 
     fn ns_key(&self, key: &str) -> String {
-        format!("{}::{}", self.namespace, key)
+        format!("{}::{key}", self.namespace)
     }
 
     pub fn get<T: 'static + Clone>(&self, key: &str) -> BlackboardResult<T> {
@@ -347,7 +351,11 @@ impl NamespacedBoard {
         self.inner.remove(&self.ns_key(key));
     }
 
-    pub fn append<T: 'static + Send + Sync + Clone>(&self, key: &str, item: T) -> BlackboardResult<()> {
+    pub fn append<T: 'static + Send + Sync + Clone>(
+        &self,
+        key: &str,
+        item: T,
+    ) -> BlackboardResult<()> {
         self.inner.append(&self.ns_key(key), item)
     }
 
@@ -356,7 +364,7 @@ impl NamespacedBoard {
     }
 
     pub fn keys(&self) -> Vec<String> {
-        // Strip the namespace prefix before returning keys to callers
+        // Return unprefixed keys belonging only to this namespace.
         let prefix = format!("{}::", self.namespace);
         self.inner
             .keys()
@@ -366,37 +374,59 @@ impl NamespacedBoard {
     }
 
     pub fn len(&self) -> usize {
-        // Count only keys in this namespace
-        self.keys().len()
+        // Count matching keys without allocating stripped Strings.
+        let prefix = format!("{}::", self.namespace);
+        self.inner
+            .keys()
+            .iter()
+            .filter(|k| k.starts_with(&prefix))
+            .count()
     }
 
     pub fn clear(&self) {
-        // Remove only keys in this namespace
+        // Remove only keys belonging to this namespace.
         for key in self.keys() {
             self.remove(&key);
         }
     }
 }
 
-impl Resource for NamespacedBoard {}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum State { Start, Done }
 
-fn main() -> Result<(), CanoError> {
-    // Use it like any other blackboard: register it in Resources by type
-    let board = NamespacedBoard::new("pipeline_v2");
-    board.put("status", "running".to_string());
+struct WriteStageTask;
 
-    let _workflow: Workflow<State> = Workflow::new(
-        Resources::new().insert(board.clone()),
-    )
-    // ... register tasks that retrieve it via
-    //     res.get::<NamespacedBoard>()? ...
-    .add_exit_state(State::Done);
-    Ok(())
+#[task(state = State)]
+impl WriteStageTask {
+    async fn run(&self, res: &Resources) -> Result<State, CanoError> {
+        // Multiple NamespacedBoard views can share one Blackboard safely.
+        let ingest = res.get_named::<NamespacedBoard>("ingest")?;
+        let metrics = res.get_named::<NamespacedBoard>("metrics")?;
+        ingest.put("status", "complete".to_string());
+        metrics.put("status", 200u16);
+        Ok(State::Done)
+    }
 }
 
+#[tokio::main]
+async fn main() -> Result<(), CanoError> {
+    let shared = Blackboard::new();
+    let ingest = NamespacedBoard::new("ingest", shared.clone());
+    let metrics = NamespacedBoard::new("metrics", shared);
+
+    // Keep an ingest handle so main can inspect keys after orchestrate() completes.
+    let workflow = Workflow::new(
+        Resources::new()
+            .insert_named("ingest", ingest.clone())
+            .insert_named("metrics", metrics),
+    )
+    .register(State::Start, WriteStageTask)
+    .add_exit_state(State::Done);
+
+    workflow.orchestrate(State::Start).await?;
+    assert_eq!(ingest.get::<String>("status")?, "complete");
+    Ok(())
+}
 ```
 </div>
 
