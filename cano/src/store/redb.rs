@@ -1263,4 +1263,104 @@ mod tests {
         };
         assert!(v3 != v1 && v3 != v2);
     }
+
+    #[tokio::test]
+    async fn untagged_versioned_stored_row_preserves_workflow_version() {
+        // Rows written after `workflow_version` was added but before `ROW_TAG_V1`
+        // carry untagged `postcard(StoredRow)` bytes and must keep their version.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("ckpt.redb");
+        let store = RedbStore::new(&path).unwrap();
+        let untagged = postcard::to_stdvec(&StoredRow {
+            state: "Work".into(),
+            task_id: "worker".into(),
+            output_blob: Some(vec![1, 2]),
+            kind: RowKind::StepCursor,
+            workflow_version: 11,
+        })
+        .unwrap();
+        assert!(!untagged.starts_with(&ROW_TAG_V1));
+        {
+            let tx = store.db.begin_write().unwrap();
+            {
+                let mut table = tx.open_table(CHECKPOINTS).unwrap();
+                table
+                    .insert(("untagged-v1", 0u64), untagged.as_slice())
+                    .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        let rows = store.load_run("untagged-v1").await.unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].workflow_version, 11);
+        assert_eq!(rows[0].kind, RowKind::StepCursor);
+        assert_eq!(rows[0].output_blob.as_deref(), Some(&[1u8, 2][..]));
+    }
+
+    #[cfg(feature = "scheduler")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn checkpoints_and_scheduler_records_coexist_under_concurrent_writes() {
+        let dir = tempdir().unwrap();
+        let store = Arc::new(RedbStore::new(dir.path().join("shared.redb")).unwrap());
+        let CasOutcome::Written(seed) = store
+            .compare_and_swap("same-id", None, b"v0".to_vec())
+            .await
+            .unwrap()
+        else {
+            panic!("seed write must succeed");
+        };
+
+        let swaps = (0..12u8).map(|i| {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                store
+                    .compare_and_swap("same-id", Some(seed), vec![b's', i])
+                    .await
+                    .unwrap()
+            })
+        });
+        let appends = (0..12u64).map(|seq| {
+            let store = Arc::clone(&store);
+            tokio::spawn(async move {
+                store
+                    .append("same-id", CheckpointRow::new(seq, format!("S{seq}"), "t"))
+                    .await
+                    .unwrap();
+            })
+        });
+        let (swap_outcomes, append_outcomes) = tokio::join!(
+            futures_util::future::join_all(swaps),
+            futures_util::future::join_all(appends),
+        );
+        for res in append_outcomes {
+            res.unwrap();
+        }
+        let winners: Vec<u64> = swap_outcomes
+            .into_iter()
+            .filter_map(|res| match res.unwrap() {
+                CasOutcome::Written(v) => Some(v),
+                CasOutcome::Conflict => None,
+            })
+            .collect();
+        assert_eq!(winners.len(), 1, "exactly one concurrent swap must win");
+
+        // Clearing the checkpoint log leaves the scheduler record with the same id intact,
+        // and removing the scheduler record leaves checkpoints intact.
+        assert_eq!(store.load_run("same-id").await.unwrap().len(), 12);
+        store.clear("same-id").await.unwrap();
+        assert!(store.load_run("same-id").await.unwrap().is_empty());
+        assert_eq!(
+            store.load("same-id").await.unwrap().unwrap().version,
+            winners[0]
+        );
+
+        store
+            .append("same-id", CheckpointRow::new(0, "After", "t"))
+            .await
+            .unwrap();
+        store.remove("same-id").await.unwrap();
+        assert!(store.load("same-id").await.unwrap().is_none());
+        assert_eq!(store.load_run("same-id").await.unwrap().len(), 1);
+    }
 }

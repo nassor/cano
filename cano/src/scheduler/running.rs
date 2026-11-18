@@ -10,7 +10,9 @@ use tokio_util::sync::CancellationToken;
 use crate::error::{CanoError, CanoResult};
 
 use super::lease::{Coordinator, Due};
-use super::loops::{abandon, acquire, cron_loop, every_loop, reserve_local, run_reserved};
+use super::loops::{
+    abandon, acquire, activate, cron_loop, every_loop, reserve_local, run_reserved,
+};
 use super::{FlowInfo, FlowRuntime, ParsedSchedule, Status};
 
 /// Live handle to a started [`Scheduler`](crate::scheduler::Scheduler).
@@ -203,15 +205,17 @@ impl RunningScheduler {
         if self.inner.shutdown.is_cancelled() {
             return Err(Self::stopped());
         }
-        let reserved = acquire(rt, &self.inner.cancel_runs, Due::Trigger)
+        let reserved = acquire(rt, &self.inner.cancel_runs, Due::Trigger, None)
             .await
-            .map_err(|refused| refused.into_error(id))?;
+            .map_err(|refused| refused.into_error(id))?
+            .expect("trigger does not pass a shutdown token to acquire");
         let late = {
             let mut tasks = self.inner.tasks.lock();
             if self.inner.shutdown.is_cancelled() {
                 Some(reserved)
             } else {
                 while tasks.try_join_next().is_some() {}
+                activate(rt, &reserved);
                 tasks.spawn(run_reserved(Arc::clone(rt), reserved));
                 None
             }
@@ -345,11 +349,13 @@ async fn shutdown_sequence(inner: &Inner) -> CanoResult<()> {
                     aborted.push(id);
                 }
             }
-            result = Err(CanoError::timeout(format!(
-                "scheduler shutdown aborted {} in-flight flow(s): {}",
-                aborted.len(),
-                aborted.join(", ")
-            )));
+            if !aborted.is_empty() {
+                result = Err(CanoError::timeout(format!(
+                    "scheduler shutdown aborted {} in-flight flow(s): {}",
+                    aborted.len(),
+                    aborted.join(", ")
+                )));
+            }
         }
     }
 

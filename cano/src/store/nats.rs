@@ -302,6 +302,10 @@ impl NatsStore {
         value: &Bytes,
         attempt: usize,
     ) -> Result<CasOutcome, Failure> {
+        if expected == Some(0) {
+            // JetStream revisions start at 1; passing 0 to `kv.update` means "create".
+            return Ok(CasOutcome::Conflict);
+        }
         // Revision 0 means "the subject has no message". `kv.create` is not used for the
         // same reason as in `append_once`. A deleted or purged key has a marker message,
         // whose revision then stands in for "absent".
@@ -325,7 +329,11 @@ impl NatsStore {
                 .await
                 .map_err(|e| scheduler_transient("swap", e))?;
             match current {
-                Some(entry) if expected.is_none() && entry.operation != kv::Operation::Put => {
+                Some(entry)
+                    if expected.is_none()
+                        && entry.operation != kv::Operation::Put
+                        && entry.revision > revision =>
+                {
                     revision = entry.revision;
                 }
                 Some(entry)

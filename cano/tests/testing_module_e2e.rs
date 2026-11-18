@@ -193,3 +193,76 @@ async fn assert_compensation_ran_mismatch_panics() {
     let ran = vec!["step1".to_string()];
     assert_compensation_ran(&ran, &["step2", "step1"]);
 }
+
+#[tokio::test]
+async fn in_memory_checkpoint_store_passes_public_contract() {
+    let store = InMemoryCheckpointStore::new();
+    assert_checkpoint_store_contract(&store, "e2e-ckpt").await;
+}
+
+#[cfg(feature = "scheduler")]
+mod scheduler_testing {
+    use super::*;
+    use cano::scheduler::{CasOutcome, VersionedRecord};
+    use std::collections::HashMap;
+
+    #[derive(Default)]
+    struct CustomSchedulerStore {
+        inner: Mutex<(u64, HashMap<String, VersionedRecord>)>,
+    }
+
+    #[scheduler_store]
+    impl SchedulerStore for CustomSchedulerStore {
+        async fn load(&self, flow_id: &str) -> Result<Option<VersionedRecord>, CanoError> {
+            Ok(self.inner.lock().unwrap().1.get(flow_id).cloned())
+        }
+
+        async fn compare_and_swap(
+            &self,
+            flow_id: &str,
+            expected: Option<u64>,
+            value: Vec<u8>,
+        ) -> Result<CasOutcome, CanoError> {
+            let mut guard = self.inner.lock().unwrap();
+            let (counter, map) = &mut *guard;
+            if map.get(flow_id).map(|r| r.version) != expected {
+                return Ok(CasOutcome::Conflict);
+            }
+            *counter += 1;
+            let version = *counter;
+            map.insert(flow_id.to_string(), VersionedRecord { version, value });
+            Ok(CasOutcome::Written(version))
+        }
+
+        async fn remove(&self, flow_id: &str) -> Result<(), CanoError> {
+            self.inner.lock().unwrap().1.remove(flow_id);
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn custom_and_in_memory_scheduler_stores_pass_contract_and_coordinate() {
+        let custom = Arc::new(CustomSchedulerStore::default());
+        assert_scheduler_store_contract(&*custom, "custom").await;
+
+        let mem = Arc::new(InMemorySchedulerStore::new());
+        assert_scheduler_store_contract(&*mem, "mem").await;
+
+        let wf = || {
+            Workflow::bare()
+                .register(S::Start, Go(S::Done))
+                .add_exit_state(S::Done)
+        };
+        let a = Scheduler::new()
+            .manual("job", wf(), S::Start)
+            .with_store(mem.clone())
+            .with_instance_id("node-a")
+            .start()
+            .await
+            .unwrap();
+        a.trigger("job").await.unwrap();
+        assert_eq!(a.wait_idle("job").await.unwrap().status, Status::Completed);
+        assert!(mem.record("job").is_some());
+        a.stop().await.unwrap();
+    }
+}

@@ -179,7 +179,12 @@ pub async fn assert_scheduler_store_contract(store: &dyn SchedulerStore, namespa
         "scheduler store contract [swap]: a write must change the version"
     );
     expect_record(store, "swap", &swap, s2, b"b").await;
-    for (what, expected) in [("stale", s1), ("wrong", s2.wrapping_add(1_000_003))] {
+    for (what, expected) in [
+        ("stale", s1),
+        ("wrong", s2.wrapping_add(1_000_003)),
+        ("zero", 0),
+        ("max", u64::MAX),
+    ] {
         let outcome = must(
             "swap",
             "compare_and_swap",
@@ -192,16 +197,24 @@ pub async fn assert_scheduler_store_contract(store: &dyn SchedulerStore, namespa
             "scheduler store contract [swap]: a swap from a {what} version must conflict"
         );
     }
-    let missing = must(
-        "swap",
-        "compare_and_swap",
-        store.compare_and_swap(&id("unknown"), Some(s2), b"c".to_vec()),
-    )
-    .await;
-    assert_eq!(
-        missing,
-        CasOutcome::Conflict,
-        "scheduler store contract [swap]: a swap on a missing id must conflict"
+    for (what, expected) in [("current", s2), ("zero", 0), ("max", u64::MAX)] {
+        let missing = must(
+            "swap",
+            "compare_and_swap",
+            store.compare_and_swap(&id("unknown"), Some(expected), b"c".to_vec()),
+        )
+        .await;
+        assert_eq!(
+            missing,
+            CasOutcome::Conflict,
+            "scheduler store contract [swap]: a swap ({what}) on a missing id must conflict"
+        );
+    }
+    assert!(
+        must("swap", "load", store.load(&id("unknown")))
+            .await
+            .is_none(),
+        "scheduler store contract [swap]: a conflicting swap on a missing id created a record"
     );
     expect_record(store, "swap", &swap, s2, b"b").await;
 

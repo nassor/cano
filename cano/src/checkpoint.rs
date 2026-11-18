@@ -347,7 +347,9 @@ mod tests {
             CheckpointRow::new(0, "Start", "t0"), // StateEntry, no blob, version 0
             CheckpointRow::new(1, "Pay", "charge").with_output(vec![1, 2, 3]), // CompensationCompletion
             CheckpointRow::new(2, "Step", "stepper").with_cursor(vec![]), // StepCursor, empty blob
-            CheckpointRow::new(3, "Start", "t0").with_workflow_version(99), // versioned StateEntry
+            CheckpointRow::new(3, "Wait", "gate").suspended(),            // Suspended, no blob
+            CheckpointRow::new(4, "Wait", "gate").with_resume_input(br#"{"ok":true}"#.to_vec()),
+            CheckpointRow::new(5, "Start", "t0").with_workflow_version(99), // versioned StateEntry
         ];
         for row in rows {
             let bytes = serde_json::to_vec(&row).expect("serialize");
@@ -365,7 +367,9 @@ mod tests {
             CheckpointRow::new(0, "Start", "t0"),
             CheckpointRow::new(1, "Pay", "charge").with_output(vec![1, 2, 3]),
             CheckpointRow::new(2, "Step", "stepper").with_cursor(vec![9, 8]),
-            CheckpointRow::new(3, "Start", "t0").with_workflow_version(99),
+            CheckpointRow::new(3, "Wait", "gate").suspended(),
+            CheckpointRow::new(4, "Wait", "gate").with_resume_input(vec![7, 6]),
+            CheckpointRow::new(5, "Start", "t0").with_workflow_version(99),
         ];
         for row in rows {
             let bytes = postcard::to_stdvec(&row).expect("serialize");

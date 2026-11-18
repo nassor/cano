@@ -87,6 +87,10 @@ impl Task<TestState> for Probe {
 #[derive(Default)]
 struct FaultyStore {
     inner: InMemorySchedulerStore,
+    /// Total store calls attempted.
+    calls: AtomicU32,
+    /// Calls currently parked inside `stall` or `swap_delay_ms`.
+    in_flight: AtomicU32,
     /// Every call fails.
     down: AtomicBool,
     /// The next `n` calls fail.
@@ -101,10 +105,21 @@ struct FaultyStore {
     swap_delay_ms: AtomicU64,
 }
 
+struct InFlight<'a>(&'a AtomicU32);
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 impl FaultyStore {
     async fn gate(&self) -> Result<(), CanoError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         assert!(!self.panic.load(Ordering::SeqCst), "store bug");
         if self.stall.load(Ordering::SeqCst) {
+            let _held = InFlight(&self.in_flight);
+            self.in_flight.fetch_add(1, Ordering::SeqCst);
             std::future::pending::<()>().await;
         }
         let consumed = self
@@ -134,6 +149,8 @@ impl SchedulerStore for FaultyStore {
         self.gate().await?;
         let delay = self.swap_delay_ms.load(Ordering::SeqCst);
         if delay > 0 {
+            let _held = InFlight(&self.in_flight);
+            self.in_flight.fetch_add(1, Ordering::SeqCst);
             sleep(Duration::from_millis(delay)).await;
         }
         if self.conflict.load(Ordering::SeqCst) {
@@ -987,4 +1004,598 @@ fn records_written_by_other_versions_decode() {
     assert_eq!(rec.state, FlowState::Tripped);
     assert_eq!(rec.failure_streak, 4);
     assert!(rec.lease.is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_outage_after_a_completed_run_waits_the_interval_instead_of_busy_polling() {
+    let store = faulty();
+    let probe = Probe::new(Duration::from_millis(5));
+    let interval = Duration::from_millis(800);
+    let running = on(Arc::clone(&store) as Arc<dyn SchedulerStore>, "a")
+        .every("f", probe.workflow(), TestState::Start, interval)
+        .start()
+        .await
+        .unwrap();
+
+    // First run completes and stamps `last_run`, so `last_run + interval` will be in
+    // the past when the next tick meets the outage.
+    assert!(
+        wait_for_status(&running, "f", Duration::from_secs(2), |s| {
+            *s == Status::Completed
+        })
+        .await
+    );
+    store.calls.store(0, Ordering::SeqCst);
+    store.down.store(true, Ordering::SeqCst);
+
+    // Wait for the due tick at `t0 + interval` to hit the failing store once.
+    assert!(
+        wait_until(Duration::from_secs(3), || store
+            .calls
+            .load(Ordering::SeqCst)
+            >= 1)
+        .await
+    );
+    let after_failed_tick = store.calls.load(Ordering::SeqCst);
+
+    // For the next 300 ms (30x `MIN_POLL`, well inside `interval`), the loop must stay
+    // asleep instead of hammering the failing store every 10 ms.
+    sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        store.calls.load(Ordering::SeqCst),
+        after_failed_tick,
+        "an outage after a completed run must back off for the full interval"
+    );
+    running.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_store_outage_after_an_expired_foreign_lease_does_not_busy_poll() {
+    let store = faulty();
+    let now = Utc::now();
+    let foreign = FlowRecord {
+        run_count: 1,
+        last_run: Some(now - chrono::Duration::seconds(10)),
+        lease: Some(Lease {
+            owner: "other".into(),
+            expires_at: now + chrono::Duration::milliseconds(150),
+        }),
+        written_by: "other".into(),
+        written_at: now,
+        ..FlowRecord::default()
+    };
+    store
+        .inner
+        .compare_and_swap("f", None, serde_json::to_vec(&foreign).unwrap())
+        .await
+        .unwrap();
+
+    let probe = Probe::new(Duration::from_millis(5));
+    let running = on(Arc::clone(&store) as Arc<dyn SchedulerStore>, "b")
+        .every(
+            "f",
+            probe.workflow(),
+            TestState::Start,
+            Duration::from_millis(800),
+        )
+        .start()
+        .await
+        .unwrap();
+
+    // `b` mirrors `RunningElsewhere` and sleeps until `lease_expires` (~150 ms).
+    assert!(
+        wait_for_status(&running, "f", Duration::from_secs(1), |s| matches!(
+            s,
+            Status::RunningElsewhere { .. }
+        ))
+        .await
+    );
+    store.calls.store(0, Ordering::SeqCst);
+    store.down.store(true, Ordering::SeqCst);
+
+    // At `lease_expires`, `b` wakes to reap the lease and hits the down store.
+    assert!(
+        wait_until(Duration::from_secs(2), || store
+            .calls
+            .load(Ordering::SeqCst)
+            >= 1)
+        .await
+    );
+    let after_failed_reap = store.calls.load(Ordering::SeqCst);
+
+    // Even with a stale `RunningElsewhere` whose `lease_expires` is now in the past,
+    // `shared_wait` must sleep the full interval rather than clamping to `MIN_POLL`.
+    sleep(Duration::from_millis(300)).await;
+    assert_eq!(store.calls.load(Ordering::SeqCst), after_failed_reap);
+    running.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stopping_scheduled_loops_during_a_hung_claim_returns_ok_at_once() {
+    let store = faulty();
+    let probe = Probe::new(Duration::from_millis(5));
+    let running = on(Arc::clone(&store) as Arc<dyn SchedulerStore>, "a")
+        .every(
+            "every_f",
+            probe.workflow(),
+            TestState::Start,
+            Duration::from_millis(60),
+        )
+        .cron("cron_f", probe.workflow(), TestState::Start, "* * * * * *")
+        .with_lease_ttl(Duration::from_secs(30))
+        .with_drain_timeout(Duration::from_millis(100))
+        .with_cancel_timeout(Duration::from_millis(100))
+        .start()
+        .await
+        .unwrap();
+
+    assert!(
+        wait_for_status(&running, "every_f", Duration::from_secs(2), |s| {
+            *s == Status::Completed
+        })
+        .await
+    );
+    store.stall.store(true, Ordering::SeqCst);
+    assert!(
+        wait_until(Duration::from_secs(2), || store
+            .in_flight
+            .load(Ordering::SeqCst)
+            >= 1)
+        .await,
+        "at least one loop must be parked inside a hung claim"
+    );
+
+    let stop_started = tokio::time::Instant::now();
+    running
+        .stop()
+        .await
+        .expect("stopping an unstarted hung claim must succeed, not report 0 aborted flows");
+    assert!(
+        stop_started.elapsed() < Duration::from_secs(1),
+        "stop must interrupt hung claims instead of waiting on the 30s TTL: {:?}",
+        stop_started.elapsed()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_every_claim_hung_in_swap_is_cancelled_cleanly_on_stop() {
+    let store = faulty();
+    store.swap_delay_ms.store(30_000, Ordering::SeqCst);
+    let probe = Probe::new(Duration::from_millis(10));
+    let running = on(Arc::clone(&store) as Arc<dyn SchedulerStore>, "a")
+        .every(
+            "f",
+            probe.workflow(),
+            TestState::Start,
+            Duration::from_secs(60),
+        )
+        .with_drain_timeout(Duration::from_millis(50))
+        .with_cancel_timeout(Duration::from_millis(100))
+        .start()
+        .await
+        .unwrap();
+
+    assert!(
+        wait_until(Duration::from_secs(2), || store
+            .in_flight
+            .load(Ordering::SeqCst)
+            >= 1)
+        .await
+    );
+    let stop_started = tokio::time::Instant::now();
+    running
+        .stop()
+        .await
+        .expect("a swap hung past drain_timeout must cancel without reporting an aborted run");
+    assert!(stop_started.elapsed() < Duration::from_secs(1));
+    assert_eq!(
+        probe.runs(),
+        0,
+        "stop must prevent the claimed tick from running"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_a_trigger_mid_claim_or_mid_abandon_never_strands_the_flow() {
+    let store = faulty();
+    store.swap_delay_ms.store(300, Ordering::SeqCst);
+    let probe = Probe::new(Duration::from_millis(10));
+    let a = manual_on(&store, "a", &probe, Duration::from_secs(10)).await;
+
+    // 1. Caller drops `trigger` while `compare_and_swap` is in flight.
+    let timed_out = tokio::time::timeout(Duration::from_millis(50), a.trigger("f")).await;
+    assert!(
+        timed_out.is_err(),
+        "trigger must still be awaiting the slow swap"
+    );
+    assert_eq!(a.status("f").unwrap().status, Status::Idle);
+
+    // Wait out any in-flight swap, then confirm a fresh trigger still works.
+    store.swap_delay_ms.store(0, Ordering::SeqCst);
+    sleep(Duration::from_millis(350)).await;
+    a.trigger("f")
+        .await
+        .expect("flow must not stay reserved after a dropped trigger");
+    assert_eq!(a.wait_idle("f").await.unwrap().status, Status::Completed);
+    a.stop().await.unwrap();
+
+    // 2. Caller drops `trigger` while `abandon` is releasing after `stop()`.
+    let store2 = faulty();
+    store2.swap_delay_ms.store(250, Ordering::SeqCst);
+    let b = manual_on(&store2, "b", &probe, Duration::from_secs(10)).await;
+    let trigger = tokio::spawn({
+        let b = b.clone();
+        async move {
+            // Long enough to finish `claim` (250 ms) and enter `abandon` (another 250 ms),
+            // short enough to drop `abandon` mid-flight.
+            let _ = tokio::time::timeout(Duration::from_millis(350), b.trigger("f")).await;
+        }
+    });
+    sleep(Duration::from_millis(80)).await;
+    b.stop().await.unwrap();
+    // Immediately after `stop`, and after the dropped `abandon`, status must never be `Running`.
+    assert_ne!(b.status("f").unwrap().status, Status::Running);
+    trigger.await.unwrap();
+    assert_eq!(b.status("f").unwrap().status, Status::Idle);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_hung_store_bounds_both_lost_lease_settle_and_release_to_one_ttl() {
+    // 1. Lost lease on a hung store settles in ~1 TTL, not 2 TTLs (no extra snapshot hang).
+    let store = faulty();
+    let ttl = Duration::from_millis(360);
+    let long = Probe::new(Duration::from_secs(5));
+    let a = manual_on(&store, "a", &long, ttl).await;
+    a.trigger("f").await.unwrap();
+    assert!(wait_until(Duration::from_secs(2), || long.runs() == 1).await);
+
+    let t0 = tokio::time::Instant::now();
+    store.stall.store(true, Ordering::SeqCst);
+    let info = a.wait_idle("f").await.unwrap();
+    let elapsed = t0.elapsed();
+    assert_eq!(info.status, Status::Idle);
+    assert!(
+        elapsed < ttl * 2 - Duration::from_millis(40),
+        "lost-lease settle took {elapsed:?} (>= 2 TTLs for ttl={ttl:?})"
+    );
+    store.stall.store(false, Ordering::SeqCst);
+    a.stop().await.unwrap();
+
+    // 2. Release hitting a hung store gives up in ~1 TTL, not 4 TTLs.
+    let store2 = faulty();
+    let short = Probe::new(Duration::from_millis(60));
+    let b = manual_on(&store2, "b", &short, ttl).await;
+    b.trigger("f").await.unwrap();
+    assert!(wait_until(Duration::from_secs(2), || short.runs() == 1).await);
+    let t1 = tokio::time::Instant::now();
+    store2.stall.store(true, Ordering::SeqCst);
+    let info = b.wait_idle("f").await.unwrap();
+    let elapsed = t1.elapsed();
+    assert_eq!(info.status, Status::Idle);
+    assert!(
+        elapsed < ttl * 2,
+        "stuck release took {elapsed:?}, expected ~1 TTL ({ttl:?})"
+    );
+    store2.stall.store(false, Ordering::SeqCst);
+    b.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn saga_cancel_and_dirty_rollback_update_the_shared_record_correctly() {
+    use std::sync::Mutex;
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    enum SagaState {
+        Step1,
+        Step2,
+        Done,
+    }
+
+    #[derive(Clone)]
+    struct SagaStep {
+        log: Arc<Mutex<Vec<&'static str>>>,
+        fail_comp: bool,
+    }
+    #[crate::saga::task(state = SagaState)]
+    impl SagaStep {
+        type Output = ();
+        async fn run(&self) -> Result<(SagaState, ()), CanoError> {
+            self.log.lock().unwrap().push("forward");
+            Ok((SagaState::Step2, ()))
+        }
+        async fn compensate(&self, _o: ()) -> Result<(), CanoError> {
+            self.log.lock().unwrap().push("compensate");
+            if self.fail_comp {
+                return Err(CanoError::task_execution("rollback failed"));
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Clone)]
+    struct Park(Arc<AtomicBool>);
+    #[task(state = SagaState)]
+    impl Park {
+        async fn run(&self) -> Result<SagaState, CanoError> {
+            self.0.store(true, Ordering::SeqCst);
+            sleep(Duration::from_secs(30)).await;
+            Ok(SagaState::Done)
+        }
+    }
+
+    // 1. Clean cancel: rolls back, clears lease, leaves streak at 0 and state Idle.
+    let store1 = store();
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let parked = Arc::new(AtomicBool::new(false));
+    let wf = Workflow::bare()
+        .register(
+            SagaState::Step1,
+            SagaStep {
+                log: Arc::clone(&log),
+                fail_comp: false,
+            },
+        )
+        .register(SagaState::Step2, Park(Arc::clone(&parked)))
+        .add_exit_state(SagaState::Done);
+    let a = instance(&store1, "a")
+        .manual("saga", wf, SagaState::Step1)
+        .start()
+        .await
+        .unwrap();
+    a.trigger("saga").await.unwrap();
+    assert!(wait_until(Duration::from_secs(2), || parked.load(Ordering::SeqCst)).await);
+    a.cancel_flow("saga").unwrap();
+    assert_eq!(a.wait_idle("saga").await.unwrap().status, Status::Idle);
+    assert_eq!(*log.lock().unwrap(), ["forward", "compensate"]);
+    let rec = record(&store1, "saga");
+    assert!(rec.lease.is_none());
+    assert_eq!(rec.failure_streak, 0);
+    assert_eq!(rec.state, FlowState::Idle);
+    a.stop().await.unwrap();
+
+    // 2. Dirty rollback: `CompensationFailed` counts as a failure in the shared store.
+    let store2 = store();
+    let log2 = Arc::new(Mutex::new(Vec::new()));
+    let parked2 = Arc::new(AtomicBool::new(false));
+    let wf2 = Workflow::bare()
+        .register(
+            SagaState::Step1,
+            SagaStep {
+                log: Arc::clone(&log2),
+                fail_comp: true,
+            },
+        )
+        .register(SagaState::Step2, Park(Arc::clone(&parked2)))
+        .add_exit_state(SagaState::Done);
+    let b = instance(&store2, "b")
+        .manual("saga", wf2, SagaState::Step1)
+        .start()
+        .await
+        .unwrap();
+    b.trigger("saga").await.unwrap();
+    assert!(wait_until(Duration::from_secs(2), || parked2.load(Ordering::SeqCst)).await);
+    b.cancel_flow("saga").unwrap();
+    let info = b.wait_idle("saga").await.unwrap();
+    assert!(matches!(info.status, Status::Backoff { streak: 1, .. }));
+    let rec2 = record(&store2, "saga");
+    assert!(rec2.lease.is_none());
+    assert_eq!(rec2.failure_streak, 1);
+    assert_eq!(rec2.state, FlowState::Backoff);
+    b.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_aborted_run_leaves_its_lease_to_expire_and_is_counted_as_a_failure() {
+    #[derive(Clone)]
+    struct Uncancellable(Arc<AtomicBool>);
+    #[crate::saga::task(state = TestState)]
+    impl Uncancellable {
+        type Output = ();
+        async fn run(&self) -> Result<(TestState, ()), CanoError> {
+            self.0.store(true, Ordering::SeqCst);
+            sleep(Duration::from_secs(60)).await;
+            Ok((TestState::Complete, ()))
+        }
+        async fn compensate(&self, _o: ()) -> Result<(), CanoError> {
+            Ok(())
+        }
+    }
+
+    let store = store();
+    let started = Arc::new(AtomicBool::new(false));
+    let wf = Workflow::bare()
+        .register(TestState::Start, Uncancellable(Arc::clone(&started)))
+        .add_exit_state(TestState::Complete);
+    let ttl = Duration::from_millis(250);
+    let a = instance(&store, "inst-a")
+        .manual("f", wf, TestState::Start)
+        .with_lease_ttl(ttl)
+        .with_drain_timeout(Duration::from_millis(30))
+        .with_cancel_timeout(Duration::from_millis(30))
+        .start()
+        .await
+        .unwrap();
+
+    a.trigger("f").await.unwrap();
+    assert!(wait_until(Duration::from_secs(2), || started.load(Ordering::SeqCst)).await);
+    let err = a
+        .stop()
+        .await
+        .expect_err("uncancellable forward saga step must abort");
+    assert_eq!(err.category(), "timeout");
+    assert_eq!(
+        record(&store, "f").lease.as_ref().map(|l| l.owner.as_str()),
+        Some("inst-a"),
+        "an aborted run cannot release its lease"
+    );
+
+    // Wait out the lease TTL; instance `b` then counts the aborted run as a failure.
+    sleep(ttl + Duration::from_millis(60)).await;
+    let probe = Probe::new(Duration::from_millis(5));
+    let b = instance(&store, "inst-b")
+        .manual("f", probe.workflow(), TestState::Start)
+        .with_backoff("f", BackoffPolicy::with_trip(1))
+        .with_lease_ttl(ttl)
+        .start()
+        .await
+        .unwrap();
+    let err = b
+        .trigger("f")
+        .await
+        .expect_err("the expired lease trips the flow at streak 1");
+    assert!(err.to_string().contains("tripped"), "{err}");
+    let rec = record(&store, "f");
+    assert!(rec.lease.is_none());
+    assert_eq!(rec.failure_streak, 1);
+    assert_eq!(rec.state, FlowState::Tripped);
+    assert!(
+        rec.last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("inst-a")),
+        "{:?}",
+        rec.last_error
+    );
+    b.stop().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panicking_checkpoint_store_records_the_failure_and_clears_the_lease() {
+    use crate::checkpoint::{CheckpointRow, CheckpointStore};
+
+    struct BoomCheckpoints;
+    #[crate::checkpoint_store]
+    impl CheckpointStore for BoomCheckpoints {
+        async fn append(&self, _id: &str, _row: CheckpointRow) -> Result<(), CanoError> {
+            panic!("checkpoint store exploded");
+        }
+        async fn load_run(&self, _id: &str) -> Result<Vec<CheckpointRow>, CanoError> {
+            Ok(Vec::new())
+        }
+        async fn clear(&self, _id: &str) -> Result<(), CanoError> {
+            Ok(())
+        }
+    }
+
+    let store = store();
+    let probe = Probe::new(Duration::from_millis(5));
+    let wf = probe
+        .workflow()
+        .with_checkpoint_store(Arc::new(BoomCheckpoints))
+        .with_workflow_id("boom-wf");
+    let a = instance(&store, "a")
+        .manual("f", wf, TestState::Start)
+        .start()
+        .await
+        .unwrap();
+
+    a.trigger("f").await.unwrap();
+    let info = a.wait_idle("f").await.unwrap();
+    assert!(matches!(info.status, Status::Backoff { streak: 1, .. }));
+    let rec = record(&store, "f");
+    assert!(rec.lease.is_none(), "panic must still release the lease");
+    assert_eq!(rec.failure_streak, 1);
+    assert!(
+        rec.last_error
+            .as_deref()
+            .is_some_and(|e| e.contains("panicked")),
+        "{:?}",
+        rec.last_error
+    );
+    a.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn consecutive_swaps_carry_distinct_write_sequences() {
+    let store = store();
+    let coord = super::Coordinator::new(
+        Arc::clone(&store) as Arc<dyn SchedulerStore>,
+        Arc::from("node-1"),
+        Duration::from_secs(30),
+    );
+    let policy = BackoffPolicy::default();
+    let Some(super::Claim::Won(held)) =
+        coord.claim("f", &policy, Due::Trigger, None).await.unwrap()
+    else {
+        panic!("first claim must win");
+    };
+    let claim_bytes = store.record("f").unwrap().value;
+    assert_eq!(held.record().write_seq, 1);
+
+    let reset_rec = coord.reset("f").await.unwrap();
+    let reset_bytes = store.record("f").unwrap().value;
+    assert_eq!(reset_rec.write_seq, 2);
+    assert_ne!(claim_bytes, reset_bytes);
+
+    let reset_again = coord.reset("f").await.unwrap();
+    let reset_again_bytes = store.record("f").unwrap().value;
+    assert_eq!(reset_again.write_seq, 3);
+    assert_ne!(reset_bytes, reset_again_bytes);
+}
+
+#[cfg(feature = "metrics")]
+#[test]
+fn store_backed_failures_and_expired_leases_emit_scheduler_metrics() {
+    use crate::metrics::test_support::*;
+
+    let ((), rows) = run_with_recorder(|| async {
+        let store = store();
+        let now = Utc::now();
+        seed(
+            &store,
+            "expired_trip",
+            &FlowRecord {
+                run_count: 1,
+                last_run: Some(now - chrono::Duration::seconds(60)),
+                lease: Some(Lease {
+                    owner: "dead".into(),
+                    expires_at: now - chrono::Duration::seconds(5),
+                }),
+                written_by: "dead".into(),
+                written_at: now - chrono::Duration::seconds(60),
+                ..FlowRecord::default()
+            },
+        )
+        .await;
+
+        let ok = Probe::new(Duration::from_millis(1));
+        let failing = Probe::failing(Duration::from_millis(1));
+        let running = instance(&store, "m")
+            .manual("expired_trip", ok.workflow(), TestState::Start)
+            .with_backoff("expired_trip", BackoffPolicy::with_trip(1))
+            .manual("fail_once", failing.workflow(), TestState::Start)
+            .start()
+            .await
+            .unwrap();
+
+        let _ = running.trigger("expired_trip").await;
+        running.trigger("fail_once").await.unwrap();
+        running.wait_idle("fail_once").await.unwrap();
+        running.stop().await.unwrap();
+    });
+
+    assert_eq!(
+        counter(
+            &rows,
+            "cano_scheduler_flow_tripped_total",
+            &[("flow", "expired_trip")]
+        ),
+        1
+    );
+    assert_eq!(
+        counter(
+            &rows,
+            "cano_scheduler_flow_runs_total",
+            &[("flow", "fail_once"), ("outcome", "failed")]
+        ),
+        1
+    );
+    assert_eq!(
+        counter(
+            &rows,
+            "cano_scheduler_flow_backoff_total",
+            &[("flow", "fail_once")]
+        ),
+        1
+    );
+    assert_eq!(gauge(&rows, "cano_scheduler_active_flows", &[]), 0.0);
 }

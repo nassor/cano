@@ -357,15 +357,16 @@ impl PostgresStore {
         value: &[u8],
         attempt: usize,
     ) -> Result<CasOutcome, Failure> {
-        let expected = expected
-            .map(|version| {
-                i64::try_from(version).map_err(|_| {
-                    Failure::fatal(CanoError::scheduler_store(format!(
-                        "postgres scheduler swap: version {version} exceeds the Postgres bigint range"
-                    )))
-                })
-            })
-            .transpose()?;
+        let expected = match expected {
+            None => None,
+            // Postgres sequence values live in `1..=i64::MAX`, so `0` or anything above
+            // `i64::MAX` can never match a stored version.
+            Some(0) => return Ok(CasOutcome::Conflict),
+            Some(version) => match i64::try_from(version) {
+                Ok(version) => Some(version),
+                Err(_) => return Ok(CasOutcome::Conflict),
+            },
+        };
         let client = Checkout::get(&self.pool, "scheduler swap").await?;
         let result = self
             .swap_or_verify(&client, flow_id, expected, value, attempt)
@@ -1248,5 +1249,39 @@ mod tests {
             scheduler_error(CanoError::configuration("c")).category(),
             "configuration"
         );
+    }
+
+    #[tokio::test]
+    async fn out_of_range_sequence_fails_fatally_before_any_io() {
+        // `with_create_table(false)` builds the pool lazily; port 1 would error on connect.
+        let store = PostgresStore::builder()
+            .with_create_table(false)
+            .with_retry(RetryMode::fixed(3, Duration::from_secs(60)))
+            .connect("postgres://u:p@127.0.0.1:1/db")
+            .await
+            .unwrap();
+        let err = store
+            .append("wf", CheckpointRow::new(u64::MAX, "S", "t"))
+            .await
+            .unwrap_err();
+        assert_eq!(err.category(), "checkpoint_store");
+        assert!(err.to_string().contains("bigint range"), "{err}");
+    }
+
+    #[cfg(feature = "scheduler")]
+    #[tokio::test]
+    async fn impossible_scheduler_versions_conflict_without_io() {
+        let store = PostgresStore::builder()
+            .with_create_table(false)
+            .connect("postgres://u:p@127.0.0.1:1/db")
+            .await
+            .unwrap();
+        for impossible in [0, (i64::MAX as u64) + 1, u64::MAX] {
+            let outcome = store
+                .compare_and_swap("f", Some(impossible), b"v".to_vec())
+                .await
+                .unwrap();
+            assert_eq!(outcome, CasOutcome::Conflict, "version {impossible}");
+        }
     }
 }

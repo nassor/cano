@@ -129,69 +129,84 @@ impl Drop for Unreserve<'_> {
 }
 
 /// Take flow `rt` for one run: reserve it locally, then (with a store) win the claim.
-/// A refused claim leaves the cell showing what the shared record says.
+/// A refused claim leaves the cell showing what the shared record says. A won store
+/// claim stays in `claiming` until [`activate`] commits to running it (or [`abandon`]
+/// hands it back), so a run cancelled before launch never flashes [`Status::Running`].
 pub(super) async fn acquire(
     rt: &FlowRuntime,
     cancel_runs: &CancellationToken,
     due: Due,
-) -> Result<Reserved, Refused> {
+    shutdown: Option<&CancellationToken>,
+) -> Result<Option<Reserved>, Refused> {
     let token = reserve(rt, cancel_runs)?;
     let Some(coord) = &rt.coordinator else {
-        return Ok(Reserved { token, held: None });
+        return Ok(Some(Reserved { token, held: None }));
     };
     let mut guard = Unreserve { rt, armed: true };
     let flow_id = rt.cell.borrow().info.id.clone();
-    match coord.claim(&flow_id, &rt.policy, due).await {
-        Ok(Claim::Won(held)) => {
+    match coord.claim(&flow_id, &rt.policy, due, shutdown).await {
+        Ok(Some(Claim::Won(held))) => {
             guard.armed = false;
-            rt.cell.send_modify(|cell| {
-                cell.claiming = false;
-                cell.info.status = Status::Running;
-                coord.mirror(cell, held.record());
-            });
-            Ok(Reserved {
+            Ok(Some(Reserved {
                 token,
                 held: Some(held),
-            })
+            }))
         }
-        Ok(Claim::Refused { reason, record }) => {
+        Ok(Some(Claim::Refused { reason, record })) => {
             guard.armed = false;
             rt.cell
                 .send_modify(|cell| coord.settle(cell, Some(&record)));
             Err(Refused::Refusal(reason))
         }
+        Ok(None) => Ok(None),
         Err(error) => Err(Refused::Store(error)),
     }
 }
 
+/// Flip a store-claimed reservation from `claiming` to [`Status::Running`] and mirror
+/// the claimed record right before spawning or running the flow.
+pub(super) fn activate(rt: &FlowRuntime, reserved: &Reserved) {
+    if let (Some(coord), Some(held)) = (&rt.coordinator, &reserved.held) {
+        rt.cell.send_modify(|cell| {
+            cell.claiming = false;
+            cell.info.status = Status::Running;
+            coord.mirror(cell, held.record());
+        });
+    }
+}
+
 /// Give a reserved run back without running it (the scheduler began stopping while
-/// `trigger` was claiming): the lease is released as a deliberate cancel.
+/// claiming): clear the local reservation first so a dropped caller cannot strand it,
+/// then release the lease as a deliberate cancel.
 pub(super) async fn abandon(rt: &FlowRuntime, reserved: Reserved) {
-    let Reserved { held, .. } = reserved;
-    let record = match (&rt.coordinator, held) {
-        (Some(coord), Some(_)) => {
-            let flow_id = rt.cell.borrow().info.id.clone();
-            match coord
-                .release(&flow_id, &rt.policy, &Err(CanoError::cancelled()))
-                .await
-            {
-                Release::Written(record) => Some(record),
-                Release::NotHeld(record) => record,
-                Release::GaveUp => None,
-            }
-        }
-        _ => None,
-    };
     rt.cell.send_modify(|cell| {
+        cell.claiming = false;
         cell.run_token = None;
         cell.info.status = Status::Idle;
-        if let (Some(coord), Some(record)) = (&rt.coordinator, &record) {
-            coord.mirror(cell, record);
-        }
     });
+    let Reserved { held, .. } = reserved;
+    if let (Some(coord), Some(_)) = (&rt.coordinator, held) {
+        let flow_id = rt.cell.borrow().info.id.clone();
+        let record = match coord
+            .release(&flow_id, &rt.policy, &Err(CanoError::cancelled()))
+            .await
+        {
+            Release::Written(record) => Some(record),
+            Release::NotHeld(record) => record,
+            Release::GaveUp => None,
+        };
+        if let Some(record) = record {
+            rt.cell.send_modify(|cell| coord.mirror(cell, &record));
+        }
+    }
 }
 
 type Unwound = Result<CanoResult<()>, Box<dyn Any + Send>>;
+
+enum RunLease {
+    Held,
+    Lost(Option<super::lease::FlowRecord>),
+}
 
 /// Run one reserved flow to completion and record its outcome.
 ///
@@ -216,9 +231,9 @@ pub(super) async fn run_reserved(rt: Arc<FlowRuntime>, reserved: Reserved) {
     let run = tracing::Instrument::instrument(run, tracing::info_span!("execute_flow"));
     let run = std::panic::AssertUnwindSafe(run).catch_unwind();
 
-    let (unwound, lease_lost) = match (&rt.coordinator, held) {
+    let (unwound, lease_state) = match (&rt.coordinator, held) {
         (Some(coord), Some(held)) => run_with_lease(coord, &flow_id, held, &token, run).await,
-        _ => (run.await, false),
+        _ => (run.await, RunLease::Held),
     };
     let result = match unwound {
         Ok(inner) => inner,
@@ -239,10 +254,9 @@ pub(super) async fn run_reserved(rt: Arc<FlowRuntime>, reserved: Reserved) {
         apply_outcome(&rt, result);
         return;
     };
-    let record = if lease_lost {
-        coord.snapshot(&flow_id).await
-    } else {
-        match coord.release(&flow_id, &rt.policy, &result).await {
+    let record = match lease_state {
+        RunLease::Lost(record) => record,
+        RunLease::Held => match coord.release(&flow_id, &rt.policy, &result).await {
             Release::Written(record) => Some(record),
             Release::NotHeld(record) => {
                 #[cfg(feature = "tracing")]
@@ -250,31 +264,31 @@ pub(super) async fn run_reserved(rt: Arc<FlowRuntime>, reserved: Reserved) {
                 record
             }
             Release::GaveUp => None,
-        }
+        },
     };
     rt.cell
         .send_modify(|cell| coord.settle(cell, record.as_ref()));
 }
 
 /// Drive `run` while renewing `held`. Returns the run's outcome and whether the
-/// lease was lost (the run was then cancelled through `token` and drained).
+/// lease was held or lost (the run was then cancelled through `token` and drained).
 async fn run_with_lease(
     coord: &Coordinator,
     flow_id: &str,
     mut held: HeldLease,
     token: &CancellationToken,
     run: impl Future<Output = Unwound>,
-) -> (Unwound, bool) {
+) -> (Unwound, RunLease) {
     tokio::pin!(run);
     // `run` is never dropped here: a lost lease cancels it and waits for it to drain
     // (saga compensation must complete), it does not abandon it.
     let first = tokio::select! {
-        outcome = &mut run => Some(outcome),
-        () = coord.keep_alive(flow_id, &mut held) => None,
+        outcome = &mut run => Ok(outcome),
+        record = coord.keep_alive(flow_id, &mut held) => Err(record),
     };
     match first {
-        Some(outcome) => (outcome, false),
-        None => {
+        Ok(outcome) => (outcome, RunLease::Held),
+        Err(record) => {
             #[cfg(feature = "tracing")]
             tracing::warn!(
                 flow_id,
@@ -282,7 +296,7 @@ async fn run_with_lease(
                 "scheduler lease lost; cancelling the run"
             );
             token.cancel();
-            (run.await, true)
+            (run.await, RunLease::Lost(record))
         }
     }
 }
@@ -328,19 +342,44 @@ fn apply_outcome(rt: &FlowRuntime, result: CanoResult<()>) {
     });
 }
 
-/// Take the flow and run it inline; a refusal skips this tick.
-async fn dispatch(rt: &Arc<FlowRuntime>, cancel_runs: &CancellationToken, due: Due) {
-    match acquire(rt, cancel_runs, due).await {
-        Ok(reserved) => run_reserved(Arc::clone(rt), reserved).await,
-        Err(Refused::Store(_error)) => {
+enum Tick {
+    Ran,
+    Refused(Refused),
+    Stopped,
+}
+
+/// Take the flow and run it inline; a refusal skips this tick. `shutdown` interrupts a
+/// claim before its swap begins; once a swap is in flight it finishes and drains during
+/// `drain_timeout`, or `cancel_runs` aborts it when `drain_timeout` expires on a hung swap.
+async fn dispatch(
+    rt: &Arc<FlowRuntime>,
+    shutdown: &CancellationToken,
+    cancel_runs: &CancellationToken,
+    due: Due,
+) -> Tick {
+    let acquired = tokio::select! {
+        biased;
+        _ = cancel_runs.cancelled() => return Tick::Stopped,
+        res = acquire(rt, cancel_runs, due, Some(shutdown)) => res,
+    };
+    match acquired {
+        Ok(Some(reserved)) => {
+            activate(rt, &reserved);
+            run_reserved(Arc::clone(rt), reserved).await;
+            Tick::Ran
+        }
+        Ok(None) => Tick::Stopped,
+        Err(Refused::Store(error)) => {
             #[cfg(feature = "tracing")]
             tracing::error!(
                 flow_id = %rt.cell.borrow().info.id,
-                error = %_error,
+                error = %error,
                 "scheduler store: claim failed; skipping this tick"
             );
+            let _ = &error;
+            Tick::Refused(Refused::Store(error))
         }
-        Err(_) => {}
+        Err(other) => Tick::Refused(other),
     }
 }
 
@@ -371,20 +410,20 @@ pub(super) async fn every_loop(
     if shutdown.is_cancelled() {
         return;
     }
-    dispatch(&rt, &cancel_runs, Due::Every(interval)).await;
+    let mut last_tick = dispatch(&rt, &shutdown, &cancel_runs, Due::Every(interval)).await;
     loop {
-        if shutdown.is_cancelled() {
+        if shutdown.is_cancelled() || matches!(last_tick, Tick::Stopped) {
             break;
         }
         let wait = if rt.coordinator.is_some() {
-            shared_wait(&rt, interval)
+            shared_wait(&rt, interval, &last_tick)
         } else {
             wait_until_eligible(&rt, interval)
         };
         if !sleep_or_shutdown(wait, &shutdown).await {
             break;
         }
-        dispatch(&rt, &cancel_runs, Due::Every(interval)).await;
+        last_tick = dispatch(&rt, &shutdown, &cancel_runs, Due::Every(interval)).await;
     }
 }
 
@@ -436,7 +475,12 @@ pub(super) async fn cron_loop(
             }
         }
 
-        dispatch(&rt, &cancel_runs, Due::Cron(next)).await;
+        if matches!(
+            dispatch(&rt, &shutdown, &cancel_runs, Due::Cron(next)).await,
+            Tick::Stopped
+        ) {
+            break;
+        }
     }
 }
 
@@ -463,20 +507,21 @@ fn wait_until_eligible(rt: &FlowRuntime, interval: Duration) -> Duration {
 ///   never goes beyond the lease expiry: a holder that stopped renewing is noticed
 ///   promptly.
 /// - A tripped flow only changes when someone calls `reset_flow`; look every interval.
-/// - With nothing known (the claim failed on a store error), retry after one interval.
-fn shared_wait(rt: &FlowRuntime, interval: Duration) -> Duration {
+/// - When the claim failed on a store error or a local trigger is still running, retry
+///   after at least one interval instead of polling at [`MIN_POLL`].
+fn shared_wait(rt: &FlowRuntime, interval: Duration, last_tick: &Tick) -> Duration {
     let now = Utc::now();
     let cell = rt.cell.borrow();
     let info = &cell.info;
-    let Some(last_run) = info.last_run else {
-        return interval;
+    let mut wake = match info.last_run {
+        Some(last_run) => plus(last_run, interval),
+        None => plus(now, interval),
     };
-    let mut wake = plus(last_run, interval);
     if let Some(eligible) = info.next_eligible {
         wake = wake.max(eligible);
     }
     match &info.status {
-        Status::Tripped { .. } => wake = wake.max(plus(now, interval)),
+        Status::Tripped { .. } | Status::Running => wake = wake.max(plus(now, interval)),
         Status::RunningElsewhere { lease_expires, .. } => {
             if wake <= now {
                 wake = plus(now, interval);
@@ -484,6 +529,12 @@ fn shared_wait(rt: &FlowRuntime, interval: Duration) -> Duration {
             wake = wake.min(*lease_expires);
         }
         _ => {}
+    }
+    if matches!(
+        last_tick,
+        Tick::Refused(Refused::Store(_) | Refused::Running)
+    ) {
+        wake = wake.max(plus(now, interval));
     }
     (wake - now)
         .to_std()
