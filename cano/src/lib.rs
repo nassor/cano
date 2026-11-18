@@ -266,8 +266,8 @@
 //!
 //! ## Getting Started
 //!
-//! 1. Run an example: `cargo run --example workflow_simple`
-//! 2. Read the module docs — each module has detailed documentation and examples
+//! 1. Read the [documentation and setup guide](https://nassor.github.io/cano/)
+//! 2. Run an example: `cargo run --example workflow_simple`
 //! 3. Run benchmarks: `cargo bench --bench workflow_performance`
 
 // Lets macro output use `::cano::…` paths inside this crate too.
@@ -442,4 +442,217 @@ pub mod prelude {
     // `Resource` trait imported above.
     pub use crate::FromResources;
     pub use crate::Resource as ResourceDerive;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn collect_files(dir: &Path, ext: &str, out: &mut Vec<PathBuf>) {
+        let mut entries: Vec<_> = fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("failed to read {}: {e}", dir.display()))
+            .map(|res| res.expect("dir entry").path())
+            .collect();
+        entries.sort();
+        for path in entries {
+            if path.is_dir() {
+                collect_files(&path, ext, out);
+            } else if path.extension().and_then(|s| s.to_str()) == Some(ext) {
+                out.push(path);
+            }
+        }
+    }
+
+    fn parse_semver(version: &str) -> (u64, u64, u64) {
+        let core = version.split(['-', '+']).next().unwrap_or(version);
+        let mut parts = core.split('.');
+        let major = parts
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("invalid major version in {version:?}"));
+        let minor = parts
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("invalid minor version in {version:?}"));
+        let patch = parts
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or_else(|| panic!("invalid patch version in {version:?}"));
+        assert!(
+            parts.next().is_none(),
+            "unexpected extra version segment in {version:?}"
+        );
+        (major, minor, patch)
+    }
+
+    fn extract_quoted_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+        let mut rest = line;
+        while let Some(idx) = rest.find(key) {
+            let prev = idx.checked_sub(1).map(|i| rest.as_bytes()[i]);
+            let before_ok =
+                prev.is_none_or(|b| !b.is_ascii_alphanumeric() && b != b'_' && b != b'-');
+            rest = &rest[idx + key.len()..];
+            if !before_ok {
+                continue;
+            }
+            let after_key = rest.trim_start();
+            if let Some(after_eq) = after_key.strip_prefix('=') {
+                let after_eq = after_eq.trim_start();
+                if let Some(quoted) = after_eq.strip_prefix('"')
+                    && let Some(end) = quoted.find('"')
+                {
+                    return Some(&quoted[..end]);
+                }
+            }
+        }
+        None
+    }
+
+    fn section_line<'a>(toml: &'a str, section: &str, key: &str) -> Option<&'a str> {
+        let mut current = "";
+        for raw in toml.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if line.starts_with('[') && line.ends_with(']') {
+                current = line.trim_matches(|c| c == '[' || c == ']').trim();
+                continue;
+            }
+            if current == section
+                && let Some(after_key) = line.strip_prefix(key)
+                && after_key.trim_start().starts_with('=')
+            {
+                return Some(line);
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn version_sources_stay_in_sync() {
+        let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let Some(root) = manifest_dir.parent() else {
+            return;
+        };
+        let root_cargo_path = root.join("Cargo.toml");
+        let docs_config_path = root.join("docs/config.toml");
+        if !root_cargo_path.exists() || !docs_config_path.exists() {
+            // Standalone `.crate` package tests run outside the workspace checkout.
+            return;
+        }
+
+        let pkg_version = env!("CARGO_PKG_VERSION");
+        let (major, minor, patch) = parse_semver(pkg_version);
+        let pkg_minor = format!("{major}.{minor}");
+
+        // 1. docs/config.toml [extra].version matches CARGO_PKG_VERSION.
+        let docs_config = fs::read_to_string(&docs_config_path).expect("read docs/config.toml");
+        let docs_line = section_line(&docs_config, "extra", "version")
+            .expect("docs/config.toml must define [extra].version");
+        let docs_version = extract_quoted_field(docs_line, "version")
+            .expect("docs/config.toml [extra].version must be a quoted string");
+        assert_eq!(
+            docs_version, pkg_version,
+            "docs/config.toml [extra].version must match CARGO_PKG_VERSION"
+        );
+
+        // 2. Root Cargo.toml [workspace.dependencies].cano-macros matches major.minor
+        //    (or an exact major.minor.m_patch pin with m_patch <= patch), and
+        //    cano/Cargo.toml inherits it via `.workspace = true`.
+        let root_cargo = fs::read_to_string(&root_cargo_path).expect("read root Cargo.toml");
+        let macros_line = section_line(&root_cargo, "workspace.dependencies", "cano-macros")
+            .expect("root Cargo.toml must define [workspace.dependencies].cano-macros");
+        let macros_ver = extract_quoted_field(macros_line, "version")
+            .expect("cano-macros workspace dependency must specify a version")
+            .trim_start_matches('=');
+        if macros_ver != pkg_minor {
+            let (m_major, m_minor, m_patch) = parse_semver(macros_ver);
+            assert!(
+                m_major == major && m_minor == minor && m_patch <= patch,
+                "cano-macros version {macros_ver:?} does not match cano {pkg_version:?}"
+            );
+        }
+
+        let crate_cargo =
+            fs::read_to_string(manifest_dir.join("Cargo.toml")).expect("read cano/Cargo.toml");
+        assert!(
+            crate_cargo
+                .lines()
+                .map(str::trim)
+                .any(|l| !l.starts_with('#') && l == "cano-macros.workspace = true"),
+            "cano/Cargo.toml must declare `cano-macros.workspace = true`"
+        );
+        assert!(
+            !crate_cargo
+                .lines()
+                .map(str::trim)
+                .any(|l| !l.starts_with('#') && l.starts_with("cano-macros = {")),
+            "cano/Cargo.toml must not pin cano-macros inline; use root Cargo.toml"
+        );
+
+        // 3. No hardcoded cano version snippets in cano/src/**/*.rs or README.md.
+        let forbidden = [
+            concat!("cano", " = { version ="),
+            concat!("cano", " = \"0."),
+            concat!("cano", " = \"1."),
+        ];
+        let mut scan_files = Vec::new();
+        collect_files(&manifest_dir.join("src"), "rs", &mut scan_files);
+        let readme = root.join("README.md");
+        if readme.exists() {
+            scan_files.push(readme);
+        }
+        for path in scan_files {
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+            for (idx, line) in text.lines().enumerate() {
+                for pat in forbidden {
+                    assert!(
+                        !line.contains(pat),
+                        "{}:{} contains hardcoded version snippet ({pat})",
+                        path.display(),
+                        idx + 1
+                    );
+                }
+            }
+        }
+
+        // 4. Every `cano =` dependency snippet in docs/content/**/*.md uses a template token.
+        let mut md_files = Vec::new();
+        collect_files(&root.join("docs/content"), "md", &mut md_files);
+        for path in md_files {
+            let text = fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+            for (idx, line) in text.lines().enumerate() {
+                let trimmed = line.trim();
+                let stripped = trimmed.strip_prefix("# ").unwrap_or(trimmed).trim_start();
+                if stripped.starts_with("cano =") {
+                    if let Some(ver) = extract_quoted_field(stripped, "version") {
+                        assert!(
+                            ver == "@CANO_MINOR@" || ver == "@CANO_VERSION@",
+                            "{}:{} must use @CANO_MINOR@ or @CANO_VERSION@, found {ver:?}",
+                            path.display(),
+                            idx + 1
+                        );
+                    } else if let Some(ver) = extract_quoted_field(stripped, "cano") {
+                        assert!(
+                            ver == "@CANO_MINOR@" || ver == "@CANO_VERSION@",
+                            "{}:{} must use @CANO_MINOR@ or @CANO_VERSION@, found {ver:?}",
+                            path.display(),
+                            idx + 1
+                        );
+                    }
+                }
+            }
+        }
+
+        let docs_index =
+            fs::read_to_string(root.join("docs/content/_index.md")).expect("read docs index");
+        assert!(
+            docs_index.contains("@CANO_MINOR@"),
+            "docs/content/_index.md must use @CANO_MINOR@"
+        );
+    }
 }

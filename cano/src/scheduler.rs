@@ -78,13 +78,8 @@
 //! that share a table, bucket or file form one cluster; the built-in stores name theirs
 //! `cano_scheduler` by default.
 //!
-//! > **Note:** The scheduler is an optional feature. Enable the `"scheduler"`
-//! > feature in your `Cargo.toml`.
-//!
-//! ```toml
-//! [dependencies]
-//! cano = { version = "0.16", features = ["scheduler"] }
-//! ```
+//! > **Note:** Compiled with the `scheduler` feature. See the
+//! > [Scheduler guide](https://nassor.github.io/cano/scheduler/) for `Cargo.toml` setup and full examples.
 
 mod backoff;
 mod builder;

@@ -13,3 +13,6 @@ license = "MIT OR Apache-2.0"
 homepage = "https://nassor.github.io/cano/"
 repository = "https://github.com/nassor/cano"
 authors = ["Nassor Frazier-Silva <nassor@gmail.com>"]
+
+[workspace.dependencies]
+cano-macros = { version = "0.16", path = "cano-macros" }

@@ -54,7 +54,7 @@ enables every optional feature (<code>scheduler</code>, <code>tracing</code>, <c
 
 ```toml
 [dependencies]
-cano = { version = "0.16", features = ["metrics"] }
+cano = { version = "@CANO_MINOR@", features = ["metrics"] }
 
 # The metrics crate is a facade, so you also need a recorder or exporter:
 metrics-exporter-prometheus = "0.18"  # for production
@@ -331,7 +331,7 @@ your application. Cano never depends on it, in the same way it never depends on
 
 ```toml
 [dependencies]
-cano = { version = "0.16", features = ["metrics", "tracing"] }
+cano = { version = "@CANO_MINOR@", features = ["metrics", "tracing"] }
 metrics-tracing-context = "0.18"
 tracing-subscriber = "0.3"
 ```

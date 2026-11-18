@@ -457,7 +457,7 @@ before and after, so it can run against a shared database.
 
 ```toml
 [dev-dependencies]
-cano = { version = "0.16", features = ["testing"] }
+cano = { version = "@CANO_MINOR@", features = ["testing"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
