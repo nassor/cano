@@ -206,3 +206,187 @@ async fn crash_mid_work_then_resume_does_not_re_run_start() {
     let reopened = RedbStore::new(&db).unwrap();
     assert!(reopened.load_run(wf_id).await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn codec_v2_write_id_rows_decode_with_distinct_payloads() {
+    #[derive(serde::Serialize)]
+    struct StoredRowMirror {
+        state: String,
+        task_id: String,
+        output_blob: Option<Vec<u8>>,
+        kind: RowKind,
+        workflow_version: u32,
+    }
+
+    const CHECKPOINTS: redb::TableDefinition<(&str, u64), &[u8]> =
+        redb::TableDefinition::new("cano_checkpoints");
+
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("v2.redb");
+
+    let encode_v2 = |write_id: u128| {
+        let mut out = Vec::from(*b"CW");
+        out.extend_from_slice(&write_id.to_le_bytes());
+        out.extend_from_slice(
+            &postcard::to_stdvec(&StoredRowMirror {
+                state: "Start".into(),
+                task_id: "t0".into(),
+                output_blob: Some(vec![1, 2, 3]),
+                kind: RowKind::CompensationCompletion,
+                workflow_version: 5,
+            })
+            .unwrap(),
+        );
+        out
+    };
+
+    let bytes_a = encode_v2(1);
+    let bytes_b = encode_v2(2);
+    assert_ne!(bytes_a, bytes_b, "distinct write_ids must differ on disk");
+
+    {
+        let db = redb::Database::create(&db_path).unwrap();
+        let tx = db.begin_write().unwrap();
+        {
+            let mut table = tx.open_table(CHECKPOINTS).unwrap();
+            table.insert(("run-a", 0u64), bytes_a.as_slice()).unwrap();
+            table.insert(("run-b", 0u64), bytes_b.as_slice()).unwrap();
+            table
+                .insert(("run-bad", 0u64), b"CWshort".as_slice())
+                .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    let store = RedbStore::new(&db_path).unwrap();
+    let expected = vec![
+        CheckpointRow::new(0, "Start", "t0")
+            .with_output(vec![1, 2, 3])
+            .with_workflow_version(5),
+    ];
+    assert_eq!(store.load_run("run-a").await.unwrap(), expected);
+    assert_eq!(store.load_run("run-b").await.unwrap(), expected);
+
+    let err = store.load_run("run-bad").await.unwrap_err();
+    assert_eq!(err.category(), "checkpoint_store");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn redb_dropped_write_futures_do_not_commit_orphans() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(RedbStore::new(dir.path().join("drop-orphan.redb")).unwrap());
+    let keep = CheckpointRow::new(0, "Keep", "t");
+    store.append("keep-run", keep.clone()).await.unwrap();
+
+    // Keep the redb write lock busy with concurrent large appends while we poll and
+    // drop orphan write futures.
+    let blob = vec![0xABu8; 512 * 1024];
+    let mut blockers = Vec::new();
+    for i in 0..8u64 {
+        let s = Arc::clone(&store);
+        let b = blob.clone();
+        blockers.push(tokio::spawn(async move {
+            s.append(
+                &format!("blocker-{i}"),
+                CheckpointRow::new(0, "B", "t").with_output(b),
+            )
+            .await
+            .unwrap();
+        }));
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+
+    let waker = futures_util::task::noop_waker();
+    let mut cx = std::task::Context::from_waker(&waker);
+
+    let mut append_fut = Box::pin(store.append("orphan-run", CheckpointRow::new(0, "Orphan", "t")));
+    let append_done = append_fut.as_mut().poll(&mut cx).is_ready();
+    drop(append_fut);
+
+    let mut clear_fut = Box::pin(store.clear("keep-run"));
+    let clear_done = clear_fut.as_mut().poll(&mut cx).is_ready();
+    drop(clear_fut);
+
+    #[cfg(feature = "scheduler")]
+    let swap_done = {
+        use cano::SchedulerStore;
+        let mut swap_fut =
+            Box::pin(store.compare_and_swap("orphan-flow", None, b"orphan".to_vec()));
+        let done = swap_fut.as_mut().poll(&mut cx).is_ready();
+        drop(swap_fut);
+        done
+    };
+
+    for h in blockers {
+        h.await.unwrap();
+    }
+    // Ensure any aborted blocking tasks have finished before asserting.
+    store
+        .append("post-drop", CheckpointRow::new(0, "Ok", "t"))
+        .await
+        .unwrap();
+
+    if !append_done {
+        assert!(store.load_run("orphan-run").await.unwrap().is_empty());
+    }
+    if !clear_done {
+        assert_eq!(store.load_run("keep-run").await.unwrap(), vec![keep]);
+    }
+    #[cfg(feature = "scheduler")]
+    if !swap_done {
+        use cano::SchedulerStore;
+        assert!(store.load("orphan-flow").await.unwrap().is_none());
+    }
+}
+
+#[cfg(feature = "store-postgres")]
+#[tokio::test]
+async fn store_retry_applies_jitter_to_transient_failures() {
+    use cano::PostgresStore;
+    use std::time::{Duration, Instant};
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let accepts_srv = Arc::clone(&accepts);
+    let srv = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            accepts_srv.fetch_add(1, Ordering::SeqCst);
+            drop(stream);
+        }
+    });
+
+    let retries = 6;
+    let delay = Duration::from_millis(60);
+    let store = PostgresStore::builder()
+        .with_create_table(false)
+        .with_operation_timeout(Duration::from_millis(200))
+        .with_retry(RetryMode::fixed(retries, delay))
+        .connect(&format!("postgres://u:p@127.0.0.1:{}/db", addr.port()))
+        .await
+        .unwrap();
+
+    let started = Instant::now();
+    let err = store.load_run("jitter").await.unwrap_err();
+    let elapsed = started.elapsed();
+
+    srv.abort();
+    assert_eq!(err.category(), "checkpoint_store");
+    let observed_accepts = accepts.load(Ordering::SeqCst);
+    if observed_accepts > 0 {
+        assert_eq!(observed_accepts, retries + 1);
+    } else {
+        // Sandboxed environments block outbound TCP connect() before the kernel reaches accept().
+        let msg = err.to_string().to_lowercase();
+        assert!(
+            msg.contains("error connecting to server"),
+            "unexpected postgres error when no sockets were accepted: {msg}"
+        );
+    }
+    // Each retry applies 50%..=100% jitter, so 6 * 60ms sleeps >= ~180ms minus timer granularity.
+    assert!(
+        elapsed >= Duration::from_millis(retries as u64 * 25),
+        "expected >= ~50% of fixed retry budget ({elapsed:?})"
+    );
+}

@@ -39,12 +39,13 @@ use std::ffi::{OsStr, OsString};
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[cfg(feature = "scheduler")]
 use redb::ReadableTable;
 use redb::{Database, ReadableDatabase, TableDefinition};
 
-use super::codec::{self, ROW_TAG_V1, StoredRow};
+use super::codec::{self, StoredRow};
 use super::conflict_error;
 use crate::checkpoint::{CheckpointRow, CheckpointStore, RowKind};
 use crate::error::CanoError;
@@ -97,6 +98,24 @@ fn redb_err(e: impl std::fmt::Display) -> CanoError {
 #[cfg(feature = "scheduler")]
 fn scheduler_err(e: impl std::fmt::Display) -> CanoError {
     CanoError::scheduler_store(format!("redb: {e}"))
+}
+
+/// Sets `cancelled` when dropped, so if the caller future is dropped (e.g. a lease-TTL
+/// timeout) while a `spawn_blocking` write is queued or waiting on the redb write lock,
+/// the blocking closure aborts immediately without committing an orphan write or `fsync`.
+struct CallerCancelled(Arc<AtomicBool>);
+
+impl CallerCancelled {
+    fn new() -> (Self, Arc<AtomicBool>) {
+        let flag = Arc::new(AtomicBool::new(false));
+        (Self(Arc::clone(&flag)), flag)
+    }
+}
+
+impl Drop for CallerCancelled {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
 }
 
 /// Assemble a [`CheckpointRow`] from the decoded stored fields.
@@ -318,10 +337,17 @@ impl CheckpointStore for RedbStore {
         // the single global write lock off the Tokio worker that awaits us from the
         // FSM loop (once per state entry) — otherwise every checkpoint transition
         // stalls a runtime worker and serializes concurrent appends onto it.
+        let (_cancel, cancelled) = CallerCancelled::new();
         let db = Arc::clone(&self.db);
         let wf_id = workflow_id.to_string();
         tokio::task::spawn_blocking(move || -> Result<(), CanoError> {
+            if cancelled.load(Ordering::Acquire) {
+                return Err(redb_err("checkpoint append cancelled"));
+            }
             let tx = db.begin_write().map_err(redb_err)?;
+            if cancelled.load(Ordering::Acquire) {
+                return Err(redb_err("checkpoint append cancelled"));
+            }
             {
                 let mut table = tx.open_table(CHECKPOINTS).map_err(redb_err)?;
                 // Reject a duplicate `(workflow_id, sequence)`: `insert` would silently
@@ -337,6 +363,9 @@ impl CheckpointStore for RedbStore {
                 {
                     return Err(conflict_error(&wf_id, sequence));
                 }
+            }
+            if cancelled.load(Ordering::Acquire) {
+                return Err(redb_err("checkpoint append cancelled"));
             }
             tx.commit().map_err(redb_err)?;
             Ok(())
@@ -362,7 +391,7 @@ impl CheckpointStore for RedbStore {
                 let (key, value) = entry.map_err(redb_err)?;
                 let sequence = key.value().1;
                 let bytes = value.value();
-                let row = if bytes.starts_with(&ROW_TAG_V1) {
+                let row = if codec::is_tagged(bytes) {
                     // Explicitly versioned row. A decode failure here is genuine
                     // corruption — surface it instead of falling back to the legacy
                     // shape (the V0 fallback would silently mask a corrupt V1 row
@@ -418,15 +447,32 @@ impl CheckpointStore for RedbStore {
     }
 
     async fn clear(&self, workflow_id: &str) -> Result<(), CanoError> {
+        let (_cancel, cancelled) = CallerCancelled::new();
         let db = Arc::clone(&self.db);
         let wf_id = workflow_id.to_string();
         tokio::task::spawn_blocking(move || -> Result<(), CanoError> {
+            if cancelled.load(Ordering::Acquire) {
+                return Err(redb_err("checkpoint clear cancelled"));
+            }
             let tx = db.begin_write().map_err(redb_err)?;
+            if cancelled.load(Ordering::Acquire) {
+                return Err(redb_err("checkpoint clear cancelled"));
+            }
+            let mut removed = false;
             {
                 let mut table = tx.open_table(CHECKPOINTS).map_err(redb_err)?;
                 table
-                    .retain_in(workflow_range(&wf_id), |_, _| false)
+                    .retain_in(workflow_range(&wf_id), |_, _| {
+                        removed = true;
+                        false
+                    })
                     .map_err(redb_err)?;
+            }
+            if !removed {
+                return Ok(());
+            }
+            if cancelled.load(Ordering::Acquire) {
+                return Err(redb_err("checkpoint clear cancelled"));
             }
             tx.commit().map_err(redb_err)?;
             Ok(())
@@ -468,10 +514,17 @@ impl SchedulerStore for RedbStore {
         // Read, compare, bump the counter, write and commit in one write transaction.
         // redb allows one writer at a time, so of concurrent swaps from one version
         // exactly one sees the expected version.
+        let (_cancel, cancelled) = CallerCancelled::new();
         let db = Arc::clone(&self.db);
         let id = flow_id.to_string();
         tokio::task::spawn_blocking(move || -> Result<CasOutcome, CanoError> {
+            if cancelled.load(Ordering::Acquire) {
+                return Err(scheduler_err("scheduler swap cancelled"));
+            }
             let tx = db.begin_write().map_err(scheduler_err)?;
+            if cancelled.load(Ordering::Acquire) {
+                return Err(scheduler_err("scheduler swap cancelled"));
+            }
             let next = {
                 let mut records = tx.open_table(SCHEDULER).map_err(scheduler_err)?;
                 let current = records
@@ -498,6 +551,9 @@ impl SchedulerStore for RedbStore {
                     .map_err(scheduler_err)?;
                 next
             };
+            if cancelled.load(Ordering::Acquire) {
+                return Err(scheduler_err("scheduler swap cancelled"));
+            }
             tx.commit().map_err(scheduler_err)?;
             Ok(CasOutcome::Written(next))
         })
@@ -508,13 +564,27 @@ impl SchedulerStore for RedbStore {
     async fn remove(&self, flow_id: &str) -> Result<(), CanoError> {
         // Only the record goes; the version counter stays so a re-created record never
         // reuses an earlier version.
+        let (_cancel, cancelled) = CallerCancelled::new();
         let db = Arc::clone(&self.db);
         let id = flow_id.to_string();
         tokio::task::spawn_blocking(move || -> Result<(), CanoError> {
+            if cancelled.load(Ordering::Acquire) {
+                return Err(scheduler_err("scheduler remove cancelled"));
+            }
             let tx = db.begin_write().map_err(scheduler_err)?;
-            {
+            if cancelled.load(Ordering::Acquire) {
+                return Err(scheduler_err("scheduler remove cancelled"));
+            }
+            let removed = {
                 let mut table = tx.open_table(SCHEDULER).map_err(scheduler_err)?;
-                table.remove(id.as_str()).map_err(scheduler_err)?;
+                table.remove(id.as_str()).map_err(scheduler_err)?.is_some()
+            };
+            if !removed {
+                // Skip `tx.commit()` (`fsync`) when the record was already absent.
+                return Ok(());
+            }
+            if cancelled.load(Ordering::Acquire) {
+                return Err(scheduler_err("scheduler remove cancelled"));
             }
             tx.commit().map_err(scheduler_err)?;
             Ok(())
@@ -526,6 +596,7 @@ impl SchedulerStore for RedbStore {
 
 #[cfg(test)]
 mod tests {
+    use super::super::codec::ROW_TAG_V1;
     use super::*;
     use tempfile::tempdir;
 
@@ -1368,5 +1439,122 @@ mod tests {
         store.remove("same-id").await.unwrap();
         assert!(store.load("same-id").await.unwrap().is_none());
         assert_eq!(store.load_run("same-id").await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn v2_tagged_rows_decode_through_redb_store() {
+        let dir = tempdir().unwrap();
+        let store = RedbStore::new(dir.path().join("ckpt.redb")).unwrap();
+        let mut bytes = Vec::from(*b"CW");
+        bytes.extend_from_slice(&123456789u128.to_le_bytes());
+        bytes.extend_from_slice(
+            &postcard::to_stdvec(&StoredRow {
+                state: "V2".into(),
+                task_id: "t".into(),
+                output_blob: Some(vec![7, 8]),
+                kind: RowKind::StepCursor,
+                workflow_version: 3,
+            })
+            .unwrap(),
+        );
+        {
+            let tx = store.db.begin_write().unwrap();
+            {
+                let mut table = tx.open_table(CHECKPOINTS).unwrap();
+                table.insert(("v2-run", 0u64), bytes.as_slice()).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let rows = store.load_run("v2-run").await.unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                CheckpointRow::new(0, "V2", "t")
+                    .with_cursor(vec![7, 8])
+                    .with_workflow_version(3)
+            ]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn dropped_write_futures_abort_without_committing_orphan_mutations() {
+        let dir = tempdir().unwrap();
+        let store = RedbStore::new(dir.path().join("orphan.redb")).unwrap();
+
+        let keep_row = CheckpointRow::new(0, "Keep", "t");
+        store.append("existing", keep_row.clone()).await.unwrap();
+        #[cfg(feature = "scheduler")]
+        let keep_ver = {
+            let CasOutcome::Written(v) = store
+                .compare_and_swap("existing-flow", None, b"keep".to_vec())
+                .await
+                .unwrap()
+            else {
+                panic!("seed swap must write");
+            };
+            v
+        };
+
+        // Hold the single redb write lock on a background thread so queued
+        // `spawn_blocking` write closures block inside `begin_write()`.
+        let db = Arc::clone(&store.db);
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            let tx = db.begin_write().unwrap();
+            locked_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(tx);
+        });
+        locked_rx.recv().unwrap();
+
+        let waker = futures_util::task::noop_waker();
+        let mut cx = std::task::Context::from_waker(&waker);
+
+        let mut append_fut = Box::pin(store.append("orphan-wf", CheckpointRow::new(0, "Bad", "t")));
+        assert!(append_fut.as_mut().poll(&mut cx).is_pending());
+
+        let mut clear_fut = Box::pin(store.clear("existing"));
+        assert!(clear_fut.as_mut().poll(&mut cx).is_pending());
+
+        #[cfg(feature = "scheduler")]
+        let mut swap_fut = Box::pin(store.compare_and_swap("orphan-flow", None, b"bad".to_vec()));
+        #[cfg(feature = "scheduler")]
+        assert!(swap_fut.as_mut().poll(&mut cx).is_pending());
+
+        #[cfg(feature = "scheduler")]
+        let mut remove_fut = Box::pin(store.remove("existing-flow"));
+        #[cfg(feature = "scheduler")]
+        assert!(remove_fut.as_mut().poll(&mut cx).is_pending());
+
+        // Let the blocking workers advance right up to `db.begin_write()`.
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+
+        // Drop every future (triggering `CallerCancelled`) before releasing the lock.
+        drop(append_fut);
+        drop(clear_fut);
+        #[cfg(feature = "scheduler")]
+        {
+            drop(swap_fut);
+            drop(remove_fut);
+        }
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        // A follow-up write proves all aborted blocking tasks released cleanly.
+        store
+            .append("after", CheckpointRow::new(0, "Ok", "t"))
+            .await
+            .unwrap();
+
+        assert!(store.load_run("orphan-wf").await.unwrap().is_empty());
+        assert_eq!(store.load_run("existing").await.unwrap(), vec![keep_row]);
+        #[cfg(feature = "scheduler")]
+        {
+            assert!(store.load("orphan-flow").await.unwrap().is_none());
+            let rec = store.load("existing-flow").await.unwrap().unwrap();
+            assert_eq!(rec.version, keep_ver);
+            assert_eq!(rec.value, b"keep");
+        }
     }
 }

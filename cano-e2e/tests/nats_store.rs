@@ -495,3 +495,141 @@ async fn multi_instance_scheduler_cluster_coordinates_over_nats() {
     node_a.stop().await.unwrap();
     node_b.stop().await.unwrap();
 }
+
+#[tokio::test]
+async fn identical_seq0_append_race_with_lost_ack() {
+    let nats = NatsFixture::start().await;
+    let store_a = Arc::new(
+        proxied_store(&nats, |b| {
+            b.with_operation_timeout(Duration::from_millis(800))
+                .with_retry(RetryMode::fixed(20, Duration::from_millis(150)))
+        })
+        .await,
+    );
+    let store_b = Arc::new(
+        NatsStore::builder()
+            .with_operation_timeout(Duration::from_secs(2))
+            .with_retry(RetryMode::fixed(4, Duration::from_millis(100)))
+            .connect(nats.direct_url())
+            .await
+            .unwrap(),
+    );
+    support::scenario_identical_seq0_append_race(store_a, store_b, &nats.toxi).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scheduler_partition_failover_and_zombie_fencing() {
+    let nats = NatsFixture::start().await;
+    let store_a = Arc::new(
+        proxied_store(&nats, |b| {
+            b.with_operation_timeout(Duration::from_millis(500))
+        })
+        .await,
+    );
+    let store_b = Arc::new(
+        NatsStore::builder()
+            .with_operation_timeout(Duration::from_secs(1))
+            .connect(nats.direct_url())
+            .await
+            .unwrap(),
+    );
+    support::scenario_scheduler_partition_failover_and_zombie_fencing(store_a, store_b, &nats.toxi)
+        .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn scheduler_lost_ack_on_claim_renew_release_preserves_ticks() {
+    let nats = NatsFixture::start().await;
+    let store = Arc::new(
+        proxied_store(&nats, |b| {
+            b.with_operation_timeout(Duration::from_millis(800))
+                .with_retry(RetryMode::fixed(20, Duration::from_millis(150)))
+        })
+        .await,
+    );
+    support::scenario_scheduler_lost_ack_preserves_ticks(store, &nats.toxi).await;
+}
+
+#[tokio::test]
+async fn load_run_racing_clear_completes_promptly_and_cleans_consumers() {
+    let nats = NatsFixture::start().await;
+    let store = NatsStore::builder()
+        .with_operation_timeout(Duration::from_secs(10))
+        .connect(nats.direct_url())
+        .await
+        .unwrap();
+
+    for round in 0..8 {
+        let id = format!("race-load-clear-{round}");
+        for seq in 0..25u64 {
+            store.append(&id, row(seq)).await.unwrap();
+        }
+        let started = std::time::Instant::now();
+        let (loaded, cleared) = tokio::join!(store.load_run(&id), store.clear(&id));
+        loaded.expect("load_run racing clear must succeed");
+        cleared.expect("clear racing load_run must succeed");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "load_run racing clear hung for {:?}",
+            started.elapsed()
+        );
+        assert!(store.load_run(&id).await.unwrap().is_empty());
+    }
+
+    let mut stream = nats
+        .jetstream()
+        .await
+        .get_stream("KV_cano_checkpoints")
+        .await
+        .unwrap();
+    assert_eq!(
+        stream.info().await.unwrap().state.consumer_count,
+        0,
+        "ephemeral load_run consumers must be cleaned up"
+    );
+}
+
+#[tokio::test]
+async fn remove_buffered_purge_cannot_wipe_recreated_record() {
+    let nats = NatsFixture::start().await;
+    let store_a = proxied_store(&nats, |b| {
+        b.with_operation_timeout(Duration::from_millis(500))
+    })
+    .await;
+    let store_b = NatsStore::connect(nats.direct_url()).await.unwrap();
+
+    let CasOutcome::Written(_) = store_b
+        .compare_and_swap("purge-hazard", None, b"v1".to_vec())
+        .await
+        .unwrap()
+    else {
+        panic!("seed must write");
+    };
+
+    nats.toxi.blackhole().await;
+    let err = store_a
+        .remove("purge-hazard")
+        .await
+        .expect_err("remove must time out under blackhole");
+    assert_eq!(err.category(), "scheduler_store");
+
+    store_b.remove("purge-hazard").await.unwrap();
+    let CasOutcome::Written(new_ver) = store_b
+        .compare_and_swap("purge-hazard", None, b"v2-new".to_vec())
+        .await
+        .unwrap()
+    else {
+        panic!("recreate must write");
+    };
+
+    nats.toxi.heal().await;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+
+    let rec = store_b
+        .load("purge-hazard")
+        .await
+        .unwrap()
+        .expect("recreated record must survive any flushed stale purge");
+    assert_eq!(rec.version, new_ver);
+    assert_eq!(rec.value, b"v2-new");
+}

@@ -7,6 +7,8 @@
 use std::future::Future;
 use std::time::Duration;
 
+use rand::RngExt;
+
 use crate::RetryMode;
 use crate::error::CanoError;
 
@@ -32,9 +34,19 @@ impl Failure {
     }
 }
 
-/// Calls `attempt(n)` for n = 0, 1, ...; sleeps `retry.delay_for_attempt(n)` after a
-/// transient failure and stops with that failure's error when it returns `None` or the
-/// failure is fatal.
+/// Equal jitter in `[50%, 100%]` so concurrent instances retrying after a store outage
+/// desynchronize without ever exceeding the caller's configured delay.
+fn jittered_delay(delay: Duration) -> Duration {
+    if delay.is_zero() {
+        return Duration::ZERO;
+    }
+    let factor = rand::rng().random_range(0.5_f64..=1.0);
+    delay.mul_f64(factor).max(Duration::from_nanos(1))
+}
+
+/// Calls `attempt(n)` for n = 0, 1, ...; sleeps a jittered `retry.delay_for_attempt(n)`
+/// after a transient failure and stops with that failure's error when it returns `None` or
+/// the failure is fatal.
 pub(super) async fn run<T, F, Fut>(retry: &RetryMode, mut attempt: F) -> Result<T, CanoError>
 where
     F: FnMut(usize) -> Fut,
@@ -50,7 +62,12 @@ where
             return Err(failure.error);
         }
         match retry.delay_for_attempt(n) {
-            Some(delay) => tokio::time::sleep(delay).await,
+            Some(delay) => {
+                let sleep_for = jittered_delay(delay);
+                if !sleep_for.is_zero() {
+                    tokio::time::sleep(sleep_for).await;
+                }
+            }
             None => return Err(failure.error),
         }
         n += 1;
@@ -149,6 +166,46 @@ mod tests {
             failure.error.to_string().contains("op: timed out after 1s"),
             "{}",
             failure.error
+        );
+    }
+
+    #[test]
+    fn jittered_delay_stays_within_half_to_full_and_varies() {
+        assert_eq!(jittered_delay(Duration::ZERO), Duration::ZERO);
+        let base = Duration::from_millis(100);
+        let samples: Vec<Duration> = (0..64).map(|_| jittered_delay(base)).collect();
+        for &d in &samples {
+            assert!(
+                d >= Duration::from_millis(50) && d <= base,
+                "jittered delay {d:?} outside [50ms, 100ms]"
+            );
+        }
+        assert!(
+            samples.windows(2).any(|w| w[0] != w[1]),
+            "jittered delays must vary across samples: {samples:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_applies_jitter_to_fixed_retry_sleeps() {
+        let mode = RetryMode::fixed(8, Duration::from_millis(100));
+        let mut elapsed = Vec::new();
+        for _ in 0..8 {
+            let start = tokio::time::Instant::now();
+            let _ = run(&mode, |_| async {
+                Err::<(), _>(Failure::transient(CanoError::checkpoint_store("transient")))
+            })
+            .await;
+            let total = start.elapsed();
+            assert!(
+                total >= Duration::from_millis(400) && total <= Duration::from_millis(800),
+                "total jittered retry sleep {total:?} outside [400ms, 800ms]"
+            );
+            elapsed.push(total);
+        }
+        assert!(
+            elapsed.windows(2).any(|w| w[0] != w[1]),
+            "retry totals must reflect randomized jitter: {elapsed:?}"
         );
     }
 }

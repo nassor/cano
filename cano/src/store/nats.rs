@@ -50,12 +50,16 @@
 //!
 //! An `Err` from `append` after a timeout does not prove the row is absent: the server may
 //! have stored it after the client gave up, and `async-nats` sends a buffered publish once
-//! it reconnects. A retried `append` treats a byte-identical row already stored at its key
-//! as its own earlier write and returns `Ok`; a different row there is a conflict.
+//! it reconnects. Each `append` stamps a fresh 128-bit `write_id` (`ROW_TAG_V2`), so a
+//! retried `append` treats a stored row at its key as its own earlier write only when its
+//! full payload — `write_id` included — matches; a rival's identical row is a conflict.
 //!
 //! A retried `compare_and_swap` that meets a conflict reads the key; stored bytes equal to
 //! the bytes it sent count as its own earlier write and return `Written` with the stored
 //! revision.
+//!
+//! `remove` reads the key's current revision and purges with `purge_expect_revision`, so a
+//! buffered timed-out purge cannot delete a newly created record after reconnect.
 //!
 //! ## Example
 //!
@@ -80,11 +84,21 @@
 //! ```
 
 use std::fmt;
+#[cfg(feature = "scheduler")]
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use async_nats::jetstream::consumer::push::OrderedConfig;
-use async_nats::jetstream::consumer::{DeliverPolicy, ReplayPolicy};
-use async_nats::jetstream::kv::{self, UpdateErrorKind};
+use async_nats::connection::State as ConnectionState;
+use async_nats::jetstream::consumer::push::{OrderedConfig, OrderedErrorKind};
+use async_nats::jetstream::consumer::{Consumer, DeliverPolicy, ReplayPolicy};
+use async_nats::jetstream::context::{
+    ConsumerInfoErrorKind, CreateKeyValueErrorKind, KeyValueErrorKind,
+    PublishError as JsPublishError, PublishErrorKind as JsPublishErrorKind,
+    RequestError as JsRequestError, RequestErrorKind as JsRequestErrorKind,
+};
+use async_nats::jetstream::kv::{self, EntryErrorKind, UpdateErrorKind};
+use async_nats::jetstream::stream::{ConsumerErrorKind, PurgeErrorKind};
 use bytes::Bytes;
 use futures_util::StreamExt;
 
@@ -148,6 +162,43 @@ impl fmt::Debug for NatsStore {
     }
 }
 
+/// How long `load_once` waits on `messages.next()` before checking `consumer_info` to see
+/// whether a concurrent `clear()` purged all pending messages.
+const LOAD_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// Best-effort deletes the ephemeral `load_run` consumer if the future is dropped early
+/// (for instance on an `operation_timeout`), and supports inline deletion before return.
+struct ConsumerCleanupGuard {
+    stream: async_nats::jetstream::stream::Stream,
+    client: async_nats::Client,
+    name: Option<String>,
+}
+
+impl ConsumerCleanupGuard {
+    async fn delete_now(&mut self, timeout: Duration) {
+        if let Some(name) = self.name.take()
+            && self.client.connection_state() == ConnectionState::Connected
+        {
+            let _ = tokio::time::timeout(timeout, self.stream.delete_consumer(&name)).await;
+        }
+    }
+}
+
+impl Drop for ConsumerCleanupGuard {
+    fn drop(&mut self) {
+        if let Some(name) = self.name.take()
+            && self.client.connection_state() == ConnectionState::Connected
+            && let Ok(handle) = tokio::runtime::Handle::try_current()
+        {
+            let stream = self.stream.clone();
+            handle.spawn(async move {
+                let _ = tokio::time::timeout(Duration::from_secs(1), stream.delete_consumer(&name))
+                    .await;
+            });
+        }
+    }
+}
+
 impl NatsStore {
     /// A builder with every setting at its default.
     #[must_use]
@@ -181,18 +232,51 @@ impl NatsStore {
         &self.client
     }
 
+    fn ensure_connected(
+        &self,
+        op: &str,
+        make_error: fn(String) -> CanoError,
+    ) -> Result<(), Failure> {
+        if self.client.connection_state() != ConnectionState::Connected {
+            return Err(Failure::transient(make_error(format!(
+                "nats {op}: client is not connected"
+            ))));
+        }
+        Ok(())
+    }
+
+    fn check_max_payload(
+        &self,
+        len: usize,
+        op: &str,
+        make_error: fn(String) -> CanoError,
+    ) -> Result<(), Failure> {
+        if let Some(info) = self.client.try_server_info()
+            && info.max_payload > 0
+            && len > info.max_payload
+        {
+            return Err(Failure::fatal(make_error(format!(
+                "nats {op}: payload of {len} bytes exceeds server max_payload of {} bytes",
+                info.max_payload
+            ))));
+        }
+        Ok(())
+    }
+
     async fn append_once(
         &self,
         workflow_id: &str,
         sequence: u64,
         key: &str,
         payload: &Bytes,
-        sent: &std::sync::atomic::AtomicBool,
+        sent: &AtomicBool,
     ) -> Result<(), Failure> {
+        self.ensure_connected("append", CanoError::checkpoint_store)?;
+        self.check_max_payload(payload.len(), "append", CanoError::checkpoint_store)?;
         // Revision 0 means "the subject has no message". `kv.create` is not used: it
         // re-reads the key after any failed publish and so reports its own lost-ack write
         // as `AlreadyExists`.
-        let prior_sent = sent.swap(true, std::sync::atomic::Ordering::Relaxed);
+        let prior_sent = sent.swap(true, Ordering::Relaxed);
         let error = match self.kv.update(key, payload.clone(), 0).await {
             Ok(_) => return Ok(()),
             Err(error) => error,
@@ -201,11 +285,18 @@ impl NatsStore {
             UpdateErrorKind::WrongLastRevision => {
                 if prior_sent {
                     // An earlier attempt actually sent `update` and may have been stored
-                    // before its ack was lost.
+                    // before its ack was lost. `payload` carries this invocation's 128-bit
+                    // `write_id`, so equal bytes guarantee it was our own write.
                     match self.kv.get(key).await {
                         Ok(Some(stored)) if stored == *payload => return Ok(()),
                         Ok(_) => {}
-                        Err(e) => return Err(transient("append", e)),
+                        Err(e) => {
+                            return Err(classify_entry_error(
+                                "append",
+                                &e,
+                                CanoError::checkpoint_store,
+                            ));
+                        }
                     }
                 }
                 Err(Failure::fatal(conflict_error(workflow_id, sequence)))
@@ -213,11 +304,16 @@ impl NatsStore {
             UpdateErrorKind::InvalidKey => Err(Failure::fatal(CanoError::checkpoint_store(
                 format!("nats append: {error}"),
             ))),
-            _ => Err(transient("append", error)),
+            _ => Err(classify_update_error(
+                "append",
+                &error,
+                CanoError::checkpoint_store,
+            )),
         }
     }
 
     async fn load_once(&self, workflow_id: &str) -> Result<Vec<CheckpointRow>, Failure> {
+        self.ensure_connected("load_run", CanoError::checkpoint_store)?;
         let consumer = self
             .kv
             .stream
@@ -230,7 +326,31 @@ impl NatsStore {
                 ..Default::default()
             })
             .await
-            .map_err(|e| transient("load_run", e))?;
+            .map_err(|e| classify_consumer_error("load_run", &e))?;
+        let consumer_name = consumer.cached_info().name.clone();
+        let mut cleanup = ConsumerCleanupGuard {
+            stream: self.kv.stream.clone(),
+            client: self.client.clone(),
+            name: Some(consumer_name.clone()),
+        };
+        let result = self
+            .read_consumer_rows(workflow_id, &consumer_name, consumer)
+            .await;
+        let delete_limit = if result.is_ok() {
+            self.operation_timeout.min(Duration::from_secs(1))
+        } else {
+            Duration::from_millis(200)
+        };
+        cleanup.delete_now(delete_limit).await;
+        result
+    }
+
+    async fn read_consumer_rows(
+        &self,
+        workflow_id: &str,
+        consumer_name: &str,
+        consumer: Consumer<OrderedConfig>,
+    ) -> Result<Vec<CheckpointRow>, Failure> {
         if consumer.cached_info().num_pending == 0 {
             return Ok(Vec::new());
         }
@@ -239,11 +359,22 @@ impl NatsStore {
             .await
             .map_err(|e| transient("load_run", e))?;
         let mut rows = Vec::new();
-        // A concurrent `clear` can leave the pending count stale, so no message with
-        // `pending == 0` arrives; the operation timeout bounds that wait.
         loop {
-            let message = match messages.next().await {
-                Some(message) => message.map_err(|e| transient("load_run", e))?,
+            let next = match tokio::time::timeout(LOAD_POLL_INTERVAL, messages.next()).await {
+                Ok(next) => next,
+                Err(_) => {
+                    // A concurrent `clear` can purge pending messages before they arrive,
+                    // so no message with `pending == 0` is ever delivered. Poll the
+                    // consumer's pending count to distinguish purged from slow delivery.
+                    match self.kv.stream.consumer_info(consumer_name).await {
+                        Ok(info) if info.num_pending == 0 => break,
+                        Ok(_) => continue,
+                        Err(e) => return Err(classify_consumer_info_error("load_run", &e)),
+                    }
+                }
+            };
+            let message = match next {
+                Some(message) => message.map_err(|e| classify_ordered_error("load_run", &e))?,
                 None => {
                     return Err(Failure::transient(CanoError::checkpoint_store(
                         "nats load_run: the consumer ended before delivering every row",
@@ -276,24 +407,26 @@ impl NatsStore {
     }
 
     async fn clear_once(&self, workflow_id: &str) -> Result<(), Failure> {
+        self.ensure_connected("clear", CanoError::checkpoint_store)?;
         self.kv
             .stream
             .purge()
             .filter(run_filter(&self.kv.prefix, &encode_id(workflow_id)))
             .await
             .map(drop)
-            .map_err(|e| transient("clear", e))
+            .map_err(|e| classify_purge_error("clear", &e))
     }
 }
 
 #[cfg(feature = "scheduler")]
 impl NatsStore {
     async fn load_flow_once(&self, key: &str) -> Result<Option<VersionedRecord>, Failure> {
+        self.ensure_connected("load", CanoError::scheduler_store)?;
         let entry = self
             .scheduler_kv
             .entry(key)
             .await
-            .map_err(|e| scheduler_transient("load", e))?;
+            .map_err(|e| classify_entry_error("load", &e, CanoError::scheduler_store))?;
         Ok(entry.and_then(|entry| live_record(entry.operation, entry.revision, &entry.value)))
     }
 
@@ -302,18 +435,21 @@ impl NatsStore {
         key: &str,
         expected: Option<u64>,
         value: &Bytes,
-        sent: &std::sync::atomic::AtomicBool,
+        target_rev: &AtomicU64,
+        sent_target: &AtomicBool,
     ) -> Result<CasOutcome, Failure> {
         if expected == Some(0) {
             // JetStream revisions start at 1; passing 0 to `kv.update` means "create".
             return Ok(CasOutcome::Conflict);
         }
+        self.ensure_connected("swap", CanoError::scheduler_store)?;
+        self.check_max_payload(value.len(), "swap", CanoError::scheduler_store)?;
         // Revision 0 means "the subject has no message". `kv.create` is not used for the
         // same reason as in `append_once`. A deleted or purged key has a marker message,
         // whose revision then stands in for "absent".
-        let mut revision = expected.unwrap_or(0);
+        let mut revision = target_rev.load(Ordering::Relaxed);
         loop {
-            let prior_sent = sent.swap(true, std::sync::atomic::Ordering::Relaxed);
+            let prior_sent = sent_target.swap(true, Ordering::Relaxed);
             match self.scheduler_kv.update(key, value.clone(), revision).await {
                 Ok(written) => return Ok(CasOutcome::Written(written)),
                 Err(error) => match error.kind() {
@@ -323,21 +459,33 @@ impl NatsStore {
                             "nats swap: {error}"
                         ))));
                     }
-                    _ => return Err(scheduler_transient("swap", error)),
+                    _ => {
+                        return Err(classify_update_error(
+                            "swap",
+                            &error,
+                            CanoError::scheduler_store,
+                        ));
+                    }
                 },
+            }
+            if !prior_sent && expected.is_some() {
+                return Ok(CasOutcome::Conflict);
             }
             let current = self
                 .scheduler_kv
                 .entry(key)
                 .await
-                .map_err(|e| scheduler_transient("swap", e))?;
+                .map_err(|e| classify_entry_error("swap", &e, CanoError::scheduler_store))?;
             match current {
                 Some(entry)
                     if expected.is_none()
                         && entry.operation != kv::Operation::Put
                         && entry.revision > revision =>
                 {
+                    target_rev.store(entry.revision, Ordering::Relaxed);
+                    sent_target.store(false, Ordering::Relaxed);
                     revision = entry.revision;
+                    continue;
                 }
                 Some(entry)
                     if prior_sent
@@ -345,8 +493,8 @@ impl NatsStore {
                         && entry.value == *value
                         && entry.revision > revision =>
                 {
-                    // An earlier attempt actually sent `update` and may have been stored
-                    // before its ack was lost.
+                    // An earlier attempt actually sent `update` at `revision` and may have
+                    // been stored before its ack was lost.
                     return Ok(CasOutcome::Written(entry.revision));
                 }
                 _ => return Ok(CasOutcome::Conflict),
@@ -355,10 +503,40 @@ impl NatsStore {
     }
 
     async fn remove_once(&self, key: &str) -> Result<(), Failure> {
-        self.scheduler_kv
-            .purge(key)
-            .await
-            .map_err(|e| scheduler_transient("remove", e))
+        self.ensure_connected("remove", CanoError::scheduler_store)?;
+        loop {
+            let entry = self
+                .scheduler_kv
+                .entry(key)
+                .await
+                .map_err(|e| classify_entry_error("remove", &e, CanoError::scheduler_store))?;
+            let Some(entry) = entry.filter(|entry| entry.operation == kv::Operation::Put) else {
+                return Ok(());
+            };
+            match self
+                .scheduler_kv
+                .purge_expect_revision(key, Some(entry.revision))
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(error) => match error.kind() {
+                    // Concurrent swap or remove changed the key's revision; re-read.
+                    UpdateErrorKind::WrongLastRevision => continue,
+                    UpdateErrorKind::InvalidKey => {
+                        return Err(Failure::fatal(CanoError::scheduler_store(format!(
+                            "nats remove: {error}"
+                        ))));
+                    }
+                    _ => {
+                        return Err(classify_update_error(
+                            "remove",
+                            &error,
+                            CanoError::scheduler_store,
+                        ));
+                    }
+                },
+            }
+        }
     }
 }
 
@@ -367,9 +545,10 @@ impl CheckpointStore for NatsStore {
     async fn append(&self, workflow_id: &str, row: CheckpointRow) -> Result<(), CanoError> {
         let sequence = row.sequence;
         let key = format!("{}.{sequence}", encode_id(workflow_id));
-        let payload = Bytes::from(codec::encode(row)?);
+        let write_id = rand::random::<u128>();
+        let payload = Bytes::from(codec::encode_with_write_id(row, write_id)?);
         let (key, payload) = (key.as_str(), &payload);
-        let sent = std::sync::atomic::AtomicBool::new(false);
+        let sent = AtomicBool::new(false);
         let sent = &sent;
         retry::run(&self.retry, move |_| {
             retry::bounded(
@@ -428,13 +607,14 @@ impl SchedulerStore for NatsStore {
     ) -> Result<CasOutcome, CanoError> {
         let key = encode_id(flow_id);
         let (key, value) = (key.as_str(), &Bytes::from(value));
-        let sent = std::sync::atomic::AtomicBool::new(false);
-        let sent = &sent;
+        let target_rev = AtomicU64::new(expected.unwrap_or(0));
+        let sent_target = AtomicBool::new(false);
+        let (target_rev, sent_target) = (&target_rev, &sent_target);
         retry::run(&self.retry, move |_| {
             scheduler_bounded(
                 "nats scheduler swap",
                 self.operation_timeout,
-                self.swap_once(key, expected, value, sent),
+                self.swap_once(key, expected, value, target_rev, sent_target),
             )
         })
         .await
@@ -502,8 +682,9 @@ impl NatsStoreBuilder {
     }
 
     /// The full bucket configuration used when the store creates the bucket: storage,
-    /// replicas, `max_age`, placement, compression, mirror. An empty `bucket` keeps the
-    /// name already set ([`DEFAULT_CHECKPOINT_BUCKET`] unless [`with_checkpoint_bucket`](Self::with_checkpoint_bucket) ran).
+    /// replicas, placement, compression, mirror. `max_age` must remain zero so checkpoint
+    /// and suspended state cannot silently expire. An empty `bucket` keeps the name already
+    /// set ([`DEFAULT_CHECKPOINT_BUCKET`] unless [`with_checkpoint_bucket`](Self::with_checkpoint_bucket) ran).
     /// Default: `history: 1`, a description, everything else at the server's defaults.
     #[must_use]
     pub fn with_checkpoint_bucket_config(mut self, config: kv::Config) -> Self {
@@ -526,8 +707,9 @@ impl NatsStoreBuilder {
     }
 
     /// The full configuration used when the store creates the scheduler bucket: storage,
-    /// replicas, `max_age`, placement, compression, mirror. An empty `bucket` keeps the
-    /// name already set ([`DEFAULT_SCHEDULER_BUCKET`] unless
+    /// replicas, placement, compression, mirror. `max_age` must remain zero so `Tripped`
+    /// and `Backoff` state cannot silently expire. An empty `bucket` keeps the name already
+    /// set ([`DEFAULT_SCHEDULER_BUCKET`] unless
     /// [`with_scheduler_bucket`](Self::with_scheduler_bucket) ran). Default: `history: 1`, a
     /// description, everything else at the server's defaults.
     #[cfg(feature = "scheduler")]
@@ -584,13 +766,16 @@ impl NatsStoreBuilder {
         self
     }
 
-    /// Connect with the connection name [`DEFAULT_CONNECTION_NAME`] and the other
-    /// [`ConnectOptions`](async_nats::ConnectOptions) at their defaults.
+    /// Connect with the connection name [`DEFAULT_CONNECTION_NAME`], `request_timeout` aligned
+    /// to `operation_timeout`, and the other [`ConnectOptions`](async_nats::ConnectOptions) at
+    /// their defaults.
     pub async fn connect(
         self,
         addrs: impl async_nats::ToServerAddrs,
     ) -> Result<NatsStore, CanoError> {
-        let options = async_nats::ConnectOptions::new().name(DEFAULT_CONNECTION_NAME);
+        let options = async_nats::ConnectOptions::new()
+            .name(DEFAULT_CONNECTION_NAME)
+            .request_timeout(Some(self.operation_timeout));
         self.connect_with_options(addrs, options).await
     }
 
@@ -627,17 +812,20 @@ impl NatsStoreBuilder {
         self.build_with_context(context).await
     }
 
-    /// Use a JetStream context you built. The domain and API prefix settings do not apply.
+    /// Use a JetStream context you built. The domain and API prefix settings do not apply;
+    /// the context's timeout is aligned to `operation_timeout`.
     pub async fn build_with_context(
         self,
-        context: async_nats::jetstream::Context,
+        mut context: async_nats::jetstream::Context,
     ) -> Result<NatsStore, CanoError> {
         self.validate_buckets()?;
+        context.set_timeout(self.operation_timeout);
         let kv = open_bucket(
             &context,
             self.config,
             self.create_bucket,
             self.operation_timeout,
+            &self.retry,
             CanoError::checkpoint_store::<String>,
         )
         .await?;
@@ -647,6 +835,7 @@ impl NatsStoreBuilder {
             self.scheduler_config,
             self.create_bucket,
             self.operation_timeout,
+            &self.retry,
             CanoError::scheduler_store::<String>,
         )
         .await?;
@@ -672,9 +861,19 @@ impl NatsStoreBuilder {
 
     fn validate_buckets(&self) -> Result<(), CanoError> {
         validate_bucket(&self.config.bucket)?;
+        if !self.config.max_age.is_zero() {
+            return Err(CanoError::configuration(
+                "checkpoint bucket max_age must be zero so recovery and suspended state cannot expire",
+            ));
+        }
         #[cfg(feature = "scheduler")]
         {
             validate_bucket(&self.scheduler_config.bucket)?;
+            if !self.scheduler_config.max_age.is_zero() {
+                return Err(CanoError::configuration(
+                    "scheduler bucket max_age must be zero so tripped and backoff state cannot expire",
+                ));
+            }
             if self.scheduler_config.bucket == self.config.bucket {
                 return Err(CanoError::configuration(format!(
                     "the checkpoint and scheduler buckets must differ, both are {:?}",
@@ -707,39 +906,240 @@ async fn open_bucket(
     config: kv::Config,
     create_bucket: bool,
     timeout: Duration,
+    retry_mode: &RetryMode,
     error: fn(String) -> CanoError,
 ) -> Result<kv::Store, CanoError> {
     let bucket = config.bucket.clone();
-    retry::bounded("nats open bucket", timeout, async {
-        let get_err = match context.get_key_value(bucket.as_str()).await {
-            Ok(kv) => return Ok(kv),
-            Err(e) => e,
-        };
-        if !create_bucket {
-            return Err(Failure::fatal(error(format!(
-                "nats bucket {bucket:?} unavailable and bucket creation is disabled: {get_err}"
-            ))));
-        }
-        context
-            .create_key_value(config)
-            .await
-            .map_err(|create_err| {
-                Failure::fatal(error(format!(
-                    "nats open bucket {bucket:?}: {get_err}; create: {create_err}"
-                )))
-            })
+    retry::run(retry_mode, |_| {
+        let config = config.clone();
+        let bucket = bucket.as_str();
+        bounded_with("nats open bucket", timeout, error, async move {
+            let get_err = match context.get_key_value(bucket).await {
+                Ok(kv) => return Ok(kv),
+                Err(e) => e,
+            };
+            if get_err.kind() == KeyValueErrorKind::InvalidStoreName {
+                return Err(Failure::fatal(error(format!(
+                    "nats bucket {bucket:?}: {get_err}"
+                ))));
+            }
+            if !create_bucket {
+                let err = error(format!(
+                    "nats bucket {bucket:?} unavailable and bucket creation is disabled: {get_err}"
+                ));
+                return Err(if is_fatal_get_kv(&get_err) {
+                    Failure::fatal(err)
+                } else {
+                    Failure::transient(err)
+                });
+            }
+            context
+                .create_key_value(config)
+                .await
+                .map_err(|create_err| {
+                    let err = error(format!(
+                        "nats open bucket {bucket:?}: {get_err}; create: {create_err}"
+                    ));
+                    if is_fatal_create_kv(&create_err) {
+                        Failure::fatal(err)
+                    } else {
+                        Failure::transient(err)
+                    }
+                })
+        })
     })
     .await
-    .map_err(|failure| failure.error)
 }
 
 fn transient(op: &str, e: impl fmt::Display) -> Failure {
     Failure::transient(CanoError::checkpoint_store(format!("nats {op}: {e}")))
 }
 
-#[cfg(feature = "scheduler")]
-fn scheduler_transient(op: &str, e: impl fmt::Display) -> Failure {
-    Failure::transient(CanoError::scheduler_store(format!("nats {op}: {e}")))
+fn is_fatal_jetstream_error(err: &async_nats::jetstream::Error) -> bool {
+    use async_nats::jetstream::ErrorCode;
+    matches!(
+        err.error_code(),
+        ErrorCode::BAD_REQUEST
+            | ErrorCode::INVALID_JSON
+            | ErrorCode::STREAM_INVALID_CONFIG
+            | ErrorCode::STREAM_MESSAGE_EXCEEDS_MAXIMUM
+            | ErrorCode::STREAM_NOT_FOUND
+            | ErrorCode::STREAM_SUBJECT_OVERLAP
+            | ErrorCode::STREAM_INVALID
+            | ErrorCode::STREAM_LIMITS
+            | ErrorCode::STREAM_REPLICAS_NOT_SUPPORTED
+            | ErrorCode::JETSTREAM_NOT_ENABLED
+            | ErrorCode::JETSTREAM_NOT_ENABLED_FOR_ACCOUNT
+            | ErrorCode::NO_ACCOUNT
+            | ErrorCode::NOT_SUPPORTED_IN_CLUSTER_MODE
+            | ErrorCode::REQUIRED_API_LEVEL
+            | ErrorCode::NAME_NOT_MATCH_SUBJECT
+            | ErrorCode::STREAM_MISMATCH
+            | ErrorCode::STREAM_NOT_MATCH
+            | ErrorCode::CONSUMER_INVALID_POLICY
+            | ErrorCode::CONSUMER_CONFIG_REQUIRED
+            | ErrorCode::CONSUMER_NAME_TOO_LONG
+            | ErrorCode::CONSUMER_BAD_DURABLE_NAME
+            | ErrorCode::CONSUMER_EMPTY_FILTER
+    ) || matches!(err.code(), 400 | 403)
+}
+
+fn has_fatal_source(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = err.source();
+    while let Some(src) = current {
+        if let Some(js_err) = src.downcast_ref::<async_nats::jetstream::Error>()
+            && is_fatal_jetstream_error(js_err)
+        {
+            return true;
+        }
+        if let Some(pub_err) = src.downcast_ref::<JsPublishError>()
+            && matches!(
+                pub_err.kind(),
+                JsPublishErrorKind::MaxPayloadExceeded | JsPublishErrorKind::StreamNotFound
+            )
+        {
+            return true;
+        }
+        if let Some(pub_err) = src.downcast_ref::<async_nats::client::PublishError>()
+            && matches!(
+                pub_err.kind(),
+                async_nats::client::PublishErrorKind::MaxPayloadExceeded
+                    | async_nats::client::PublishErrorKind::InvalidSubject
+            )
+        {
+            return true;
+        }
+        if let Some(req_err) = src.downcast_ref::<async_nats::client::RequestError>()
+            && matches!(
+                req_err.kind(),
+                async_nats::client::RequestErrorKind::InvalidSubject
+                    | async_nats::client::RequestErrorKind::MaxPayloadExceeded
+            )
+        {
+            return true;
+        }
+        if let Some(req_err) = src.downcast_ref::<JsRequestError>()
+            && matches!(req_err.kind(), JsRequestErrorKind::InvalidSubject)
+        {
+            return true;
+        }
+        if let Some(get_err) = src.downcast_ref::<async_nats::jetstream::context::GetStreamError>()
+        {
+            use async_nats::jetstream::context::GetStreamErrorKind;
+            match get_err.kind() {
+                GetStreamErrorKind::EmptyName | GetStreamErrorKind::InvalidStreamName => {
+                    return true;
+                }
+                GetStreamErrorKind::JetStream(js) if is_fatal_jetstream_error(&js) => return true,
+                _ => {}
+            }
+        }
+        current = src.source();
+    }
+    false
+}
+
+fn is_fatal_get_kv(err: &async_nats::jetstream::context::KeyValueError) -> bool {
+    matches!(err.kind(), KeyValueErrorKind::InvalidStoreName) || has_fatal_source(err)
+}
+
+fn is_fatal_create_kv(err: &async_nats::jetstream::context::CreateKeyValueError) -> bool {
+    matches!(
+        err.kind(),
+        CreateKeyValueErrorKind::InvalidStoreName
+            | CreateKeyValueErrorKind::TooLongHistory
+            | CreateKeyValueErrorKind::LimitMarkersNotSupported
+    ) || has_fatal_source(err)
+}
+
+fn classify_update_error(
+    op: &str,
+    err: &kv::UpdateError,
+    make_error: fn(String) -> CanoError,
+) -> Failure {
+    let fatal = matches!(err.kind(), UpdateErrorKind::InvalidKey) || has_fatal_source(err);
+    Failure {
+        error: make_error(format!("nats {op}: {err}")),
+        transient: !fatal,
+    }
+}
+
+fn classify_entry_error(
+    op: &str,
+    err: &kv::EntryError,
+    make_error: fn(String) -> CanoError,
+) -> Failure {
+    let fatal = matches!(err.kind(), EntryErrorKind::InvalidKey) || has_fatal_source(err);
+    Failure {
+        error: make_error(format!("nats {op}: {err}")),
+        transient: !fatal,
+    }
+}
+
+fn classify_purge_error(op: &str, err: &async_nats::error::Error<PurgeErrorKind>) -> Failure {
+    let fatal = match err.kind() {
+        PurgeErrorKind::JetStream(js) => is_fatal_jetstream_error(&js),
+        PurgeErrorKind::TimedOut => false,
+        PurgeErrorKind::Request => has_fatal_source(err),
+    };
+    Failure {
+        error: CanoError::checkpoint_store(format!("nats {op}: {err}")),
+        transient: !fatal,
+    }
+}
+
+fn classify_consumer_error(op: &str, err: &async_nats::error::Error<ConsumerErrorKind>) -> Failure {
+    let fatal = match err.kind() {
+        ConsumerErrorKind::InvalidConsumerType | ConsumerErrorKind::InvalidName => true,
+        ConsumerErrorKind::JetStream(js) => is_fatal_jetstream_error(&js),
+        ConsumerErrorKind::TimedOut => false,
+        ConsumerErrorKind::Request | ConsumerErrorKind::Other => has_fatal_source(err),
+    };
+    Failure {
+        error: CanoError::checkpoint_store(format!("nats {op}: {err}")),
+        transient: !fatal,
+    }
+}
+
+fn classify_consumer_info_error(
+    op: &str,
+    err: &async_nats::jetstream::context::ConsumerInfoError,
+) -> Failure {
+    let fatal = match err.kind() {
+        ConsumerInfoErrorKind::InvalidName | ConsumerInfoErrorKind::StreamNotFound => true,
+        ConsumerInfoErrorKind::JetStream(js) => is_fatal_jetstream_error(&js),
+        ConsumerInfoErrorKind::Offline
+        | ConsumerInfoErrorKind::NotFound
+        | ConsumerInfoErrorKind::TimedOut
+        | ConsumerInfoErrorKind::NoResponders => false,
+        ConsumerInfoErrorKind::Request => has_fatal_source(err),
+    };
+    Failure {
+        error: CanoError::checkpoint_store(format!("nats {op}: {err}")),
+        transient: !fatal,
+    }
+}
+
+fn classify_ordered_error(op: &str, err: &async_nats::error::Error<OrderedErrorKind>) -> Failure {
+    let fatal = matches!(err.kind(), OrderedErrorKind::PullBasedConsumer) || has_fatal_source(err);
+    Failure {
+        error: CanoError::checkpoint_store(format!("nats {op}: {err}")),
+        transient: !fatal,
+    }
+}
+
+async fn bounded_with<T>(
+    what: &str,
+    limit: Duration,
+    make_error: fn(String) -> CanoError,
+    fut: impl Future<Output = Result<T, Failure>>,
+) -> Result<T, Failure> {
+    match tokio::time::timeout(limit, fut).await {
+        Ok(result) => result,
+        Err(_) => Err(Failure::transient(make_error(format!(
+            "{what}: timed out after {limit:?}"
+        )))),
+    }
 }
 
 /// [`retry::bounded`] with the scheduler store's error for an elapsed limit.
@@ -749,12 +1149,7 @@ async fn scheduler_bounded<T>(
     limit: Duration,
     fut: impl Future<Output = Result<T, Failure>>,
 ) -> Result<T, Failure> {
-    match tokio::time::timeout(limit, fut).await {
-        Ok(result) => result,
-        Err(_) => Err(Failure::transient(CanoError::scheduler_store(format!(
-            "{what}: timed out after {limit:?}"
-        )))),
-    }
+    bounded_with(what, limit, CanoError::scheduler_store::<String>, fut).await
 }
 
 /// The record of a key's latest entry; a delete or purge marker means no record.
@@ -967,5 +1362,57 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err.category(), "configuration");
+    }
+
+    #[test]
+    fn non_zero_bucket_max_age_is_rejected() {
+        let err = NatsStore::builder()
+            .with_checkpoint_bucket_config(kv::Config {
+                max_age: Duration::from_secs(60),
+                ..Default::default()
+            })
+            .validate()
+            .unwrap_err();
+        assert_eq!(err.category(), "configuration");
+        assert!(err.to_string().contains("max_age"), "{err}");
+
+        #[cfg(feature = "scheduler")]
+        {
+            let err = NatsStore::builder()
+                .with_scheduler_bucket_config(kv::Config {
+                    max_age: Duration::from_secs(60),
+                    ..Default::default()
+                })
+                .validate()
+                .unwrap_err();
+            assert_eq!(err.category(), "configuration");
+            assert!(err.to_string().contains("max_age"), "{err}");
+        }
+    }
+
+    #[test]
+    fn permanent_jetstream_errors_are_classified_fatal() {
+        use async_nats::jetstream::{Error as JsError, ErrorCode};
+        for code in [
+            ErrorCode::BAD_REQUEST,
+            ErrorCode::STREAM_NOT_FOUND,
+            ErrorCode::STREAM_MESSAGE_EXCEEDS_MAXIMUM,
+            ErrorCode::JETSTREAM_NOT_ENABLED,
+        ] {
+            let err: JsError = serde_json::from_value(serde_json::json!({
+                "code": 400,
+                "err_code": code.0,
+                "description": "permanent error"
+            }))
+            .unwrap();
+            assert!(is_fatal_jetstream_error(&err), "code={code:?}");
+        }
+        let transient_js: JsError = serde_json::from_value(serde_json::json!({
+            "code": 503,
+            "err_code": ErrorCode::CLUSTER_NOT_AVAILABLE.0,
+            "description": "cluster unavailable"
+        }))
+        .unwrap();
+        assert!(!is_fatal_jetstream_error(&transient_js));
     }
 }
