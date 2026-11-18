@@ -263,7 +263,8 @@ impl RunningScheduler {
     ///
     /// With a [store](crate::scheduler::Scheduler::with_store) the reset is written to the
     /// shared record, so it applies to every instance: a flow tripped on one instance runs
-    /// again on all of them. A lease held by a run in flight is left alone.
+    /// again on all of them. Expired leases are cleared, while a live lease held by an
+    /// in-flight run remains intact.
     ///
     /// # Errors
     ///
