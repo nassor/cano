@@ -6,13 +6,14 @@
 //! is it tripped, who holds the lease) is made here from the decoded [`FlowRecord`],
 //! and every change is one compare-and-swap from the version that was read.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use futures_util::FutureExt;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use tokio_util::sync::CancellationToken;
 
 use crate::error::{CanoError, CanoResult};
@@ -25,6 +26,41 @@ const CAS_ATTEMPTS: usize = 5;
 const RELEASE_RETRIES: u32 = 3;
 /// Retry `n` of a release waits `n` times this.
 const RELEASE_BACKOFF: Duration = Duration::from_millis(100);
+/// Maximum length (in UTF-8 bytes) stored in `FlowRecord::last_error` and
+/// standalone `Status::Backoff`/`Tripped::last_error`.
+pub(super) const MAX_LAST_ERROR_BYTES: usize = 4096;
+/// Maximum number of unresolved unstarted claims remembered on a `Coordinator`
+/// so store recovery cleanup never grows without bound.
+const MAX_UNSTARTED_LEASES: usize = 1024;
+/// Upper bound on `abort_claim` cleanup so a hung store cannot stall callers.
+const MAX_ABORT_CLAIM_BUDGET: Duration = Duration::from_secs(5);
+
+/// Truncate `msg` to at most [`MAX_LAST_ERROR_BYTES`] bytes on a UTF-8 char
+/// boundary, appending `"..."` when truncated.
+pub(super) fn truncate_error(msg: &str) -> String {
+    if msg.len() <= MAX_LAST_ERROR_BYTES {
+        return msg.to_string();
+    }
+    const SUFFIX: &str = "...";
+    let mut end = MAX_LAST_ERROR_BYTES - SUFFIX.len();
+    while !msg.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = String::with_capacity(end + SUFFIX.len());
+    out.push_str(&msg[..end]);
+    out.push_str(SUFFIX);
+    out
+}
+
+/// Deserialize a present JSON field (`null` -> `Some(None)`, `"ts"` -> `Some(Some(ts))`)
+/// while `#[serde(default)]` supplies `None` when the key is absent.
+fn deserialize_double_option<'de, T, D>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    T: Deserialize<'de>,
+    D: Deserializer<'de>,
+{
+    Deserialize::deserialize(deserializer).map(Some)
+}
 
 /// `t + d`, saturating at the far future instead of panicking.
 pub(super) fn plus(t: DateTime<Utc>, d: Duration) -> DateTime<Utc> {
@@ -71,6 +107,37 @@ pub(super) struct Lease {
     #[serde(default)]
     pub(super) id: u64,
     pub(super) expires_at: DateTime<Utc>,
+    /// Pre-claim `run_count`, `last_run` and `last_tick` captured right before `claim()`
+    /// bumps them, so an unstarted claim (lost ACK, pre-run shutdown, dropped trigger)
+    /// can restore the record without losing or double-counting scheduled ticks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) prev_run_count: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_double_option"
+    )]
+    pub(super) prev_last_run: Option<Option<DateTime<Utc>>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_double_option"
+    )]
+    pub(super) prev_last_tick: Option<Option<DateTime<Utc>>>,
+}
+
+impl Lease {
+    fn restore_into(&self, record: &mut FlowRecord) {
+        if let Some(prev) = self.prev_run_count {
+            record.run_count = prev;
+        }
+        if let Some(prev) = self.prev_last_run {
+            record.last_run = prev;
+        }
+        if let Some(prev) = self.prev_last_tick {
+            record.last_tick = prev;
+        }
+    }
 }
 
 /// Everything the cluster knows about one flow; the bytes behind a store key.
@@ -87,10 +154,12 @@ pub(super) struct FlowRecord {
     pub(super) last_error: Option<String>,
     pub(super) state: FlowState,
     pub(super) lease: Option<Lease>,
-    /// Writer, write time and per-coordinator counter: two writes never have equal
-    /// bytes, even within one clock tick, so a store that retries an ambiguous swap can
-    /// tell its own earlier write from a rival's.
+    /// Writer, session, write time and per-coordinator counter: two writes never have
+    /// equal bytes, even within one clock tick or across processes sharing an instance
+    /// id, so a store retrying an ambiguous swap can tell its own write from a rival's.
     pub(super) written_by: String,
+    #[serde(default)]
+    pub(super) written_session: u64,
     pub(super) written_at: DateTime<Utc>,
     pub(super) write_seq: u64,
 }
@@ -143,7 +212,7 @@ impl FlowRecord {
         } else {
             FlowState::Tripped
         };
-        self.last_error = Some(error);
+        self.last_error = Some(truncate_error(&error));
     }
 
     fn succeed(&mut self) {
@@ -161,6 +230,20 @@ impl FlowRecord {
         } else {
             self.state = FlowState::Idle;
         }
+    }
+
+    fn apply_result(
+        &mut self,
+        policy: &BackoffPolicy,
+        result: &CanoResult<()>,
+        now: DateTime<Utc>,
+    ) {
+        match result {
+            Ok(()) => self.succeed(),
+            Err(e) if e.is_cancelled() => self.cancelled(now),
+            Err(e) => self.fail(policy, e.to_string(), now),
+        }
+        self.lease = None;
     }
 }
 
@@ -220,11 +303,13 @@ pub(super) enum Claim {
     Refused { reason: Refusal, record: FlowRecord },
 }
 
-/// A lease this instance holds, with the record version it was last written at.
+/// A lease this instance holds, with the record version it was last written at
+/// and the monotonic deadline by which it expires unless renewed.
 pub(super) struct HeldLease {
     version: u64,
     id: u64,
     record: FlowRecord,
+    expires_mono: tokio::time::Instant,
 }
 
 impl HeldLease {
@@ -236,11 +321,15 @@ impl HeldLease {
         &self.record
     }
 
-    /// Time left on the lease as last written, zero once it ran out.
+    /// Time left on the lease as last written, bounded by both wall clock and
+    /// monotonic elapsed time; zero once it ran out.
     fn remaining(&self, now: DateTime<Utc>) -> Duration {
-        self.record.lease.as_ref().map_or(Duration::ZERO, |lease| {
+        let wall_remaining = self.record.lease.as_ref().map_or(Duration::ZERO, |lease| {
             (lease.expires_at - now).to_std().unwrap_or(Duration::ZERO)
-        })
+        });
+        self.expires_mono
+            .saturating_duration_since(tokio::time::Instant::now())
+            .min(wall_remaining)
     }
 }
 
@@ -261,9 +350,14 @@ enum ReleaseAttempt {
     Conflict,
 }
 
+enum AbortAttempt {
+    Resolved(Box<FlowRecord>),
+    Conflict,
+}
+
 enum Renew {
     Held,
-    Lost(Option<FlowRecord>),
+    Lost(Option<Box<FlowRecord>>),
 }
 
 /// One scheduler instance's view of the shared store.
@@ -274,6 +368,10 @@ pub(super) struct Coordinator {
     ttl: Duration,
     writes: AtomicU64,
     leases: AtomicU64,
+    /// Bounded record of `(flow_id, lease_id)` pairs from unstarted claims whose
+    /// `abort_claim` gave up during a store outage, so a later `claim` on this same
+    /// session can restore pre-claim counters before checking `due.is_due`.
+    unstarted_leases: parking_lot::Mutex<VecDeque<(Arc<str>, u64)>>,
 }
 
 /// Run a store call so that a panic inside a custom store becomes an error instead of
@@ -323,7 +421,12 @@ impl Coordinator {
             ttl,
             writes: AtomicU64::new(0),
             leases: AtomicU64::new(0),
+            unstarted_leases: parking_lot::Mutex::new(VecDeque::new()),
         }
+    }
+
+    pub(super) fn ttl(&self) -> Duration {
+        self.ttl
     }
 
     pub(super) fn next_lease_id(&self) -> u64 {
@@ -336,6 +439,33 @@ impl Coordinator {
 
     fn matches_lease(&self, lease: &Lease, lease_id: u64) -> bool {
         self.is_same_session(lease) && lease.id == lease_id
+    }
+
+    pub(super) fn record_unstarted(&self, flow_id: &str, lease_id: u64) {
+        let mut guard = self.unstarted_leases.lock();
+        if guard
+            .iter()
+            .any(|(f, id)| &**f == flow_id && *id == lease_id)
+        {
+            return;
+        }
+        if guard.len() >= MAX_UNSTARTED_LEASES {
+            guard.pop_front();
+        }
+        guard.push_back((Arc::from(flow_id), lease_id));
+    }
+
+    fn is_unstarted(&self, flow_id: &str, lease_id: u64) -> bool {
+        self.unstarted_leases
+            .lock()
+            .iter()
+            .any(|(f, id)| &**f == flow_id && *id == lease_id)
+    }
+
+    fn remove_unstarted(&self, flow_id: &str, lease_id: u64) {
+        self.unstarted_leases
+            .lock()
+            .retain(|(f, id)| !(&**f == flow_id && *id == lease_id));
     }
 
     #[cfg(feature = "tracing")]
@@ -386,6 +516,7 @@ impl Coordinator {
         record: &mut FlowRecord,
     ) -> Result<Option<u64>, CanoError> {
         record.written_by = self.instance_id.to_string();
+        record.written_session = self.session;
         record.written_at = Utc::now();
         record.write_seq = self.writes.fetch_add(1, Ordering::Relaxed) + 1;
         let bytes = serde_json::to_vec(record).map_err(|e| {
@@ -404,6 +535,12 @@ impl Coordinator {
         )
     }
 
+    fn expires_mono_from(&self, swap_started: tokio::time::Instant) -> tokio::time::Instant {
+        swap_started
+            .checked_add(self.ttl)
+            .unwrap_or_else(|| crate::workflow::deadline_after(self.ttl))
+    }
+
     /// Try to take the flow for one run. See the module docs of
     /// [`Scheduler`](super::Scheduler) for the rules; each attempt is one compare-and-swap
     /// from the loaded version, re-loaded when another instance wins it.
@@ -420,6 +557,32 @@ impl Coordinator {
         shutdown: Option<&CancellationToken>,
         sent_lease: &std::sync::atomic::AtomicBool,
     ) -> Result<Option<Claim>, CanoError> {
+        let deadline = crate::workflow::deadline_after(self.ttl);
+        match tokio::time::timeout_at(
+            deadline,
+            self.claim_inner(flow_id, lease_id, policy, due, shutdown, sent_lease),
+        )
+        .await
+        {
+            Ok(res) => res,
+            Err(_) => Err(CanoError::scheduler_store(format!(
+                "flow '{flow_id}': claim timed out after {:?}",
+                self.ttl
+            ))),
+        }
+    }
+
+    async fn claim_inner(
+        &self,
+        flow_id: &str,
+        lease_id: u64,
+        policy: &BackoffPolicy,
+        due: Due,
+        shutdown: Option<&CancellationToken>,
+        sent_lease: &std::sync::atomic::AtomicBool,
+    ) -> Result<Option<Claim>, CanoError> {
+        let mut last_swap_started: Option<tokio::time::Instant> = None;
+        let mut pending_unstarted_cleanup: Option<u64> = None;
         for _ in 0..CAS_ATTEMPTS {
             let loaded = match shutdown {
                 Some(stop) => tokio::select! {
@@ -438,9 +601,32 @@ impl Coordinator {
             };
             let now = Utc::now();
 
+            if let Some(old_id) = pending_unstarted_cleanup
+                && !record
+                    .lease
+                    .as_ref()
+                    .is_some_and(|l| self.matches_lease(l, old_id))
+            {
+                self.remove_unstarted(flow_id, old_id);
+                pending_unstarted_cleanup = None;
+            }
+
             let mut abandoned = false;
+            let mut resolved_unstarted: Option<u64> = None;
             if let Some(lease) = record.lease.clone() {
                 if lease.expires_at > now {
+                    if self.matches_lease(&lease, lease_id) {
+                        // An earlier iteration of this same claim(lease_id) already
+                        // committed (e.g. lost ACK + concurrent reset_flow).
+                        let swap_started =
+                            last_swap_started.unwrap_or_else(tokio::time::Instant::now);
+                        return Ok(Some(Claim::Won(HeldLease {
+                            version: version.expect("loaded record with lease must have a version"),
+                            id: lease_id,
+                            record,
+                            expires_mono: self.expires_mono_from(swap_started),
+                        })));
+                    }
                     if !self.is_same_session(&lease) {
                         return Ok(Some(Claim::Refused {
                             reason: Refusal::Elsewhere {
@@ -450,16 +636,32 @@ impl Coordinator {
                             record,
                         }));
                     }
-                    // Our own live lease from this same Coordinator session with no run
-                    // in flight: a release that gave up. Take it over without counting a
-                    // failure.
+                    if self.is_unstarted(flow_id, lease.id) {
+                        // Prior unstarted claim on this session whose abort_claim gave up
+                        // during store outage: restore pre-claim counters before due check.
+                        lease.restore_into(&mut record);
+                        record.cancelled(now);
+                        record.lease = None;
+                        resolved_unstarted = Some(lease.id);
+                        pending_unstarted_cleanup = Some(lease.id);
+                    }
+                    // Otherwise: our own live lease from this same Coordinator session with
+                    // no run in flight (a release that gave up). Take it over without
+                    // counting a failure.
+                } else if self.is_same_session(&lease) && self.is_unstarted(flow_id, lease.id) {
+                    lease.restore_into(&mut record);
+                    record.cancelled(now);
+                    record.lease = None;
+                    resolved_unstarted = Some(lease.id);
+                    pending_unstarted_cleanup = Some(lease.id);
                 } else {
-                    // The owner stopped renewing: count the lost run as a failure,
-                    // and write that even when the claim below is refused.
+                    // The owner stopped renewing: count the lost run as a failure anchored
+                    // at lease expiry, and write that even when the claim below is refused.
+                    let failed_at = lease.expires_at.min(now);
                     record.fail(
                         policy,
                         format!("lease expired: instance '{}' stopped renewing", lease.owner),
-                        now,
+                        failed_at,
                     );
                     record.lease = None;
                     abandoned = true;
@@ -475,30 +677,47 @@ impl Coordinator {
             };
 
             if let Some(reason) = refusal {
-                if !abandoned {
+                if !abandoned && resolved_unstarted.is_none() {
                     return Ok(Some(Claim::Refused { reason, record }));
                 }
                 if self.swap(flow_id, version, &mut record).await?.is_some() {
+                    if let Some(old_id) = resolved_unstarted {
+                        self.remove_unstarted(flow_id, old_id);
+                    }
                     #[cfg(feature = "metrics")]
-                    count_failure(flow_id, &record);
+                    if abandoned {
+                        count_failure(flow_id, &record);
+                    }
                     return Ok(Some(Claim::Refused { reason, record }));
                 }
                 continue;
             }
+
+            let prev_run_count = Some(record.run_count);
+            let prev_last_run = Some(record.last_run);
+            let prev_last_tick = Some(record.last_tick);
 
             record.lease = Some(Lease {
                 owner: self.instance_id.to_string(),
                 session: self.session,
                 id: lease_id,
                 expires_at: plus(now, self.ttl),
+                prev_run_count,
+                prev_last_run,
+                prev_last_tick,
             });
             record.run_count = record.run_count.saturating_add(1);
             record.last_run = Some(now);
             if let Due::Cron(tick) = due {
                 record.last_tick = Some(tick);
             }
-            sent_lease.store(true, Ordering::Relaxed);
+            sent_lease.store(true, Ordering::Release);
+            let swap_started = tokio::time::Instant::now();
+            last_swap_started = Some(swap_started);
             if let Some(version) = self.swap(flow_id, version, &mut record).await? {
+                if let Some(old_id) = resolved_unstarted {
+                    self.remove_unstarted(flow_id, old_id);
+                }
                 #[cfg(feature = "metrics")]
                 if abandoned {
                     count_failure(flow_id, &record);
@@ -507,10 +726,90 @@ impl Coordinator {
                     version,
                     id: lease_id,
                     record,
+                    expires_mono: self.expires_mono_from(swap_started),
                 })));
             }
         }
         Err(contended(flow_id, "claim"))
+    }
+
+    /// Roll back an unstarted claim (`lease_id`): restores pre-claim `run_count`,
+    /// `last_run` and `last_tick`, calls `cancelled(now)` and clears the lease if it still
+    /// belongs to `(me, session, lease_id)`. Bounded by `min(ttl, 5s)`. If store failures
+    /// prevent resolving it, remembers `(flow_id, lease_id)` for same-session recovery.
+    pub(super) async fn abort_claim(&self, flow_id: &str, lease_id: u64) -> Option<FlowRecord> {
+        let budget = self.ttl.min(MAX_ABORT_CLAIM_BUDGET);
+        let deadline = crate::workflow::deadline_after(budget);
+        let result = tokio::time::timeout_at(deadline, async {
+            let mut conflicts = 0;
+            let mut errors = 0u32;
+            loop {
+                match self.try_abort_claim(flow_id, lease_id).await {
+                    Ok(AbortAttempt::Resolved(record)) => return Some(*record),
+                    Ok(AbortAttempt::Conflict) => {
+                        conflicts += 1;
+                        if conflicts >= CAS_ATTEMPTS {
+                            return None;
+                        }
+                    }
+                    Err(error) => {
+                        errors += 1;
+                        if errors > RELEASE_RETRIES {
+                            log_store_failure(
+                                flow_id,
+                                "aborting unstarted claim failed; remembering lease",
+                                &error,
+                            );
+                            return None;
+                        }
+                        log_store_failure(
+                            flow_id,
+                            "aborting unstarted claim failed; retrying",
+                            &error,
+                        );
+                        let delay = (Duration::from_millis(50) * errors).min(budget / 4);
+                        if !delay.is_zero() {
+                            tokio::time::sleep(delay).await;
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap_or(None);
+
+        if result.is_none() {
+            self.record_unstarted(flow_id, lease_id);
+        } else {
+            self.remove_unstarted(flow_id, lease_id);
+        }
+        result
+    }
+
+    async fn try_abort_claim(
+        &self,
+        flow_id: &str,
+        lease_id: u64,
+    ) -> Result<AbortAttempt, CanoError> {
+        let Some((version, mut record)) = self.load(flow_id).await? else {
+            return Ok(AbortAttempt::Resolved(Box::default()));
+        };
+        let Some(lease) = record.lease.take() else {
+            return Ok(AbortAttempt::Resolved(Box::new(record)));
+        };
+        if !self.matches_lease(&lease, lease_id) {
+            record.lease = Some(lease);
+            return Ok(AbortAttempt::Resolved(Box::new(record)));
+        }
+        let now = Utc::now();
+        lease.restore_into(&mut record);
+        record.cancelled(now);
+        Ok(
+            match self.swap(flow_id, Some(version), &mut record).await? {
+                Some(_) => AbortAttempt::Resolved(Box::new(record)),
+                None => AbortAttempt::Conflict,
+            },
+        )
     }
 
     /// Renew `held` every `ttl / 3` for as long as it can; returns once the lease is
@@ -529,13 +828,14 @@ impl Coordinator {
             // Never sleep past the expiry: a lease that ran out is reported at once.
             tokio::time::sleep(period.min(held.remaining(Utc::now()))).await;
             if let Renew::Lost(record) = self.renew(flow_id, held).await {
-                return record;
+                return record.map(|b| *b);
             }
         }
     }
 
     /// One renewal round: `Lost` when the lease ran out or belongs to another owner (or
-    /// no record is stored); `Held` when renewed, or on a store problem to retry next round.
+    /// no record is stored); `Held` when renewed, or on a transient store problem while
+    /// lease budget remains.
     async fn renew(&self, flow_id: &str, held: &mut HeldLease) -> Renew {
         for _ in 0..CAS_ATTEMPTS {
             let now = Utc::now();
@@ -552,7 +852,11 @@ impl Coordinator {
                 session: self.session,
                 id: held.id,
                 expires_at: plus(now, self.ttl),
+                prev_run_count: None,
+                prev_last_run: None,
+                prev_last_tick: None,
             });
+            let swap_started = tokio::time::Instant::now();
             match tokio::time::timeout_at(
                 deadline,
                 self.swap(flow_id, Some(held.version), &mut next),
@@ -562,18 +866,24 @@ impl Coordinator {
                 Ok(Ok(Some(version))) => {
                     held.version = version;
                     held.record = next;
+                    held.expires_mono = self.expires_mono_from(swap_started);
                     return Renew::Held;
                 }
                 Ok(Ok(None)) => {}
                 Ok(Err(error)) => {
                     log_store_failure(flow_id, "lease renewal failed", &error);
-                    return Renew::Held;
+                    return if held.remaining(Utc::now()).is_zero() {
+                        Renew::Lost(None)
+                    } else {
+                        Renew::Held
+                    };
                 }
-                Err(_) => return Renew::Held,
+                Err(_) => return Renew::Lost(None),
             }
 
             // Someone changed the record (`reset_flow` on another instance): follow it
-            // while this exact lease (`held.id`) is still ours.
+            // while this exact lease (`held.id`) is still ours, keeping existing
+            // `held.expires_mono` since the lease was not extended here.
             match tokio::time::timeout_at(deadline, self.load(flow_id)).await {
                 Ok(Ok(Some((version, record))))
                     if record
@@ -584,37 +894,52 @@ impl Coordinator {
                     held.version = version;
                     held.record = record;
                 }
-                Ok(Ok(other)) => return Renew::Lost(other.map(|(_, record)| record)),
+                Ok(Ok(other)) => return Renew::Lost(other.map(|(_, record)| Box::new(record))),
                 Ok(Err(error)) => {
                     log_store_failure(flow_id, "lease renewal failed", &error);
-                    return Renew::Held;
+                    return if held.remaining(Utc::now()).is_zero() {
+                        Renew::Lost(None)
+                    } else {
+                        Renew::Held
+                    };
                 }
-                Err(_) => return Renew::Held,
+                Err(_) => return Renew::Lost(None),
             }
         }
-        Renew::Held
+        if held.remaining(Utc::now()).is_zero() {
+            Renew::Lost(None)
+        } else {
+            Renew::Held
+        }
     }
 
-    /// Record a finished run and clear the lease. Retries conflicts only while the
-    /// lease is still ours, and store errors a few times within one lease TTL before
-    /// giving up (past a TTL the lease has already expired).
+    /// Record a finished run and clear the lease. Attempts an optimistic 1-RTT swap
+    /// directly from `held` first, falling back to `load` + `matches_lease` + `swap` on
+    /// conflict or error. Retries store errors a few times within one lease TTL before
+    /// giving up.
     pub(super) async fn release(
         &self,
         flow_id: &str,
-        lease_id: u64,
+        held: &HeldLease,
         policy: &BackoffPolicy,
         result: &CanoResult<()>,
     ) -> Release {
         let deadline = crate::workflow::deadline_after(self.ttl);
         let mut conflicts = 0;
         let mut errors = 0;
+        let mut try_optimistic = true;
+        let mut optimistic_seq: Option<u64> = None;
         loop {
-            let attempt = match tokio::time::timeout_at(
-                deadline,
-                self.try_release(flow_id, lease_id, policy, result),
-            )
-            .await
-            {
+            let fut = async {
+                if try_optimistic {
+                    self.try_release_optimistic(flow_id, held, policy, result, &mut optimistic_seq)
+                        .await
+                } else {
+                    self.try_release(flow_id, held.id, policy, result, optimistic_seq)
+                        .await
+                }
+            };
+            let attempt = match tokio::time::timeout_at(deadline, fut).await {
                 Ok(attempt) => attempt,
                 Err(_) => {
                     #[cfg(feature = "tracing")]
@@ -636,6 +961,7 @@ impl Coordinator {
                 }
                 Ok(ReleaseAttempt::NotHeld(record)) => return Release::NotHeld(record),
                 Ok(ReleaseAttempt::Conflict) => {
+                    try_optimistic = false;
                     conflicts += 1;
                     if conflicts >= CAS_ATTEMPTS {
                         log_store_failure(
@@ -647,6 +973,7 @@ impl Coordinator {
                     }
                 }
                 Err(error) => {
+                    try_optimistic = false;
                     errors += 1;
                     if errors > RELEASE_RETRIES {
                         #[cfg(feature = "tracing")]
@@ -678,12 +1005,31 @@ impl Coordinator {
         }
     }
 
+    async fn try_release_optimistic(
+        &self,
+        flow_id: &str,
+        held: &HeldLease,
+        policy: &BackoffPolicy,
+        result: &CanoResult<()>,
+        optimistic_seq: &mut Option<u64>,
+    ) -> Result<ReleaseAttempt, CanoError> {
+        let mut record = held.record.clone();
+        record.apply_result(policy, result, Utc::now());
+        let swapped = self.swap(flow_id, Some(held.version), &mut record).await;
+        *optimistic_seq = Some(record.write_seq);
+        Ok(match swapped? {
+            Some(_) => ReleaseAttempt::Written(record),
+            None => ReleaseAttempt::Conflict,
+        })
+    }
+
     async fn try_release(
         &self,
         flow_id: &str,
         lease_id: u64,
         policy: &BackoffPolicy,
         result: &CanoResult<()>,
+        optimistic_seq: Option<u64>,
     ) -> Result<ReleaseAttempt, CanoError> {
         let Some((version, mut record)) = self.load(flow_id).await? else {
             return Ok(ReleaseAttempt::NotHeld(None));
@@ -693,15 +1039,17 @@ impl Coordinator {
             .as_ref()
             .is_some_and(|lease| self.matches_lease(lease, lease_id))
         {
+            if record.lease.is_none()
+                && let Some(seq) = optimistic_seq
+                && record.written_by == *self.instance_id
+                && record.written_session == self.session
+                && record.write_seq == seq
+            {
+                return Ok(ReleaseAttempt::Written(record));
+            }
             return Ok(ReleaseAttempt::NotHeld(Some(record)));
         }
-        let now = Utc::now();
-        match result {
-            Ok(()) => record.succeed(),
-            Err(e) if e.is_cancelled() => record.cancelled(now),
-            Err(e) => record.fail(policy, e.to_string(), now),
-        }
-        record.lease = None;
+        record.apply_result(policy, result, Utc::now());
         Ok(
             match self.swap(flow_id, Some(version), &mut record).await? {
                 Some(_) => ReleaseAttempt::Written(record),
@@ -710,31 +1058,56 @@ impl Coordinator {
         )
     }
 
-    /// Clear the failure streak and backoff window in the shared record. The lease,
-    /// if any, is left alone. A flow with no record is already clean.
+    /// Clear the failure streak and backoff window in the shared record, and clear any
+    /// expired lease while leaving a live lease intact. A flow with no record is already
+    /// clean.
     pub(super) async fn reset(&self, flow_id: &str) -> Result<FlowRecord, CanoError> {
-        for _ in 0..CAS_ATTEMPTS {
-            let Some((version, mut record)) = self.load(flow_id).await? else {
-                return Ok(FlowRecord::default());
-            };
-            record.failure_streak = 0;
-            record.next_eligible = None;
-            record.last_error = None;
-            record.state = FlowState::Idle;
-            if self
-                .swap(flow_id, Some(version), &mut record)
-                .await?
-                .is_some()
-            {
-                return Ok(record);
+        let deadline = crate::workflow::deadline_after(self.ttl);
+        tokio::time::timeout_at(deadline, async {
+            for _ in 0..CAS_ATTEMPTS {
+                let Some((version, mut record)) = self.load(flow_id).await? else {
+                    return Ok(FlowRecord::default());
+                };
+                let now = Utc::now();
+                let mut cleared_same_session = None;
+                if let Some(lease) = &record.lease
+                    && lease.expires_at <= now
+                {
+                    if self.is_same_session(lease) {
+                        cleared_same_session = Some(lease.id);
+                    }
+                    record.lease = None;
+                }
+                record.failure_streak = 0;
+                record.next_eligible = None;
+                record.last_error = None;
+                record.state = FlowState::Idle;
+                if self
+                    .swap(flow_id, Some(version), &mut record)
+                    .await?
+                    .is_some()
+                {
+                    if let Some(lease_id) = cleared_same_session {
+                        self.remove_unstarted(flow_id, lease_id);
+                    }
+                    return Ok(record);
+                }
             }
-        }
-        Err(contended(flow_id, "reset"))
+            Err(contended(flow_id, "reset"))
+        })
+        .await
+        .unwrap_or_else(|_| {
+            Err(CanoError::scheduler_store(format!(
+                "flow '{flow_id}': reset timed out after {:?}",
+                self.ttl
+            )))
+        })
     }
 
     /// Copy `record` into the local cell. The status is left alone while a local run
     /// is in flight: `Running` always wins over what the store says.
     pub(super) fn mirror(&self, cell: &mut FlowCell, record: &FlowRecord) {
+        cell.mirrored = Some(record.clone());
         let info = &mut cell.info;
         info.run_count = record.run_count;
         info.last_run = record.last_run;
@@ -743,6 +1116,14 @@ impl Coordinator {
         if info.status != Status::Running {
             info.status = record.status(&self.instance_id, self.session, Utc::now());
         }
+    }
+
+    /// Compute the status of `cell` at `now` from its last mirrored record, used when a
+    /// cached `RunningElsewhere` lease has expired locally.
+    pub(super) fn normalized_status(&self, cell: &FlowCell, now: DateTime<Utc>) -> Status {
+        cell.mirrored.as_ref().map_or(Status::Idle, |record| {
+            record.status(&self.instance_id, self.session, now)
+        })
     }
 
     /// End the local run: drop its token, leave `Running`, then mirror `record` when

@@ -162,12 +162,12 @@ impl RunningScheduler {
     /// Wait until flow `id` is not [`Status::Running`] and return its info, or `None`
     /// for an unknown id. Returns immediately when the flow is not running.
     pub async fn wait_idle(&self, id: &str) -> Option<FlowInfo> {
-        let mut rx = self.inner.flows.get(id)?.cell.subscribe();
-        let cell = rx
-            .wait_for(|cell| cell.info.status != Status::Running)
+        let rt = self.inner.flows.get(id)?;
+        let mut rx = rt.cell.subscribe();
+        rx.wait_for(|cell| cell.info.status != Status::Running)
             .await
             .ok()?;
-        Some(cell.info.clone())
+        Some(flow_info(rt))
     }
 
     /// Start a run of flow `id` now.
@@ -292,9 +292,10 @@ impl RunningScheduler {
     ///
     /// With a [store](crate::scheduler::Scheduler::with_store) the counters and status
     /// reflect the shared record as this instance last read it (see
-    /// [`Status::RunningElsewhere`]).
+    /// [`Status::RunningElsewhere`]); once an observed remote lease expires, the status
+    /// falls back to the mirrored non-lease state.
     pub fn status(&self, id: &str) -> Option<FlowInfo> {
-        Some(self.inner.flows.get(id)?.cell.borrow().info.clone())
+        self.inner.flows.get(id).map(|rt| flow_info(rt))
     }
 
     /// Snapshot of every flow, in registration order.
@@ -302,7 +303,7 @@ impl RunningScheduler {
         self.inner
             .order
             .iter()
-            .map(|id| self.inner.flows[id].cell.borrow().info.clone())
+            .map(|id| flow_info(&self.inner.flows[id]))
             .collect()
     }
 
@@ -316,6 +317,22 @@ impl RunningScheduler {
     fn stopped() -> CanoError {
         CanoError::workflow("Scheduler is stopping or stopped")
     }
+}
+
+/// Snapshot `rt`'s public `FlowInfo`, normalizing an already-expired
+/// `RunningElsewhere` status back to the underlying mirrored record state.
+fn flow_info(rt: &FlowRuntime) -> FlowInfo {
+    let cell = rt.cell.borrow();
+    let mut info = cell.info.clone();
+    if let (Some(coord), Status::RunningElsewhere { lease_expires, .. }) =
+        (&rt.coordinator, &info.status)
+    {
+        let now = chrono::Utc::now();
+        if *lease_expires <= now {
+            info.status = coord.normalized_status(&cell, now);
+        }
+    }
+    info
 }
 
 /// Drain → cancel → abort → teardown. See [`RunningScheduler::stop`].

@@ -643,3 +643,96 @@ async fn cancel_flow_cancels_checkpointed_stepped_flow() {
     assert_eq!(running.status("stepped").unwrap().status, Status::Idle);
     running.stop().await.unwrap();
 }
+
+#[cfg(feature = "testing")]
+#[tokio::test(flavor = "multi_thread")]
+async fn cancel_flow_checkpointed_stepped_flow_resumes_from_cursor_and_clears_log() {
+    use cano::testing::InMemoryCheckpointStore;
+
+    #[derive(Clone)]
+    struct ResumableStepper {
+        seen: Arc<Mutex<Vec<Option<u32>>>>,
+        park_on_step1: Arc<AtomicBool>,
+        step1_parked: Arc<AtomicBool>,
+    }
+
+    #[task::stepped(state = Step)]
+    impl ResumableStepper {
+        async fn step(
+            &self,
+            _res: &Resources,
+            cursor: Option<u32>,
+        ) -> Result<StepOutcome<u32, Step>, CanoError> {
+            self.seen.lock().unwrap().push(cursor);
+            if cursor == Some(0) && self.park_on_step1.load(SeqCst) {
+                self.step1_parked.store(true, SeqCst);
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
+            match cursor {
+                None => Ok(StepOutcome::More(0)),
+                Some(0) => Ok(StepOutcome::More(1)),
+                Some(_) => Ok(StepOutcome::Done(Step::Done)),
+            }
+        }
+    }
+
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let park_on_step1 = Arc::new(AtomicBool::new(true));
+    let step1_parked = flag();
+    let store = Arc::new(InMemoryCheckpointStore::new());
+    let wf = Workflow::bare()
+        .with_checkpoint_store(store.clone())
+        .with_workflow_id("stepped-resume-ckpt")
+        .register(
+            Step::Work,
+            ResumableStepper {
+                seen: seen.clone(),
+                park_on_step1: park_on_step1.clone(),
+                step1_parked: step1_parked.clone(),
+            },
+        )
+        .add_exit_state(Step::Done);
+
+    let running = Scheduler::new()
+        .manual("stepped", wf, Step::Work)
+        .start()
+        .await
+        .unwrap();
+
+    // Run 1: persists cursor 0, parks inside cursor Some(0), then gets cancelled.
+    running.trigger("stepped").await.unwrap();
+    await_flag(&step1_parked).await;
+    running.cancel_flow("stepped").unwrap();
+    await_not_running(&running, "stepped").await;
+    assert_eq!(running.status("stepped").unwrap().status, Status::Idle);
+    assert!(
+        !store.rows("stepped-resume-ckpt").is_empty(),
+        "cancelled stepped run retains checkpoint log for resume"
+    );
+
+    // Run 2: re-trigger auto-resumes from persisted cursor 0 (does not re-run None) and clears log.
+    park_on_step1.store(false, SeqCst);
+    running.trigger("stepped").await.unwrap();
+    await_not_running(&running, "stepped").await;
+    assert_eq!(running.status("stepped").unwrap().status, Status::Completed);
+    assert!(
+        store.rows("stepped-resume-ckpt").is_empty(),
+        "completed resumed run clears checkpoint log"
+    );
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![None, Some(0), Some(0), Some(1)],
+        "second run must resume from cursor 0 instead of restarting at None"
+    );
+
+    // Run 3: starts fresh from cursor None.
+    running.trigger("stepped").await.unwrap();
+    await_not_running(&running, "stepped").await;
+    assert_eq!(running.status("stepped").unwrap().status, Status::Completed);
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![None, Some(0), Some(0), Some(1), None, Some(0), Some(1)]
+    );
+
+    running.stop().await.unwrap();
+}

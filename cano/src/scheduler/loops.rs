@@ -109,38 +109,116 @@ pub(super) fn reserve_local(
     reserve(rt, cancel_runs).map(|token| Reserved { token, held: None })
 }
 
+struct ReleaseClaiming(Option<Arc<FlowRuntime>>);
+
+impl Drop for ReleaseClaiming {
+    fn drop(&mut self) {
+        if let Some(rt) = self.0.take() {
+            rt.cell.send_modify(|cell| {
+                cell.claiming = false;
+                cell.run_token = None;
+            });
+        }
+    }
+}
+
+struct AbandonDrop {
+    coord: Option<Arc<Coordinator>>,
+    flow_id: Arc<str>,
+    lease_id: u64,
+}
+
+impl Drop for AbandonDrop {
+    fn drop(&mut self) {
+        if let Some(coord) = self.coord.take() {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let flow_id = Arc::clone(&self.flow_id);
+                let lease_id = self.lease_id;
+                handle.spawn(async move {
+                    let _ = coord.abort_claim(&flow_id, lease_id).await;
+                });
+            } else {
+                coord.record_unstarted(&self.flow_id, self.lease_id);
+            }
+        }
+    }
+}
+
 /// Ends an in-flight claim unless disarmed: a claim future dropped mid-await (a
 /// cancelled `trigger`) must not leave the flow reserved locally or strand a newly
 /// written lease in the store.
-struct Unreserve<'a> {
-    rt: &'a FlowRuntime,
+struct Unreserve {
+    rt: Arc<FlowRuntime>,
     flow_id: Arc<str>,
     lease_id: u64,
     sent_lease: Arc<std::sync::atomic::AtomicBool>,
     armed: bool,
 }
 
-impl Drop for Unreserve<'_> {
+impl Drop for Unreserve {
     fn drop(&mut self) {
-        if self.armed {
-            self.rt.cell.send_modify(|cell| {
-                cell.claiming = false;
-                cell.run_token = None;
-            });
-            if self.sent_lease.load(std::sync::atomic::Ordering::Relaxed)
-                && let Some(coord) = self.rt.coordinator.clone()
-                && let Ok(handle) = tokio::runtime::Handle::try_current()
-            {
+        if !self.armed {
+            return;
+        }
+        if self.sent_lease.load(std::sync::atomic::Ordering::Acquire)
+            && let Some(coord) = self.rt.coordinator.clone()
+        {
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let rt = Arc::clone(&self.rt);
                 let flow_id = Arc::clone(&self.flow_id);
                 let lease_id = self.lease_id;
-                let policy = self.rt.policy.clone();
-                handle.spawn(async move {
-                    let _ = coord
-                        .release(&flow_id, lease_id, &policy, &Err(CanoError::cancelled()))
-                        .await;
+                // Keep `cell.claiming = true` until `abort_claim` completes so a second
+                // `trigger()` cannot race cleanup and double-bump `run_count`.
+                rt.cell.send_modify(|cell| {
+                    cell.run_token = None;
                 });
+                handle.spawn(async move {
+                    let mut guard = ReleaseClaiming(Some(Arc::clone(&rt)));
+                    if let Some(record) = coord.abort_claim(&flow_id, lease_id).await {
+                        guard.0 = None;
+                        rt.cell
+                            .send_modify(|cell| coord.settle(cell, Some(&record)));
+                    }
+                });
+                return;
             }
+            coord.record_unstarted(&self.flow_id, self.lease_id);
         }
+        self.rt.cell.send_modify(|cell| {
+            cell.claiming = false;
+            cell.run_token = None;
+        });
+    }
+}
+
+async fn cleanup_aborted_claim(
+    rt: &FlowRuntime,
+    coord: &Coordinator,
+    flow_id: &str,
+    lease_id: u64,
+    sent_lease: &std::sync::atomic::AtomicBool,
+    guard: &mut Unreserve,
+) {
+    if sent_lease.load(std::sync::atomic::Ordering::Acquire) {
+        // Keep `guard.armed = true` across `abort_claim` so a caller dropped mid-cleanup
+        // still delegates rollback to `Unreserve::drop`, and only clear `cell.claiming`
+        // once `abort_claim` completes.
+        let settled = coord.abort_claim(flow_id, lease_id).await;
+        guard.armed = false;
+        rt.cell.send_modify(|cell| {
+            if let Some(record) = settled.as_ref() {
+                coord.settle(cell, Some(record));
+            } else {
+                cell.claiming = false;
+                cell.run_token = None;
+            }
+        });
+    } else {
+        guard.armed = false;
+        rt.cell.send_modify(|cell| {
+            cell.claiming = false;
+            cell.run_token = None;
+        });
     }
 }
 
@@ -149,7 +227,7 @@ impl Drop for Unreserve<'_> {
 /// claim stays in `claiming` until [`activate`] commits to running it (or [`abandon`]
 /// hands it back), so a run cancelled before launch never flashes [`Status::Running`].
 pub(super) async fn acquire(
-    rt: &FlowRuntime,
+    rt: &Arc<FlowRuntime>,
     cancel_runs: &CancellationToken,
     due: Due,
     shutdown: Option<&CancellationToken>,
@@ -162,7 +240,7 @@ pub(super) async fn acquire(
     let lease_id = coord.next_lease_id();
     let sent_lease = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let mut guard = Unreserve {
-        rt,
+        rt: Arc::clone(rt),
         flow_id: Arc::clone(&flow_id),
         lease_id,
         sent_lease: Arc::clone(&sent_lease),
@@ -186,19 +264,11 @@ pub(super) async fn acquire(
             Err(Refused::Refusal(reason))
         }
         Ok(None) => {
-            guard.armed = false;
-            rt.cell.send_modify(|cell| {
-                cell.claiming = false;
-                cell.run_token = None;
-            });
+            cleanup_aborted_claim(rt, coord, &flow_id, lease_id, &sent_lease, &mut guard).await;
             Ok(None)
         }
         Err(error) => {
-            guard.armed = false;
-            rt.cell.send_modify(|cell| {
-                cell.claiming = false;
-                cell.run_token = None;
-            });
+            cleanup_aborted_claim(rt, coord, &flow_id, lease_id, &sent_lease, &mut guard).await;
             Err(Refused::Store(error))
         }
     }
@@ -218,7 +288,7 @@ pub(super) fn activate(rt: &FlowRuntime, reserved: &Reserved) {
 
 /// Give a reserved run back without running it (the scheduler began stopping while
 /// claiming): clear the local reservation first so a dropped caller cannot strand it,
-/// then release the lease as a deliberate cancel.
+/// then roll back the unstarted claim as a deliberate cancel.
 pub(super) async fn abandon(rt: &FlowRuntime, reserved: Reserved) {
     rt.cell.send_modify(|cell| {
         cell.claiming = false;
@@ -228,19 +298,13 @@ pub(super) async fn abandon(rt: &FlowRuntime, reserved: Reserved) {
     let Reserved { held, .. } = reserved;
     if let (Some(coord), Some(held)) = (&rt.coordinator, held) {
         let flow_id = rt.cell.borrow().info.id.clone();
-        let record = match coord
-            .release(
-                &flow_id,
-                held.id(),
-                &rt.policy,
-                &Err(CanoError::cancelled()),
-            )
-            .await
-        {
-            Release::Written(record) => Some(record),
-            Release::NotHeld(record) => record,
-            Release::GaveUp => None,
+        let mut drop_guard = AbandonDrop {
+            coord: Some(Arc::clone(coord)),
+            flow_id: Arc::clone(&flow_id),
+            lease_id: held.id(),
         };
+        let record = coord.abort_claim(&flow_id, held.id()).await;
+        drop_guard.coord = None;
         if let Some(record) = record {
             rt.cell
                 .send_modify(|cell| coord.settle(cell, Some(&record)));
@@ -274,7 +338,8 @@ impl Drop for RunningGuard<'_> {
 type Unwound = Result<CanoResult<()>, Box<dyn Any + Send>>;
 
 enum RunLease {
-    Held(u64),
+    Standalone,
+    Held(HeldLease),
     Lost(Option<super::lease::FlowRecord>),
 }
 
@@ -300,7 +365,7 @@ pub(super) async fn run_reserved(rt: Arc<FlowRuntime>, reserved: Reserved) {
     #[cfg(feature = "metrics")]
     let started = std::time::Instant::now();
 
-    let run = rt.flow.run(&token);
+    let run = rt.flow.run(&flow_id, &token);
     #[cfg(feature = "tracing")]
     let run = tracing::Instrument::instrument(
         run,
@@ -310,7 +375,7 @@ pub(super) async fn run_reserved(rt: Arc<FlowRuntime>, reserved: Reserved) {
 
     let (unwound, lease_state) = match (&rt.coordinator, held) {
         (Some(coord), Some(held)) => run_with_lease(coord, &flow_id, held, &token, run).await,
-        _ => (run.await, RunLease::Held(0)),
+        _ => (run.await, RunLease::Standalone),
     };
     let result = match unwound {
         Ok(inner) => inner,
@@ -341,18 +406,17 @@ pub(super) async fn run_reserved(rt: Arc<FlowRuntime>, reserved: Reserved) {
         return;
     };
     let record = match lease_state {
+        RunLease::Standalone => unreachable!("coordinator requires a held lease"),
         RunLease::Lost(record) => record,
-        RunLease::Held(lease_id) => {
-            match coord.release(&flow_id, lease_id, &rt.policy, &result).await {
-                Release::Written(record) => Some(record),
-                Release::NotHeld(record) => {
-                    #[cfg(feature = "tracing")]
-                    tracing::warn!(%flow_id, "scheduler lease was lost before the run ended; outcome not written");
-                    record
-                }
-                Release::GaveUp => None,
+        RunLease::Held(held) => match coord.release(&flow_id, &held, &rt.policy, &result).await {
+            Release::Written(record) => Some(record),
+            Release::NotHeld(record) => {
+                #[cfg(feature = "tracing")]
+                tracing::warn!(%flow_id, "scheduler lease was lost before the run ended; outcome not written");
+                record
             }
-        }
+            Release::GaveUp => None,
+        },
     };
     running_guard.disarmed = true;
     rt.cell
@@ -368,7 +432,6 @@ async fn run_with_lease(
     token: &CancellationToken,
     run: impl Future<Output = Unwound>,
 ) -> (Unwound, RunLease) {
-    let lease_id = held.id();
     tokio::pin!(run);
     // `run` is never dropped here: a lost lease cancels it and waits for it to drain
     // (saga compensation must complete), it does not abandon it.
@@ -377,7 +440,7 @@ async fn run_with_lease(
         record = coord.keep_alive(flow_id, &mut held) => Err(record),
     };
     match first {
-        Ok(outcome) => (outcome, RunLease::Held(lease_id)),
+        Ok(outcome) => (outcome, RunLease::Held(held)),
         Err(record) => {
             #[cfg(feature = "tracing")]
             tracing::warn!(
@@ -426,7 +489,7 @@ fn apply_outcome(rt: &FlowRuntime, result: CanoResult<()>) {
                 }
             }
             Err(e) => {
-                let last_error: Arc<str> = Arc::from(e.to_string());
+                let last_error: Arc<str> = Arc::from(super::lease::truncate_error(&e.to_string()));
                 cell.last_error = Some(Arc::clone(&last_error));
                 let (streak, until) =
                     super::lease::after_failure(&rt.policy, info.failure_streak, Utc::now());
@@ -465,6 +528,9 @@ async fn dispatch(
     cancel_runs: &CancellationToken,
     due: Due,
 ) -> Tick {
+    if shutdown.is_cancelled() {
+        return Tick::Stopped;
+    }
     let acquired = tokio::select! {
         biased;
         _ = cancel_runs.cancelled() => return Tick::Stopped,
@@ -472,6 +538,10 @@ async fn dispatch(
     };
     match acquired {
         Ok(Some(reserved)) => {
+            if shutdown.is_cancelled() {
+                abandon(rt, reserved).await;
+                return Tick::Stopped;
+            }
             activate(rt, &reserved);
             run_reserved(Arc::clone(rt), reserved).await;
             Tick::Ran
@@ -589,11 +659,39 @@ pub(super) async fn cron_loop(
             }
         }
 
-        if matches!(
-            dispatch(&rt, &shutdown, &cancel_runs, Due::Cron(next)).await,
-            Tick::Stopped
-        ) {
-            break;
+        let retry_wait = rt
+            .coordinator
+            .as_ref()
+            .map(|c| (c.ttl() / 3).clamp(Duration::from_millis(50), Duration::from_secs(5)));
+        let following = schedule.after(&next).next();
+        loop {
+            match dispatch(&rt, &shutdown, &cancel_runs, Due::Cron(next)).await {
+                Tick::Stopped => return,
+                Tick::Refused(Refused::Store(_)) => {
+                    let Some(wait) = retry_wait else {
+                        break;
+                    };
+                    let now = Utc::now();
+                    let sleep_for = match following {
+                        Some(after_next) => {
+                            let Some(until_next) =
+                                (after_next - now).to_std().ok().filter(|d| !d.is_zero())
+                            else {
+                                break;
+                            };
+                            wait.min(until_next)
+                        }
+                        None => wait,
+                    };
+                    if !sleep_or_shutdown(sleep_for, &shutdown).await {
+                        return;
+                    }
+                    if following.is_some_and(|after_next| Utc::now() >= after_next) {
+                        break;
+                    }
+                }
+                _ => break,
+            }
         }
     }
 }
@@ -621,9 +719,16 @@ fn wait_until_eligible(rt: &FlowRuntime, interval: Duration) -> Duration {
 ///   never goes beyond the lease expiry: a holder that stopped renewing is noticed
 ///   promptly.
 /// - A tripped flow only changes when someone calls `reset_flow`; look every interval.
-/// - When the claim failed on a store error or a local trigger is still running, retry
-///   after at least one interval instead of polling at [`MIN_POLL`].
+/// - When the claim failed on a store error, retry after `min(interval, max(ttl / 3,
+///   MIN_POLL))` instead of sleeping a full long interval; when a local trigger is still
+///   running, wait at least one interval instead of polling at [`MIN_POLL`].
 fn shared_wait(rt: &FlowRuntime, interval: Duration, last_tick: &Tick) -> Duration {
+    if matches!(last_tick, Tick::Refused(Refused::Store(_))) {
+        let retry = rt.coordinator.as_ref().map_or(interval, |coord| {
+            interval.min((coord.ttl() / 3).max(MIN_POLL))
+        });
+        return retry.max(MIN_POLL);
+    }
     let now = Utc::now();
     let cell = rt.cell.borrow();
     let info = &cell.info;
@@ -644,10 +749,7 @@ fn shared_wait(rt: &FlowRuntime, interval: Duration, last_tick: &Tick) -> Durati
         }
         _ => {}
     }
-    if matches!(
-        last_tick,
-        Tick::Refused(Refused::Store(_) | Refused::Running)
-    ) {
+    if matches!(last_tick, Tick::Refused(Refused::Running)) {
         wake = wake.max(plus(now, interval));
     }
     (wake - now)

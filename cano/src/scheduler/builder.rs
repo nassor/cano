@@ -320,6 +320,7 @@ impl Scheduler {
             },
             run_token: None,
             last_error: None,
+            mirrored: None,
             claiming: false,
             aborted: false,
         };

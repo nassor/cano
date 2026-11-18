@@ -462,7 +462,7 @@ where
 
     /// Map a checkpoint state label (the `Debug` rendering of a `TState`) back to
     /// the matching registered or exit state, or `None` if no state has that label.
-    fn state_from_label(&self, label: &str) -> Option<TState> {
+    pub(super) fn state_from_label(&self, label: &str) -> Option<TState> {
         self.all_states()
             .find(|s| format!("{s:?}") == label)
             .cloned()
@@ -661,6 +661,31 @@ where
         // is O(N log N) on an already-sorted log so the overhead for compliant
         // backends is negligible.
         rows.sort_by_key(|r| r.sequence);
+        self.execute_resume_from_rows(workflow_id, rows, input, token)
+            .await
+    }
+
+    /// Resume a scheduled workflow directly from preloaded, sequence-sorted
+    /// checkpoint rows without repeating resource `setup`/`teardown` (owned by
+    /// the scheduler).
+    #[cfg(feature = "scheduler")]
+    pub(super) async fn resume_scheduled_from_rows(
+        &self,
+        workflow_id: Arc<str>,
+        rows: Vec<CheckpointRow>,
+        token: Option<&CancellationToken>,
+    ) -> Result<TState, CanoError> {
+        self.execute_resume_from_rows(workflow_id, rows, None, token)
+            .await
+    }
+
+    async fn execute_resume_from_rows(
+        &self,
+        workflow_id: Arc<str>,
+        rows: Vec<CheckpointRow>,
+        input: Option<Vec<u8>>,
+        token: Option<&CancellationToken>,
+    ) -> Result<TState, CanoError> {
         let last = rows.last().ok_or_else(|| {
             CanoError::checkpoint_store(format!(
                 "no checkpoint rows for workflow id {workflow_id:?}"

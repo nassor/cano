@@ -203,7 +203,11 @@ trait Flow: Send + Sync + 'static {
     fn setup(&self) -> BoxFuture<'_, CanoResult<()>>;
     fn teardown(&self) -> BoxFuture<'_, ()>;
     /// One run from the initial state under `token` (no resource lifecycle).
-    fn run<'a>(&'a self, token: &'a CancellationToken) -> BoxFuture<'a, CanoResult<()>>;
+    fn run<'a>(
+        &'a self,
+        flow_id: &'a str,
+        token: &'a CancellationToken,
+    ) -> BoxFuture<'a, CanoResult<()>>;
 }
 
 struct WorkflowFlow<TState>
@@ -236,10 +240,14 @@ where
         Box::pin(self.workflow.resources.teardown_all())
     }
 
-    fn run<'a>(&'a self, token: &'a CancellationToken) -> BoxFuture<'a, CanoResult<()>> {
+    fn run<'a>(
+        &'a self,
+        flow_id: &'a str,
+        token: &'a CancellationToken,
+    ) -> BoxFuture<'a, CanoResult<()>> {
         Box::pin(async move {
             self.workflow
-                .run_once(self.initial_state.clone(), Some(token))
+                .run_once(self.initial_state.clone(), flow_id, Some(token))
                 .await
                 .map(drop)
         })
@@ -254,6 +262,9 @@ struct FlowCell {
     /// Last failure error string on a standalone scheduler, kept so cancelling a
     /// manual trigger during an active backoff window restores `Status::Backoff`.
     last_error: Option<Arc<str>>,
+    /// Last record mirrored from the shared store, used by `status`/`list` to
+    /// recompute `Status` when a cached `RunningElsewhere` lease expires locally.
+    mirrored: Option<lease::FlowRecord>,
     /// A store claim is in flight on this instance. It blocks a second local dispatch
     /// without showing the flow as `Running` before the claim is won.
     claiming: bool,

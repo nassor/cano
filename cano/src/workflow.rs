@@ -959,15 +959,51 @@ where
 
     /// Validate (cached) + validate the initial state + run the FSM. No resource
     /// setup/teardown: the scheduler owns its flows' resource lifecycle.
+    ///
+    /// When a [`CheckpointStore`] is attached, self-heals across crashes,
+    /// cancellations and failovers: empty logs run fresh, completed exit-state
+    /// logs are cleared before starting a fresh run, and unfinished logs resume
+    /// from their last checkpointed state without re-running resource setup.
     #[cfg(feature = "scheduler")]
     pub(crate) async fn run_once(
         &self,
         initial_state: TState,
+        fallback_workflow_id: &str,
         token: Option<&CancellationToken>,
     ) -> Result<TState, CanoError> {
         self.validate_cached()?;
         self.validate_initial_state(&initial_state)?;
-        let run = self.run_workflow(initial_state, token);
+        let run = async move {
+            let Some(store) = self.checkpoint_store.as_ref() else {
+                return self.run_workflow(initial_state, token).await;
+            };
+            let wf_id = self
+                .workflow_id
+                .clone()
+                .unwrap_or_else(|| Arc::from(fallback_workflow_id));
+            let mut rows = store.load_run(&wf_id).await.map_err(|e| {
+                CanoError::checkpoint_store(format!("load checkpoint run {wf_id:?}: {e}"))
+            })?;
+            rows.sort_by_key(|r| r.sequence);
+            if let Some(last) = rows.last() {
+                let is_completed_exit = last.workflow_version == self.workflow_version
+                    && !matches!(
+                        last.kind,
+                        crate::checkpoint::RowKind::Suspended
+                            | crate::checkpoint::RowKind::ResumeInput
+                    )
+                    && self
+                        .state_from_label(&last.state)
+                        .is_some_and(|s| self.exit_states.contains(&s));
+                if is_completed_exit {
+                    store.clear(&wf_id).await?;
+                } else {
+                    return self.resume_scheduled_from_rows(wf_id, rows, token).await;
+                }
+            }
+            self.run_workflow_with_id(initial_state, Some(wf_id), token)
+                .await
+        };
         #[cfg(feature = "tracing")]
         if let Some(span) = self.tracing_span.clone() {
             return run.instrument(span).await;
@@ -985,6 +1021,16 @@ where
         initial_state: TState,
         token: Option<&CancellationToken>,
     ) -> Result<TState, CanoError> {
+        self.run_workflow_with_id(initial_state, self.workflow_id.clone(), token)
+            .await
+    }
+
+    async fn run_workflow_with_id(
+        &self,
+        initial_state: TState,
+        workflow_id: Option<Arc<str>>,
+        token: Option<&CancellationToken>,
+    ) -> Result<TState, CanoError> {
         #[cfg(feature = "metrics")]
         let _active = crate::metrics::WorkflowActiveGuard::new();
         let started = std::time::Instant::now();
@@ -993,7 +1039,7 @@ where
             .execute_workflow_from(
                 initial_state,
                 0,
-                self.workflow_id.clone(),
+                workflow_id,
                 Vec::new(),
                 HashMap::new(),
                 None,

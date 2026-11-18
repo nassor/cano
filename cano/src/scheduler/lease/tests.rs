@@ -382,6 +382,9 @@ async fn a_lost_lease_cancels_the_run_and_keeps_the_new_owners_record() {
             session: 99,
             id: 1,
             expires_at: Utc::now() + chrono::Duration::seconds(60),
+            prev_run_count: None,
+            prev_last_run: None,
+            prev_last_tick: None,
         });
         rec.written_by = "thief".into();
         let bytes = serde_json::to_vec(&rec).unwrap();
@@ -430,6 +433,9 @@ async fn an_expired_foreign_lease_counts_as_a_failure() {
                 session: 99,
                 id: 1,
                 expires_at: now - chrono::Duration::seconds(10),
+                prev_run_count: None,
+                prev_last_run: None,
+                prev_last_tick: None,
             }),
             written_by: "ghost".into(),
             written_at: now - chrono::Duration::seconds(60),
@@ -1065,6 +1071,9 @@ async fn a_store_outage_after_an_expired_foreign_lease_does_not_busy_poll() {
             session: 99,
             id: 1,
             expires_at: now + chrono::Duration::milliseconds(150),
+            prev_run_count: None,
+            prev_last_run: None,
+            prev_last_tick: None,
         }),
         written_by: "other".into(),
         written_at: now,
@@ -1631,7 +1640,7 @@ async fn stale_lease_id_cannot_release_newer_run_on_same_instance() {
     let sent = std::sync::atomic::AtomicBool::new(false);
 
     let id1 = coord.next_lease_id();
-    let Some(super::Claim::Won(_)) = coord
+    let Some(super::Claim::Won(held1)) = coord
         .claim("f", id1, &policy, Due::Trigger, None, &sent)
         .await
         .unwrap()
@@ -1642,7 +1651,7 @@ async fn stale_lease_id_cannot_release_newer_run_on_same_instance() {
     tokio::time::sleep(Duration::from_millis(40)).await;
 
     let id2 = coord.next_lease_id();
-    let Some(super::Claim::Won(_)) = coord
+    let Some(super::Claim::Won(held2)) = coord
         .claim("f", id2, &policy, Due::Trigger, None, &sent)
         .await
         .unwrap()
@@ -1651,13 +1660,13 @@ async fn stale_lease_id_cannot_release_newer_run_on_same_instance() {
     };
 
     // Late zombie release for `id1` must return `NotHeld` and leave `id2` intact.
-    let rel = coord.release("f", id1, &policy, &Ok(())).await;
+    let rel = coord.release("f", &held1, &policy, &Ok(())).await;
     assert!(matches!(rel, super::Release::NotHeld(Some(_))));
     let rec = record(&store, "f");
     assert_eq!(rec.lease.as_ref().map(|l| l.id), Some(id2));
 
     // Releasing `id2` succeeds and clears the lease.
-    let rel2 = coord.release("f", id2, &policy, &Ok(())).await;
+    let rel2 = coord.release("f", &held2, &policy, &Ok(())).await;
     assert!(matches!(rel2, super::Release::Written(_)));
     assert!(record(&store, "f").lease.is_none());
 }
@@ -1752,6 +1761,9 @@ fn store_backed_failures_and_expired_leases_emit_scheduler_metrics() {
                     session: 99,
                     id: 1,
                     expires_at: now - chrono::Duration::seconds(5),
+                    prev_run_count: None,
+                    prev_last_run: None,
+                    prev_last_tick: None,
                 }),
                 written_by: "dead".into(),
                 written_at: now - chrono::Duration::seconds(60),
@@ -1801,4 +1813,1004 @@ fn store_backed_failures_and_expired_leases_emit_scheduler_metrics() {
         1
     );
     assert_eq!(gauge(&rows, "cano_scheduler_active_flows", &[]), 0.0);
+}
+
+/// Programmable store wrapper for injecting lost ACKs, concurrent resets, and
+/// load/swap pauses at exact points in the lease protocol.
+#[derive(Default)]
+struct HookedStore {
+    inner: InMemorySchedulerStore,
+    calls: AtomicU32,
+    down: AtomicBool,
+    stall_next_load: AtomicBool,
+    stall_next_swap: AtomicBool,
+    fail_swap_after_next_load: AtomicBool,
+    lost_ack_next_swap: AtomicBool,
+    lost_ack_with_reset_next_swap: AtomicBool,
+    delay_swap_ms: AtomicU64,
+    pause_swap_then_notify:
+        parking_lot::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
+    pause_next_load:
+        parking_lot::Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
+}
+
+impl HookedStore {
+    fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+}
+
+#[crate::scheduler_store]
+impl SchedulerStore for HookedStore {
+    async fn load(&self, flow_id: &str) -> Result<Option<VersionedRecord>, CanoError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let pause = self.pause_next_load.lock().take();
+        if let Some((entered, release)) = pause {
+            entered.notify_one();
+            release.notified().await;
+        }
+        if self.stall_next_load.swap(false, Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        if self.down.load(Ordering::SeqCst) {
+            return Err(CanoError::scheduler_store("store is down"));
+        }
+        let loaded = self.inner.load(flow_id).await;
+        if self.fail_swap_after_next_load.swap(false, Ordering::SeqCst) {
+            self.down.store(true, Ordering::SeqCst);
+        }
+        loaded
+    }
+
+    async fn compare_and_swap(
+        &self,
+        flow_id: &str,
+        expected: Option<u64>,
+        value: Vec<u8>,
+    ) -> Result<CasOutcome, CanoError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let delay = self.delay_swap_ms.load(Ordering::SeqCst);
+        if delay > 0 {
+            sleep(Duration::from_millis(delay)).await;
+        }
+        if self.stall_next_swap.swap(false, Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        if self.down.load(Ordering::SeqCst) {
+            return Err(CanoError::scheduler_store("store is down"));
+        }
+        let pause = self.pause_swap_then_notify.lock().take();
+        if let Some((entered, release)) = pause {
+            let _ = self
+                .inner
+                .compare_and_swap(flow_id, expected, value)
+                .await?;
+            entered.notify_one();
+            release.notified().await;
+            return Ok(CasOutcome::Conflict);
+        }
+        if self
+            .lost_ack_with_reset_next_swap
+            .swap(false, Ordering::SeqCst)
+        {
+            let outcome = self
+                .inner
+                .compare_and_swap(flow_id, expected, value)
+                .await?;
+            if let CasOutcome::Written(ver) = outcome {
+                let mut rec = record(&self.inner, flow_id);
+                rec.failure_streak = 0;
+                rec.next_eligible = None;
+                rec.last_error = None;
+                rec.state = FlowState::Idle;
+                let reset_bytes = serde_json::to_vec(&rec).unwrap();
+                let _ = self
+                    .inner
+                    .compare_and_swap(flow_id, Some(ver), reset_bytes)
+                    .await?;
+            }
+            return Ok(CasOutcome::Conflict);
+        }
+        if self.lost_ack_next_swap.swap(false, Ordering::SeqCst) {
+            let _ = self
+                .inner
+                .compare_and_swap(flow_id, expected, value)
+                .await?;
+            return Err(CanoError::scheduler_store("lost ACK after commit"));
+        }
+        self.inner.compare_and_swap(flow_id, expected, value).await
+    }
+
+    async fn remove(&self, flow_id: &str) -> Result<(), CanoError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        if self.down.load(Ordering::SeqCst) {
+            return Err(CanoError::scheduler_store("store is down"));
+        }
+        self.inner.remove(flow_id).await
+    }
+}
+
+#[tokio::test]
+async fn claim_lost_ack_aborts_claim_and_restores_pre_claim_counters() {
+    let store = HookedStore::new();
+    let coord = super::Coordinator::new(
+        Arc::clone(&store) as Arc<dyn SchedulerStore>,
+        Arc::from("node-1"),
+        Duration::from_secs(10),
+    );
+    let policy = BackoffPolicy::with_trip(1);
+    let tick1 = Utc::now();
+
+    // 1. Fresh record with Due::Cron: lost ACK commits lease, abort_claim restores
+    // run_count=0, last_run=None, last_tick=None and clears lease.
+    store.lost_ack_next_swap.store(true, Ordering::SeqCst);
+    let sent = AtomicBool::new(false);
+    let id1 = coord.next_lease_id();
+    let err = coord
+        .claim("f", id1, &policy, Due::Cron(tick1), None, &sent)
+        .await
+        .err()
+        .expect("lost ACK must surface error");
+    assert_eq!(err.category(), "scheduler_store");
+    assert!(sent.load(Ordering::SeqCst));
+    // Lease was actually committed in the store with run_count=1 and last_tick=Some(tick1).
+    let committed = record(&store.inner, "f");
+    assert_eq!(committed.run_count, 1);
+    assert_eq!(committed.last_tick, Some(tick1));
+    assert!(committed.lease.is_some());
+
+    let restored = coord
+        .abort_claim("f", id1)
+        .await
+        .expect("abort_claim resolves");
+    assert_eq!(restored.run_count, 0);
+    assert_eq!(restored.last_run, None);
+    assert_eq!(restored.last_tick, None);
+    assert_eq!(restored.state, FlowState::Idle);
+    assert!(restored.lease.is_none());
+
+    // Same cron tick is still due and wins cleanly with run_count=1.
+    let sent2 = AtomicBool::new(false);
+    let id2 = coord.next_lease_id();
+    let Some(super::Claim::Won(held)) = coord
+        .claim("f", id2, &policy, Due::Cron(tick1), None, &sent2)
+        .await
+        .unwrap()
+    else {
+        panic!("same cron tick must be claimable after abort_claim");
+    };
+    assert_eq!(held.record().run_count, 1);
+    assert_eq!(held.record().last_tick, Some(tick1));
+
+    // 2. Existing record with active backoff on Due::Trigger: abort_claim restores
+    // prior run_count, last_run, last_tick AND FlowState::Backoff.
+    let t0 = tick1 - chrono::Duration::seconds(30);
+    let active_backoff = FlowRecord {
+        run_count: 2,
+        last_run: Some(t0),
+        last_tick: Some(t0),
+        failure_streak: 1,
+        next_eligible: Some(Utc::now() + chrono::Duration::seconds(60)),
+        last_error: Some("earlier".into()),
+        state: FlowState::Backoff,
+        written_by: "seed".into(),
+        written_at: t0,
+        ..FlowRecord::default()
+    };
+    store
+        .inner
+        .compare_and_swap("g", None, serde_json::to_vec(&active_backoff).unwrap())
+        .await
+        .unwrap();
+
+    store.lost_ack_next_swap.store(true, Ordering::SeqCst);
+    let sent3 = AtomicBool::new(false);
+    let id3 = coord.next_lease_id();
+    assert!(
+        coord
+            .claim("g", id3, &policy, Due::Trigger, None, &sent3)
+            .await
+            .is_err()
+    );
+    let restored_g = coord.abort_claim("g", id3).await.unwrap();
+    assert_eq!(restored_g.run_count, 2);
+    assert_eq!(restored_g.last_run, Some(t0));
+    assert_eq!(restored_g.last_tick, Some(t0));
+    assert_eq!(restored_g.state, FlowState::Backoff);
+    assert_eq!(restored_g.failure_streak, 1);
+    assert!(restored_g.lease.is_none());
+}
+
+#[tokio::test]
+async fn claim_lost_ack_with_concurrent_reset_flow_wins_without_not_due() {
+    let store = HookedStore::new();
+    let coord = super::Coordinator::new(
+        Arc::clone(&store) as Arc<dyn SchedulerStore>,
+        Arc::from("node-1"),
+        Duration::from_secs(10),
+    );
+    let policy = BackoffPolicy::default();
+
+    for (flow_id, due) in [
+        ("every-f", Due::Every(Duration::from_secs(60))),
+        ("cron-f", Due::Cron(Utc::now())),
+    ] {
+        store
+            .lost_ack_with_reset_next_swap
+            .store(true, Ordering::SeqCst);
+        let sent = AtomicBool::new(false);
+        let id = coord.next_lease_id();
+        let outcome = coord
+            .claim(flow_id, id, &policy, due, None, &sent)
+            .await
+            .expect("claim must recover on iteration 2 after lost-ACK + reset conflict");
+        let Some(super::Claim::Won(held)) = outcome else {
+            panic!("{flow_id}: expected Claim::Won instead of NotDue");
+        };
+        assert_eq!(held.id(), id);
+        assert_eq!(held.record().run_count, 1);
+        assert!(held.remaining(Utc::now()) > Duration::ZERO);
+    }
+}
+
+#[tokio::test]
+async fn claim_lost_ack_delayed_recovery_restores_unstarted_lease_and_bounds_set() {
+    let store = HookedStore::new();
+    let coord = super::Coordinator::new(
+        Arc::clone(&store) as Arc<dyn SchedulerStore>,
+        Arc::from("node-1"),
+        Duration::from_millis(250),
+    );
+
+    // Bounded capacity check on unstarted_leases.
+    for i in 0..(super::MAX_UNSTARTED_LEASES + 25) {
+        coord.record_unstarted("cap-flow", i as u64 + 1);
+    }
+    assert_eq!(
+        coord.unstarted_leases.lock().len(),
+        super::MAX_UNSTARTED_LEASES
+    );
+
+    let policy = BackoffPolicy::with_trip(1);
+    let tick1 = Utc::now();
+
+    // 1. Live unstarted same-session lease on Due::Cron: abort_claim fails during
+    // outage, then store recovers while lease is still live.
+    store.lost_ack_next_swap.store(true, Ordering::SeqCst);
+    let sent = AtomicBool::new(false);
+    let id1 = coord.next_lease_id();
+    assert!(
+        coord
+            .claim("cron-delayed", id1, &policy, Due::Cron(tick1), None, &sent)
+            .await
+            .is_err()
+    );
+    store.down.store(true, Ordering::SeqCst);
+    assert!(coord.abort_claim("cron-delayed", id1).await.is_none());
+    assert!(coord.is_unstarted("cron-delayed", id1));
+
+    store.down.store(false, Ordering::SeqCst);
+    let sent2 = AtomicBool::new(false);
+    let id2 = coord.next_lease_id();
+    let Some(super::Claim::Won(held)) = coord
+        .claim("cron-delayed", id2, &policy, Due::Cron(tick1), None, &sent2)
+        .await
+        .unwrap()
+    else {
+        panic!("cron claim after delayed recovery must win without skipping tick");
+    };
+    assert_eq!(held.record().run_count, 1, "must not double-bump run_count");
+    assert_eq!(held.record().failure_streak, 0);
+    assert!(!coord.is_unstarted("cron-delayed", id1));
+
+    // 2. Live unstarted same-session lease on Due::Every where prev_last_run is NOT
+    // due yet: claim restores prev_* and writes cleaned-up record before returning NotDue.
+    let recent = Utc::now() - chrono::Duration::seconds(5);
+    let existing = FlowRecord {
+        run_count: 4,
+        last_run: Some(recent),
+        state: FlowState::Completed,
+        written_by: "node-1".into(),
+        written_at: recent,
+        ..FlowRecord::default()
+    };
+    store
+        .inner
+        .compare_and_swap(
+            "every-not-due",
+            None,
+            serde_json::to_vec(&existing).unwrap(),
+        )
+        .await
+        .unwrap();
+    store.lost_ack_next_swap.store(true, Ordering::SeqCst);
+    let sent3 = AtomicBool::new(false);
+    let id3 = coord.next_lease_id();
+    assert!(
+        coord
+            .claim("every-not-due", id3, &policy, Due::Trigger, None, &sent3)
+            .await
+            .is_err()
+    );
+    store.down.store(true, Ordering::SeqCst);
+    assert!(coord.abort_claim("every-not-due", id3).await.is_none());
+    store.down.store(false, Ordering::SeqCst);
+
+    let sent4 = AtomicBool::new(false);
+    let id4 = coord.next_lease_id();
+    let Some(super::Claim::Refused {
+        reason: super::Refusal::NotDue,
+        record: rec,
+    }) = coord
+        .claim(
+            "every-not-due",
+            id4,
+            &policy,
+            Due::Every(Duration::from_secs(60)),
+            None,
+            &sent4,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("restored prev_last_run is not due yet");
+    };
+    assert_eq!(rec.run_count, 4);
+    assert_eq!(rec.last_run, Some(recent));
+    assert!(rec.lease.is_none(), "unstarted lease must be cleared");
+    assert!(!coord.is_unstarted("every-not-due", id3));
+
+    // 3. Outage lasting past TTL on same session unstarted lease: still restores
+    // prev_* rather than counting a false failure.
+    store.lost_ack_next_swap.store(true, Ordering::SeqCst);
+    let sent5 = AtomicBool::new(false);
+    let id5 = coord.next_lease_id();
+    assert!(
+        coord
+            .claim(
+                "expired-unstarted",
+                id5,
+                &policy,
+                Due::Trigger,
+                None,
+                &sent5
+            )
+            .await
+            .is_err()
+    );
+    store.down.store(true, Ordering::SeqCst);
+    assert!(coord.abort_claim("expired-unstarted", id5).await.is_none());
+    sleep(Duration::from_millis(300)).await;
+    store.down.store(false, Ordering::SeqCst);
+
+    let sent6 = AtomicBool::new(false);
+    let id6 = coord.next_lease_id();
+    let Some(super::Claim::Won(held6)) = coord
+        .claim(
+            "expired-unstarted",
+            id6,
+            &policy,
+            Due::Trigger,
+            None,
+            &sent6,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("same-session expired unstarted lease must not trip flow");
+    };
+    assert_eq!(held6.record().run_count, 1);
+    assert_eq!(held6.record().failure_streak, 0);
+    assert!(!coord.is_unstarted("expired-unstarted", id5));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_trigger_mid_claim_holds_claiming_until_abort_claim_finishes() {
+    let store = HookedStore::new();
+    let probe = Probe::new(Duration::from_millis(10));
+    let running = on(Arc::clone(&store) as Arc<dyn SchedulerStore>, "a")
+        .manual("f", probe.workflow(), TestState::Start)
+        .with_lease_ttl(Duration::from_secs(5))
+        .start()
+        .await
+        .unwrap();
+
+    // Pause trigger #1 right AFTER its claim swap commits to the store, then pause
+    // abort_claim's load so we can test a racing trigger #2.
+    let swap_entered = Arc::new(tokio::sync::Notify::new());
+    let swap_release = Arc::new(tokio::sync::Notify::new());
+    *store.pause_swap_then_notify.lock() =
+        Some((Arc::clone(&swap_entered), Arc::clone(&swap_release)));
+
+    let t1 = tokio::spawn({
+        let running = running.clone();
+        async move { running.trigger("f").await }
+    });
+    swap_entered.notified().await;
+
+    let abort_entered = Arc::new(tokio::sync::Notify::new());
+    let abort_release = Arc::new(tokio::sync::Notify::new());
+    *store.pause_next_load.lock() = Some((Arc::clone(&abort_entered), Arc::clone(&abort_release)));
+
+    // Drop trigger #1 mid-swap after its lease committed in the store.
+    t1.abort();
+    let _ = t1.await;
+
+    // Wait for Unreserve::drop's spawned abort_claim task to enter its load.
+    abort_entered.notified().await;
+
+    // A second trigger while abort_claim is in flight must be rejected cleanly instead of
+    // racing cleanup and double-bumping run_count.
+    let err = running
+        .trigger("f")
+        .await
+        .expect_err("claiming must remain true until abort_claim finishes");
+    assert!(err.to_string().contains("already running"), "{err}");
+
+    // Let abort_claim finish rolling back the unstarted lease.
+    abort_release.notify_one();
+    assert!(
+        wait_until(Duration::from_secs(2), || {
+            store
+                .inner
+                .record("f")
+                .is_some_and(|r| FlowRecord::decode("f", &r.value).unwrap().lease.is_none())
+        })
+        .await
+    );
+    let rec = record(&store.inner, "f");
+    assert_eq!(rec.run_count, 0);
+    assert!(rec.last_run.is_none());
+
+    // Trigger #3 now succeeds and runs once.
+    assert!(
+        wait_until(Duration::from_secs(2), || running
+            .status("f")
+            .unwrap()
+            .status
+            == Status::Idle)
+        .await
+    );
+    running.trigger("f").await.unwrap();
+    assert_eq!(
+        running.wait_idle("f").await.unwrap().status,
+        Status::Completed
+    );
+    assert_eq!(probe.runs(), 1);
+    assert_eq!(record(&store.inner, "f").run_count, 1);
+
+    running.stop().await.unwrap();
+}
+
+#[tokio::test]
+async fn held_lease_remaining_is_monotonic_and_slow_swap_bounded() {
+    let store = HookedStore::new();
+    let ttl = Duration::from_millis(200);
+    let coord = super::Coordinator::new(
+        Arc::clone(&store) as Arc<dyn SchedulerStore>,
+        Arc::from("node-1"),
+        ttl,
+    );
+    let policy = BackoffPolicy::default();
+
+    // 1. Slow swap in claim: expires_mono is anchored BEFORE self.swap.
+    store.delay_swap_ms.store(120, Ordering::SeqCst);
+    let sent = AtomicBool::new(false);
+    let Some(super::Claim::Won(mut held)) = coord
+        .claim(
+            "f",
+            coord.next_lease_id(),
+            &policy,
+            Due::Trigger,
+            None,
+            &sent,
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("claim must win");
+    };
+    let rem = held.remaining(Utc::now());
+    assert!(
+        rem < Duration::from_millis(120),
+        "slow swap must eat into monotonic remaining time, got {rem:?}"
+    );
+
+    // 2. Wall-clock backward skew: even if expires_at is 10 hours ahead, remaining is
+    // bounded by expires_mono.
+    if let Some(lease) = held.record.lease.as_mut() {
+        lease.expires_at = Utc::now() + chrono::Duration::hours(10);
+    }
+    assert!(held.remaining(Utc::now()) < Duration::from_millis(120));
+
+    // 3. Slow swap in renew: expires_mono is also anchored BEFORE self.swap.
+    let fresh_store = HookedStore::new();
+    let fresh_coord = super::Coordinator::new(
+        Arc::clone(&fresh_store) as Arc<dyn SchedulerStore>,
+        Arc::from("node-1"),
+        ttl,
+    );
+    let Some(super::Claim::Won(mut held2)) = fresh_coord
+        .claim(
+            "g",
+            fresh_coord.next_lease_id(),
+            &policy,
+            Due::Trigger,
+            None,
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("claim must win");
+    };
+    fresh_store.delay_swap_ms.store(120, Ordering::SeqCst);
+    assert!(matches!(
+        fresh_coord.renew("g", &mut held2).await,
+        super::Renew::Held
+    ));
+    let rem_after_renew = held2.remaining(Utc::now());
+    assert!(
+        rem_after_renew < Duration::from_millis(120),
+        "slow renew swap must bound expires_mono from before swap, got {rem_after_renew:?}"
+    );
+}
+
+#[tokio::test]
+async fn renew_returns_lost_when_timeout_at_elapses_or_remaining_hits_zero() {
+    let store = HookedStore::new();
+    let ttl = Duration::from_millis(120);
+    let coord = super::Coordinator::new(
+        Arc::clone(&store) as Arc<dyn SchedulerStore>,
+        Arc::from("node-1"),
+        ttl,
+    );
+    let policy = BackoffPolicy::default();
+
+    let Some(super::Claim::Won(mut held)) = coord
+        .claim(
+            "f",
+            coord.next_lease_id(),
+            &policy,
+            Due::Trigger,
+            None,
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("claim must win");
+    };
+    // Make wall-clock expires_at artificially far in the future so only monotonic
+    // timeout_at / expires_mono can fire.
+    if let Some(lease) = held.record.lease.as_mut() {
+        lease.expires_at = Utc::now() + chrono::Duration::hours(1);
+    }
+
+    // 1. Stall swap past deadline -> must return Renew::Lost(None), NOT Renew::Held.
+    store.stall_next_swap.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        coord.renew("f", &mut held).await,
+        super::Renew::Lost(None)
+    ));
+
+    // 2. Conflict on swap, followed by stalled load past deadline -> Renew::Lost(None).
+    let Some(super::Claim::Won(mut held2)) = coord
+        .claim(
+            "g",
+            coord.next_lease_id(),
+            &policy,
+            Due::Trigger,
+            None,
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("claim must win");
+    };
+    coord.reset("g").await.unwrap();
+    store.stall_next_load.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        coord.renew("g", &mut held2).await,
+        super::Renew::Lost(None)
+    ));
+
+    // 3. Conflict reload preserves existing expires_mono without extending it.
+    let Some(super::Claim::Won(mut held3)) = coord
+        .claim(
+            "h",
+            coord.next_lease_id(),
+            &policy,
+            Due::Trigger,
+            None,
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("claim must win");
+    };
+    let orig_mono = held3.expires_mono;
+    let orig_version = held3.version;
+    coord.reset("h").await.unwrap();
+    sleep(Duration::from_millis(20)).await;
+    // Iter 1 hits reset conflict and reloads (updating version without extending
+    // expires_mono), then fail_swap_after_next_load triggers a transient error on iter 2
+    // so renew exits Renew::Held and we directly observe expires_mono stayed orig_mono.
+    store
+        .fail_swap_after_next_load
+        .store(true, Ordering::SeqCst);
+    assert!(matches!(
+        coord.renew("h", &mut held3).await,
+        super::Renew::Held
+    ));
+    assert_ne!(held3.version, orig_version);
+    assert_eq!(held3.expires_mono, orig_mono);
+    store.down.store(false, Ordering::SeqCst);
+
+    // 4. When remaining hits zero before a transient store error -> Renew::Lost(None).
+    let Some(super::Claim::Won(mut held4)) = coord
+        .claim(
+            "h2",
+            coord.next_lease_id(),
+            &policy,
+            Due::Trigger,
+            None,
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("claim must win");
+    };
+    let orig_mono4 = held4.expires_mono;
+    // Wait until remaining is ~0, then hit store error -> must return Renew::Lost(None).
+    sleep(ttl + Duration::from_millis(20)).await;
+    store.down.store(true, Ordering::SeqCst);
+    assert_eq!(held4.expires_mono, orig_mono4);
+    assert!(matches!(
+        coord.renew("h2", &mut held4).await,
+        super::Renew::Lost(None)
+    ));
+}
+
+#[tokio::test]
+async fn claim_and_reset_loops_are_bounded_by_ttl() {
+    let store = faulty();
+    store.conflict.store(true, Ordering::SeqCst);
+    // Each call takes 60ms -> 5 CAS_ATTEMPTS * (load + swap) = 600ms without a loop
+    // cap, vs 120ms TTL cap.
+    store.swap_delay_ms.store(60, Ordering::SeqCst);
+    let ttl = Duration::from_millis(120);
+    let coord = super::Coordinator::new(
+        Arc::clone(&store) as Arc<dyn SchedulerStore>,
+        Arc::from("node-1"),
+        ttl,
+    );
+    let policy = BackoffPolicy::default();
+
+    let t0 = tokio::time::Instant::now();
+    let err = coord
+        .claim(
+            "f",
+            coord.next_lease_id(),
+            &policy,
+            Due::Trigger,
+            None,
+            &AtomicBool::new(false),
+        )
+        .await
+        .err()
+        .expect("claim must time out");
+    assert_eq!(err.category(), "scheduler_store");
+    assert!(
+        t0.elapsed() < Duration::from_millis(250),
+        "claim exceeded ttl bound: {:?}",
+        t0.elapsed()
+    );
+
+    store
+        .inner
+        .compare_and_swap(
+            "f",
+            None,
+            serde_json::to_vec(&FlowRecord::default()).unwrap(),
+        )
+        .await
+        .unwrap();
+    let t1 = tokio::time::Instant::now();
+    let err = coord.reset("f").await.expect_err("reset must time out");
+    assert_eq!(err.category(), "scheduler_store");
+    assert!(
+        t1.elapsed() < Duration::from_millis(250),
+        "reset exceeded ttl bound: {:?}",
+        t1.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn cron_reaping_expired_lease_anchors_backoff_at_expiry_and_does_not_skip_next_firing() {
+    let store = store();
+    let now = Utc::now();
+    let day_ago = now - chrono::Duration::hours(24);
+    let expired_at = day_ago + chrono::Duration::seconds(30);
+    seed(
+        &store,
+        "daily",
+        &FlowRecord {
+            run_count: 1,
+            last_run: Some(day_ago),
+            last_tick: Some(day_ago),
+            lease: Some(Lease {
+                owner: "crashed-day1".into(),
+                session: 42,
+                id: 1,
+                expires_at: expired_at,
+                prev_run_count: None,
+                prev_last_run: None,
+                prev_last_tick: None,
+            }),
+            written_by: "crashed-day1".into(),
+            written_at: day_ago,
+            ..FlowRecord::default()
+        },
+    )
+    .await;
+
+    let coord = super::Coordinator::new(
+        Arc::clone(&store) as Arc<dyn SchedulerStore>,
+        Arc::from("survivor"),
+        Duration::from_secs(30),
+    );
+    let policy = BackoffPolicy {
+        initial: Duration::from_secs(60),
+        multiplier: 2.0,
+        max_delay: Duration::from_secs(300),
+        jitter: 0.0,
+        streak_limit: None,
+    };
+    let Some(super::Claim::Won(held)) = coord
+        .claim(
+            "daily",
+            coord.next_lease_id(),
+            &policy,
+            Due::Cron(now),
+            None,
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("Day 2 healthy cron firing must not be skipped after Day 1 lease expiry");
+    };
+    assert_eq!(held.record().failure_streak, 1);
+    assert_eq!(
+        held.record().next_eligible,
+        Some(super::plus(expired_at, Duration::from_secs(60)))
+    );
+    assert_eq!(held.record().last_tick, Some(now));
+    assert_eq!(held.record().run_count, 2);
+}
+
+#[tokio::test]
+async fn reset_clears_expired_lease_while_preserving_live_lease() {
+    let store = store();
+    let now = Utc::now();
+    seed(
+        &store,
+        "expired",
+        &FlowRecord {
+            failure_streak: 1,
+            state: FlowState::Tripped,
+            lease: Some(Lease {
+                owner: "dead".into(),
+                session: 11,
+                id: 1,
+                expires_at: now - chrono::Duration::seconds(5),
+                prev_run_count: None,
+                prev_last_run: None,
+                prev_last_tick: None,
+            }),
+            ..FlowRecord::default()
+        },
+    )
+    .await;
+    seed(
+        &store,
+        "live",
+        &FlowRecord {
+            failure_streak: 2,
+            state: FlowState::Backoff,
+            lease: Some(Lease {
+                owner: "alive".into(),
+                session: 22,
+                id: 1,
+                expires_at: now + chrono::Duration::seconds(30),
+                prev_run_count: None,
+                prev_last_run: None,
+                prev_last_tick: None,
+            }),
+            ..FlowRecord::default()
+        },
+    )
+    .await;
+
+    let coord = super::Coordinator::new(
+        Arc::clone(&store) as Arc<dyn SchedulerStore>,
+        Arc::from("node-1"),
+        Duration::from_secs(30),
+    );
+    let rec_expired = coord.reset("expired").await.unwrap();
+    assert!(rec_expired.lease.is_none());
+    assert_eq!(rec_expired.failure_streak, 0);
+    assert_eq!(rec_expired.state, FlowState::Idle);
+
+    // Subsequent claim with streak_limit=1 must win instead of reaping the old lease.
+    let policy = BackoffPolicy::with_trip(1);
+    let claimed = coord
+        .claim(
+            "expired",
+            coord.next_lease_id(),
+            &policy,
+            Due::Trigger,
+            None,
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(claimed, Some(super::Claim::Won(_))));
+
+    let rec_live = coord.reset("live").await.unwrap();
+    assert_eq!(
+        rec_live.lease.as_ref().map(|l| l.owner.as_str()),
+        Some("alive"),
+        "live lease must remain intact across reset"
+    );
+    assert_eq!(rec_live.failure_streak, 0);
+    assert_eq!(rec_live.state, FlowState::Idle);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn optimistic_release_uses_one_rtt_and_falls_back_on_conflict_or_lost_ack() {
+    // 1. Happy path: claim (load + swap = 2 calls) + release (1 swap = 1 call) => 3 calls total.
+    let store = HookedStore::new();
+    let probe = Probe::new(Duration::from_millis(10));
+    let running = on(Arc::clone(&store) as Arc<dyn SchedulerStore>, "a")
+        .manual("f", probe.workflow(), TestState::Start)
+        .with_lease_ttl(Duration::from_secs(10))
+        .start()
+        .await
+        .unwrap();
+    store.calls.store(0, Ordering::SeqCst);
+
+    running.trigger("f").await.unwrap();
+    assert_eq!(
+        running.wait_idle("f").await.unwrap().status,
+        Status::Completed
+    );
+    assert_eq!(
+        store.calls.load(Ordering::SeqCst),
+        3,
+        "claim (2) + optimistic 1-RTT release (1) must take 3 store calls"
+    );
+    running.stop().await.unwrap();
+
+    // 2. Conflict on optimistic release (e.g. reset_flow bumped version): falls back
+    // to load + swap and writes Completed.
+    let store2 = HookedStore::new();
+    let coord = super::Coordinator::new(
+        Arc::clone(&store2) as Arc<dyn SchedulerStore>,
+        Arc::from("node-1"),
+        Duration::from_secs(10),
+    );
+    let policy = BackoffPolicy::default();
+    let Some(super::Claim::Won(held)) = coord
+        .claim(
+            "g",
+            coord.next_lease_id(),
+            &policy,
+            Due::Trigger,
+            None,
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("claim must win");
+    };
+    coord.reset("g").await.unwrap();
+    let rel = coord.release("g", &held, &policy, &Ok(())).await;
+    assert!(matches!(rel, super::Release::Written(_)));
+    let rec = record(&store2.inner, "g");
+    assert_eq!(rec.state, FlowState::Completed);
+    assert!(rec.lease.is_none());
+
+    // 3. Lost ACK on optimistic release swap: fallback load recognizes
+    // (written_by, written_session, write_seq) and returns Written instead of NotHeld.
+    let Some(super::Claim::Won(held2)) = coord
+        .claim(
+            "h",
+            coord.next_lease_id(),
+            &policy,
+            Due::Trigger,
+            None,
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("claim must win");
+    };
+    store2.lost_ack_next_swap.store(true, Ordering::SeqCst);
+    let rel2 = coord.release("h", &held2, &policy, &Ok(())).await;
+    assert!(
+        matches!(rel2, super::Release::Written(_)),
+        "lost-ACK optimistic release must be recognized as Written"
+    );
+    assert!(record(&store2.inner, "h").lease.is_none());
+}
+
+#[tokio::test]
+async fn written_session_differs_across_coordinators_sharing_instance_id() {
+    let store = store();
+    let c1 = super::Coordinator::new(
+        Arc::clone(&store) as Arc<dyn SchedulerStore>,
+        Arc::from("shared-id"),
+        Duration::from_secs(10),
+    );
+    let c2 = super::Coordinator::new(
+        Arc::clone(&store) as Arc<dyn SchedulerStore>,
+        Arc::from("shared-id"),
+        Duration::from_secs(10),
+    );
+    let policy = BackoffPolicy::default();
+    let Some(super::Claim::Won(h1)) = c1
+        .claim(
+            "f1",
+            c1.next_lease_id(),
+            &policy,
+            Due::Trigger,
+            None,
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("c1 claim must win");
+    };
+    let Some(super::Claim::Won(h2)) = c2
+        .claim(
+            "f2",
+            c2.next_lease_id(),
+            &policy,
+            Due::Trigger,
+            None,
+            &AtomicBool::new(false),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("c2 claim must win");
+    };
+    assert_ne!(h1.record().written_session, 0);
+    assert_ne!(h2.record().written_session, 0);
+    assert_ne!(h1.record().written_session, h2.record().written_session);
+}
+
+#[test]
+fn last_error_over_1mib_is_utf8_safely_truncated_to_4096() {
+    // Place 4-byte UTF-8 emoji ('🦀') across the 4093-byte truncation boundary.
+    let mut big = "a".repeat(4091);
+    big.push('🦀');
+    big.push_str(&"b".repeat(1_100_000));
+    assert!(big.len() > 1_048_576);
+
+    let mut rec = FlowRecord::default();
+    rec.fail(&BackoffPolicy::default(), big, Utc::now());
+    let stored = rec.last_error.as_deref().expect("error must be stored");
+    assert!(stored.len() <= super::MAX_LAST_ERROR_BYTES);
+    assert!(stored.ends_with("..."));
+    assert_eq!(stored.len(), 4091 + 3);
+    assert!(serde_json::to_vec(&rec).unwrap().len() <= 8192);
 }
