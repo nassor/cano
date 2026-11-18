@@ -67,6 +67,17 @@
 - `cano::testing::InMemorySchedulerStore` and `cano::testing::assert_scheduler_store_contract`.
 - The `scheduler_cluster` example runs two schedulers over one `RedbStore`, and the docs gain a
   "Several scheduler instances" page.
+- Scheduled `Workflow` + `CheckpointStore` automatic resume: `Scheduler` defaults `workflow_id`
+  to `flow_id` when unset, clears stale matching-version exit logs before starting a fresh run,
+  and automatically resumes unfinished runs (rehydrating saga compensation stacks and stepped or
+  stream cursors) without repeating resource setup or teardown.
+- Expanded store contract assertions: `assert_checkpoint_store_contract` tests concurrent
+  identical seq-0 `append` races, and `assert_scheduler_store_contract` checks 256 KiB payloads,
+  post-`remove` equal-byte create races, stale pre-remove version rejection after recreate,
+  matching payloads on race winners, and concurrent `load` / `compare_and_swap` / `remove`
+  linearizability.
+- Animated SMIL diagrams across the scheduler documentation, plus updated resilience, scheduled
+  checkpoint auto-resume, store contract, and network store documentation.
 
 ### Changed
 
@@ -120,6 +131,37 @@
 - `#[task]`, `#[resource]`, `#[checkpoint_store]` and `#[scheduler_store]` preserve explicit
   lifetimes, rewrite nested elided references, order lifetime parameters before type and const
   generics, and reject duplicate or unsupported items with spanned compile errors.
+- `Scheduler` lease resilience and recovery:
+  - Preserves pre-claim `run_count`, `last_run` and `last_tick` on `Lease`, rolls back unstarted
+    claims via `abort_claim` (with a bounded `unstarted_leases` fallback set during store outages)
+    on lost ACKs, cancellations, dropped `trigger` futures, and shutdown races, and recovers from a
+    lost-ACK claim plus concurrent `reset_flow` by matching the session's `lease.id`.
+  - Tracks holder lease TTL monotonically via `tokio::time::Instant` anchored before the claim or
+    renewal swap, returns `Renew::Lost(None)` when the renewal budget expires or times out, and
+    caps `claim` and `reset` CAS loops by the lease TTL.
+  - Anchors expired-lease failure timestamps at `lease.expires_at.min(now)`, retries due cron ticks
+    on transient store errors while before the next firing, retries `every` store errors at `ttl / 3`,
+    normalizes expired `Status::RunningElsewhere` in `status`, `list` and `wait_idle`, clears
+    expired leases in `reset_flow` while leaving live leases intact, uses an optimistic 1-RTT swap
+    in `release` with `written_session` disambiguation, and UTF-8-safely truncates `last_error` to
+    4096 bytes.
+- Store hardening across `NatsStore`, `PostgresStore`, `RedbStore` and `store::retry`:
+  - `NatsStore::append` (`ROW_TAG_V2` with 128-bit `write_id`) and `PostgresStore::append`
+    (`write_id bytea` column) prevent retried appends from absorbing another writer's identical
+    seq-0 row; `RedbStore` decodes both V1 and V2 payloads.
+  - `NatsStore::compare_and_swap` returns `CasOutcome::Conflict` in 1 RTT on `WrongLastRevision`
+    when no send occurred on the current target revision and resets `sent_target` when advancing
+    across a tombstone; `NatsStore::remove` checks the current revision and uses
+    `purge_expect_revision`; `NatsStore::load_run` bounds `messages.next()` with `consumer_info`
+    polling during concurrent `clear` and deletes ephemeral consumers on return or drop;
+    `NatsStoreBuilder` rejects non-zero `max_age`, aligns `request_timeout` and JetStream `Context`
+    timeout with `operation_timeout`, retries `open_bucket`, guards connection and `max_payload`
+    limits, and classifies permanent JetStream errors as fatal.
+  - `PostgresStore` defaults `keepalives_idle` to 30 s, `connect_timeout` and deadpool `wait`
+    timeout to `operation_timeout`, and classifies SQLSTATE `40003`, `25006` and `57014` as
+    transient; `store::retry` applies equal `[50%, 100%]` jitter; `RedbStore` cancels queued
+    blocking writes via `CallerCancelled` drop guards and skips `tx.commit()` on no-op `clear` and
+    `remove` calls.
 
 ## 0.16.0 - 2026-11-15 - API Simplification
 
