@@ -339,9 +339,12 @@ removes them before and after, so it can share a table or bucket with live sched
 It checks that an unknown id loads <code>None</code> and removes as a no-op, that a create writes once and
 conflicts afterwards, that a swap from the current version writes and changes the version while a stale or
 wrong version conflicts and leaves the record alone, that a removed id can be created again with a new
-version, that ids sharing a prefix stay isolated, that awkward ids (spaces, wildcards, non-ASCII, 200+
-characters) work, that concurrent creates and concurrent swaps from one version have exactly one winner, and
-that a 64 KiB value round-trips.
+version and stale pre-remove versions still conflict after recreate, that ids sharing a prefix stay
+isolated, that awkward ids (spaces, wildcards, non-ASCII, 200+ characters) work, that concurrent creates
+(including post-remove tombstone recreate races with equal bytes) and concurrent swaps from one version have
+exactly one winner whose payload matches the stored record, that concurrent <code>load</code>,
+<code>compare_and_swap</code> and <code>remove</code> calls stay linearizable, and that an empty value, an
+identical-value version bump and a 256 KiB payload round-trip.
 </p>
 
 ```rust

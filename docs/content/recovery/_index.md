@@ -142,7 +142,10 @@ which is what <code>CheckpointStore::load_run</code> returns.</p>
 <p>
 <code>Workflow::resume_from(workflow_id)</code> loads the run with <code>load_run</code> and
 re-enters the FSM from the highest-sequence row. <code>resume_from_with_token(workflow_id, &amp;token)</code>
-makes the resumed run cancellable.
+makes the resumed run cancellable. When a workflow runs under the
+<a href="../scheduler/#checkpoint-resume">scheduler</a>, the scheduler defaults <code>workflow_id</code> to
+the flow id when unset, clears stale completed exit logs, and automatically resumes unfinished runs
+on the next tick or failover.
 </p>
 
 <div class="diagram-frame">
@@ -449,9 +452,10 @@ is alive. Renaming the executable changes <code>app</code> and starts a new file
 </p>
 
 <p>
-One table maps <code>(workflow_id, sequence)</code> to a <a href="https://docs.rs/postcard"><code>postcard</code></a>-encoded
-payload holding the other <code>CheckpointRow</code> fields, including <code>kind</code>. redb orders
-composite keys element by element, so a workflow's rows are range-scanned in ascending
+One table maps <code>(workflow_id, sequence)</code> to a <code>ROW_TAG_V1</code> (<code>CV</code>) tagged
+<a href="https://docs.rs/postcard"><code>postcard</code></a>-encoded payload holding the other
+<code>CheckpointRow</code> fields, including <code>kind</code> (while still decoding untagged legacy rows).
+redb orders composite keys element by element, so a workflow's rows are range-scanned in ascending
 <code>sequence</code>. The sequence lives in the key, not the value.
 </p>
 <p>
@@ -514,10 +518,10 @@ let checkpoint_store = PostgresStore::builder()
 <dd>How the pool checks a connection before reuse.</dd>
 
 <dt><code>with_operation_timeout(Duration)</code> <small>10 s</small></dt>
-<dd>The bound on each attempt of <code>append</code>, <code>load_run</code> and <code>clear</code>, connection checkout included.</dd>
+<dd>The bound on each attempt of both <code>CheckpointStore</code> (<code>append</code>, <code>load_run</code>, <code>clear</code>) and <code>SchedulerStore</code> (<code>load</code>, <code>compare_and_swap</code>, <code>remove</code>), connection checkout and migration included.</dd>
 
 <dt><code>with_retry(RetryMode)</code> <small><code>RetryMode::None</code></small></dt>
-<dd>Retries for transient failures. See <a href="#network-failures">timeouts and retries</a>.</dd>
+<dd>Jittered retries for transient failures across both <code>CheckpointStore</code> and <code>SchedulerStore</code>. See <a href="#network-failures">timeouts and retries</a>.</dd>
 </dl>
 
 <p>
@@ -592,7 +596,7 @@ let checkpoint_store = NatsStore::builder()
 <dd>The bucket name: one or more of <code>[A-Za-z0-9_-]</code>.</dd>
 
 <dt><code>with_checkpoint_bucket_config(kv::Config)</code> <small><code>history: 1</code></small></dt>
-<dd>The configuration used when the store creates the bucket: storage, replicas, <code>max_age</code>, placement, compression, mirror.</dd>
+<dd>The configuration used when the store creates the bucket: storage, replicas, placement, compression, mirror. Setting a non-zero <code>max_age</code> is rejected with <code>CanoError::Configuration</code> so checkpoint and scheduler state cannot silently expire.</dd>
 
 <dt><code>with_create_bucket(bool)</code> <small><code>true</code></small></dt>
 <dd>Create the bucket on connect when it is missing.</dd>
@@ -601,10 +605,10 @@ let checkpoint_store = NatsStore::builder()
 <dd>Reach JetStream in another domain or through an imported API prefix. Set at most one.</dd>
 
 <dt><code>with_operation_timeout(Duration)</code> <small>10 s</small></dt>
-<dd>The bound on each attempt of <code>append</code>, <code>load_run</code> and <code>clear</code>, and on opening the bucket.</dd>
+<dd>The bound on each attempt of both <code>CheckpointStore</code> (<code>append</code>, <code>load_run</code>, <code>clear</code>) and <code>SchedulerStore</code> (<code>load</code>, <code>compare_and_swap</code>, <code>remove</code>), and on opening a bucket.</dd>
 
 <dt><code>with_retry(RetryMode)</code> <small><code>RetryMode::None</code></small></dt>
-<dd>Retries for transient failures. See <a href="#network-failures">timeouts and retries</a>.</dd>
+<dd>Jittered retries for transient failures across both <code>CheckpointStore</code> and <code>SchedulerStore</code>, plus bucket opening. See <a href="#network-failures">timeouts and retries</a>.</dd>
 </dl>
 
 <p>
@@ -615,27 +619,38 @@ let checkpoint_store = NatsStore::builder()
 </p>
 
 <p>
-Each row is one key, <code>{workflow_id}.{sequence}</code>, holding the same postcard encoding
-<code>RedbStore</code> writes. Workflow id bytes outside <code>[A-Za-z0-9_-]</code> are
-written as <code>=</code> plus two hex digits, so <code>order-1</code> stays <code>order-1</code> and
-<code>order.2</code> becomes <code>order=2E2</code>. <code>append</code> writes with an expected
-revision of 0, so a second write to a key fails. <code>clear</code> purges the run's keys from the
-stream in one request.
+Each row is one key, <code>{workflow_id}.{sequence}</code>, holding a <code>ROW_TAG_V2</code>
+(<code>CW</code>) tagged postcard encoding with a fresh per-append 128-bit <code>write_id</code>
+(decoding both <code>ROW_TAG_V1</code> and <code>ROW_TAG_V2</code>). Workflow id bytes outside
+<code>[A-Za-z0-9_-]</code> are written as <code>=</code> plus two hex digits, so <code>order-1</code>
+stays <code>order-1</code> and <code>order.2</code> becomes <code>order=2E2</code>. <code>append</code>
+writes with an expected revision of 0, so a second write to a key fails. <code>load_run</code> cleans up
+its ephemeral ordered consumer, <code>clear</code> purges the run's keys from the stream in one
+request, and scheduler <code>remove</code> checks the key's revision before purging.
 </p>
 <hr class="section-divider">
 
 <h2 id="network-failures"><a href="#network-failures" class="anchor-link" aria-hidden="true">#</a>Timeouts and retries in the network stores</h2>
 <p>
-<code>PostgresStore</code> and <code>NatsStore</code> bound every call with the
-operation timeout and, with <code>with_retry</code>, retry a call that failed on a transient error: a
-timeout, a dropped connection, a server shutting down. A conflict or a malformed row is never retried.
-A Postgres connection whose call timed out is closed, never returned to the pool.
+<code>PostgresStore</code> and <code>NatsStore</code> apply <code>with_operation_timeout</code> and
+jittered <code>with_retry</code> across both <code>CheckpointStore</code> (<code>append</code>,
+<code>load_run</code>, <code>clear</code>) and <code>SchedulerStore</code> (<code>load</code>,
+<code>compare_and_swap</code>, <code>remove</code>). Transient errors (a timeout, a dropped
+connection, a serialization failure or a shutting-down server) are retried with randomized jitter to avoid
+herd spikes on store recovery. A conflict or a malformed row is never retried. A Postgres connection whose
+call timed out is closed, never returned to the pool.
 </p>
 <p>
-An <code>Err</code> from <code>append</code> after a timeout does not prove the row is absent: the
-write may have landed after the client gave up. A retried <code>append</code> that finds a
-byte-identical row at its sequence treats it as its own earlier write and returns <code>Ok</code>; a
-different row there is a conflict.
+An <code>Err</code> from <code>append</code> or <code>compare_and_swap</code> after a timeout does not prove
+the write is absent: the mutation may have landed after the client gave up. Each <code>append</code> call
+generates a fresh random per-append <code>write_id</code> (stored in a <code>write_id</code> column by
+<code>PostgresStore</code> and in the <code>ROW_TAG_V2</code> header by <code>NatsStore</code>), so a
+retried <code>append</code> treats a stored row at that sequence as its own earlier write only when both the
+row contents and <code>write_id</code> match. Concurrent fresh runs starting at sequence <code>0</code> with
+identical initial states therefore never mistake each other's row for their own. Similarly, a retried
+<code>SchedulerStore::compare_and_swap</code> accepts a stored record whose bytes match what it sent,
+because each <code>FlowRecord</code> stamps <code>written_by</code>, <code>written_session</code>,
+<code>written_at</code> and <code>write_seq</code>.
 </p>
 <hr class="section-divider">
 
