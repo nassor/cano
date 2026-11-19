@@ -18,7 +18,7 @@ render_emoji = false
 [extra]
 # Single source of truth for the docs version: drives the header badge (`vX.Y.Z`)
 # and substitutes `@CANO_MINOR@` (`X.Y`) and `@CANO_VERSION@` (`X.Y.Z`) in page bodies.
-version = "0.16.0"
+version = "0.17.0"
 github_url = "https://github.com/nassor/cano"
 crates_url = "https://crates.io/crates/cano"
 docsrs_url = "https://docs.rs/cano"

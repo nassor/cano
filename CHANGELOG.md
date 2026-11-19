@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.17.0 - 2026-11-19
+
 ### Added
 
 - `SuspendTask` and `#[task::suspend]`: a task model that parks a run at its state.
