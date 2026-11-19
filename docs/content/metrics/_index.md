@@ -7,6 +7,10 @@ template = "section.html"
 <div class="content-wrapper">
 <h1>Metrics</h1>
 <p class="subtitle"><code>metrics</code>-crate counters, histograms, and gauges for your workflows.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.13.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 <p class="feature-tag">Behind the <code>metrics</code> feature gate (<code>features = ["metrics"]</code>).</p>
 
 <div class="callout callout-info">
@@ -260,7 +264,11 @@ names follow the <code>metrics</code> crate's underscore convention.
 </div>
 <div class="card">
 <h3 id="scheduler-metrics"><a href="#scheduler-metrics" class="anchor-link" aria-hidden="true">#</a>Scheduler</h3>
-<p class="feature-tag">Also requires the <code>scheduler</code> feature.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.13.0</span>
+<span class="meta-tag meta-tag-native">not wasm-supported</span>
+</div>
+<p class="feature-tag">Also requires the <code>scheduler</code> feature (implies <code>runtime-tokio</code>; not supported on Wasm).</p>
 <ul>
 <li><code>cano_scheduler_flow_runs_total{flow, outcome}</code>: counter; <code>outcome</code> is <code>completed</code>, <code>cancelled</code> or <code>failed</code></li>
 <li><code>cano_scheduler_flow_duration_seconds{flow}</code>: histogram (seconds)</li>

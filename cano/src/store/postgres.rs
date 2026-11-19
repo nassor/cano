@@ -1,6 +1,8 @@
 //! [`PostgresStore`]: a [`CheckpointStore`] and, with the `scheduler` feature, a
 //! `SchedulerStore`, backed by PostgreSQL tables.
 //!
+//! **Availability:** since `0.17.0` (`store-postgres` feature) · **not wasm-supported** (native only)
+//!
 //! Compiled with the `store-postgres` feature. Connections come from a
 //! [`deadpool_postgres`] pool over [`tokio_postgres`]; both crates are re-exported here so
 //! you can build a TLS connector, a [`tokio_postgres::Config`] or your own pool without
@@ -168,6 +170,8 @@ const SEQUENCE_STEM_MAX: usize = 63 - "_version_seq".len();
 
 /// A [`CheckpointStore`] that keeps every run in one PostgreSQL table and, with the
 /// `scheduler` feature, a `SchedulerStore` that keeps every flow's record in a second one.
+///
+/// **Availability:** since `0.17.0` (`store-postgres` feature) · **not wasm-supported** (native only)
 ///
 /// The checkpoint table is `cano_checkpoints` and the scheduler table is `cano_scheduler`
 /// by default. The scheduler record is the scheduler's JSON in a `bytea` column; query it

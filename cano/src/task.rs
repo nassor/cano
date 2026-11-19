@@ -1,5 +1,7 @@
 //! # Task API - Workflow Processing Interface
 //!
+//! **Availability:** since `0.5.0` (`#[task]` macro since `0.10.0`) · **wasm-supported**
+//!
 //! This module provides the [`Task`] trait, the single interface for workflow processing units.
 //! A [`Task`] implements `run`, giving you direct control over the execution flow; it returns
 //! the FSM's next state.
@@ -114,6 +116,8 @@ pub use cano_macros::timer_task as timer;
 
 /// Task trait for workflow processing
 ///
+/// **Availability:** since `0.5.0` (`#[task]` macro since `0.10.0`) · **wasm-supported**
+///
 /// This is the single interface for workflow processing units: implement `run`,
 /// which returns the FSM's next state.
 ///
@@ -195,7 +199,7 @@ where
     async fn run(&self, res: &Resources) -> Result<TState, CanoError>;
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
     use super::*;
     use crate::resource::Resources;

@@ -1,5 +1,9 @@
 //! # Testing helpers — batteries-included fixtures for workflow tests
 //!
+//! **Availability:** since `0.15.0` (`assert_checkpoint_store_contract`, `InMemorySchedulerStore`,
+//! and `assert_scheduler_store_contract` since `0.17.0`) · **wasm-supported** (scheduler store
+//! fixtures are **not wasm-supported**)
+//!
 //! Everything in this module is gated behind the `testing` feature and is meant
 //! to be pulled in wholesale from a test module:
 //!
@@ -60,7 +64,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use parking_lot::Mutex;
+use crate::sync::Mutex;
 
 use crate::checkpoint::{CheckpointRow, CheckpointStore};
 use crate::error::CanoError;
@@ -158,6 +162,8 @@ pub enum RecordedEvent {
 
 /// A [`WorkflowObserver`] that records every event it
 /// receives into an inspectable list.
+///
+/// **Availability:** since `0.15.0` · **wasm-supported**
 ///
 /// Wrap it in an `Arc`, attach it with
 /// [`Workflow::with_observer`](crate::workflow::Workflow::with_observer), drive the
@@ -363,6 +369,8 @@ impl WorkflowObserver for RecordingObserver {
 /// A process-local [`CheckpointStore`] for resume /
 /// recovery tests.
 ///
+/// **Availability:** since `0.15.0` · **wasm-supported**
+///
 /// It needs no on-disk file — a single
 /// `Arc<InMemoryCheckpointStore>` can be shared across an
 /// [`orchestrate`](crate::workflow::Workflow::orchestrate) run and a later
@@ -543,6 +551,8 @@ pub fn assert_compensation_ran<S: AsRef<str>>(actual: &[S], expected: &[&str]) {
 }
 
 /// Run the [`CheckpointStore`] contract against `store`.
+///
+/// **Availability:** since `0.17.0` · **wasm-supported**
 ///
 /// Use it to test your own backend, or a built-in one against a real server. It uses only
 /// workflow ids of the form `{namespace}/{case}`, clears each of them before and after use,
@@ -894,7 +904,7 @@ async fn must<T>(
         .unwrap_or_else(|e| panic!("checkpoint store contract [{clause}]: {what} failed: {e}"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
     use super::*;
     use crate::prelude::*;

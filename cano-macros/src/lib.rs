@@ -11,18 +11,18 @@
 //!
 //! These macros are intended to be used via their namespaced paths in `cano`:
 //!
-//! - `#[cano::task]` — for `impl Task` (and the `Task` trait definition itself)
-//! - `#[cano::task::router]` — for `impl RouterTask` and the `RouterTask` trait
-//! - `#[cano::task::poll]` — for `impl PollTask` and the `PollTask` trait
-//! - `#[cano::task::timer]` — for `impl TimerTask` and the `TimerTask` trait
-//! - `#[cano::task::batch]` — for `impl BatchTask` and the `BatchTask` trait
-//! - `#[cano::task::stepped]` — for `impl SteppedTask` and the `SteppedTask` trait
-//! - `#[cano::task::suspend]` — for `impl SuspendTask` and the `SuspendTask` trait
-//! - `#[cano::task::stream]` — for `impl StreamTask` and the `StreamTask` trait
-//! - `#[cano::saga::task]` — for `impl CompensatableTask`
-//! - `#[cano::resource]` — for `impl Resource` and the `Resource` trait
-//! - `#[cano::checkpoint_store]` — for `impl CheckpointStore` and the `CheckpointStore` trait
-//! - `#[cano::scheduler_store]` — for `impl SchedulerStore` and the `SchedulerStore` trait
+//! - `#[cano::task]` — for `impl Task` (and the `Task` trait definition itself) (`since 0.10.0` · **wasm-supported**)
+//! - `#[cano::task::router]` — for `impl RouterTask` and the `RouterTask` trait (`since 0.12.0` · **wasm-supported**)
+//! - `#[cano::task::poll]` — for `impl PollTask` and the `PollTask` trait (`since 0.12.0` · **wasm-supported**)
+//! - `#[cano::task::timer]` — for `impl TimerTask` and the `TimerTask` trait (`since 0.15.0` · **wasm-supported**)
+//! - `#[cano::task::batch]` — for `impl BatchTask` and the `BatchTask` trait (`since 0.12.0` · **wasm-supported**)
+//! - `#[cano::task::stepped]` — for `impl SteppedTask` and the `SteppedTask` trait (`since 0.12.0` · **wasm-supported**)
+//! - `#[cano::task::suspend]` — for `impl SuspendTask` and the `SuspendTask` trait (`since 0.17.0` · **wasm-supported**)
+//! - `#[cano::task::stream]` — for `impl StreamTask` and the `StreamTask` trait (`since 0.15.0` · **wasm-supported**)
+//! - `#[cano::saga::task]` — for `impl CompensatableTask` (`since 0.12.0` · **wasm-supported**)
+//! - `#[cano::resource]` — for `impl Resource` and the `Resource` trait (`since 0.10.0` · **wasm-supported**)
+//! - `#[cano::checkpoint_store]` — for `impl CheckpointStore` and the `CheckpointStore` trait (`since 0.12.0` · **wasm-supported**)
+//! - `#[cano::scheduler_store]` — for `impl SchedulerStore` and the `SchedulerStore` trait (`since 0.17.0` · **not wasm-supported** (native only))
 //!
 //! All are functionally identical in the async-rewrite they perform; they differ
 //! only in name. New traits that need async-fn-in-dyn rewriting can ship their
@@ -49,6 +49,8 @@ mod timer_task_impl;
 /// Derive a `from_resources(&Resources) -> CanoResult<Self>` constructor that
 /// pulls each field out of a `cano::Resources` map.
 ///
+/// **Availability:** since `0.10.0` · **wasm-supported**
+///
 /// Each field must be `Arc<T>`. A plain field is looked up by its type
 /// (`Resources::get_arc::<T>()`); `#[res("name")]` looks it up by name
 /// (`Resources::get_named_arc::<T>("name")`).
@@ -74,6 +76,8 @@ pub fn derive_from_resources(input: TokenStream) -> TokenStream {
 }
 
 /// Apply to `impl Task for ...` blocks (or the `Task` trait definition itself).
+///
+/// **Availability:** since `0.10.0` · **wasm-supported**
 ///
 /// Rewrites every `async fn` method into a method returning
 /// `Pin<Box<dyn Future<Output = ...> + Send + 'async_trait>>`, the same shape
@@ -118,6 +122,8 @@ pub fn task(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Apply to `impl Resource for ...` blocks (or the `Resource` trait definition itself).
 ///
+/// **Availability:** since `0.10.0` · **wasm-supported**
+///
 /// Rewrites every `async fn` method into a method returning
 /// `Pin<Box<dyn Future<Output = ...> + Send + 'async_trait>>`. Behaviorally
 /// identical to [`task`]; the separate name makes the attribute
@@ -129,6 +135,8 @@ pub fn resource(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Apply to the `SchedulerStore` trait definition, an
 /// `impl SchedulerStore for T` block, or an inherent `impl T { ... }` block.
+///
+/// **Availability:** since `0.17.0` · **not wasm-supported** (native only)
 ///
 /// Two surface forms on impl blocks:
 ///
@@ -155,6 +163,8 @@ pub fn scheduler_store(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Apply to the `CheckpointStore` trait definition, an
 /// `impl CheckpointStore for T` block, or — for less boilerplate — an inherent
 /// `impl T { ... }` block.
+///
+/// **Availability:** since `0.12.0` · **wasm-supported**
 ///
 /// Two surface forms on impl blocks:
 ///
@@ -188,6 +198,8 @@ pub fn checkpoint_store(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// `impl CompensatableTask<S> for T` block, or — for less boilerplate — an
 /// inherent `impl T { ... }` block.
 ///
+/// **Availability:** since `0.12.0` · **wasm-supported**
+///
 /// Use as `#[cano::saga::task]`.
 ///
 /// Two surface forms on impl blocks:
@@ -213,6 +225,8 @@ pub fn compensatable_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Apply to the `RouterTask` trait definition, an
 /// `impl RouterTask<S> for T` block, or — for less boilerplate — an
 /// inherent `impl T { ... }` block.
+///
+/// **Availability:** since `0.12.0` · **wasm-supported**
 ///
 /// Use as `#[cano::task::router]`.
 ///
@@ -242,6 +256,8 @@ pub fn router_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Apply to the `BatchTask` trait definition, an
 /// `impl BatchTask<S> for T` block, or — for less boilerplate — an
 /// inherent `impl T { ... }` block.
+///
+/// **Availability:** since `0.12.0` · **wasm-supported**
 ///
 /// Use as `#[cano::task::batch]`.
 ///
@@ -278,6 +294,8 @@ pub fn batch_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// `impl PollTask<S> for T` block, or — for less boilerplate — an
 /// inherent `impl T { ... }` block.
 ///
+/// **Availability:** since `0.12.0` · **wasm-supported**
+///
 /// Use as `#[cano::task::poll]`.
 ///
 /// Two surface forms on impl blocks:
@@ -306,6 +324,8 @@ pub fn poll_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Apply to the `TimerTask` trait definition, an
 /// `impl TimerTask<S> for T` block, or — for less boilerplate — an
 /// inherent `impl T { ... }` block.
+///
+/// **Availability:** since `0.15.0` · **wasm-supported**
 ///
 /// Use as `#[cano::task::timer]`.
 ///
@@ -340,6 +360,8 @@ pub fn timer_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// `impl SteppedTask<S> for T` block, or — for less boilerplate — an
 /// inherent `impl T { ... }` block.
 ///
+/// **Availability:** since `0.12.0` · **wasm-supported**
+///
 /// Use as `#[cano::task::stepped]`.
 ///
 /// Two surface forms on impl blocks:
@@ -368,6 +390,8 @@ pub fn stepped_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// Apply to the `SuspendTask` trait definition, an
 /// `impl SuspendTask<S> for T` block, or an inherent `impl T { ... }` block.
 ///
+/// **Availability:** since `0.17.0` · **wasm-supported**
+///
 /// Use as `#[cano::task::suspend]`.
 ///
 /// Two surface forms on impl blocks:
@@ -391,6 +415,8 @@ pub fn suspend_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Apply to the `StreamTask` trait definition, an `impl StreamTask<S> for T`
 /// block, or an inherent `impl T { ... }` block.
+///
+/// **Availability:** since `0.15.0` · **wasm-supported**
 ///
 /// Use as `#[cano::task::stream]`. `StreamTask` is a genuine stream-processing model:
 /// consume an `impl Stream` continuously, flush per [`StreamWindow`] window, run until
@@ -416,6 +442,8 @@ pub fn stream_task(attr: TokenStream, item: TokenStream) -> TokenStream {
 
 /// Derive an empty `cano::Resource` impl (uses the trait's default no-op
 /// `setup` / `teardown`).
+///
+/// **Availability:** since `0.10.0` · **wasm-supported**
 ///
 /// Apply this derive to any struct that needs to implement `Resource` but has no
 /// custom lifecycle logic. The trait's `setup` and `teardown` defaults (which

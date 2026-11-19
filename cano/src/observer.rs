@@ -1,5 +1,8 @@
 //! # Workflow Observer — lifecycle and failure event hooks
 //!
+//! **Availability:** `WorkflowObserver` and `TracingObserver` since `0.12.0`;
+//! `MetricsObserver` since `0.13.0` · **wasm-supported**
+//!
 //! [`WorkflowObserver`] lets you subscribe to workflow execution events without
 //! touching the engine's [`tracing`](https://docs.rs/tracing) instrumentation.
 //! Observers are **additive**: every event site continues to emit its existing
@@ -51,6 +54,8 @@
 use crate::error::CanoError;
 
 /// Subscribe to workflow lifecycle and failure events.
+///
+/// **Availability:** since `0.12.0` · **wasm-supported**
 ///
 /// All methods have a default no-op implementation, so implementors only
 /// override the events they care about. See the [module documentation](self)
@@ -152,6 +157,8 @@ pub trait WorkflowObserver: Send + Sync + 'static {
 
 /// A [`WorkflowObserver`] that re-emits every event as a [`tracing`](https://docs.rs/tracing)
 /// event (requires the `tracing` feature).
+///
+/// **Availability:** since `0.12.0` · **wasm-supported**
 ///
 /// This is a convenience for getting workflow lifecycle/failure signals into your
 /// `tracing` subscriber without writing an observer by hand. It emits **flat events,
@@ -267,6 +274,8 @@ impl WorkflowObserver for TracingObserver {
 /// — the metrics it emits then require this observer to be attached, exactly as `tracing`
 /// events from [`TracingObserver`] require attaching that observer.
 ///
+/// **Availability:** since `0.13.0` (`metrics` feature) · **wasm-supported**
+///
 /// Requires the `metrics` feature. Complements (does not replace) the always-on
 /// `#[cfg(feature = "metrics")]` direct instrumentation elsewhere in the engine (workflow run
 /// duration, circuit internals, scheduler flows, …) — see [`crate::metrics`], which also
@@ -331,7 +340,7 @@ impl WorkflowObserver for MetricsObserver {
     // count each dispatch by outcome; a separate "start" counter would just be their sum.
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
     use crate::prelude::*;
     use crate::workflow::test_support::EventLog;
@@ -566,7 +575,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "metrics"))]
+#[cfg(all(test, feature = "metrics", feature = "runtime-tokio"))]
 mod metrics_observer_tests {
     use super::*;
     use crate::metrics::test_support::*;

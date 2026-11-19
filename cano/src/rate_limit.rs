@@ -1,5 +1,8 @@
 //! # Rate Limiter — Token Bucket for Outbound Call Throttling
 //!
+//! **Availability:** `RateLimiter` since `0.14.0`; `WindowedRateLimiter` and `MultiRateLimiter`
+//! since `0.15.0` · **wasm-supported**
+//!
 //! A [`RateLimiter`] caps how fast tasks make outbound calls, smoothing bursty load into a
 //! steady rate a downstream dependency can absorb. Where a [`CircuitBreaker`](crate::circuit::CircuitBreaker)
 //! stops calls to a dependency that is *down*, a rate limiter paces calls to a dependency
@@ -25,8 +28,9 @@
 //! - [`try_acquire`](RateLimiter::try_acquire) — non-blocking; returns `Some(Permit)` if a
 //!   token was available, `None` if the bucket is empty. Use it to shed load.
 //! - [`acquire`](RateLimiter::acquire) — async; if the bucket is empty it computes exactly
-//!   how long until the next token refills, `tokio::time::sleep`s that long, and retries.
-//!   Use it to *pace* work.
+//!   how long until the next token refills, sleeps that long via Cano's runtime sleep
+//!   (`tokio::time::sleep` under `runtime-tokio`, WASI Preview 3 monotonic clock under `wasm`),
+//!   and retries. Use it to *pace* work.
 //!
 //! A [`Permit`] is a lightweight RAII marker for the rate-limited call's scope. Unlike a
 //! [`CircuitBreaker`](crate::circuit::CircuitBreaker) permit (which records a success/failure
@@ -38,8 +42,8 @@
 //!
 //! A limiter is cheap to clone (`Arc` inside; clones share one bucket). **Share clones of one
 //! `RateLimiter` across every task that hits the same quota** so the budget is enforced globally, including across tasks
-//! running in parallel inside a [split/join](crate::workflow) state. Internally it's a
-//! synchronous [`parking_lot::Mutex`] with no awaits held across the critical section.
+//! running in parallel inside a [split/join](crate::workflow) state. Internally it uses a
+//! synchronous mutex (`parking_lot::Mutex` under `runtime-tokio`, `std::sync::Mutex` under `wasm`) with no awaits held across the critical section.
 //!
 //! [`RateLimiter`] also implements [`Resource`] (no-op lifecycle), so it can be registered in
 //! [`Resources`](crate::resource::Resources) and looked up by type inside a task body.
@@ -55,8 +59,8 @@
 
 use crate::error::CanoError;
 use crate::resource::Resource;
+use crate::sync::Mutex;
 use cano_macros::resource;
-use parking_lot::Mutex;
 use smallvec::SmallVec;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -103,7 +107,7 @@ where
                     crate::metrics::rate_limiter_throttled("waited");
                     waited = true;
                 }
-                tokio::time::sleep(wait).await;
+                crate::rt::sleep(wait).await;
             }
         }
     }
@@ -169,6 +173,8 @@ struct State {
 }
 
 /// A reusable token-bucket rate limiter.
+///
+/// **Availability:** since `0.14.0` · **wasm-supported**
 ///
 /// Cheap to clone (`Arc` internally). Share one limiter across every task that draws on the
 /// same quota so the budget is enforced globally. See the [module documentation](self) for
@@ -537,6 +543,8 @@ struct WindowState {
 
 /// A fixed-window rate limiter: admits up to `limit` units per `window`, with a hard reset.
 ///
+/// **Availability:** since `0.15.0` · **wasm-supported**
+///
 /// Where the continuous [`RateLimiter`] token bucket drips capacity back smoothly, a window makes
 /// the full quota available at once and resets it as a **step** at the boundary — the shape of
 /// Claude-Code-style "N per 5 hours, resets at …" limits — and exposes a
@@ -809,6 +817,8 @@ const MULTI_MIN_BACKOFF: Duration = Duration::from_millis(1);
 /// Enforces several rate limits at once: an acquisition succeeds only if **every** applicable
 /// tier has capacity, and either all tiers are debited or none are.
 ///
+/// **Availability:** since `0.15.0` · **wasm-supported**
+///
 /// This is the Claude-Code-style multi-level limiter: compose a 5-hour tier, a 7-day tier, and a
 /// model-scoped 7-day tier, mixing [`RateLimiter`] (token bucket) and [`WindowedRateLimiter`]
 /// (fixed window) freely, each metering its own currency via `cost`. On rejection it reports
@@ -890,7 +900,7 @@ impl MultiRateLimiter {
                 Err((tier, retry_after)) => {
                     Self::record_throttle(tier);
                     // `retry_after` is already floored to `MULTI_MIN_BACKOFF` by `reserve_all`.
-                    tokio::time::sleep(retry_after).await;
+                    crate::rt::sleep(retry_after).await;
                 }
             }
         }
@@ -962,7 +972,7 @@ impl std::fmt::Debug for MultiPermit {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
     use super::*;
     use std::sync::Arc;
@@ -1794,7 +1804,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "metrics"))]
+#[cfg(all(test, feature = "metrics", feature = "runtime-tokio"))]
 mod metrics_tests {
     use super::*;
     use crate::metrics::test_support::*;

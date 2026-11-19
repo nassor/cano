@@ -9,7 +9,11 @@ weight = 1
 
 <h1>Checkpoint stores</h1>
 <p class="subtitle">Where the recovery log lives: the three built-in stores, and how to write your own.</p>
-<p class="feature-tag">The <code>CheckpointStore</code> trait is always available. <code>RedbStore</code> is behind <code>store-redb</code>, which is on by default. <code>PostgresStore</code> is behind <code>store-postgres</code> and <code>NatsStore</code> behind <code>store-nats</code>.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.12.0 (trait) · 0.17.0 (stores)</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported (custom trait impl)</span>
+</div>
+<p class="feature-tag">The <code>CheckpointStore</code> trait is always available (including under <code>wasm</code>). <code>RedbStore</code> (<code>store-redb</code>, on by default), <code>PostgresStore</code> (<code>store-postgres</code>), and <code>NatsStore</code> (<code>store-nats</code>) require <code>runtime-tokio</code> and are not supported on Wasm.</p>
 
 <p>
 See <a href="../">Crash recovery</a> for what the engine records and how a run resumes. This page covers
@@ -58,6 +62,10 @@ one set of flows. A custom checkpoint store does not need to.
 <hr class="section-divider">
 
 <h2 id="trait"><a href="#trait" class="anchor-link" aria-hidden="true">#</a>The <code>CheckpointStore</code> trait</h2>
+<div class="meta-tags">
+<span class="meta-tag">since 0.12.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 <p>
 The trait has three async methods. The engine only ever appends rows, reads a whole run back, and
 deletes a whole run:
@@ -108,7 +116,11 @@ stored whole.
 <hr class="section-divider">
 
 <h2 id="redb"><a href="#redb" class="anchor-link" aria-hidden="true">#</a>Built in: <code>RedbStore</code></h2>
-<p class="feature-tag">Behind the <code>store-redb</code> feature, which is on by default. <code>default-features = false</code> removes redb from the build.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.17.0</span>
+<span class="meta-tag meta-tag-native">not wasm-supported</span>
+</div>
+<p class="feature-tag">Behind the <code>store-redb</code> feature, which is on by default (implies <code>runtime-tokio</code>). On native without redb, use <code>default-features = false, features = ["runtime-tokio"]</code>; on WASI P3 use <code>default-features = false, features = ["wasm"]</code>.</p>
 
 <p>
 <code>RedbStore</code> is an embedded, ACID, pure-Rust key-value store
@@ -173,7 +185,11 @@ inside that process, not across processes. See <a href="../../scheduler/several-
 <hr class="section-divider">
 
 <h2 id="postgres"><a href="#postgres" class="anchor-link" aria-hidden="true">#</a>Built in: <code>PostgresStore</code></h2>
-<p class="feature-tag">Behind the <code>store-postgres</code> feature gate (<code>features = ["store-postgres"]</code>).</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.17.0</span>
+<span class="meta-tag meta-tag-native">not wasm-supported</span>
+</div>
+<p class="feature-tag">Behind the <code>store-postgres</code> feature gate (<code>features = ["store-postgres"]</code>, implies <code>runtime-tokio</code>).</p>
 
 <p>
 <code>PostgresStore</code> keeps every run in one table, <code>cano_checkpoints</code> by
@@ -271,7 +287,11 @@ per-append 16-byte token so retried appends after a lost ACK match only their ow
 <hr class="section-divider">
 
 <h2 id="nats"><a href="#nats" class="anchor-link" aria-hidden="true">#</a>Built in: <code>NatsStore</code></h2>
-<p class="feature-tag">Behind the <code>store-nats</code> feature gate (<code>features = ["store-nats"]</code>).</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.17.0</span>
+<span class="meta-tag meta-tag-native">not wasm-supported</span>
+</div>
+<p class="feature-tag">Behind the <code>store-nats</code> feature gate (<code>features = ["store-nats"]</code>, implies <code>runtime-tokio</code>).</p>
 
 <p>
 <code>NatsStore</code> keeps every run in one JetStream Key/Value bucket,
@@ -470,6 +490,10 @@ both: the run fails, and <code>resume_from</code> later continues from the rows 
 </p>
 
 <h3 id="custom-test"><a href="#custom-test" class="anchor-link" aria-hidden="true">#</a>Test it against the contract</h3>
+<div class="meta-tags">
+<span class="meta-tag">since 0.17.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 <p>
 The <code>testing</code> feature's
 <a href="../../testing/#store-contract"><code>assert_checkpoint_store_contract</code></a> runs every

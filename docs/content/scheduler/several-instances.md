@@ -9,6 +9,10 @@ weight = 2
 
 <h1>Several scheduler instances</h1>
 <p class="subtitle">Run the same flows on several processes, with each tick executed once across all of them.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.17.0</span>
+<span class="meta-tag meta-tag-native">not wasm-supported</span>
+</div>
 <p class="feature-tag">Behind the <code>scheduler</code> feature, plus the feature of the store you share: <code>store-redb</code> (on by default), <code>store-postgres</code> or <code>store-nats</code>.</p>
 
 <p>

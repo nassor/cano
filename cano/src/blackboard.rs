@@ -1,5 +1,7 @@
 //! # Blackboard for Processing Pipelines
 //!
+//! **Availability:** since `0.17.0` · **wasm-supported**
+//!
 //! This module provides an optional shared key-value blackboard for common needs
 //! in processing pipelines. These are convenience tools - you can use any storage
 //! backend that meets your pipeline's requirements.

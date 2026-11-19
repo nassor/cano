@@ -9,6 +9,10 @@ weight = 2
 
 <h1>Rate limiting</h1>
 <p class="subtitle">Pace or shed calls to a rate-sensitive dependency.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.14.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 This page is a how-to and reference for the rate limiters. See <a href="../">Resilience</a> for how
@@ -91,7 +95,7 @@ calls at once before traffic settles to the refill rate.
 A limiter is cheap to clone, and clones share one bucket. Give every task that draws on the same
 quota a clone of one limiter, so the budget is enforced globally, including across tasks running in
 parallel inside a <a href="../../split-join/">split/join</a> state. The bucket sits behind a
-<code>parking_lot::Mutex</code> that is never held across an await.
+a mutex (<code>parking_lot::Mutex</code> under <code>runtime-tokio</code>, <code>std::sync::Mutex</code> under <code>wasm</code>) that is never held across an await.
 </p>
 
 <h3 id="rl-policy"><a href="#rl-policy" class="anchor-link" aria-hidden="true">#</a><code>RateLimiterPolicy</code></h3>
@@ -126,7 +130,7 @@ caught before any task runs.
 <dd>Returns <code>Some</code> and spends a token if one is available, <code>None</code> if the bucket is empty. Use it to shed load.</dd>
 
 <dt><code>acquire(&amp;self) -&gt; Permit</code> <small>async</small></dt>
-<dd>If the bucket is empty, computes how long until the next token refills, sleeps that long with <code>tokio::time::sleep</code>, and tries again. Use it to pace work.</dd>
+<dd>If the bucket is empty, computes how long until the next token refills, sleeps that long via Cano's runtime sleep (<code>tokio::time::sleep</code> on native, WASI Preview 3 monotonic clock on <code>wasm</code>), and tries again. Use it to pace work.</dd>
 </dl>
 <div class="diagram-frame">
 <p class="diagram-label">One acquisition: lazy refill, then shed or park</p>
@@ -206,6 +210,10 @@ and read it with <code>res.get::&lt;RateLimiter&gt;()?</code> in the task body.
 </p>
 
 <h3 id="rl-windowed"><a href="#rl-windowed" class="anchor-link" aria-hidden="true">#</a>Token bucket and fixed window</h3>
+<div class="meta-tags">
+<span class="meta-tag">since 0.15.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 <p>
 The token bucket keeps a long-run rate and smooths bursts. It cannot model a quota that resets at a
 boundary, such as "500 per 5 hours". It refills continuously and has no reset instant to show.
@@ -247,6 +255,10 @@ retry-after.
 </p>
 
 <h3 id="rl-multi"><a href="#rl-multi" class="anchor-link" aria-hidden="true">#</a>Multi-tier limiting</h3>
+<div class="meta-tags">
+<span class="meta-tag">since 0.15.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 <p>
 API limits often stack: a 5-hour cap, a weekly cap, and a separate weekly cap for one model.
 <code>MultiRateLimiter</code> enforces them together. A request is admitted only if every applicable

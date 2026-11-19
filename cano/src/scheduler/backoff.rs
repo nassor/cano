@@ -1,5 +1,7 @@
 //! Backoff policy for failed scheduled runs.
 //!
+//! **Availability:** since `0.11.0` (`scheduler` feature) · **not wasm-supported** (native only)
+//!
 //! Wraps a single [`BackoffPolicy`] type that the scheduler consults after a
 //! workflow fails. Distinct from the task-level [`crate::circuit::CircuitBreaker`]:
 //! the breaker gates a single task's call to a dependency; this policy gates
@@ -11,6 +13,8 @@ use std::time::Duration;
 
 /// Policy controlling how the scheduler delays subsequent runs of a flow that
 /// just failed and when to stop dispatching it altogether.
+///
+/// **Availability:** since `0.11.0` · **not wasm-supported** (native only)
 ///
 /// Every flow has one: [`BackoffPolicy::default`] unless overridden for that
 /// flow via [`Scheduler::with_backoff`](super::Scheduler::with_backoff). After a

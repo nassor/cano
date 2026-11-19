@@ -9,6 +9,10 @@ weight = 1
 
 <h1>Circuit breakers</h1>
 <p class="subtitle">Stop calling a dependency that is down, before the retry loop runs.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.11.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 This page is a how-to and reference for <code>CircuitBreaker</code>. See <a href="../">Resilience</a>

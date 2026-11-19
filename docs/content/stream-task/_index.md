@@ -7,6 +7,10 @@ template = "section.html"
 <div class="content-wrapper">
 <h1>StreamTask</h1>
 <p class="subtitle">Consume an unbounded stream: flush per window, run until cancelled or exhausted, resume from a cursor.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.15.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 A <code>StreamTask</code> consumes an <code>impl Stream</code> continuously. It pulls one item at a

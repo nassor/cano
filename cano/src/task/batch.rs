@@ -1,5 +1,7 @@
 //! # BatchTask — Fan-Out-Over-Data Processing Model
 //!
+//! **Availability:** since `0.12.0` · **wasm-supported**
+//!
 //! A [`BatchTask`] loads a `Vec` of work items, processes them concurrently (up to
 //! [`BatchTask::concurrency`] parallel calls), and then aggregates the results in
 //! **input order** via [`BatchTask::finish`]. The partial-failure policy lives entirely
@@ -187,6 +189,8 @@ use std::fmt;
 
 /// A fan-out-over-data processing model that loads items, processes them with bounded
 /// concurrency, and aggregates results in input order.
+///
+/// **Availability:** since `0.12.0` · **wasm-supported**
 ///
 /// # Generic Types
 ///
@@ -431,7 +435,7 @@ where
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
     use super::*;
 
@@ -854,7 +858,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "metrics"))]
+#[cfg(all(test, feature = "metrics", feature = "runtime-tokio"))]
 mod metrics_tests {
     use super::*;
 

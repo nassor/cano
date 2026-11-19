@@ -1,4 +1,6 @@
 //! [`InMemorySchedulerStore`] and [`assert_scheduler_store_contract`].
+//!
+//! **Availability:** since `0.17.0` · **not wasm-supported** (native only; requires `scheduler`)
 
 use std::collections::HashMap;
 
@@ -8,6 +10,8 @@ use crate::error::CanoError;
 use crate::scheduler::{CasOutcome, SchedulerStore, VersionedRecord};
 
 /// A process-local [`SchedulerStore`].
+///
+/// **Availability:** since `0.17.0` · **not wasm-supported** (native only)
 ///
 /// Share one `Arc<InMemorySchedulerStore>` between several schedulers in one test to
 /// exercise multi-instance coordination without a database. It honors the full trait

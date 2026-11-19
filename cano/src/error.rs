@@ -1,5 +1,7 @@
 //! # Error Handling - Clear, Actionable Error Messages
 //!
+//! **Availability:** since `0.1.0` · **wasm-supported**
+//!
 //! This module provides comprehensive error handling for the Cano workflow engine.
 //! It includes categorized error types that make it easy to understand what went wrong
 //! and how to fix it.
@@ -138,6 +140,8 @@
 /// Marked `#[non_exhaustive]`: external `match` arms over `CanoError` must
 /// include a wildcard so that future variants do not break downstream code at
 /// compile time.
+///
+/// **Availability:** since `0.1.0` · **wasm-supported**
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum CanoError {

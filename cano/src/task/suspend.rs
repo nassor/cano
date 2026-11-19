@@ -1,5 +1,7 @@
 //! # SuspendTask: durable suspend and resume
 //!
+//! **Availability:** since `0.17.0` · **wasm-supported**
+//!
 //! A [`SuspendTask`] parks a run at its state until an outside party (a human reviewer, a
 //! webhook, another service) delivers a typed input. When the FSM enters the state the
 //! engine runs [`suspend`](SuspendTask::suspend), writes a
@@ -115,6 +117,8 @@ use std::borrow::Cow;
 use std::fmt;
 
 /// A task that parks the run until an outside party delivers an input.
+///
+/// **Availability:** since `0.17.0` · **wasm-supported**
 ///
 /// See the [module documentation](self) for the run lifecycle and requirements.
 ///
@@ -261,7 +265,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
     use super::*;
 

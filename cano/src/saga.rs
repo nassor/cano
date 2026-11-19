@@ -1,5 +1,7 @@
 //! # Saga / Compensation — undo successful work when a later step fails
 //!
+//! **Availability:** since `0.12.0` · **wasm-supported**
+//!
 //! Once a workflow step has mutated an external system — charged a card, reserved
 //! inventory — the FSM can't roll it back by itself; only an explicit *refund* or
 //! *release* undoes it. The saga pattern handles this by pairing each irreversible
@@ -51,6 +53,8 @@ use crate::task::TaskConfig;
 
 /// A workflow task that records an `Output` when it succeeds and can later be
 /// undone via [`compensate`](Self::compensate).
+///
+/// **Availability:** since `0.12.0` · **wasm-supported**
 ///
 /// Register it with [`Workflow::register`](crate::workflow::Workflow::register).
 /// Use `#[saga::task(state = S)]` on an inherent `impl` block — the macro builds
@@ -294,7 +298,7 @@ where
             // docstring for the cancel-safety rationale.
             let forward_fut = self.0.run(res);
             let (state, output) = match attempt_timeout {
-                Some(d) => match tokio::time::timeout(d, forward_fut).await {
+                Some(d) => match crate::rt::timeout(d, forward_fut).await {
                     Ok(inner) => inner?,
                     Err(_) => {
                         return Err(CanoError::timeout(format!(
@@ -337,7 +341,7 @@ where
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
     //! Focused unit tests for the saga adapter (`CompensatableAdapter`) and the inline-compensate
     //! helper (`run_inline_compensate`). These exercise the adapter's own branches in isolation —

@@ -7,11 +7,15 @@ template = "section.html"
 <div class="content-wrapper">
 <h1>TimerTask</h1>
 <p class="subtitle">Wait once, then transition: a single scheduled sleep, not a poll loop.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.15.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 A <code>TimerTask</code> decides how long to wait, the engine sleeps once, and then the task decides
 where to go next. There is no loop and no condition re-check: a 30-minute timer schedules one
-<code>tokio::time::sleep</code> and wakes a single time. It is one of the
+runtime sleep (<code>tokio::time::sleep</code> on native, WASI Preview 3 monotonic clock on <code>wasm</code>) and wakes a single time. It is one of the
 <a href="../task/">Task</a> family of processing models, alongside
 <a href="../router-task/">RouterTask</a>, <a href="../poll-task/">PollTask</a>,
 <a href="../batch-task/">BatchTask</a>, <a href="../stepped-task/">SteppedTask</a>,
@@ -36,7 +40,7 @@ struct CoolDown;
 impl CoolDown {
     // Resource-free methods omit `res: &Resources`.
     async fn wait(&self) -> Result<TimerOutcome, CanoError> {
-        // Engine schedules one cancellation-aware tokio::time::sleep.
+        // Engine schedules one cancellation-aware runtime sleep.
         Ok(TimerOutcome::Duration(Duration::from_secs(30)))
     }
     async fn after_wait(&self) -> Result<Stage, CanoError> {

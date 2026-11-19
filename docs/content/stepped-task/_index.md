@@ -7,6 +7,10 @@ template = "section.html"
 <div class="content-wrapper">
 <h1>SteppedTask</h1>
 <p class="subtitle">Resumable iterative work: checkpoint a cursor, resume mid-loop after a crash.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.12.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 A <code>SteppedTask</code> does work in discrete steps. Each step takes the previous step's cursor and

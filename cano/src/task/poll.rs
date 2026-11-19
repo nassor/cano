@@ -1,5 +1,7 @@
 //! # PollTask — Wait-Until Processing Model
 //!
+//! **Availability:** since `0.12.0` · **wasm-supported**
+//!
 //! A [`PollTask`] repeatedly calls `poll()` until it returns [`PollOutcome::Ready`] or until an
 //! optional wall-clock timeout is exceeded. This "wait-until" pattern is the canonical way
 //! to poll an external system for completion without blocking a thread.
@@ -170,6 +172,8 @@ pub enum PollErrorPolicy {
 /// A "wait-until" processing model that repeatedly calls [`poll`](PollTask::poll) until
 /// it returns [`PollOutcome::Ready`].
 ///
+/// **Availability:** since `0.12.0` · **wasm-supported**
+///
 /// # Generic Types
 ///
 /// - **`TState`**: The state enum used by the workflow (`Clone + Debug + Send + Sync`).
@@ -304,14 +308,14 @@ where
                 crate::metrics::poll_iteration(false);
                 consecutive_errors = 0;
                 if delay_ms > 0 {
-                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    crate::rt::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 } else {
                     // Zero-delay `Pending` must still yield so the loop can never
                     // busy-spin the executor thread when the poll body completes
                     // synchronously (the common in-memory / DB-flag check). Without
                     // this, on a `current_thread` runtime the task that would flip
                     // the polled condition can never be scheduled — a livelock.
-                    tokio::task::yield_now().await;
+                    crate::rt::yield_now().await;
                 }
             }
             Err(e) => match &policy {
@@ -323,7 +327,7 @@ where
                     consecutive_errors += 1;
                     // Yield before the next poll so a synchronously-erroring poll
                     // body can't spin the executor either.
-                    tokio::task::yield_now().await;
+                    crate::rt::yield_now().await;
                 }
             },
         }
@@ -338,7 +342,7 @@ where
 // Tests
 // ---------------------------------------------------------------------------
 
-#[cfg(test)]
+#[cfg(all(test, feature = "runtime-tokio"))]
 mod tests {
     use super::*;
 
@@ -767,7 +771,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "metrics"))]
+#[cfg(all(test, feature = "metrics", feature = "runtime-tokio"))]
 mod metrics_tests {
     use super::*;
     use crate::metrics::test_support::*;

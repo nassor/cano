@@ -8,6 +8,10 @@ template = "section.html"
 
 <h1>Workflows</h1>
 <p class="subtitle">Register a task for each state and run the machine to an exit state.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.1.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <nav class="page-toc" aria-label="Table of contents">
 <div class="page-toc-title">On this page</div>

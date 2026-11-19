@@ -236,33 +236,55 @@
 //!
 //! ## Module Overview
 //!
-//! - [`mod@task`]: The [`Task`] trait — single `run()` method
-//! - [`task::router`]: The [`RouterTask`] trait — side-effect-free branching via `route()`; registered with [`Workflow::register`]
-//! - [`task::poll`]: The [`PollTask`] trait — wait-until loop via `poll()`; registered with [`Workflow::register`]
-//! - [`task::timer`]: The [`TimerTask`] trait — wait-then-transition via `wait()`/`after_wait()`; registered with [`Workflow::register`]
-//! - [`task::batch`]: The [`BatchTask`] trait — fan-out over data items via `load`/`process_item`/`finish`; registered with [`Workflow::register`]
-//! - [`task::stepped`]: The [`SteppedTask`] trait — resumable iterative work via `step()` with a serializable cursor; registered with [`Workflow::register`] (persists the cursor when a checkpoint store is attached)
-//! - [`task::stream`]: The [`StreamTask`] trait — a genuine stream-processing model: consume an `impl Stream` continuously, flush per [`StreamWindow`] window, run until the [`CancellationToken`] fires, and resume from a persisted cursor; registered with [`Workflow::register`]
-//! - [`task::suspend`]: The [`SuspendTask`] trait — park a run until [`Workflow::resume_with`] delivers a typed input; registered with [`Workflow::register`]
-//! - [`CancellationToken`] — cooperative cancellation for [`orchestrate_with_token`](Workflow::orchestrate_with_token)
-//! - [`workflow`]: [`Workflow`] — FSM orchestration with Split/Join support
-//! - `scheduler` (requires `scheduler` feature): `Scheduler` (builder) and `RunningScheduler` (live handle) — cron and interval scheduling
-//! - [`mod@resource`]: [`Resource`] trait, [`Resources`] dictionary, and [`HealthStatus`] — lifecycle-aware resource management and health probes
-//! - [`observer`]: [`WorkflowObserver`] — synchronous lifecycle/failure event hooks (and [`TracingObserver`], behind the `tracing` feature)
+//! - [`mod@task`]: The [`Task`] trait — single `run()` method (`since 0.5.0` · **wasm-supported**)
+//! - [`task::router`]: The [`RouterTask`] trait — side-effect-free branching via `route()`; registered with [`Workflow::register`] (`since 0.12.0` · **wasm-supported**)
+//! - [`task::poll`]: The [`PollTask`] trait — wait-until loop via `poll()`; registered with [`Workflow::register`] (`since 0.12.0` · **wasm-supported**)
+//! - [`task::timer`]: The [`TimerTask`] trait — wait-then-transition via `wait()`/`after_wait()`; registered with [`Workflow::register`] (`since 0.15.0` · **wasm-supported**)
+//! - [`task::batch`]: The [`BatchTask`] trait — fan-out over data items via `load`/`process_item`/`finish`; registered with [`Workflow::register`] (`since 0.12.0` · **wasm-supported**)
+//! - [`task::stepped`]: The [`SteppedTask`] trait — resumable iterative work via `step()` with a serializable cursor; registered with [`Workflow::register`] (persists the cursor when a checkpoint store is attached) (`since 0.12.0` · **wasm-supported**)
+//! - [`task::stream`]: The [`StreamTask`] trait — a genuine stream-processing model: consume an `impl Stream` continuously, flush per [`StreamWindow`] window, run until the [`CancellationToken`] fires, and resume from a persisted cursor; registered with [`Workflow::register`] (`since 0.15.0` · **wasm-supported**)
+//! - [`task::suspend`]: The [`SuspendTask`] trait — park a run until [`Workflow::resume_with`] delivers a typed input; registered with [`Workflow::register`] (`since 0.17.0` · **wasm-supported**)
+//! - [`CancellationToken`] — cooperative cancellation for [`orchestrate_with_token`](Workflow::orchestrate_with_token) (`since 0.15.0` · **wasm-supported**)
+//! - [`workflow`]: [`Workflow`] — FSM orchestration (`since 0.1.0`) with Split/Join support (`since 0.7.0`) (**wasm-supported**)
+//! - `scheduler` (requires `scheduler` feature): `Scheduler` (builder, `since 0.2.0`) and `RunningScheduler` (live handle) — cron and interval scheduling (`since 0.6.0` · **not wasm-supported**)
+//! - [`mod@resource`]: [`Resource`] trait, [`Resources`] dictionary (`since 0.10.0`), and [`HealthStatus`] (`since 0.12.0`) — lifecycle-aware resource management and health probes (**wasm-supported**)
+//! - [`observer`]: [`WorkflowObserver`] — synchronous lifecycle/failure event hooks (`since 0.12.0`), and [`TracingObserver`] (`tracing` feature) (**wasm-supported**)
 //! - `metrics` (requires `metrics` feature): a `MetricsObserver` plus low-cardinality
 //!   counters / histograms / gauges for workflow, task, retry, split/join, circuit-breaker,
 //!   scheduler, processing-loop, recovery and saga internals — call `cano::metrics::describe()`
-//!   for the full list with help text and units
-//! - [`checkpoint`]: [`CheckpointStore`] / [`CheckpointRow`], the append-only checkpoint log behind crash recovery, suspend and resume
-//! - [`store`]: the storage backends that implement [`CheckpointStore`]: [`RedbStore`] (`store-redb`, on by default), `PostgresStore` (`store-postgres`) and `NatsStore` (`store-nats`)
-//! - [`saga`]: [`CompensatableTask`] — pair a forward step with a compensating action; failures roll back via [`Workflow::register`]
-//! - [`rate_limit`]: [`RateLimiter`] (token bucket) and [`WindowedRateLimiter`] (fixed window) throttles, both implementing [`Meter`] so they compose into a [`MultiRateLimiter`] that enforces several weighted tiers (e.g. a 5h + 7d + per-model limit) at once
-//! - [`blackboard`]: [`Blackboard`] — a typed in-memory key-value map that implements [`Resource`]
-//! - `testing` (requires `testing` feature): batteries-included test fixtures —
-//!   a `RecordingObserver`, a public `InMemoryCheckpointStore`, a `panic_on_attempt` task factory and an `assert_compensation_ran`
-//!   saga helper. Import explicitly with `use cano::testing::*;` — it is deliberately
-//!   **not** in the [`prelude`] so production code never picks it up by accident.
-//! - [`error`]: [`CanoError`] variants and the [`CanoResult`] alias
+//!   for the full list with help text and units (`since 0.13.0` · **wasm-supported**)
+//! - [`checkpoint`]: [`CheckpointStore`] / [`CheckpointRow`], the append-only checkpoint log behind crash recovery, suspend and resume (`since 0.12.0` · **wasm-supported**)
+//! - [`store`]: the storage backends that implement [`CheckpointStore`]: [`RedbStore`] (`store-redb`, on by default), `PostgresStore` (`store-postgres`) and `NatsStore` (`store-nats`) (`since 0.17.0` · **not wasm-supported**)
+//! - [`saga`]: [`CompensatableTask`] — pair a forward step with a compensating action; failures roll back via [`Workflow::register`] (`since 0.12.0` · **wasm-supported**)
+//! - [`rate_limit`]: [`RateLimiter`] (`since 0.14.0`) and [`WindowedRateLimiter`] / [`MultiRateLimiter`] (`since 0.15.0`) throttles (**wasm-supported**)
+//! - [`blackboard`]: [`Blackboard`] — a typed in-memory key-value map that implements [`Resource`] (`since 0.17.0` · **wasm-supported**)
+//! - `testing` (requires `testing` feature): batteries-included test fixtures (`since 0.15.0` · **wasm-supported**; scheduler store fixtures are native only). Import explicitly with `use cano::testing::*;` — it is deliberately **not** in the [`prelude`] so production code never picks it up by accident.
+//! - [`error`]: [`CanoError`] variants and the [`CanoResult`] alias (`since 0.1.0` · **wasm-supported**)
+//!
+//! ## Cargo Features & WebAssembly Support
+//!
+//! | Feature | Default | Since | Wasm | Purpose |
+//! |---|---|---|---|---|
+//! | `runtime-tokio` | Yes | `0.17.0` | **not wasm-supported** | Native Tokio multi-thread/timer runtime and `parking_lot` locks |
+//! | `wasm` | No | `0.17.0` | **wasm-supported** | WASI Preview 3 (`wasm32-wasip3`) Component Model backend via `wasip3::clocks::monotonic_clock` and `FuturesUnordered` |
+//! | `store-redb` | Yes | `0.17.0` | **not wasm-supported** | Embedded [`RedbStore`] (implies `runtime-tokio`) |
+//! | `store-postgres` | No | `0.17.0` | **not wasm-supported** | [`PostgresStore`] over `deadpool-postgres` (implies `runtime-tokio`) |
+//! | `store-nats` | No | `0.17.0` | **not wasm-supported** | [`NatsStore`] over NATS JetStream KV (implies `runtime-tokio`) |
+//! | `scheduler` | No | `0.6.0` | **not wasm-supported** | [`Scheduler`], cron/interval dispatch, and `SchedulerStore` (implies `runtime-tokio`) |
+//! | `tracing` | No | `0.6.0` | **wasm-supported** | `tracing` spans, events, and [`TracingObserver`] |
+//! | `metrics` | No | `0.13.0` | **wasm-supported** | `metrics` facade counters, histograms, gauges, and [`MetricsObserver`] |
+//! | `testing` | No | `0.15.0` | **wasm-supported** | `RecordingObserver`, `InMemoryCheckpointStore`, `panic_on_attempt`, `assert_checkpoint_store_contract` (scheduler store fixtures are native only) |
+//! | `all` | No | `0.10.0` | **not wasm-supported** | Enables `runtime-tokio`, `scheduler`, `tracing`, `store-redb`, `store-postgres`, `store-nats`, `metrics`, and `testing` |
+//!
+//! ### WebAssembly (WASI Preview 3)
+//!
+//! Compile `cano` as a lean guest library inside a WASI Preview 3 (`wasm32-wasip3`) Component
+//! Model binary by disabling default features and enabling `wasm` (optionally alongside `tracing`,
+//! `metrics`, and `testing`). On WASI P3, sleeps and deadlines delegate directly to
+//! `wasip3::clocks::monotonic_clock`, concurrent split/join branches run via
+//! `futures_util::stream::FuturesUnordered`, and locks use `std::sync`. See the
+//! [WebAssembly guide](https://nassor.github.io/cano/wasm/) for `Cargo.toml` setup and a
+//! `wit-bindgen` component walkthrough.
 //!
 //! ## Getting Started
 //!
@@ -280,8 +302,10 @@ pub mod error;
 pub mod observer;
 pub mod rate_limit;
 pub mod resource;
+pub(crate) mod rt;
 pub mod saga;
 pub mod store;
+pub(crate) mod sync;
 pub mod task;
 pub mod workflow;
 
@@ -444,7 +468,7 @@ pub mod prelude {
     pub use crate::Resource as ResourceDerive;
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use std::fs;
     use std::path::{Path, PathBuf};

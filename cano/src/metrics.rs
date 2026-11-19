@@ -1,5 +1,7 @@
 //! Internal metrics emission, behind the `metrics` feature.
 //!
+//! **Availability:** since `0.13.0` (`metrics` feature) · **wasm-supported**
+//!
 //! Cano uses the [`metrics`](https://docs.rs/metrics) facade crate the same way it uses
 //! `tracing`: instrumentation is compiled in only when the `metrics` feature is enabled,
 //! and it does nothing until you install a recorder (e.g. `metrics-exporter-prometheus`).
@@ -570,7 +572,7 @@ pub(crate) fn scheduler_flow_tripped(flow: &str) {
     counter!(SCHEDULER_FLOW_TRIPPED_TOTAL, "flow" => flow.to_owned()).increment(1);
 }
 
-#[cfg(all(test, feature = "metrics"))]
+#[cfg(all(test, feature = "metrics", feature = "runtime-tokio"))]
 pub(crate) mod test_support {
     //! Test harness: run async code with a thread-local `DebuggingRecorder` installed and
     //! assert over the captured snapshot. Reused by every metrics test in the crate.
@@ -673,7 +675,7 @@ pub(crate) mod test_support {
     }
 }
 
-#[cfg(all(test, feature = "metrics"))]
+#[cfg(all(test, feature = "metrics", feature = "runtime-tokio"))]
 mod tests {
     use super::test_support::*;
 

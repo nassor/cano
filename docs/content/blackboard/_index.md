@@ -7,6 +7,10 @@ template = "section.html"
 <div class="content-wrapper">
 <h1>Blackboard</h1>
 <p class="subtitle">In-memory shared state for passing data between workflow stages.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.17.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 The blackboard is the shared scratch space between workflow stages. Tasks write values as they run and read the values
@@ -68,7 +72,7 @@ that is safe to clone and share across async tasks. A custom variant is a typed 
 </div>
 
 <p>
-<code>Blackboard</code> wraps its map in <code>Arc&lt;RwLock&lt;_&gt;&gt;</code> (a <code>parking_lot</code> lock).
+<code>Blackboard</code> wraps its map in <code>Arc&lt;RwLock&lt;_&gt;&gt;</code> (<code>parking_lot</code> under <code>runtime-tokio</code>, <code>std::sync</code> under <code>wasm</code>).
 Readers share the lock and writers get exclusive access. Cloning the blackboard gives a second handle to the
 same underlying data, not a copy.
 </p>

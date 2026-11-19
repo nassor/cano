@@ -9,6 +9,10 @@ weight = 1
 
 <h1>Configuring tasks</h1>
 <p class="subtitle">Retries, per-attempt timeouts and circuit breakers via <code>TaskConfig</code>.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.1.4</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 Every <a href="../">Task</a> can return a <code>TaskConfig</code> from its <code>config</code> method. It sets how the task retries, how long each attempt may run, and whether a circuit breaker guards it. The engine reads it once, when the task is registered.
@@ -109,6 +113,10 @@ TaskConfig::new()
 <div class="card-stack retry-cards">
 <div class="card">
 <h3>Per-attempt timeout</h3>
+<div class="meta-tags">
+<span class="meta-tag">since 0.10.3</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 <p>Bound each attempt with a fresh deadline. It composes with any retry mode.</p>
 <div class="code-block">
 <span class="code-block-label">Attempt timeout config</span>
@@ -122,7 +130,7 @@ TaskConfig::new()
 </div>
 <h4>How attempt timeouts compose with retries</h4>
 <p>
-Each attempt runs under <code>tokio::time::timeout</code>. An expired attempt produces a <code>CanoError::Timeout</code>, which goes through the same retry path as any other failure, so the <code>RetryMode</code> decides whether to retry. The deadline resets on every attempt. With no retries the task fails with the raw <code>Timeout</code>; with retries, exhaustion surfaces as <code>CanoError::RetryExhausted</code> wrapping the last error.
+Each attempt runs under Cano's runtime timeout (<code>tokio::time::timeout</code> under <code>runtime-tokio</code>, WASI Preview 3 monotonic clock under <code>wasm</code>). An expired attempt produces a <code>CanoError::Timeout</code>, which goes through the same retry path as any other failure, so the <code>RetryMode</code> decides whether to retry. The deadline resets on every attempt. With no retries the task fails with the raw <code>Timeout</code>; with retries, exhaustion surfaces as <code>CanoError::RetryExhausted</code> wrapping the last error.
 </p>
 <div class="callout callout-warning">
 <div class="callout-label">Cancellation</div>

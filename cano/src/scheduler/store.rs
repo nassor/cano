@@ -1,6 +1,8 @@
 //! [`SchedulerStore`]: the shared record that lets several scheduler instances run one
 //! set of flows, each tick on exactly one instance.
 //!
+//! **Availability:** since `0.17.0` (`scheduler` feature) · **not wasm-supported** (native only)
+//!
 //! The trait is a versioned compare-and-swap register keyed by flow id. The scheduler
 //! keeps everything else (due checks, the run lease, backoff and trip state) in the
 //! record's bytes, so a backend only stores and swaps opaque values. The built-in
@@ -30,6 +32,8 @@ pub enum CasOutcome {
 }
 
 /// Versioned compare-and-swap storage for scheduler flow records.
+///
+/// **Availability:** since `0.17.0` · **not wasm-supported** (native only)
 ///
 /// Instances that share one store (one table, bucket or file) coordinate their flows
 /// through it: a flow id names the same flow on every instance.

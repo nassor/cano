@@ -6,7 +6,7 @@ members = ["cano", "cano-macros", "cano-e2e"]
 default-members = ["cano", "cano-macros"]
 
 [workspace.package]
-version = "0.16.0"
+version = "0.17.0"
 edition = "2024"
 rust-version = "1.98.0"
 license = "MIT OR Apache-2.0"
@@ -15,4 +15,4 @@ repository = "https://github.com/nassor/cano"
 authors = ["Nassor Frazier-Silva <nassor@gmail.com>"]
 
 [workspace.dependencies]
-cano-macros = { version = "0.16", path = "cano-macros" }
+cano-macros = { version = "0.17", path = "cano-macros" }

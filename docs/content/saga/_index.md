@@ -7,6 +7,10 @@ template = "section.html"
 <div class="content-wrapper">
 <h1>Sagas and compensation</h1>
 <p class="subtitle">Undo successful steps in reverse when a later step fails.</p>
+<div class="meta-tags">
+<span class="meta-tag">since 0.12.0</span>
+<span class="meta-tag meta-tag-wasm">wasm-supported</span>
+</div>
 
 <p>
 Once a workflow step has charged a card or reserved inventory, the FSM cannot roll it back by itself.
